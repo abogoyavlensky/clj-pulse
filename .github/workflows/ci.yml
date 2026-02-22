@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  lint-fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -24,5 +24,17 @@ jobs:
         run: bb fmt-check
       - name: Linting
         run: bb lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3.6.1
+        with:
+          install_args: "babashka"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
       - name: Tests
         run: bb test
