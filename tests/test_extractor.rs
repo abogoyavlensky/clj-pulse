@@ -106,3 +106,12 @@ fn test_name_range_is_just_name_not_full_form() {
     );
     assert!(hello.name_range.end.character > hello.name_range.start.character);
 }
+
+#[test]
+fn test_extracts_defonce() {
+    let src = r#"(ns my.app) (defonce state (atom {}))"#;
+    let (_, syms) = extract(src, Path::new("app.clj")).unwrap();
+    let s = syms.iter().find(|s| s.name == "state").unwrap();
+    assert_eq!(s.kind, DefKind::Defonce);
+    assert_eq!(s.fqn, "my.app/state");
+}

@@ -9,6 +9,7 @@ use tower_lsp::lsp_types::Range;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DefKind {
     Def,
+    Defonce,
     Defn,
     DefnPrivate,
     Defmacro,

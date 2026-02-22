@@ -286,6 +286,7 @@ fn node_to_lsp_range(node: Node) -> Range {
 fn str_to_defkind(s: &str) -> Option<DefKind> {
     match s {
         "def" => Some(DefKind::Def),
+        "defonce" => Some(DefKind::Defonce),
         "defn" => Some(DefKind::Defn),
         "defn-" => Some(DefKind::DefnPrivate),
         "defmacro" => Some(DefKind::Defmacro),
