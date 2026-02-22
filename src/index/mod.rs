@@ -1,4 +1,5 @@
 pub mod extractor;
+pub mod scanner;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

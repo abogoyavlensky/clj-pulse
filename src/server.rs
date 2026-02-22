@@ -4,7 +4,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::config;
 use crate::document::DocumentStore;
+use crate::index::scanner;
 use crate::index::Index;
 
 pub struct Backend {
@@ -25,7 +27,66 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        if let Some(root_uri) = params.root_uri {
+            if let Ok(root_path) = root_uri.to_file_path() {
+                let index = self.index.clone();
+                let client = self.client.clone();
+                tokio::spawn(async move {
+                    let start = std::time::Instant::now();
+                    let source_paths = config::source_paths(&root_path);
+                    tracing::info!(
+                        "project root: {}, source paths: {:?}",
+                        root_path.display(),
+                        source_paths
+                    );
+
+                    match scanner::build_index(&root_path, &source_paths) {
+                        Ok(new_index) => {
+                            let sym_count = new_index.symbols.len();
+                            let ns_count = new_index.namespaces.len();
+
+                            for entry in new_index.symbols.iter() {
+                                index.symbols.insert(entry.key().clone(), entry.value().clone());
+                            }
+                            for entry in new_index.namespaces.iter() {
+                                index
+                                    .namespaces
+                                    .insert(entry.key().clone(), entry.value().clone());
+                            }
+                            for entry in new_index.ns_symbols.iter() {
+                                index
+                                    .ns_symbols
+                                    .insert(entry.key().clone(), entry.value().clone());
+                            }
+                            for entry in new_index.file_to_ns.iter() {
+                                index
+                                    .file_to_ns
+                                    .insert(entry.key().clone(), entry.value().clone());
+                            }
+
+                            let elapsed = start.elapsed();
+                            let msg = format!(
+                                "Indexed {} symbols in {} namespaces in {:?}",
+                                sym_count, ns_count, elapsed
+                            );
+                            tracing::info!("{}", msg);
+                            client.log_message(MessageType::INFO, msg).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("failed to build index: {}", e);
+                            client
+                                .log_message(
+                                    MessageType::ERROR,
+                                    format!("clj-lsp: index build failed: {}", e),
+                                )
+                                .await;
+                        }
+                    }
+                });
+            }
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -44,10 +105,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        tracing::info!("clj-lsp initialized, building index...");
-        self.client
-            .log_message(MessageType::INFO, "clj-lsp: building index...")
-            .await;
+        tracing::info!("clj-lsp initialized");
     }
 
     async fn shutdown(&self) -> Result<()> {
