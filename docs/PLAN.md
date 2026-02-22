@@ -76,9 +76,10 @@ path = "src/main.rs"
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 
-# Parsing
-tree-sitter = "0.22"
-tree-sitter-clojure = "0.0.12"
+# Parsing — tree-sitter-clojure 0.1 requires tree-sitter ^0.25, NOT 0.26+
+tree-sitter = "0.25"
+tree-sitter-clojure = "0.1"
+tree-sitter-language = "0.1"   # needed for tree-sitter 0.25+ language() binding
 
 # Concurrency / data structures
 dashmap = "5"
@@ -87,6 +88,7 @@ rayon = "1"
 # File system
 ignore = "0.4"   # respects .gitignore, from ripgrep
 ropey = "1.6"    # rope for open file text buffers
+dirs = "5"       # platform cache/config dirs (used for log file path)
 
 # Utilities
 anyhow = "1"
@@ -245,12 +247,16 @@ async fn main() {
 
 **`src/server.rs`**
 - Implement `LanguageServer` trait for `Backend` struct
-- `Backend` holds: `client: Client`, `index: Arc<Index>`, `documents: Arc<DocumentStore>`
+- `Backend` holds: `client: Client`, `index: Arc<Index>`, `documents: DocumentStore`
+- **Note**: `Index` uses `DashMap` internally which provides interior mutability — no `RwLock` wrapper needed. Same for `DocumentStore` (also backed by `DashMap`).
 - `initialize`: return `ServerCapabilities` with:
   - `text_document_sync`: `TextDocumentSyncKind::INCREMENTAL`
   - `completion_provider`: `Some(CompletionOptions::default())`
   - `hover_provider`: `Some(HoverProviderCapability::Simple(true))`
   - `definition_provider`: `Some(OneOf::Left(true))`
+- `did_open`: call `documents.open(uri, text)` to populate DocumentStore
+- `did_close`: call `documents.close(uri)` to free memory
+- `did_change`: call `documents.apply_changes(uri, changes)` to keep rope in sync with editor
 - All other handlers: stub returning `Ok(None)` or `Ok(vec![])`
 - `initialized`: spawn background task to build index (just log "building index" for now)
 
@@ -354,23 +360,47 @@ Implementation requirements:
 - Use tree-sitter queries — compile queries once as `static` using `std::sync::OnceLock`
 - Extract `(ns ...)` form: get namespace name, parse `:require` for aliases and refers
 - Extract all `def*` forms: name, kind (map first symbol to `DefKind`), docstring (next sibling string literal after name), params (all vector children for each arity)
+- **Multi-arity detection**: multi-arity defns wrap each arity in a `list_lit`, not a top-level `vec_lit`:
+  ```clojure
+  (defn greet          ;; list_lit
+    ([name] ...)       ;;   list_lit → contains vec_lit [name]
+    ([title name] ...) ;;   list_lit → contains vec_lit [title name]
+  )
+  ```
+  So: if the def form has NO direct `vec_lit` child but has `list_lit` children (after name/doc),
+  treat each child `list_lit`'s first `vec_lit` as an arity's params.
 - For `name_range`: use the range of the name node specifically, not the whole form
 - Reader conditionals (`#?`): include both `:clj` and `:cljs` branches (collect all defs from both)
 - On any node parse error: log warning, skip that form, continue
 
+**Grammar node types reference** (tree-sitter-clojure uses `_lit` suffix convention):
+- Lists `(...)` → `list_lit`
+- Symbols → `sym_lit` (children: `sym_ns`, `sym_name`)
+- Vectors `[...]` → `vec_lit`
+- Strings `"..."` → `str_lit`
+- Keywords `:foo` → `kwd_lit` (children: `kwd_ns`, `kwd_name`)
+- Reader conditionals `#?(...)` → `read_cond_lit`
+- There is **NO** dedicated `ns_form` node — `(ns ...)` is just a `list_lit` whose first child `sym_lit` has text `"ns"`
+
+> **Agent note**: Before writing extractor queries, run a quick smoke test: parse a simple
+> `(ns my.core) (defn foo [x] x)` string, dump the tree with `root.to_sexp()`, and verify
+> actual node types match the above. If they don't, update queries accordingly.
+
 Tree-sitter query strings to use (compile with `Query::new`):
 
 ```scheme
-; NS query
-(ns_form . (sym_lit) @ns-name)
+; NS query — no ns_form node, match list whose first symbol is "ns"
+(list_lit . (sym_lit) @ns-kw . (sym_lit) @ns-name)
+;; Then filter in code: only process when node_text(@ns-kw) == "ns"
 
-; DEF query  
+; DEF query
 (list_lit . (sym_lit) @def-kw . (sym_lit) @def-name)
+;; Filter in code: only process when str_to_defkind(node_text(@def-kw)).is_some()
 
 ; DOCSTRING query (sibling string after name in def form)
 (list_lit . (sym_lit) @_kw . (sym_lit) @_name . (str_lit) @doc)
 
-; PARAMS query (vectors inside def forms)  
+; PARAMS query — top-level vec_lit for single-arity defs
 (list_lit . (sym_lit) @_kw . (sym_lit) @_name (vec_lit) @params)
 ```
 
@@ -634,7 +664,7 @@ fn insert_file_updates_index() {
 }
 ```
 
-Wire into `server.rs` `initialized` handler — spawn a tokio task that calls `scanner::build_index()` and stores the result in `Backend`'s `Arc<RwLock<Index>>` (or swap an `Arc<Index>` atomically).
+Wire into `server.rs` `initialized` handler — spawn a tokio task that calls `scanner::build_index()` and populates `Backend`'s `Arc<Index>`. Since `Index` uses `DashMap` internally, no `RwLock` is needed — just call `index.insert_file()` directly through the `Arc`.
 
 ### DONE when:
 ```
@@ -726,9 +756,7 @@ fn returns_none_for_unknown_symbol() {
 Wire into `server.rs`:
 ```rust
 async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
-    let index = self.index.read().await;
-    let docs = self.documents.read().await;
-    handlers::definition::handle(&index, &docs, params)
+    handlers::definition::handle(&self.index, &self.documents, params)
         .await
         .map_err(|e| { tracing::error!("definition error: {}", e); tower_lsp::jsonrpc::Error::internal_error() })
 }
@@ -995,31 +1023,24 @@ $ cargo test test_hover   # all tests pass
 
 ### Modify:
 
-**`server.rs`** — implement `did_save`:
+**`server.rs`** — implement `did_save` (DashMap-backed Index needs no lock):
 ```rust
 async fn did_save(&self, params: DidSaveTextDocumentParams) {
-    let path = params.text_document.uri.to_file_path().ok()?;
+    let Some(path) = params.text_document.uri.to_file_path().ok() else { return };
     let source = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => { tracing::warn!("failed to read {}: {}", path.display(), e); return; }
     };
-    let mut index = self.index.write().await;
-    index.remove_file(&path);
+    self.index.remove_file(&path);
     match extractor::extract(&source, &path) {
-        Ok((meta, symbols)) => index.insert_file(meta, symbols),
+        Ok((meta, symbols)) => self.index.insert_file(meta, symbols),
         Err(e) => tracing::warn!("failed to re-index {}: {}", path.display(), e),
     }
     tracing::info!("re-indexed {}", path.display());
 }
 ```
 
-Also implement `did_change` to update `DocumentStore` (needed for `word_at` to see unsaved changes):
-```rust
-async fn did_change(&self, params: DidChangeTextDocumentParams) {
-    let docs = self.documents.write().await;
-    docs.apply_changes(&params.text_document.uri, params.content_changes).ok();
-}
-```
+`did_change` should already be wired from Step 1 (updating DocumentStore). No additional lock needed — `DocumentStore` is also backed by `DashMap`.
 
 No new tests needed — verify manually by:
 1. Open utils.clj, hover over a symbol → see its doc
@@ -1077,9 +1098,18 @@ codegen-units = 1
 strip = true
 ```
 
+**`--version` flag** — add to `main.rs` before LSP startup:
+```rust
+if std::env::args().any(|a| a == "--version") {
+    println!("fast-clj-lsp {}", env!("CARGO_PKG_VERSION"));
+    return;
+}
+```
+No need for `clap` — this is the only CLI flag.
+
 **README.md** — include:
 - Install: `cargo install --path .`
-- Verify: `fast-clj-lsp --version` (add `--version` flag)
+- Verify: `fast-clj-lsp --version`
 - Editor setup sections
 - Limitations (v1 scope)
 
