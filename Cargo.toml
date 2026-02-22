@@ -3,6 +3,10 @@ name = "clj-lsp"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "clj_lsp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "clj-lsp"
 path = "src/main.rs"

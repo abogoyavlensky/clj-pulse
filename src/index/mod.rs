@@ -1,3 +1,5 @@
+pub mod extractor;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
