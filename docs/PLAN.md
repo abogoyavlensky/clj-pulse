@@ -1,4 +1,4 @@
-# fast-clj-lsp — Implementation Plan
+# clj-lsp — Implementation Plan
 
 > **For AI agents**: Follow steps in order. Each step has explicit files to create/modify,
 > exact code contracts, and a DONE criteria. Do not proceed to the next step until all
@@ -20,7 +20,7 @@ A minimal, fast Clojure LSP server in Rust. V1 scope:
 ## Final Project Structure
 
 ```
-fast-clj-lsp/
+clj-lsp/
 ├── Cargo.toml
 ├── ARCHITECTURE.md          ← data flow reference for agents
 ├── build.rs                 ← optional: codegen for core symbols
@@ -63,12 +63,12 @@ fast-clj-lsp/
 
 ```toml
 [package]
-name = "fast-clj-lsp"
+name = "clj-lsp"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "fast-clj-lsp"
+name = "clj-lsp"
 path = "src/main.rs"
 
 [dependencies]
@@ -230,13 +230,13 @@ async fn main() {
     // Log to file — LSP servers must not write to stdout
     let log_dir = dirs::cache_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("fast-clj-lsp");
+        .join("clj-lsp");
     std::fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::daily(log_dir, "server.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt().with_writer(non_blocking).init();
 
-    tracing::info!("fast-clj-lsp starting");
+    tracing::info!("clj-lsp starting");
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -289,7 +289,7 @@ async fn main() {
 ```
 $ cargo build   # no errors
 $ cargo run     # starts without crash
-# In editor: connect to server, see "fast-clj-lsp" in LSP status, no errors in log
+# In editor: connect to server, see "clj-lsp" in LSP status, no errors in log
 ```
 
 ---
@@ -1063,13 +1063,13 @@ No new tests needed — verify manually by:
 - At startup: log project root, source paths, count of files found
 - After indexing: log `"Indexed N symbols in M namespaces in Xms"`
 - On each definition request: log the word being resolved and whether it was found
-- Log file: `~/.cache/fast-clj-lsp/server.log`
+- Log file: `~/.cache/clj-lsp/server.log`
 
 **VS Code config** — create `editors/vscode/`:
 ```json
 // .vscode/settings.json for users
 {
-  "clojure.lsp.server.path": "/path/to/fast-clj-lsp"
+  "clojure.lsp.server.path": "/path/to/clj-lsp"
 }
 ```
 Or minimal `package.json` extension activating the server for `clojure` language ID.
@@ -1078,12 +1078,12 @@ Or minimal `package.json` extension activating the server for `clojure` language
 ```json
 {
   "lsp": {
-    "fast-clj-lsp": {
-      "binary": { "path": "/path/to/fast-clj-lsp" }
+    "clj-lsp": {
+      "binary": { "path": "/path/to/clj-lsp" }
     }
   },
   "languages": {
-    "Clojure": { "language_servers": ["fast-clj-lsp"] }
+    "Clojure": { "language_servers": ["clj-lsp"] }
   }
 }
 ```
@@ -1101,7 +1101,7 @@ strip = true
 **`--version` flag** — add to `main.rs` before LSP startup:
 ```rust
 if std::env::args().any(|a| a == "--version") {
-    println!("fast-clj-lsp {}", env!("CARGO_PKG_VERSION"));
+    println!("clj-lsp {}", env!("CARGO_PKG_VERSION"));
     return;
 }
 ```
@@ -1109,7 +1109,7 @@ No need for `clap` — this is the only CLI flag.
 
 **README.md** — include:
 - Install: `cargo install --path .`
-- Verify: `fast-clj-lsp --version`
+- Verify: `clj-lsp --version`
 - Editor setup sections
 - Limitations (v1 scope)
 
