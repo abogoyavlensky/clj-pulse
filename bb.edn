@@ -1,0 +1,20 @@
+{:tasks
+ {:enter (println "Running task:" (:name (current-task)))
+
+  fmt-check {:doc "Check code formatting"
+             :task (shell "cargo fmt --all -- --check")}
+
+  fmt {:doc "Fix code formatting"
+       :task (shell "cargo fmt --all")}
+
+  lint {:doc "Lint code"
+        :task (shell "cargo clippy --all-targets -- -D warnings")}
+
+  test {:doc "Run tests"
+        :task (shell "cargo test")}
+
+  check {:doc "Run all code checks and tests"
+         :depends [fmt lint test]}
+
+  build {:doc "Build application uberjar"
+         :task (shell "cargo build --release")}}}

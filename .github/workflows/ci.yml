@@ -1,4 +1,4 @@
-name: CI
+name: Check
 on:
   push:
     branches: [master]
@@ -12,14 +12,17 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3.6.1
+        with:
+          install_args: "babashka"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Format check
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: bb fmt-check
+      - name: Linting
+        run: bb lint
       - name: Tests
-        run: cargo test
+        run: bb test
