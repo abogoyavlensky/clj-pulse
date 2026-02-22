@@ -7,11 +7,17 @@ pub struct DocumentStore {
     docs: DashMap<Url, Rope>,
 }
 
-impl DocumentStore {
-    pub fn new() -> Self {
+impl Default for DocumentStore {
+    fn default() -> Self {
         Self {
             docs: DashMap::new(),
         }
+    }
+}
+
+impl DocumentStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn open(&self, uri: Url, text: String) {
@@ -105,7 +111,19 @@ fn is_clj_ident_char(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(
             c,
-            '-' | '_' | '/' | '.' | '?' | '!' | '*' | '+' | '>' | '<' | '=' | '#' | '\'' | '&'
+            '-' | '_'
+                | '/'
+                | '.'
+                | '?'
+                | '!'
+                | '*'
+                | '+'
+                | '>'
+                | '<'
+                | '='
+                | '#'
+                | '\''
+                | '&'
                 | '%'
         )
 }

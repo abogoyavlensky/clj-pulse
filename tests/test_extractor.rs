@@ -19,7 +19,10 @@ fn test_extracts_defn_with_doc_and_params() {
         Path::new("basic_defn.clj"),
     )
     .unwrap();
-    let hello = syms.iter().find(|s| s.name == "hello").expect("hello not found");
+    let hello = syms
+        .iter()
+        .find(|s| s.name == "hello")
+        .expect("hello not found");
     assert_eq!(hello.kind, DefKind::Defn);
     assert_eq!(hello.fqn, "my.core/hello");
     assert_eq!(hello.doc.as_deref(), Some("Says hello to someone."));
@@ -33,8 +36,12 @@ fn test_extracts_def_and_defmacro() {
         Path::new("basic_defn.clj"),
     )
     .unwrap();
-    assert!(syms.iter().any(|s| s.name == "PI" && s.kind == DefKind::Def));
-    assert!(syms.iter().any(|s| s.name == "when-pos" && s.kind == DefKind::Defmacro));
+    assert!(syms
+        .iter()
+        .any(|s| s.name == "PI" && s.kind == DefKind::Def));
+    assert!(syms
+        .iter()
+        .any(|s| s.name == "when-pos" && s.kind == DefKind::Defmacro));
 }
 
 #[test]
@@ -68,8 +75,14 @@ fn test_extracts_ns_aliases_and_refers() {
         Path::new("ns_with_requires.clj"),
     )
     .unwrap();
-    assert_eq!(meta.aliases.get("str").map(|s| s.as_str()), Some("clojure.string"));
-    assert_eq!(meta.aliases.get("core").map(|s| s.as_str()), Some("my.core"));
+    assert_eq!(
+        meta.aliases.get("str").map(|s| s.as_str()),
+        Some("clojure.string")
+    );
+    assert_eq!(
+        meta.aliases.get("core").map(|s| s.as_str()),
+        Some("my.core")
+    );
     assert_eq!(
         meta.refers.get("format-date").map(|s| s.as_str()),
         Some("my.utils/format-date")

@@ -47,7 +47,9 @@ impl LanguageServer for Backend {
                             let ns_count = new_index.namespaces.len();
 
                             for entry in new_index.symbols.iter() {
-                                index.symbols.insert(entry.key().clone(), entry.value().clone());
+                                index
+                                    .symbols
+                                    .insert(entry.key().clone(), entry.value().clone());
                             }
                             for entry in new_index.namespaces.iter() {
                                 index

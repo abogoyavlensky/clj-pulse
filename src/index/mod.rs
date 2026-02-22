@@ -57,8 +57,8 @@ pub struct Index {
     pub core_symbols: Vec<CoreSymbol>,
 }
 
-impl Index {
-    pub fn new() -> Self {
+impl Default for Index {
+    fn default() -> Self {
         Self {
             symbols: DashMap::new(),
             namespaces: DashMap::new(),
@@ -66,6 +66,12 @@ impl Index {
             file_to_ns: DashMap::new(),
             core_symbols: Vec::new(),
         }
+    }
+}
+
+impl Index {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn lookup(&self, fqn: &str) -> Option<Symbol> {

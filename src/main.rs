@@ -1,3 +1,6 @@
+// Binary re-exports lib modules; many are used only by the lib target (tests) for now.
+#![allow(dead_code)]
+
 use tower_lsp::{LspService, Server};
 
 mod config;
