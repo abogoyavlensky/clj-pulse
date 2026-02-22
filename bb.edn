@@ -16,5 +16,8 @@
   check {:doc "Run all code checks and tests"
          :depends [fmt lint test]}
 
+  outdated {:doc "Check for outdated dependencies"
+            :task (shell "cargo outdated")}
+
   build {:doc "Build application uberjar"
          :task (shell "cargo build --release")}}}

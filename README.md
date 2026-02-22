@@ -26,8 +26,12 @@ bb fmt-check  # check formatting without fixing
 bb lint       # run clippy linter
 bb test       # run tests
 bb check      # run all checks (fmt + lint + test)
+bb outdated   # check outdated deps 
 bb build      # release build
 ```
+
+> [!NOTE]
+> To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.
 
 ## Editor Setup
 
