@@ -1,3 +1,4 @@
+pub mod completion;
 pub mod definition;
 
 use crate::index::{CoreSymbol, Index, Symbol};

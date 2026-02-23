@@ -1,0 +1,53 @@
+use std::path::Path;
+
+use clj_lsp::handlers::completion::complete_symbols;
+use clj_lsp::index::scanner;
+use clj_lsp::index::Index;
+
+fn build_test_index() -> Index {
+    let root = Path::new("tests/fixtures/simple_project");
+    let paths = vec![root.join("src")];
+    let mut index = scanner::build_index(root, &paths).unwrap();
+    index.core_symbols = clj_lsp::index::core::core_symbols();
+    index
+}
+
+#[test]
+fn test_completes_symbols_in_current_ns() {
+    let index = build_test_index();
+    let completions = complete_symbols(&index, "add", "simple.core");
+    assert!(completions.iter().any(|c| c.label == "add"));
+    assert!(!completions.iter().any(|c| c.label == "add-and-double"));
+}
+
+#[test]
+fn test_completes_with_alias_prefix() {
+    let index = build_test_index();
+    let completions = complete_symbols(&index, "core/ad", "simple.utils");
+    assert!(completions.iter().any(|c| c.label == "core/add"));
+}
+
+#[test]
+fn test_completes_clojure_core_builtins() {
+    let index = Index::new_with_core();
+    let completions = complete_symbols(&index, "map", "any.ns");
+    assert!(completions.iter().any(|c| c.label == "map"));
+    assert!(completions.iter().any(|c| c.label == "mapv"));
+    assert!(completions.iter().any(|c| c.label == "map-indexed"));
+}
+
+#[test]
+fn test_completion_item_has_doc_and_detail() {
+    let index = build_test_index();
+    let completions = complete_symbols(&index, "add", "simple.core");
+    let item = completions.iter().find(|c| c.label == "add").unwrap();
+    assert!(item.detail.is_some());
+    assert!(item.documentation.is_some());
+}
+
+#[test]
+fn test_empty_prefix_returns_all_visible_symbols() {
+    let index = build_test_index();
+    let completions = complete_symbols(&index, "", "simple.core");
+    assert!(completions.len() >= 3);
+}

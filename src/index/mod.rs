@@ -1,3 +1,4 @@
+pub mod core;
 pub mod extractor;
 pub mod scanner;
 
@@ -72,6 +73,13 @@ impl Default for Index {
 impl Index {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn new_with_core() -> Self {
+        Self {
+            core_symbols: core::core_symbols(),
+            ..Self::default()
+        }
     }
 
     pub fn lookup(&self, fqn: &str) -> Option<Symbol> {

@@ -20,7 +20,7 @@ impl Backend {
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            index: Arc::new(Index::new()),
+            index: Arc::new(Index::new_with_core()),
             documents: DocumentStore::new(),
         }
     }
@@ -143,8 +143,11 @@ impl LanguageServer for Backend {
         })
     }
 
-    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        Ok(None)
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        handlers::completion::handle(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("completion error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
     }
 
     async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
