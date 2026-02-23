@@ -213,7 +213,7 @@ word under cursor (from DocumentStore / ropey)
 
 ---
 
-## Step 1 — Scaffold + LSP Handshake
+## Step 1 — Scaffold + LSP Handshake [DONE]
 
 **Goal**: Server starts, editor connects, capabilities negotiated. No real functionality yet.
 
@@ -294,7 +294,7 @@ $ cargo run     # starts without crash
 
 ---
 
-## Step 2 — Tree-sitter Extractor
+## Step 2 — Tree-sitter Extractor [DONE]
 
 **Goal**: Given Clojure source as `&str`, extract all symbols and namespace metadata. Pure function, fully tested before wiring into the rest.
 
@@ -500,7 +500,7 @@ $ cargo test test_extractor   # all tests pass
 
 ---
 
-## Step 3 — Scanner + Index Population
+## Step 3 — Scanner + Index Population [DONE]
 
 **Goal**: Walk project directories in parallel, call extractor, populate the in-memory Index.
 
@@ -674,7 +674,7 @@ $ cargo test test_index   # all tests pass
 
 ---
 
-## Step 4 — Jump to Definition
+## Step 4 — Jump to Definition [DONE]
 
 **Goal**: `textDocument/definition` returns correct file + position.
 

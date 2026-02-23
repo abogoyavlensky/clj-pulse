@@ -5,6 +5,7 @@ use tower_lsp::{LspService, Server};
 
 mod config;
 mod document;
+mod handlers;
 mod index;
 mod server;
 

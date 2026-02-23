@@ -6,6 +6,7 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::config;
 use crate::document::DocumentStore;
+use crate::handlers;
 use crate::index::scanner;
 use crate::index::Index;
 
@@ -134,9 +135,12 @@ impl LanguageServer for Backend {
 
     async fn goto_definition(
         &self,
-        _params: GotoDefinitionParams,
+        params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        Ok(None)
+        handlers::definition::handle(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("definition error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
     }
 
     async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
