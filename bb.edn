@@ -19,5 +19,8 @@
   outdated {:doc "Check for outdated dependencies"
             :task (shell "cargo outdated")}
 
-  build {:doc "Build application uberjar"
-         :task (shell "cargo build --release")}}}
+  build {:doc "Build application binary"
+         :task (shell "cargo build")}
+  
+  release {:doc "Build application release binary"
+           :task (shell "cargo build --release")}}}
