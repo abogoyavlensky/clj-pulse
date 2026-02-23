@@ -37,13 +37,11 @@ bb build      # release build
 
 ### VS Code
 
-Add to `.vscode/settings.json` in your Clojure project:
+Setup & test workflow
 
-```json
-{
-  "clojure.lsp.server.path": "/path/to/clj-lsp"
-}
-```
+- cargo build                          # build the LSP binary
+- cd editors/vscode && npm install     # install vscode-languageclient
+- Then: Open editors/vscode/ in VS Code → F5 → opens Extension Development Host → open a Clojure project → jump-to-definition works.
 
 ### Zed
 

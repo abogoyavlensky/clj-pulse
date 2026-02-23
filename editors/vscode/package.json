@@ -1,0 +1,16 @@
+{
+  "name": "clj-lsp-dev",
+  "displayName": "clj-lsp (dev)",
+  "description": "Development extension for clj-lsp",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "activationEvents": [
+    "onLanguage:clojure"
+  ],
+  "main": "./extension.js",
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  }
+}
