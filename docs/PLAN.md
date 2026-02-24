@@ -1059,34 +1059,14 @@ No new tests needed — verify manually by:
 - Search codebase for `unwrap()` calls — replace all with `?` or explicit logging
 - Every LSP handler must catch errors and return `tower_lsp::jsonrpc::Error::internal_error()` rather than panicking
 
-**Logging**:
-- At startup: log project root, source paths, count of files found
-- After indexing: log `"Indexed N symbols in M namespaces in Xms"`
-- On each definition request: log the word being resolved and whether it was found
-- Log file: `~/.cache/clj-lsp/server.log`
-
-**VS Code config** — create `editors/vscode/`:
-```json
-// .vscode/settings.json for users
-{
-  "clojure.lsp.server.path": "/path/to/clj-lsp"
-}
-```
-Or minimal `package.json` extension activating the server for `clojure` language ID.
-
-**Zed config** — `~/.config/zed/settings.json`:
-```json
-{
-  "lsp": {
-    "clj-lsp": {
-      "binary": { "path": "/path/to/clj-lsp" }
-    }
-  },
-  "languages": {
-    "Clojure": { "language_servers": ["clj-lsp"] }
-  }
-}
-```
+**Logging** [DONE]:
+- Log file: `{project_root}/.clj-lsp/server.log` (project-local), fallback `/tmp/clj-lsp/server.log`
+- Default level: WARN+ (minimal noise). `--verbose` flag enables INFO+DEBUG
+- Single file, truncated on each server start (no rolling)
+- At startup: log project root, source paths, count of files found (INFO)
+- After indexing: log `"Indexed N symbols in M namespaces in Xms"` (INFO)
+- On each definition request: log the word being resolved and whether it was found (INFO)
+- Users should add `.clj-lsp/` to their project's `.gitignore`
 
 **Binary size / release build**:
 ```toml
