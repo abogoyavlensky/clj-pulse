@@ -15,3 +15,7 @@ From step 2
   - Dependency JAR parsing
   - Macro-expanded forms
   - defmethod dispatch values
+
+
+  From step 5:
+  - strange annotation of autocompleted functions - double rounded brackets (([...]))

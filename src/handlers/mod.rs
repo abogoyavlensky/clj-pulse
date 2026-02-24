@@ -1,5 +1,6 @@
 pub mod completion;
 pub mod definition;
+pub mod hover;
 
 use crate::index::{CoreSymbol, Index, Symbol};
 

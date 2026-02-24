@@ -150,7 +150,10 @@ impl LanguageServer for Backend {
         })
     }
 
-    async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
-        Ok(None)
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        handlers::hover::handle(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("hover error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
     }
 }
