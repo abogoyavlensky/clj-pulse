@@ -931,7 +931,7 @@ $ cargo test test_completion   # all tests pass
 
 ---
 
-## Step 6 — Hover
+## Step 6 — Hover [DONE]
 
 **Goal**: `textDocument/hover` returns formatted docstring + signature.
 
@@ -1017,7 +1017,7 @@ $ cargo test test_hover   # all tests pass
 
 ---
 
-## Step 7 — File Watching + Re-index
+## Step 7 — File Watching + Re-index [DONE]
 
 **Goal**: When a file is saved, re-index it so definition/completion/hover are immediately up to date.
 

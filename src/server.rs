@@ -7,6 +7,7 @@ use tower_lsp::{Client, LanguageServer};
 use crate::config;
 use crate::document::DocumentStore;
 use crate::handlers;
+use crate::index::extractor;
 use crate::index::scanner;
 use crate::index::Index;
 
@@ -92,8 +93,13 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::INCREMENTAL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..Default::default()
+                    },
                 )),
                 completion_provider: Some(CompletionOptions::default()),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -124,6 +130,28 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.close(&params.text_document.uri);
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let Ok(path) = params.text_document.uri.to_file_path() else {
+            return;
+        };
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("failed to read {}: {}", path.display(), e);
+                return;
+            }
+        };
+        self.index.remove_file(&path);
+        match extractor::extract(&source, &path) {
+            Ok((meta, symbols)) => {
+                let count = symbols.len();
+                self.index.insert_file(meta, symbols);
+                tracing::info!("re-indexed {} ({} symbols)", path.display(), count);
+            }
+            Err(e) => tracing::warn!("failed to re-index {}: {}", path.display(), e),
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {

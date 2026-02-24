@@ -27,7 +27,8 @@ bb lint       # run clippy linter
 bb test       # run tests
 bb check      # run all checks (fmt + lint + test)
 bb outdated   # check outdated deps 
-bb build      # release build
+bb build      # build the dev binary
+bb release    # build release binary
 ```
 
 > [!NOTE]
@@ -37,38 +38,30 @@ bb build      # release build
 
 ### VS Code
 
-Setup & test workflow
+Install [Calva](https://calva.io/) extension, then add to `settings.json`:
 
-- cargo build                          # build the LSP binary
-- cd editors/vscode && npm install     # install vscode-languageclient
-- Then: Open editors/vscode/ in VS Code → F5 → opens Extension Development Host → open a Clojure project → jump-to-definition works.
+```json
+{
+  "calva.clojureLspPath": "/path/to/clj-lsp"
+}
+```
 
 ### Zed
 
-Add to `~/.config/zed/settings.json`:
+Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then add to `~/.config/zed/settings.json`:
 
 ```json
 {
   "lsp": {
-    "clj-lsp": {
-      "binary": { "path": "/path/to/clj-lsp" }
-    }
+    "clojure-lsp": {
+      "binary": {
+        "path": "/path/to/clj-lsp",
+      },
+    },
   },
-  "languages": {
-    "Clojure": { "language_servers": ["clj-lsp"] }
-  }
 }
 ```
 
-### Neovim (nvim-lspconfig)
-
-```lua
-vim.lsp.start({
-  name = "clj-lsp",
-  cmd = { "/path/to/clj-lsp" },
-  root_dir = vim.fs.dirname(vim.fs.find({ "deps.edn", "project.clj" }, { upward = true })[1]),
-})
-```
 
 ## Architecture
 

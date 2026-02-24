@@ -19,3 +19,7 @@ From step 2
 
   From step 5:
   - strange annotation of autocompleted functions - double rounded brackets (([...]))
+
+
+From step 7:
+- debounced didChange re-indexing (200-300ms) for better UX
