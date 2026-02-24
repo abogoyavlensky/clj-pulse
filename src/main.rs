@@ -1,7 +1,6 @@
 // Binary re-exports lib modules; many are used only by the lib target (tests) for now.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use tower_lsp::{LspService, Server};
 
 mod config;
@@ -27,14 +26,18 @@ async fn main() {
         .ok()
         .and_then(|cwd| config::find_project_root(&cwd))
         .map(|root| root.join(".clj-lsp"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/clj-lsp"));
+        .unwrap_or_else(|| std::env::temp_dir().join("clj-lsp"));
     std::fs::create_dir_all(&log_dir).ok();
 
     let log_path = log_dir.join("server.log");
     let log_file = std::fs::File::create(&log_path).expect("cannot create log file");
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(log_file);
-    let level = if verbose { tracing::Level::DEBUG } else { tracing::Level::WARN };
+    let level = if verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::WARN
+    };
     tracing_subscriber::fmt()
         .with_max_level(level)
         .with_writer(non_blocking)

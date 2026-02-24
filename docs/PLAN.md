@@ -1049,7 +1049,7 @@ No new tests needed — verify manually by:
 
 ---
 
-## Step 8 — Polish + Distribution
+## Step 8 — Polish + Distribution [DONE]
 
 **Goal**: Usable by others, logs are useful, packaging works.
 
