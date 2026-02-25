@@ -35,7 +35,7 @@ Start by understanding the current project context, then ask questions one at a 
 ## After the Design
 
 **Documentation:**
-- Write the validated design to `docs/plans/000-<topic>-design.md`
+- Write the validated design to `docs/plans/000-<topic>.md`
   - The number in front is incremental and for ordering - use 000 for the first design, then 001, etc
 - Use elements-of-style:writing-clearly-and-concisely skill if available
 - Commit the design document to git
