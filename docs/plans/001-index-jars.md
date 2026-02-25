@@ -128,4 +128,5 @@ New dependencies:
 2. Run against a real Clojure project that has a populated `.cpcache/` — verify JARs are found.
 3. Confirm `clojure.string`, `clojure.set`, etc. symbols appear in completion.
 4. Restart LSP — verify second load is fast (cache hit).
-5. Run `cargo test` — ensure existing tests still pass.
+5. Run `cargo test` — ensure existing tests still pass. Before implementation, I’d treat these as must-fix: use std::env::split_paths instead of colon-splitting for classpath parsing, define a real goto_definition strategy for symbols inside JARs (current Url::from_file_path(sym.file) won’t
+  handle zip entries), and add automated tests for discovery, JAR indexing, and cache round-trip/hit behavior.
