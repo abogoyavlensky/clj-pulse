@@ -2,7 +2,7 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::Index;
+use crate::index::{Index, SymbolSource};
 
 use super::{resolve_symbol, ResolvedSymbol};
 
@@ -27,14 +27,17 @@ pub fn handle(
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
     match resolve_symbol(index, &word, &current_ns) {
-        Some(ResolvedSymbol::Project(sym)) => {
-            let target_uri = Url::from_file_path(&sym.file)
-                .map_err(|_| anyhow::anyhow!("invalid path: {:?}", sym.file))?;
-            Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                uri: target_uri,
-                range: sym.name_range,
-            })))
-        }
+        Some(ResolvedSymbol::Project(sym)) => match sym.source {
+            SymbolSource::Project => {
+                let target_uri = Url::from_file_path(&sym.file)
+                    .map_err(|_| anyhow::anyhow!("invalid path: {:?}", sym.file))?;
+                Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range: sym.name_range,
+                })))
+            }
+            SymbolSource::Jar(_) => Ok(None),
+        },
         Some(ResolvedSymbol::Core(_)) => Ok(None),
         None => Ok(None),
     }

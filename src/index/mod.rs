@@ -1,14 +1,23 @@
 pub mod core;
 pub mod extractor;
+pub mod jar;
+pub mod jar_cache;
 pub mod scanner;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Range;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SymbolSource {
+    Project,
+    Jar(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DefKind {
     Def,
     Defonce,
@@ -22,7 +31,7 @@ pub enum DefKind {
     Deftype,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub fqn: String,
@@ -31,11 +40,12 @@ pub struct Symbol {
     pub params: Vec<String>,
     pub doc: Option<String>,
     pub file: PathBuf,
+    pub source: SymbolSource,
     pub range: Range,
     pub name_range: Range,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NsMeta {
     pub name: String,
     pub file: PathBuf,

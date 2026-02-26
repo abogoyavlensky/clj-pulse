@@ -241,6 +241,7 @@ fn extract_def(
         params,
         doc,
         file: file.to_path_buf(),
+        source: super::SymbolSource::Project,
         range: node_to_lsp_range(form_node),
         name_range: node_to_lsp_range(name_node),
     });

@@ -4,6 +4,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::classpath;
 use crate::config;
 use crate::document::DocumentStore;
 use crate::handlers;
@@ -34,6 +35,7 @@ impl LanguageServer for Backend {
             if let Ok(root_path) = root_uri.to_file_path() {
                 let index = self.index.clone();
                 let client = self.client.clone();
+                let root_path_jars = root_path.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
                     let source_paths = config::source_paths(&root_path);
@@ -87,6 +89,24 @@ impl LanguageServer for Backend {
                                 .await;
                         }
                     }
+                });
+
+                // Background task: index library JARs from the classpath
+                let index_jars = self.index.clone();
+                let client_jars = self.client.clone();
+                tokio::spawn(async move {
+                    let classpath = classpath::discover(&root_path_jars);
+                    if classpath.is_empty() {
+                        return;
+                    }
+                    scanner::index_classpath_jars(&root_path_jars, classpath, &index_jars);
+                    let sym_count = index_jars.symbols.len();
+                    let msg = format!(
+                        "clj-lsp: library indexing complete ({} total symbols)",
+                        sym_count
+                    );
+                    tracing::info!("{}", msg);
+                    client_jars.log_message(MessageType::INFO, msg).await;
                 });
             }
         }

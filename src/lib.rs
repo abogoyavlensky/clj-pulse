@@ -1,3 +1,4 @@
+pub mod classpath;
 pub mod config;
 pub mod document;
 pub mod handlers;
