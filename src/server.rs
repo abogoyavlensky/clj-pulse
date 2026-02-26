@@ -14,12 +14,12 @@ use crate::index::Index;
 use crate::jar_content;
 
 #[derive(serde::Deserialize)]
-struct TextDocumentContentParams {
+pub(crate) struct TextDocumentContentParams {
     uri: String,
 }
 
 #[derive(serde::Serialize)]
-struct TextDocumentContentResult {
+pub(crate) struct TextDocumentContentResult {
     text: String,
 }
 
