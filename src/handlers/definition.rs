@@ -36,7 +36,22 @@ pub fn handle(
                     range: sym.name_range,
                 })))
             }
-            SymbolSource::Jar(_) => Ok(None),
+            SymbolSource::Jar(_) => {
+                // sym.file is "jar_path!/entry" e.g. /home/.m2/lib.jar!/clojure/string.clj
+                let file_str = sym.file.to_string_lossy();
+                let (jar_part, entry_part) = file_str
+                    .split_once("!/")
+                    .ok_or_else(|| anyhow::anyhow!("malformed jar path: {}", file_str))?;
+                let jar_url = Url::from_file_path(jar_part)
+                    .map_err(|_| anyhow::anyhow!("invalid jar path: {}", jar_part))?;
+                let jar_uri = format!("jar:{}!/{}", jar_url, entry_part);
+                let uri = Url::parse(&jar_uri)
+                    .map_err(|_| anyhow::anyhow!("invalid jar URI: {}", jar_uri))?;
+                Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri,
+                    range: sym.name_range,
+                })))
+            }
         },
         Some(ResolvedSymbol::Core(_)) => Ok(None),
         None => Ok(None),

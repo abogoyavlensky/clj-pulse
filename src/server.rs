@@ -11,6 +11,17 @@ use crate::handlers;
 use crate::index::extractor;
 use crate::index::scanner;
 use crate::index::Index;
+use crate::jar_content;
+
+#[derive(serde::Deserialize)]
+struct TextDocumentContentParams {
+    uri: String,
+}
+
+#[derive(serde::Serialize)]
+struct TextDocumentContentResult {
+    text: String,
+}
 
 pub struct Backend {
     pub client: Client,
@@ -25,6 +36,40 @@ impl Backend {
             index: Arc::new(Index::new_with_core()),
             documents: DocumentStore::new(),
         }
+    }
+
+    pub async fn text_document_content(
+        &self,
+        params: TextDocumentContentParams,
+    ) -> tower_lsp::jsonrpc::Result<TextDocumentContentResult> {
+        let (jar_path, entry_path) = jar_content::parse_jar_uri(&params.uri).map_err(|e| {
+            tracing::warn!("text_document_content: bad URI {}: {}", params.uri, e);
+            tower_lsp::jsonrpc::Error::invalid_params(e.to_string())
+        })?;
+
+        if !jar_path.exists() {
+            return Err(tower_lsp::jsonrpc::Error {
+                code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32801),
+                message: std::borrow::Cow::Owned(format!("JAR not found: {}", jar_path.display())),
+                data: None,
+            });
+        }
+
+        let text = jar_content::extract_content(&jar_path, &entry_path).map_err(|e| {
+            tracing::warn!(
+                "text_document_content: failed to extract {}: {}",
+                params.uri,
+                e
+            );
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                tower_lsp::jsonrpc::Error::invalid_params(msg)
+            } else {
+                tower_lsp::jsonrpc::Error::internal_error()
+            }
+        })?;
+
+        Ok(TextDocumentContentResult { text })
     }
 }
 
@@ -124,6 +169,9 @@ impl LanguageServer for Backend {
                 completion_provider: Some(CompletionOptions::default()),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                experimental: Some(serde_json::json!({
+                    "textDocumentContentProvider": { "schemes": ["jar"] }
+                })),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
