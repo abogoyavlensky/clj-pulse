@@ -59,7 +59,7 @@ fn cp_files_newest_first(cpcache: &Path) -> Vec<PathBuf> {
             Some((e.path(), mtime))
         })
         .collect();
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
     files.into_iter().map(|(p, _)| p).collect()
 }
 

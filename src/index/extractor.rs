@@ -164,27 +164,23 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
         if item.kind() == "kwd_lit" {
             let kw_text = node_text(item, source);
             match kw_text {
-                ":as" => {
-                    if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" {
-                        let alias = node_text(items[i + 1], source).to_string();
-                        ns_meta.aliases.insert(alias, ns_name.clone());
-                        i += 2;
-                        continue;
-                    }
+                ":as" if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" => {
+                    let alias = node_text(items[i + 1], source).to_string();
+                    ns_meta.aliases.insert(alias, ns_name.clone());
+                    i += 2;
+                    continue;
                 }
-                ":refer" => {
-                    if i + 1 < items.len() && items[i + 1].kind() == "vec_lit" {
-                        let refer_vec = named_children(items[i + 1]);
-                        for refer_node in refer_vec {
-                            if refer_node.kind() == "sym_lit" {
-                                let refer_name = node_text(refer_node, source).to_string();
-                                let fqn = format!("{}/{}", ns_name, refer_name);
-                                ns_meta.refers.insert(refer_name, fqn);
-                            }
+                ":refer" if i + 1 < items.len() && items[i + 1].kind() == "vec_lit" => {
+                    let refer_vec = named_children(items[i + 1]);
+                    for refer_node in refer_vec {
+                        if refer_node.kind() == "sym_lit" {
+                            let refer_name = node_text(refer_node, source).to_string();
+                            let fqn = format!("{}/{}", ns_name, refer_name);
+                            ns_meta.refers.insert(refer_name, fqn);
                         }
-                        i += 2;
-                        continue;
                     }
+                    i += 2;
+                    continue;
                 }
                 _ => {}
             }
