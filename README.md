@@ -1,6 +1,6 @@
 # clj-lsp
 
-A minimal, fast Clojure LSP server.
+A minimal and fast Clojure LSP server.
 
 ## V1 Scope
 

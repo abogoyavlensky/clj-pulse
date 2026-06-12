@@ -5,3 +5,4 @@
 .DS_Store
 .clj-kondo
 .lsp/
+.clj-lsp
