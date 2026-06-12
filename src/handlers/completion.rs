@@ -78,6 +78,38 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                 items.push(core_symbol_to_completion(core_sym));
             }
         }
+
+        // Pools D and E only fire for non-empty prefixes: on an empty prefix
+        // they would dump every indexed namespace into the list.
+        if !prefix.is_empty() {
+            // Pool D: aliases of the current namespace — completing "metr"
+            // to "metrics" lets the user then complete "metrics/…"
+            if let Some(meta) = &ns_meta {
+                for (alias, full_ns) in &meta.aliases {
+                    if alias.starts_with(prefix) {
+                        items.push(CompletionItem {
+                            label: alias.clone(),
+                            detail: Some(format!("alias for {}", full_ns)),
+                            kind: Some(CompletionItemKind::MODULE),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            // Pool E: namespace names (project + libraries) — makes
+            // completion inside (:require …) work
+            for entry in index.namespaces.iter() {
+                if entry.key().starts_with(prefix) {
+                    items.push(CompletionItem {
+                        label: entry.key().clone(),
+                        detail: Some("namespace".to_string()),
+                        kind: Some(CompletionItemKind::MODULE),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
     }
 
     items
