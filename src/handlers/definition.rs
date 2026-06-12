@@ -32,12 +32,18 @@ pub fn handle(
             let location = location_for(&sym.file, sym.name_range, &sym.source)?;
             Ok(Some(GotoDefinitionResponse::Scalar(location)))
         }
-        Some(ResolvedSymbol::Core(_)) => {
+        Some(ResolvedSymbol::Core(core)) => {
             // Aliases can shadow core names (`[clojure.string :as str]`);
             // navigate to the namespace only when the cursor is on the alias
             // declaration itself, not on a core-symbol usage in a body.
             if on_alias_declaration(documents, &uri, pos.line, &word) {
                 return namespace_location(index, &current_ns, &word);
+            }
+            // Built-ins live in the clojure JAR like any other library
+            // symbol; the static core list is only a doc shortcut.
+            if let Some(sym) = index.lookup_in_ns("clojure.core", &core.name) {
+                let location = location_for(&sym.file, sym.name_range, &sym.source)?;
+                return Ok(Some(GotoDefinitionResponse::Scalar(location)));
             }
             Ok(None)
         }

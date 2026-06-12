@@ -689,6 +689,54 @@ fn test_e2e_definition_on_require_alias_and_namespace() {
 }
 
 #[test]
+fn test_e2e_definition_on_core_builtin_navigates_into_clojure_jar() {
+    // `defn`, `or`, `cond`… are ordinary definitions inside the clojure JAR;
+    // bare usages must navigate into it even though the static core list
+    // answers hover/completion.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("clojure-x.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("clojure/core.clj", opts).unwrap();
+    zip.write_all(
+        b"(ns ^{:doc \"core\"} clojure.core)\n\n(defmacro or\n  \"Evaluates exprs one at a time.\"\n  ([] nil)\n  ([x] x)\n  ([x & next] nil))\n",
+    )
+    .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(or 1 2)\n");
+    let result = client.goto_definition(&utils, last_line, 2);
+
+    assert!(
+        !result.is_null(),
+        "goto-definition on core builtin returned null"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.starts_with("jar:file://") && uri.ends_with("!/clojure/core.clj"),
+        "expected jar URI into clojure core, got {}",
+        uri
+    );
+    // name_range points at `or` on the defmacro line
+    assert_eq!(result["range"]["start"]["line"], json!(2));
+}
+
+#[test]
 fn test_e2e_definition_on_alias_shadowing_core_symbol() {
     // `[simple.core :as str]`: the alias shadows clojure.core/str. On the
     // alias declaration it must navigate to the namespace; on a body usage
