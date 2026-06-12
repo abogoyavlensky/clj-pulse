@@ -29,9 +29,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Rust version pinned in .mise.toml, matching local dev and checks;
+      # install only rust (babashka isn't needed for release builds)
+      - uses: jdx/mise-action@v3.6.1
         with:
-          targets: ${{ matrix.target }}
+          install_args: "rust"
+
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:

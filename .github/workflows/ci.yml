@@ -13,12 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Installs rust + babashka pinned in .mise.toml, matching local dev
       - uses: jdx/mise-action@v3.6.1
-        with:
-          install_args: "babashka"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: bb fmt-check
@@ -30,11 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3.6.1
-        with:
-          install_args: "babashka"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Tests
         run: bb test
