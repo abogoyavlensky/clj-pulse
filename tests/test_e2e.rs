@@ -383,6 +383,158 @@ fn test_e2e_completion_with_alias_prefix() {
 }
 
 #[test]
+fn test_e2e_completion_bare_prefix_in_current_ns() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    // Type a partial bare symbol and complete it
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(add-an");
+    let result = client.completion(&utils, last_line, 7);
+
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("expected CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"add-and-double"),
+        "expected add-and-double in completions, got {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_e2e_completion_clojure_core_builtins() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(redu");
+    let result = client.completion(&utils, last_line, 5);
+
+    let items = result.as_array().expect("expected CompletionItem array");
+    let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+    assert!(
+        labels.contains(&"reduce") && labels.contains(&"reduce-kv"),
+        "expected reduce/reduce-kv in completions, got {:?}",
+        labels
+    );
+    let reduce = items.iter().find(|i| i["label"] == "reduce").unwrap();
+    let detail = reduce["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("clojure.core"),
+        "expected clojure.core detail, got {}",
+        detail
+    );
+}
+
+#[test]
+fn test_e2e_completion_from_jar_library() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn helper\n  \"Does helping.\"\n  [x]\n  x)\n\n(defn helper-two [x] x)\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    client.did_change_insert(&consumer, 2, 0, "(u/hel");
+    let result = client.completion(&consumer, 2, 6);
+
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("expected CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"u/helper") && labels.contains(&"u/helper-two"),
+        "expected u/helper completions from JAR lib, got {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_e2e_completion_from_directory_library() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let libdir = tempfile::TempDir::new().unwrap();
+    let lib_src = libdir.path().join("src");
+    std::fs::create_dir_all(lib_src.join("gitlib")).unwrap();
+    std::fs::write(
+        lib_src.join("gitlib/util.clj"),
+        "(ns gitlib.util)\n\n(defn helper\n  \"From a git dep.\"\n  [x]\n  x)\n",
+    )
+    .unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), lib_src.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_gitlib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-gitlib\n  (:require [gitlib.util :as u]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    client.did_change_insert(&consumer, 2, 0, "(u/hel");
+    let result = client.completion(&consumer, 2, 6);
+
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("expected CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"u/helper"),
+        "expected u/helper completion from directory lib, got {:?}",
+        labels
+    );
+}
+
+#[test]
 fn test_e2e_definition_after_in_memory_edit() {
     // Type new code without saving: didChange must keep the in-memory
     // document in sync so navigation works from unsaved edits.
