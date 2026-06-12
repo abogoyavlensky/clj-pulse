@@ -1,4 +1,4 @@
-# Phase 2: Occurrence Index, References, Rename, Watched Files
+# Phase 2: Occurrence Index, References, Rename, Watched Files ✅ COMPLETED
 
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -74,77 +74,105 @@ message; watched-file read failures log and skip.
 
 **Files:** Modify `src/index/extractor.rs`, `src/index/mod.rs`; test `tests/test_extractor.rs`.
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   Qualified usage resolves through alias with name-only range; bare usage
   resolves to current ns; refer'd usage resolves to source ns; `:refer`
   vector entry recorded; locally bound names (params, let, destructuring)
   not recorded; core usage resolves to `clojure.core/...`.
-- [ ] **Step 2: Implement walker**
+- [x] **Step 2: Implement walker**
   `extract` returns `(NsMeta, Vec<Symbol>, Vec<Occurrence>)` (or a struct);
   scope-stack walker over the tree; resolution mirroring `resolve_symbol`.
   Update existing callers.
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
   Run: `cargo test`  Expected: all green.
 
 ### Task 2: Index storage and wiring
 
 **Files:** Modify `src/index/mod.rs`, `src/index/scanner.rs`, `src/server.rs`.
 
-- [ ] **Step 1: Extend Index**
+- [x] **Step 1: Extend Index**
   `occurrences` map; `insert_file` takes occurrences; `remove_file` clears
   them; `insert_lib_file` inserts none. Bump `CACHE_FORMAT_VERSION` only if
   the cached `Symbol`/`NsMeta` layout changes (occurrences are not cached).
-- [ ] **Step 2: Wire project scan, did_save, did_open**
-- [ ] **Step 3: Verify**
+- [x] **Step 2: Wire project scan, did_save, did_open**
+- [x] **Step 3: Verify**
   Run: `cargo test`  Expected: all green.
 
 ### Task 3: textDocument/references
 
 **Files:** Create `src/handlers/references.rs`; modify `src/handlers/mod.rs`, `src/server.rs`; test `tests/test_e2e.rs`.
 
-- [ ] **Step 1: Write failing e2e test**
+- [x] **Step 1: Write failing e2e test**
   References for `add` from its definition in core.clj and from a usage in
   utils.clj; `includeDeclaration` true/false both asserted.
-- [ ] **Step 2: Implement handler + capability**
+- [x] **Step 2: Implement handler + capability**
   Resolution from usage or definition name; live-text re-extraction for
   open files.
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
   Run: `cargo test --test test_e2e`  Expected: all green.
 
 ### Task 4: textDocument/rename
 
 **Files:** Modify `src/handlers/references.rs`, `src/server.rs`; test `tests/test_e2e.rs`.
 
-- [ ] **Step 1: Write failing e2e tests**
+- [x] **Step 1: Write failing e2e tests**
   Cross-file rename of `add` → asserts exact edits in core.clj (definition)
   and utils.clj (alias-qualified usage, name part only); rename of a
   refer'd symbol fixes the `:refer` vector; rename of `map` (core) returns
   an error; rename with unsaved edits uses live ranges.
-- [ ] **Step 2: Implement handler + capability**
+- [x] **Step 2: Implement handler + capability**
   Symbol-name validation; project-only guard; `WorkspaceEdit.changes`.
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
   Run: `cargo test --test test_e2e`  Expected: all green.
 
 ### Task 5: workspace/didChangeWatchedFiles
 
 **Files:** Modify `src/server.rs`; test `tests/test_e2e.rs`.
 
-- [ ] **Step 1: Write failing e2e test**
+- [x] **Step 1: Write failing e2e test**
   Simulate branch switch: create a new file on disk + send Created event →
   its symbols resolve; delete a file + Deleted event → its symbols gone.
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
   Dynamic registration in `initialized`; event handler; classpath refresh
   on deps.edn/.cpcache events.
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
   Run: `cargo test --test test_e2e`  Expected: all green.
 
 ### Task 6: Wrap-up
 
 **Files:** Modify `docs/ROADMAP.md`.
 
-- [ ] **Step 1: Tick Phase 2 checkboxes in the roadmap**
-- [ ] **Step 2: Full verification**
+- [x] **Step 1: Tick Phase 2 checkboxes in the roadmap**
+- [x] **Step 2: Full verification**
   Run: `bb check && bb e2e-nvim`  Expected: all green.
-- [ ] **Step 3: Codex review**
+- [x] **Step 3: Codex review**
   Run review-with-codex on uncommitted changes; apply important findings;
   max 3 rounds.
+
+---
+
+## Completion Summary (2026-06-13)
+
+All four features implemented and verified (`bb check`: 10 suites green,
+`bb e2e-nvim` passed, readx smoke test: 8 references for
+`sentry-clj.metrics/increment` across 3 files).
+
+- Occurrence index: scope-aware walker (params, let-likes, letfn, fn,
+  destructuring incl. :or defaults, defmethod dispatch/name semantics,
+  binding/with-redefs as Var usages), resolved through aliases/refers/
+  current-ns/core; refer vector entries included; per-file storage.
+- References: cursor resolution via live-text definitions/occurrences
+  (locals can never leak), alias-half fallback for qualified words,
+  includeDeclaration support.
+- Rename: cross-file WorkspaceEdit incl. :refer vectors; project-only
+  guard; name validation; live ranges for unsaved edits.
+- Watched files: dynamic registration; create/change/delete re-indexing;
+  deps.edn changes rebuild project sources (merge_project_from, keeping
+  open out-of-:paths files) and classpath libs (clear_libs first).
+
+Codex review: 3 rounds, 11 findings total, all applied with regression
+tests. Notable: occurrence-based cursor resolution (round 1), binding/
+with-redefs and :let clause semantics (round 1–2), def initializer vs
+params vectors (round 2), defmethod-name-as-reference and :or defaults
+(round 3), stale lib cleanup + project rebuild on deps.edn change
+(rounds 1–3).

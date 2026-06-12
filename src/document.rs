@@ -97,6 +97,11 @@ impl DocumentStore {
         self.docs.get(uri).map(|rope| rope.to_string())
     }
 
+    /// URIs of all currently open documents.
+    pub fn open_uris(&self) -> Vec<Url> {
+        self.docs.iter().map(|entry| entry.key().clone()).collect()
+    }
+
     /// Returns the document text from the start up to (not including) `pos`.
     pub fn text_up_to(&self, uri: &Url, pos: Position) -> Option<String> {
         let rope = self.docs.get(uri)?;

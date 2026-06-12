@@ -88,6 +88,22 @@ impl LspClient {
     /// Sends a request and blocks until its response arrives.
     /// Server-initiated messages received in the meantime are stashed.
     fn request(&mut self, method: &str, params: Value) -> Value {
+        let msg = self.request_full(method, params);
+        if let Some(err) = msg.get("error") {
+            panic!("{} returned error: {}", method, err);
+        }
+        msg["result"].clone()
+    }
+
+    /// Like `request` but expects a JSON-RPC error and returns it.
+    fn request_expect_error(&mut self, method: &str, params: Value) -> Value {
+        let msg = self.request_full(method, params);
+        msg.get("error")
+            .unwrap_or_else(|| panic!("{} unexpectedly succeeded: {}", method, msg))
+            .clone()
+    }
+
+    fn request_full(&mut self, method: &str, params: Value) -> Value {
         self.next_id += 1;
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
@@ -101,14 +117,21 @@ impl LspClient {
                 .incoming
                 .recv_timeout(remaining)
                 .unwrap_or_else(|_| panic!("timed out waiting for response to {}", method));
-            if msg.get("id") == Some(&json!(id)) {
-                if let Some(err) = msg.get("error") {
-                    panic!("{} returned error: {}", method, err);
-                }
-                return msg["result"].clone();
+            if msg.get("method").is_none() && msg.get("id") == Some(&json!(id)) {
+                return msg;
             }
-            self.notifications.push(msg);
+            self.stash(msg);
         }
+    }
+
+    /// Stashes a server-initiated message; server→client *requests*
+    /// (e.g. client/registerCapability) get a null success response so the
+    /// server never blocks on us.
+    fn stash(&mut self, msg: Value) {
+        if let (Some(id), Some(_)) = (msg.get("id").cloned(), msg.get("method")) {
+            self.send(json!({ "jsonrpc": "2.0", "id": id, "result": null }));
+        }
+        self.notifications.push(msg);
     }
 
     /// Waits until a `window/logMessage` whose text contains `needle` has
@@ -134,7 +157,7 @@ impl LspClient {
                 .recv_timeout(remaining)
                 .unwrap_or_else(|_| panic!("timed out waiting for log: {}", needle));
             let found = matches(&msg);
-            self.notifications.push(msg);
+            self.stash(msg);
             if found {
                 return;
             }
@@ -250,6 +273,28 @@ impl LspClient {
 
     fn workspace_symbols(&mut self, query: &str) -> Value {
         self.request("workspace/symbol", json!({ "query": query }))
+    }
+
+    fn references(&mut self, path: &Path, line: u32, character: u32, include_decl: bool) -> Value {
+        self.request(
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character },
+                "context": { "includeDeclaration": include_decl }
+            }),
+        )
+    }
+
+    fn rename(&mut self, path: &Path, line: u32, character: u32, new_name: &str) -> Value {
+        self.request(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character },
+                "newName": new_name
+            }),
+        )
     }
 }
 
@@ -911,6 +956,464 @@ fn test_e2e_workspace_symbols_ranked_and_project_only() {
         "subsequence match failed: {:?}",
         names
     );
+}
+
+#[test]
+fn test_e2e_find_references() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    let utils = root.join("src/utils.clj");
+    client.did_open(&core);
+
+    // From the definition site, with declaration included
+    let (line, ch) = position_of(&core, "add"); // `(defn add` is the first match
+    let result = client.references(&core, line, ch, true);
+    assert!(!result.is_null(), "references returned null");
+    let locs = result.as_array().unwrap();
+    let uris: Vec<&str> = locs.iter().filter_map(|l| l["uri"].as_str()).collect();
+    assert_eq!(
+        locs.len(),
+        2,
+        "expected declaration + usage, got {:?}",
+        locs
+    );
+    assert!(uris.iter().any(|u| u.ends_with("/src/core.clj")));
+    assert!(uris.iter().any(|u| u.ends_with("/src/utils.clj")));
+
+    // Usage range covers only `add`, not the `core/` alias
+    let usage = locs
+        .iter()
+        .find(|l| l["uri"].as_str().unwrap().ends_with("/src/utils.clj"))
+        .unwrap();
+    let utils_text = std::fs::read_to_string(&utils).unwrap();
+    let usage_line = utils_text.lines().nth(6).unwrap(); // "  (* 2 (core/add x y)))"
+    let name_col = usage_line.find("core/add").unwrap() + "core/".len();
+    assert_eq!(usage["range"]["start"]["character"], json!(name_col));
+
+    // Without declaration: only the usage
+    let result = client.references(&core, line, ch, false);
+    let locs = result.as_array().unwrap();
+    assert_eq!(locs.len(), 1);
+    assert!(locs[0]["uri"].as_str().unwrap().ends_with("/src/utils.clj"));
+
+    // From the usage site, resolution gives the same answer
+    let (uline, uch) = position_of(&utils, "core/add");
+    client.did_open(&utils);
+    let result = client.references(&utils, uline, uch, true);
+    assert_eq!(result.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_e2e_references_work_without_indexed_definition() {
+    // References of an alias-qualified usage must work even when the target
+    // library isn't indexed (yet) — the fqn is derivable from the alias.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let consumer = root.join("src/uses_unknown.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-unknown\n  (:require [unknown.lib :as ul]))\n\n(ul/go 1)\n(ul/go 2)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&consumer);
+
+    let (line, ch) = position_of(&consumer, "ul/go");
+    let result = client.references(&consumer, line, ch, true);
+    assert!(!result.is_null(), "references returned null");
+    assert_eq!(
+        result.as_array().unwrap().len(),
+        2,
+        "both usages must be found: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_e2e_rename_rejects_local_shadowing_global() {
+    // `(defn f2 [add] add)` — the param shadows simple.core/add; rename and
+    // references on it must NOT touch the global var.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+    let last_line = std::fs::read_to_string(&core).unwrap().lines().count() as u32;
+    client.did_change_insert(&core, last_line, 0, "(defn f2 [add] add)\n");
+
+    // Cursor on the param `add` (col 10)
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", core.display()) },
+            "position": { "line": last_line, "character": 11 },
+            "newName": "plus"
+        }),
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("nothing to rename"),
+        "got: {}",
+        error
+    );
+
+    let refs = client.references(&core, last_line, 11, true);
+    assert!(
+        refs.is_null(),
+        "local must have no global references: {:?}",
+        refs
+    );
+}
+
+#[test]
+fn test_e2e_classpath_change_drops_stale_libs() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let make_jar = |name: &str, entry: &str, content: &[u8]| {
+        let jar_path = root.join(name);
+        let jar_file = std::fs::File::create(&jar_path).unwrap();
+        let mut zip = zip::ZipWriter::new(jar_file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file(entry, opts).unwrap();
+        zip.write_all(content).unwrap();
+        zip.finish().unwrap();
+        jar_path
+    };
+    let jar_a = make_jar(
+        "liba.jar",
+        "mylib/util.clj",
+        b"(ns mylib.util)\n(defn helper [x] x)\n",
+    );
+    let jar_b = make_jar(
+        "libb.jar",
+        "otherlib/core.clj",
+        b"(ns otherlib.core)\n(defn other-fn [x] x)\n",
+    );
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    let cp_file = cpcache.join("1.cp");
+    std::fs::write(&cp_file, jar_a.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n\n(u/helper 42)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (line, ch) = position_of(&consumer, "u/helper");
+    assert!(
+        !client.goto_definition(&consumer, line, ch).is_null(),
+        "lib A must resolve before the classpath change"
+    );
+
+    // Dependency swapped: A removed, B added
+    std::fs::write(&cp_file, jar_b.display().to_string()).unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", cp_file.display()), "type": 2 }] }),
+    );
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let result = client.goto_definition(&consumer, line, ch);
+        if result.is_null() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stale lib A symbol still resolves after classpath change"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn test_e2e_deps_edn_change_reindexes_project_paths() {
+    // Adding a source root to :paths (e.g. via git pull) must index its
+    // files without a restart.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    std::fs::create_dir_all(root.join("extra")).unwrap();
+    std::fs::write(
+        root.join("extra/more.clj"),
+        "(ns extra.more)\n\n(defn extra-fn [x] x)\n",
+    )
+    .unwrap();
+    let consumer = root.join("src/uses_extra.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-extra\n  (:require [extra.more :as em]))\n\n(em/extra-fn 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&consumer);
+    let (line, ch) = position_of(&consumer, "em/extra-fn");
+    assert!(
+        client.goto_definition(&consumer, line, ch).is_null(),
+        "extra/ must not be indexed while outside :paths"
+    );
+
+    // :paths gains the new root
+    let deps = root.join("deps.edn");
+    std::fs::write(
+        &deps,
+        "{:paths [\"src\" \"extra\"]\n :deps {org.clojure/clojure {:mvn/version \"1.11.1\"}}}\n",
+    )
+    .unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", deps.display()), "type": 2 }] }),
+    );
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut result = Value::Null;
+    while Instant::now() < deadline {
+        result = client.goto_definition(&consumer, line, ch);
+        if !result.is_null() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let uri = result["uri"]
+        .as_str()
+        .expect("definition after :paths change");
+    assert!(uri.ends_with("/extra/more.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_rename_across_files() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // Third file referring to `add` via :refer — rename must fix the
+    // refer vector and the bare usage too
+    std::fs::write(
+        root.join("src/refers.clj"),
+        "(ns simple.refers\n  (:require [simple.core :refer [add]]))\n\n(add 1 2)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+
+    let (line, ch) = position_of(&core, "add");
+    let result = client.rename(&core, line, ch, "plus");
+    assert!(!result.is_null(), "rename returned null");
+    let changes = result["changes"]
+        .as_object()
+        .expect("expected WorkspaceEdit.changes");
+
+    assert_eq!(
+        changes.len(),
+        3,
+        "expected 3 files edited: {:?}",
+        changes.keys().collect::<Vec<_>>()
+    );
+
+    let edits_for = |suffix: &str| -> Vec<Value> {
+        changes
+            .iter()
+            .find(|(uri, _)| uri.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no edits for {}", suffix))
+            .1
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+
+    // Declaration edit
+    let core_edits = edits_for("/src/core.clj");
+    assert_eq!(core_edits.len(), 1);
+    assert_eq!(core_edits[0]["newText"], json!("plus"));
+    assert_eq!(core_edits[0]["range"]["start"]["line"], json!(line));
+
+    // Alias-qualified usage: edit covers only the name part
+    let utils_edits = edits_for("/src/utils.clj");
+    assert_eq!(utils_edits.len(), 1);
+    let utils_text = std::fs::read_to_string(root.join("src/utils.clj")).unwrap();
+    let usage_line = utils_text.lines().nth(6).unwrap();
+    let name_col = usage_line.find("core/add").unwrap() + "core/".len();
+    assert_eq!(
+        utils_edits[0]["range"]["start"]["character"],
+        json!(name_col)
+    );
+    assert_eq!(
+        utils_edits[0]["range"]["end"]["character"],
+        json!(name_col + 3)
+    );
+
+    // :refer vector entry + bare usage
+    let refers_edits = edits_for("/src/refers.clj");
+    assert_eq!(
+        refers_edits.len(),
+        2,
+        "refer vector + usage: {:?}",
+        refers_edits
+    );
+}
+
+#[test]
+fn test_e2e_rename_rejects_library_symbols() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    // `str` in the body is clojure.core/str
+    let (line, ch) = position_of(&utils, "(str \"Hello");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", utils.display()) },
+            "position": { "line": line, "character": ch + 1 },
+            "newName": "my-str"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("rename"),
+        "expected a rename rejection message, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_e2e_rename_uses_unsaved_edits() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    let utils = root.join("src/utils.clj");
+    client.did_open(&core);
+    client.did_open(&utils);
+
+    // Add an unsaved usage of core/add in utils.clj
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(core/add 9 9)\n");
+
+    let (line, ch) = position_of(&core, "add");
+    let result = client.rename(&core, line, ch, "plus");
+    let changes = result["changes"].as_object().unwrap();
+    let utils_edits = changes
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/utils.clj"))
+        .unwrap()
+        .1
+        .as_array()
+        .unwrap();
+
+    assert_eq!(
+        utils_edits.len(),
+        2,
+        "saved + unsaved usage must both be edited: {:?}",
+        utils_edits
+    );
+    assert!(
+        utils_edits
+            .iter()
+            .any(|e| e["range"]["start"]["line"] == json!(last_line)),
+        "unsaved usage line missing from edits"
+    );
+}
+
+#[test]
+fn test_e2e_watched_files_keep_index_fresh() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    // Consumer of a namespace that doesn't exist yet
+    let consumer = root.join("src/uses_fresh.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-fresh\n  (:require [simple.fresh :as fr]))\n\n(fr/fresh-fn 1)\n",
+    )
+    .unwrap();
+    client.did_open(&consumer);
+    let (line, ch) = position_of(&consumer, "fr/fresh-fn");
+
+    assert!(
+        client.goto_definition(&consumer, line, ch).is_null(),
+        "definition should not resolve before the file exists"
+    );
+
+    // Simulate `git pull` creating the file (no editor save involved)
+    let fresh = root.join("src/fresh.clj");
+    std::fs::write(&fresh, "(ns simple.fresh)\n\n(defn fresh-fn [x] x)\n").unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", fresh.display()), "type": 1 }] }),
+    );
+
+    // Notifications are processed asynchronously — poll
+    let deadline = Instant::now() + TIMEOUT;
+    let mut result = Value::Null;
+    while Instant::now() < deadline {
+        result = client.goto_definition(&consumer, line, ch);
+        if !result.is_null() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let uri = result["uri"]
+        .as_str()
+        .expect("definition after Created event");
+    assert!(uri.ends_with("/src/fresh.clj"), "got {}", uri);
+
+    // Simulate the file being deleted
+    std::fs::remove_file(&fresh).unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", fresh.display()), "type": 3 }] }),
+    );
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let result = client.goto_definition(&consumer, line, ch);
+        if result.is_null() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "definition still resolves after Deleted event"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]

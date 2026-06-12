@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -8,7 +8,7 @@ use tree_sitter::{Node, Parser};
 use tree_sitter_clojure::LANGUAGE;
 use tree_sitter_language::LanguageFn;
 
-use super::{DefKind, NsMeta, Symbol};
+use super::{DefKind, NsMeta, Occurrence, Symbol};
 
 static LANGUAGE_REF: OnceLock<tree_sitter::Language> = OnceLock::new();
 
@@ -20,6 +20,12 @@ fn language() -> &'static tree_sitter::Language {
 }
 
 pub fn extract(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>)> {
+    extract_full(source, file).map(|(meta, symbols, _)| (meta, symbols))
+}
+
+/// Like [`extract`] but also collects every resolved symbol usage
+/// (occurrences) in a second pass over the same parse tree.
+pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
     let mut parser = Parser::new();
     parser
         .set_language(language())
@@ -49,7 +55,21 @@ pub fn extract(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>)> {
         }
     }
 
-    Ok((ns_meta, symbols))
+    // Second pass: occurrences, resolved through the completed ns metadata
+    let def_names: HashSet<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    let ctx = OccurrenceCtx {
+        source,
+        ns_meta: &ns_meta,
+        def_names,
+    };
+    let mut occurrences = Vec::new();
+    let mut scope: Vec<HashSet<String>> = Vec::new();
+    for i in 0..root.named_child_count() {
+        let child = root.named_child(i).unwrap();
+        walk_occurrences(child, &ctx, &mut scope, &mut occurrences);
+    }
+
+    Ok((ns_meta, symbols, occurrences))
 }
 
 fn process_reader_conditional(
@@ -299,6 +319,483 @@ fn point_to_position(point: tree_sitter::Point, byte_offset: usize, source: &str
         line: point.row as u32,
         character: character as u32,
     }
+}
+
+// --- occurrence collection -------------------------------------------------
+
+struct OccurrenceCtx<'a> {
+    source: &'a str,
+    ns_meta: &'a NsMeta,
+    def_names: HashSet<&'a str>,
+}
+
+static CORE_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+
+fn core_names() -> &'static HashSet<String> {
+    CORE_NAMES.get_or_init(|| {
+        super::core::core_symbols()
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    })
+}
+
+/// Forms whose second child is a binding vector with `[pattern expr …]` pairs.
+fn is_let_like(head: &str) -> bool {
+    // `binding`/`with-redefs` are deliberately NOT here: they rebind
+    // existing Vars, so their left-hand symbols are usages, not locals.
+    matches!(
+        head,
+        "let"
+            | "loop"
+            | "for"
+            | "doseq"
+            | "when-let"
+            | "if-let"
+            | "when-some"
+            | "if-some"
+            | "with-open"
+            | "dotimes"
+    )
+}
+
+fn walk_occurrences(
+    node: Node,
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    match node.kind() {
+        "sym_lit" => record_occurrence(node, ctx, scope, out),
+        "list_lit" => walk_list(node, ctx, scope, out),
+        // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
+        // macros do reference real vars, so walk those.
+        "quoting_lit" => {}
+        _ => {
+            for child in named_children(node) {
+                walk_occurrences(child, ctx, scope, out);
+            }
+        }
+    }
+}
+
+fn walk_list(
+    node: Node,
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let children = named_children(node);
+    let Some(head) = children.first() else { return };
+
+    let head_text = if head.kind() == "sym_lit" {
+        Some(sym_text(*head, ctx.source))
+    } else {
+        None
+    };
+
+    match head_text {
+        Some("ns") => collect_refer_occurrences(&children, ctx, out),
+        Some("quote") => {}
+        Some("letfn") => {
+            record_occurrence(*head, ctx, scope, out);
+            walk_letfn_form(&children, ctx, scope, out);
+        }
+        Some(t) if str_to_defkind(t).is_some() => {
+            walk_def_form(str_to_defkind(t).unwrap(), &children, ctx, scope, out);
+        }
+        Some(t) if is_let_like(t) => {
+            record_occurrence(*head, ctx, scope, out);
+            walk_let_form(&children, ctx, scope, out);
+        }
+        Some("fn") => {
+            record_occurrence(*head, ctx, scope, out);
+            walk_fn_form(&children, ctx, scope, out);
+        }
+        _ => {
+            for child in &children {
+                walk_occurrences(*child, ctx, scope, out);
+            }
+        }
+    }
+}
+
+/// `(def name …)` / `(defn name [params] body…)`: the name is a definition,
+/// not an occurrence. Only function-like forms (and record/type field
+/// vectors) treat a leading vector as bindings — for plain `def`/`defonce`/
+/// `defmulti`/`defprotocol` a vector is an initializer expression whose
+/// contents are usages.
+fn walk_def_form(
+    kind: DefKind,
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let binds_vector = matches!(
+        kind,
+        DefKind::Defn
+            | DefKind::DefnPrivate
+            | DefKind::Defmacro
+            | DefKind::Defmethod
+            | DefKind::Defrecord
+            | DefKind::Deftype
+    );
+    if !binds_vector {
+        for child in children.iter().skip(2) {
+            walk_occurrences(*child, ctx, scope, out);
+        }
+        return;
+    }
+
+    // (defmethod name dispatch-val [params] …): the name is a *reference*
+    // to the multimethod (rename must update it), and the dispatch value is
+    // an expression, even when it's a vector.
+    let mut rest_start = 2;
+    if kind == DefKind::Defmethod {
+        if let Some(name) = children.get(1).filter(|n| n.kind() == "sym_lit") {
+            record_occurrence(*name, ctx, scope, out);
+        }
+        if let Some(dispatch) = children.get(2) {
+            walk_occurrences(*dispatch, ctx, scope, out);
+        }
+        rest_start = 3;
+    }
+
+    let mut frame_pushed = false;
+    for child in children.iter().skip(rest_start) {
+        match child.kind() {
+            "vec_lit" if !frame_pushed => {
+                // Single-arity params: bind for the remaining body
+                let mut frame = HashSet::new();
+                collect_binding_names(*child, ctx, scope, out, &mut frame);
+                scope.push(frame);
+                frame_pushed = true;
+            }
+            "list_lit" if arity_body(*child) => {
+                // Multi-arity: ([params] body…) — bind per arity
+                let inner = named_children(*child);
+                let mut frame = HashSet::new();
+                if let Some(params) = inner.first() {
+                    collect_binding_names(*params, ctx, scope, out, &mut frame);
+                }
+                scope.push(frame);
+                for body in inner.iter().skip(1) {
+                    walk_occurrences(*body, ctx, scope, out);
+                }
+                scope.pop();
+            }
+            _ => walk_occurrences(*child, ctx, scope, out),
+        }
+    }
+    if frame_pushed {
+        scope.pop();
+    }
+}
+
+fn arity_body(node: Node) -> bool {
+    named_children(node)
+        .first()
+        .map(|n| n.kind() == "vec_lit")
+        .unwrap_or(false)
+}
+
+/// `(let [pattern expr …] body…)`: RHS expressions are usages evaluated with
+/// the bindings accumulated so far; LHS patterns bind.
+fn walk_let_form(
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    scope.push(HashSet::new());
+    if let Some(bindings) = children.get(1).filter(|n| n.kind() == "vec_lit") {
+        process_binding_pairs(*bindings, ctx, scope, out);
+    }
+    for body in children.iter().skip(2) {
+        walk_occurrences(*body, ctx, scope, out);
+    }
+    scope.pop();
+}
+
+/// Processes a `[pattern expr …]` binding vector: RHS expressions are
+/// usages, LHS patterns extend the current (innermost) scope frame.
+/// Comprehension modifiers are handled: `:let [..]` recurses as a nested
+/// binding vector; `:when`/`:while` expressions are plain usages.
+fn process_binding_pairs(
+    bindings: Node,
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let items = named_children(bindings);
+    for pair in items.chunks(2) {
+        let [lhs, rhs] = pair else { continue };
+        if lhs.kind() == "kwd_lit" {
+            let kw = node_text(*lhs, ctx.source);
+            if kw == ":let" && rhs.kind() == "vec_lit" {
+                process_binding_pairs(*rhs, ctx, scope, out);
+            } else {
+                walk_occurrences(*rhs, ctx, scope, out);
+            }
+            continue;
+        }
+        walk_occurrences(*rhs, ctx, scope, out);
+        let mut names = HashSet::new();
+        collect_binding_names(*lhs, ctx, scope, out, &mut names);
+        scope.last_mut().unwrap().extend(names);
+    }
+}
+
+/// `(fn name? [params] body…)` — optional self-name and params bind.
+fn walk_fn_form(
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let mut frame = HashSet::new();
+    let mut rest_start = 1;
+    if let Some(name) = children.get(1).filter(|n| n.kind() == "sym_lit") {
+        frame.insert(sym_text(*name, ctx.source).to_string());
+        rest_start = 2;
+    }
+    scope.push(frame);
+    walk_fn_tail(&children[rest_start..], ctx, scope, out);
+    scope.pop();
+}
+
+/// Params + bodies of a fn-like form (after the optional name): a leading
+/// vector binds params; `([params] body…)` lists are per-arity scopes.
+/// Assumes the caller pushed a scope frame.
+fn walk_fn_tail(
+    parts: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let mut params_bound = false;
+    for child in parts {
+        match child.kind() {
+            "vec_lit" if !params_bound => {
+                let mut names = HashSet::new();
+                collect_binding_names(*child, ctx, scope, out, &mut names);
+                scope.last_mut().unwrap().extend(names);
+                params_bound = true;
+            }
+            "list_lit" if arity_body(*child) => {
+                let inner = named_children(*child);
+                let mut arity_frame = HashSet::new();
+                if let Some(params) = inner.first() {
+                    collect_binding_names(*params, ctx, scope, out, &mut arity_frame);
+                }
+                scope.push(arity_frame);
+                for body in inner.iter().skip(1) {
+                    walk_occurrences(*body, ctx, scope, out);
+                }
+                scope.pop();
+            }
+            _ => walk_occurrences(*child, ctx, scope, out),
+        }
+    }
+}
+
+/// `(letfn [(name [params] body…) …] body…)`: the fn names are mutually
+/// recursive locals visible in every fn body and the letfn body.
+fn walk_letfn_form(
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let fn_specs: Vec<Node> = children
+        .get(1)
+        .filter(|n| n.kind() == "vec_lit")
+        .map(|n| named_children(*n))
+        .unwrap_or_default();
+
+    let mut frame = HashSet::new();
+    for spec in &fn_specs {
+        if spec.kind() == "list_lit" {
+            if let Some(name) = named_children(*spec)
+                .first()
+                .filter(|n| n.kind() == "sym_lit")
+            {
+                frame.insert(sym_text(*name, ctx.source).to_string());
+            }
+        }
+    }
+    scope.push(frame);
+
+    for spec in &fn_specs {
+        if spec.kind() != "list_lit" {
+            continue;
+        }
+        let inner = named_children(*spec);
+        scope.push(HashSet::new());
+        walk_fn_tail(&inner[1..], ctx, scope, out);
+        scope.pop();
+    }
+    for body in children.iter().skip(2) {
+        walk_occurrences(*body, ctx, scope, out);
+    }
+    scope.pop();
+}
+
+/// Collects every symbol inside a binding pattern (plain names, vector and
+/// map destructuring) except `&` and `_`. Map destructuring `:or` defaults
+/// are *expressions*, recorded as occurrences rather than bindings.
+fn collect_binding_names(
+    pattern: Node,
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+    names: &mut HashSet<String>,
+) {
+    match pattern.kind() {
+        "sym_lit" => {
+            let name = sym_text(pattern, ctx.source);
+            if name != "&" && name != "_" {
+                names.insert(name.to_string());
+            }
+        }
+        "map_lit" => {
+            let items = named_children(pattern);
+            for pair in items.chunks(2) {
+                let [k, v] = pair else { continue };
+                if k.kind() == "kwd_lit" {
+                    if node_text(*k, ctx.source) == ":or" && v.kind() == "map_lit" {
+                        // {:or {name default-expr}}: names bind, defaults
+                        // are usages
+                        for default in named_children(*v).chunks(2) {
+                            let [dk, dv] = default else { continue };
+                            if dk.kind() == "sym_lit" {
+                                names.insert(sym_text(*dk, ctx.source).to_string());
+                            }
+                            walk_occurrences(*dv, ctx, scope, out);
+                        }
+                    } else {
+                        // :keys/:strs/:syms vectors, :as name, …
+                        collect_binding_names(*v, ctx, scope, out, names);
+                    }
+                } else {
+                    // {pattern :key} — the pattern binds, the key doesn't
+                    collect_binding_names(*k, ctx, scope, out, names);
+                }
+            }
+        }
+        _ => {
+            for child in named_children(pattern) {
+                collect_binding_names(child, ctx, scope, out, names);
+            }
+        }
+    }
+}
+
+/// `(:require [some.ns :refer [a b]])` — refer entries are occurrences of
+/// `some.ns/a` etc., so rename can fix require clauses.
+fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
+    for child in children.iter().skip(2) {
+        if child.kind() != "list_lit" {
+            continue;
+        }
+        let inner = named_children(*child);
+        let is_require = inner
+            .first()
+            .map(|kw| kw.kind() == "kwd_lit" && node_text(*kw, ctx.source) == ":require")
+            .unwrap_or(false);
+        if !is_require {
+            continue;
+        }
+        for spec in inner.iter().skip(1) {
+            if spec.kind() != "vec_lit" {
+                continue;
+            }
+            let items = named_children(*spec);
+            let Some(ns_name) = items.first().filter(|n| n.kind() == "sym_lit") else {
+                continue;
+            };
+            let ns_name = sym_text(*ns_name, ctx.source).to_string();
+            let mut i = 1;
+            while i < items.len() {
+                let is_refer =
+                    items[i].kind() == "kwd_lit" && node_text(items[i], ctx.source) == ":refer";
+                if is_refer {
+                    if let Some(refer_vec) = items.get(i + 1).filter(|n| n.kind() == "vec_lit") {
+                        for sym in named_children(*refer_vec) {
+                            if sym.kind() == "sym_lit" {
+                                out.push(Occurrence {
+                                    fqn: format!("{}/{}", ns_name, sym_text(sym, ctx.source)),
+                                    name_range: node_to_lsp_range(sym_name_node(sym), ctx.source),
+                                });
+                            }
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+}
+
+fn record_occurrence(
+    node: Node,
+    ctx: &OccurrenceCtx,
+    scope: &[HashSet<String>],
+    out: &mut Vec<Occurrence>,
+) {
+    // The grammar splits qualified symbols: `lib/process` is
+    // (sym_lit namespace: (sym_ns) name: (sym_name)).
+    let name_node = node.child_by_field_name("name").unwrap_or(node);
+    let name = node_text(name_node, ctx.source);
+    if name == "&" || name == "_" || name.starts_with('%') {
+        return;
+    }
+    let name_range = node_to_lsp_range(name_node, ctx.source);
+
+    if let Some(ns_node) = node.child_by_field_name("namespace") {
+        // Qualified usage: resolve the alias; an unknown alias is treated
+        // as a literal namespace name.
+        let alias = node_text(ns_node, ctx.source);
+        let ns = ctx
+            .ns_meta
+            .aliases
+            .get(alias)
+            .cloned()
+            .unwrap_or_else(|| alias.to_string());
+        out.push(Occurrence {
+            fqn: format!("{}/{}", ns, name),
+            name_range,
+        });
+        return;
+    }
+
+    if scope.iter().any(|frame| frame.contains(name)) {
+        return; // locally bound
+    }
+
+    let current_ns = &ctx.ns_meta.name;
+    let in_ns = |name: &str| {
+        if current_ns.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", current_ns, name)
+        }
+    };
+
+    let fqn = if let Some(refer_fqn) = ctx.ns_meta.refers.get(name) {
+        refer_fqn.clone()
+    } else if ctx.def_names.contains(name) {
+        in_ns(name)
+    } else if core_names().contains(name) {
+        format!("clojure.core/{}", name)
+    } else {
+        in_ns(name)
+    };
+
+    out.push(Occurrence { fqn, name_range });
 }
 
 fn str_to_defkind(s: &str) -> Option<DefKind> {

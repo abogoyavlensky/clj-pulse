@@ -26,7 +26,8 @@ pub(crate) struct TextDocumentContentResult {
 pub struct Backend {
     pub client: Client,
     pub index: Arc<Index>,
-    pub documents: DocumentStore,
+    pub documents: Arc<DocumentStore>,
+    root: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Backend {
@@ -34,8 +35,19 @@ impl Backend {
         Self {
             client,
             index: Arc::new(Index::new_with_core()),
-            documents: DocumentStore::new(),
+            documents: Arc::new(DocumentStore::new()),
+            root: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Paths of currently open documents — kept indexed even when they live
+    /// outside deps.edn `:paths`.
+    fn open_paths(documents: &DocumentStore) -> std::collections::HashSet<std::path::PathBuf> {
+        documents
+            .open_uris()
+            .into_iter()
+            .filter_map(|uri| uri.to_file_path().ok())
+            .collect()
     }
 
     pub async fn text_document_content(
@@ -78,8 +90,10 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         if let Some(root_uri) = params.root_uri {
             if let Ok(root_path) = root_uri.to_file_path() {
+                *self.root.lock().unwrap() = Some(root_path.clone());
                 let index = self.index.clone();
                 let client = self.client.clone();
+                let documents = self.documents.clone();
                 let root_path_jars = root_path.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
@@ -95,26 +109,7 @@ impl LanguageServer for Backend {
                             let sym_count = new_index.symbols.len();
                             let ns_count = new_index.namespaces.len();
 
-                            for entry in new_index.symbols.iter() {
-                                index
-                                    .symbols
-                                    .insert(entry.key().clone(), entry.value().clone());
-                            }
-                            for entry in new_index.namespaces.iter() {
-                                index
-                                    .namespaces
-                                    .insert(entry.key().clone(), entry.value().clone());
-                            }
-                            for entry in new_index.ns_symbols.iter() {
-                                index
-                                    .ns_symbols
-                                    .insert(entry.key().clone(), entry.value().clone());
-                            }
-                            for entry in new_index.file_to_ns.iter() {
-                                index
-                                    .file_to_ns
-                                    .insert(entry.key().clone(), entry.value().clone());
-                            }
+                            index.merge_project_from(new_index, &Self::open_paths(&documents));
 
                             let elapsed = start.elapsed();
                             let msg = format!(
@@ -181,6 +176,8 @@ impl LanguageServer for Backend {
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -195,6 +192,35 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         tracing::info!("clj-lsp initialized");
+
+        // Watch source files so git pulls / branch switches keep the index
+        // fresh without editor saves. Clients without dynamic registration
+        // simply reject this; everything else still works.
+        let watchers = vec![
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/*.{clj,cljs,cljc}".to_string()),
+                kind: None,
+            },
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/deps.edn".to_string()),
+                kind: None,
+            },
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/.cpcache/*.cp".to_string()),
+                kind: None,
+            },
+        ];
+        let registration = Registration {
+            id: "clj-lsp-watched-files".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                watchers,
+            })
+            .ok(),
+        };
+        if let Err(e) = self.client.register_capability(vec![registration]).await {
+            tracing::info!("watched-files registration not supported: {}", e);
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -211,10 +237,10 @@ impl LanguageServer for Backend {
         // index them on open so navigation from them works.
         if let Ok(path) = uri.to_file_path() {
             if self.index.file_ns(&path).is_none() {
-                match extractor::extract(&text, &path) {
-                    Ok((meta, symbols)) => {
+                match extractor::extract_full(&text, &path) {
+                    Ok((meta, symbols, occurrences)) => {
                         tracing::info!("indexed opened file {}", path.display());
-                        self.index.insert_file(meta, symbols);
+                        self.index.insert_file(meta, symbols, occurrences);
                     }
                     Err(e) => {
                         tracing::debug!("failed to index opened {}: {}", path.display(), e)
@@ -242,13 +268,99 @@ impl LanguageServer for Backend {
             }
         };
         self.index.remove_file(&path);
-        match extractor::extract(&source, &path) {
-            Ok((meta, symbols)) => {
+        match extractor::extract_full(&source, &path) {
+            Ok((meta, symbols, occurrences)) => {
                 let count = symbols.len();
-                self.index.insert_file(meta, symbols);
+                self.index.insert_file(meta, symbols, occurrences);
                 tracing::info!("re-indexed {} ({} symbols)", path.display(), count);
             }
             Err(e) => tracing::warn!("failed to re-index {}: {}", path.display(), e),
+        }
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let mut classpath_changed = false;
+        let mut source_paths_changed = false;
+        for event in params.changes {
+            let Ok(path) = event.uri.to_file_path() else {
+                continue;
+            };
+
+            // deps.edn affects both the classpath and the project's own
+            // :paths; .cpcache only the classpath.
+            if path.file_name().map(|n| n == "deps.edn").unwrap_or(false) {
+                classpath_changed = true;
+                source_paths_changed = true;
+                continue;
+            }
+            if path.components().any(|c| c.as_os_str() == ".cpcache") {
+                classpath_changed = true;
+                continue;
+            }
+
+            let is_clj = path
+                .extension()
+                .map(|e| e == "clj" || e == "cljs" || e == "cljc")
+                .unwrap_or(false);
+            if !is_clj {
+                continue;
+            }
+
+            if event.typ == FileChangeType::DELETED {
+                tracing::info!("watched delete: {}", path.display());
+                self.index.remove_file(&path);
+                continue;
+            }
+
+            // CREATED or CHANGED
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    self.index.remove_file(&path);
+                    match extractor::extract_full(&source, &path) {
+                        Ok((meta, symbols, occurrences)) => {
+                            tracing::info!("watched re-index: {}", path.display());
+                            self.index.insert_file(meta, symbols, occurrences);
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to extract {}: {}", path.display(), e)
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("failed to read {}: {}", path.display(), e),
+            }
+        }
+
+        if classpath_changed {
+            let root = self.root.lock().unwrap().clone();
+            if let Some(root) = root {
+                let index = self.index.clone();
+                let client = self.client.clone();
+                let documents = self.documents.clone();
+                tokio::spawn(async move {
+                    if source_paths_changed {
+                        // :paths may have changed — rebuild project sources,
+                        // dropping files from removed roots.
+                        let source_paths = config::source_paths(&root);
+                        match scanner::build_index(&root, &source_paths) {
+                            Ok(new_index) => {
+                                index.merge_project_from(new_index, &Self::open_paths(&documents))
+                            }
+                            Err(e) => tracing::error!("project re-index failed: {}", e),
+                        }
+                    }
+
+                    // Drop symbols of removed/replaced dependencies first
+                    index.clear_libs();
+                    let classpath = classpath::discover(&root);
+                    if classpath.is_empty() {
+                        return;
+                    }
+                    scanner::index_classpath_libs(&root, classpath, &index);
+                    let msg = "clj-lsp: library re-indexing complete";
+                    tracing::info!("{}", msg);
+                    client.log_message(MessageType::INFO, msg).await;
+                });
+            }
         }
     }
 
@@ -286,6 +398,19 @@ impl LanguageServer for Backend {
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         handlers::signature::handle(&self.index, &self.documents, params).map_err(|e| {
             tracing::error!("signature help error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        // Rename errors are user-facing (invalid name, library symbol, …)
+        handlers::references::rename(&self.index, &self.documents, params)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        handlers::references::references(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("references error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
     }

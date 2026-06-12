@@ -57,8 +57,35 @@ fn test_insert_file_updates_index() {
     let fake_path = root.join("src/utils.clj");
     index.remove_file(&fake_path);
     let (meta, syms) = extractor::extract(new_source, &fake_path).unwrap();
-    index.insert_file(meta, syms);
+    index.insert_file(meta, syms, vec![]);
 
     assert!(index.lookup("simple.utils/new-fn").is_some());
     assert!(index.lookup("simple.utils/greet").is_none());
+}
+
+#[test]
+fn test_clear_libs_allows_dir_lib_reinsert() {
+    use clj_lsp::index::{Index, SymbolSource};
+    use std::path::PathBuf;
+
+    let index = Index::new();
+    let (meta, mut syms) = extractor::extract(
+        "(ns dirlib.core)\n(defn go [x] x)",
+        &PathBuf::from("/libs/dirlib/core.clj"),
+    )
+    .unwrap();
+    for s in &mut syms {
+        s.source = SymbolSource::Dir(PathBuf::from("/libs"));
+    }
+    index.insert_lib_file(meta.clone(), syms.clone());
+    assert!(index.lookup("dirlib.core/go").is_some());
+
+    // Classpath change: clear and re-insert the same dir lib
+    index.clear_libs();
+    assert!(index.lookup("dirlib.core/go").is_none());
+    index.insert_lib_file(meta, syms);
+    assert!(
+        index.lookup("dirlib.core/go").is_some(),
+        "dir-lib namespace must be reinsertable after clear_libs"
+    );
 }

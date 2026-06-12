@@ -42,13 +42,13 @@ fn test_resolves_definition_via_refer() {
     let source = include_str!("fixtures/snippets/ns_with_requires.clj");
     let (meta, syms) =
         clj_lsp::index::extractor::extract(source, Path::new("ns_with_requires.clj")).unwrap();
-    index.insert_file(meta, syms);
+    index.insert_file(meta, syms, vec![]);
 
     // Also add the referred-to symbol
     let utils_source = r#"(ns my.utils) (defn format-date [d] d)"#;
     let (meta2, syms2) =
         clj_lsp::index::extractor::extract(utils_source, Path::new("utils.clj")).unwrap();
-    index.insert_file(meta2, syms2);
+    index.insert_file(meta2, syms2, vec![]);
 
     let result = resolve_symbol(&index, "format-date", "my.service");
     match result {

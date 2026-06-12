@@ -1,0 +1,227 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use anyhow::Result;
+use tower_lsp::lsp_types::*;
+
+use crate::document::DocumentStore;
+use crate::index::{extractor, Index, Occurrence, SymbolSource};
+
+pub fn references(
+    index: &Index,
+    documents: &DocumentStore,
+    params: ReferenceParams,
+) -> Result<Option<Vec<Location>>> {
+    let uri = params.text_document_position.text_document.uri;
+    let pos = params.text_document_position.position;
+
+    let Some(fqn) = resolve_fqn_at(index, documents, &uri, pos) else {
+        return Ok(None);
+    };
+
+    let mut locations = Vec::new();
+    if params.context.include_declaration {
+        if let Some(sym) = index.lookup(&fqn) {
+            // Library declarations inside JARs are not listed; project and
+            // dir-lib files are real paths.
+            if matches!(sym.source, SymbolSource::Project | SymbolSource::Dir(_)) {
+                if let Ok(decl_uri) = Url::from_file_path(&sym.file) {
+                    locations.push(Location {
+                        uri: decl_uri,
+                        range: sym.name_range,
+                    });
+                }
+            }
+        }
+    }
+
+    for (file, occs) in occurrences_for(index, documents, &fqn) {
+        let Ok(file_uri) = Url::from_file_path(&file) else {
+            continue;
+        };
+        for occ in occs {
+            locations.push(Location {
+                uri: file_uri.clone(),
+                range: occ.name_range,
+            });
+        }
+    }
+
+    if locations.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(locations))
+    }
+}
+
+pub fn rename(
+    index: &Index,
+    documents: &DocumentStore,
+    params: RenameParams,
+) -> Result<Option<WorkspaceEdit>> {
+    let uri = params.text_document_position.text_document.uri;
+    let pos = params.text_document_position.position;
+    let new_name = params.new_name;
+
+    if !is_valid_symbol_name(&new_name) {
+        anyhow::bail!("cannot rename: '{}' is not a valid symbol name", new_name);
+    }
+
+    let fqn = resolve_fqn_at(index, documents, &uri, pos)
+        .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?;
+    let sym = index
+        .lookup(&fqn)
+        .ok_or_else(|| anyhow::anyhow!("cannot rename: no definition found for {}", fqn))?;
+    if sym.source != SymbolSource::Project {
+        anyhow::bail!("cannot rename library or built-in symbol {}", fqn);
+    }
+
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+    // Declaration edit — from live text when the defining file is open
+    // (its indexed range may be stale against unsaved edits).
+    let decl_uri = Url::from_file_path(&sym.file)
+        .map_err(|_| anyhow::anyhow!("invalid path: {:?}", sym.file))?;
+    let decl_range = documents
+        .text(&decl_uri)
+        .and_then(|text| {
+            extractor::extract_full(&text, &sym.file)
+                .ok()
+                .and_then(|(_, syms, _)| {
+                    syms.into_iter()
+                        .find(|s| s.fqn == fqn)
+                        .map(|s| s.name_range)
+                })
+        })
+        .unwrap_or(sym.name_range);
+    changes.entry(decl_uri).or_default().push(TextEdit {
+        range: decl_range,
+        new_text: new_name.clone(),
+    });
+
+    for (file, occs) in occurrences_for(index, documents, &fqn) {
+        let Ok(file_uri) = Url::from_file_path(&file) else {
+            continue;
+        };
+        let edits = changes.entry(file_uri).or_default();
+        for occ in occs {
+            edits.push(TextEdit {
+                range: occ.name_range,
+                new_text: new_name.clone(),
+            });
+        }
+    }
+
+    Ok(Some(WorkspaceEdit {
+        changes: Some(changes),
+        ..Default::default()
+    }))
+}
+
+fn is_valid_symbol_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| crate::document::is_clj_ident_char(c) && c != '/')
+}
+
+/// Resolves the symbol under the cursor to an fqn:
+///
+/// 1. Cursor on a definition name in this file → that definition's fqn.
+/// 2. Cursor on a recorded occurrence → that occurrence's fqn. Locals are
+///    never occurrences, so a `(defn f [add] add)` param cannot leak the
+///    global `add` into references/rename.
+/// 3. Qualified words only (locals are never qualified): resolve through
+///    the alias — covers a cursor on the alias half of `lib/name`.
+pub fn resolve_fqn_at(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+) -> Option<String> {
+    let word = documents.word_at(uri, pos)?;
+    let path = uri.to_file_path().ok()?;
+    let current_ns = index.file_ns(&path).unwrap_or_default();
+
+    // word_at succeeded, so the document is open: resolve against live
+    // text — unsaved edits resolve against current ranges.
+    let text = documents.text(uri)?;
+    if let Ok((_, syms, occs)) = extractor::extract_full(&text, &path) {
+        for sym in &syms {
+            if range_contains(&sym.name_range, pos) {
+                return Some(sym.fqn.clone());
+            }
+        }
+        for occ in &occs {
+            if range_contains(&occ.name_range, pos) {
+                return Some(occ.fqn.clone());
+            }
+        }
+    }
+
+    // Not a definition or occurrence — the only legitimate remaining case
+    // is the cursor on the alias half of a qualified usage. Bare words here
+    // are locals or noise; resolving them would risk corrupting renames.
+    let (alias, name) = word.split_once('/')?;
+    if alias.is_empty() || name.is_empty() {
+        return None;
+    }
+    let ns = index
+        .ns_meta(&current_ns)
+        .and_then(|m| m.aliases.get(alias).cloned())
+        .unwrap_or_else(|| alias.to_string());
+    Some(format!("{}/{}", ns, name))
+}
+
+fn range_contains(range: &Range, pos: Position) -> bool {
+    (range.start.line < pos.line
+        || (range.start.line == pos.line && range.start.character <= pos.character))
+        && (pos.line < range.end.line
+            || (pos.line == range.end.line && pos.character <= range.end.character))
+}
+
+/// All occurrences of `fqn`, per file. Files currently open in the editor
+/// are re-extracted from live text so unsaved edits produce correct ranges;
+/// everything else comes from the index.
+pub fn occurrences_for(
+    index: &Index,
+    documents: &DocumentStore,
+    fqn: &str,
+) -> Vec<(PathBuf, Vec<Occurrence>)> {
+    let mut live: HashMap<PathBuf, Vec<Occurrence>> = HashMap::new();
+    for uri in documents.open_uris() {
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
+        let Some(text) = documents.text(&uri) else {
+            continue;
+        };
+        if let Ok((_, _, occs)) = extractor::extract_full(&text, &path) {
+            live.insert(path, occs);
+        }
+    }
+
+    let mut result = Vec::new();
+    for entry in index.occurrences.iter() {
+        if live.contains_key(entry.key()) {
+            continue;
+        }
+        let matching: Vec<Occurrence> = entry
+            .value()
+            .iter()
+            .filter(|o| o.fqn == fqn)
+            .cloned()
+            .collect();
+        if !matching.is_empty() {
+            result.push((entry.key().clone(), matching));
+        }
+    }
+    for (path, occs) in live {
+        let matching: Vec<Occurrence> = occs.into_iter().filter(|o| o.fqn == fqn).collect();
+        if !matching.is_empty() {
+            result.push((path, matching));
+        }
+    }
+    result
+}

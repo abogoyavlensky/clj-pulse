@@ -29,7 +29,7 @@ fn test_goto_definition_jar_returns_jar_uri() {
     let results = clj_lsp::index::jar::index_jar(&jar_path).unwrap();
     let index = Index::new();
     for (meta, syms) in results {
-        index.insert_file(meta, syms);
+        index.insert_file(meta, syms, vec![]);
     }
 
     let result = resolve_symbol(&index, "mylib.core/hello", "user");

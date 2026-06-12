@@ -11,7 +11,8 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf]) -> Result<Index> {
     let index = Index::new();
     let files = collect_clojure_files(source_paths);
 
-    let results: Vec<(NsMeta, Vec<Symbol>)> = files
+    type Extracted = (NsMeta, Vec<Symbol>, Vec<super::Occurrence>);
+    let results: Vec<Extracted> = files
         .par_iter()
         .filter_map(|file| {
             let source = match std::fs::read_to_string(file) {
@@ -22,7 +23,7 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf]) -> Result<Index> {
                 }
             };
 
-            match extractor::extract(&source, file) {
+            match extractor::extract_full(&source, file) {
                 Ok(result) => Some(result),
                 Err(e) => {
                     tracing::warn!("failed to extract {}: {}", file.display(), e);
@@ -32,8 +33,8 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf]) -> Result<Index> {
         })
         .collect();
 
-    for (meta, symbols) in results {
-        index.insert_file(meta, symbols);
+    for (meta, symbols, occurrences) in results {
+        index.insert_file(meta, symbols, occurrences);
     }
 
     Ok(index)

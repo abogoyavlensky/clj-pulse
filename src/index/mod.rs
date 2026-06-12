@@ -48,6 +48,15 @@ pub struct Symbol {
     pub name_range: Range,
 }
 
+/// A resolved usage of a symbol in a project file. `name_range` covers only
+/// the name part of a qualified usage (`core/add` → just `add`), so rename
+/// edits never touch the alias.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Occurrence {
+    pub fqn: String,
+    pub name_range: Range,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NsMeta {
     pub name: String,
@@ -68,6 +77,8 @@ pub struct Index {
     pub namespaces: DashMap<String, NsMeta>,
     pub ns_symbols: DashMap<String, Vec<String>>,
     pub file_to_ns: DashMap<PathBuf, String>,
+    /// Resolved symbol usages per project file (libraries excluded).
+    pub occurrences: DashMap<PathBuf, Vec<Occurrence>>,
     pub core_symbols: Vec<CoreSymbol>,
 }
 
@@ -78,6 +89,7 @@ impl Default for Index {
             namespaces: DashMap::new(),
             ns_symbols: DashMap::new(),
             file_to_ns: DashMap::new(),
+            occurrences: DashMap::new(),
             core_symbols: Vec::new(),
         }
     }
@@ -113,6 +125,7 @@ impl Index {
     }
 
     pub fn remove_file(&self, path: &Path) {
+        self.occurrences.remove(path);
         if let Some((_, ns_name)) = self.file_to_ns.remove(path) {
             if let Some((_, fqns)) = self.ns_symbols.remove(&ns_name) {
                 for fqn in fqns {
@@ -123,7 +136,7 @@ impl Index {
         }
     }
 
-    pub fn insert_file(&self, meta: NsMeta, symbols: Vec<Symbol>) {
+    pub fn insert_file(&self, meta: NsMeta, symbols: Vec<Symbol>, occurrences: Vec<Occurrence>) {
         let ns_name = meta.name.clone();
         let file = meta.file.clone();
 
@@ -134,12 +147,78 @@ impl Index {
         }
 
         self.ns_symbols.insert(ns_name.clone(), fqns);
+        self.occurrences.insert(file.clone(), occurrences);
         self.file_to_ns.insert(file, ns_name.clone());
         self.namespaces.insert(ns_name, meta);
     }
 
     pub fn file_ns(&self, path: &Path) -> Option<String> {
         self.file_to_ns.get(path).map(|r| r.clone())
+    }
+
+    /// Merges a freshly built project index into this one, removing project
+    /// files that no longer exist in the new scan (e.g. source roots dropped
+    /// from deps.edn `:paths`). Files in `keep` (currently open documents,
+    /// which may legitimately live outside `:paths`) and library entries are
+    /// untouched.
+    pub fn merge_project_from(&self, new_index: Index, keep: &std::collections::HashSet<PathBuf>) {
+        // Project files are exactly the keys of `occurrences`
+        let stale: Vec<PathBuf> = self
+            .occurrences
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|path| !new_index.file_to_ns.contains_key(path) && !keep.contains(path))
+            .collect();
+        for path in stale {
+            self.remove_file(&path);
+        }
+
+        for entry in new_index.symbols.iter() {
+            self.symbols
+                .insert(entry.key().clone(), entry.value().clone());
+        }
+        for entry in new_index.namespaces.iter() {
+            self.namespaces
+                .insert(entry.key().clone(), entry.value().clone());
+        }
+        for entry in new_index.ns_symbols.iter() {
+            self.ns_symbols
+                .insert(entry.key().clone(), entry.value().clone());
+        }
+        for entry in new_index.file_to_ns.iter() {
+            self.file_to_ns
+                .insert(entry.key().clone(), entry.value().clone());
+        }
+        for entry in new_index.occurrences.iter() {
+            self.occurrences
+                .insert(entry.key().clone(), entry.value().clone());
+        }
+    }
+
+    /// Removes all library-sourced data (JARs and classpath dirs), keeping
+    /// project symbols and occurrences. Called when the classpath changes
+    /// so removed dependencies don't linger in completion/navigation.
+    pub fn clear_libs(&self) {
+        self.symbols
+            .retain(|_, sym| sym.source == SymbolSource::Project);
+        self.ns_symbols.retain(|ns, fqns| {
+            if fqns.iter().any(|fqn| self.symbols.contains_key(fqn)) {
+                return true;
+            }
+            // Symbol-less namespaces: keep only project-owned ones (project
+            // files always have an occurrences entry; jar virtual paths and
+            // dir-lib files never do).
+            fqns.is_empty()
+                && self
+                    .namespaces
+                    .get(ns)
+                    .map(|meta| self.occurrences.contains_key(&meta.file))
+                    .unwrap_or(false)
+        });
+        self.namespaces
+            .retain(|ns, _| self.ns_symbols.contains_key(ns));
+        self.file_to_ns
+            .retain(|_, ns| self.namespaces.contains_key(ns));
     }
 
     /// Inserts a library namespace (from a JAR or a classpath source dir)
@@ -149,10 +228,12 @@ impl Index {
     pub fn insert_lib_file(&self, meta: NsMeta, symbols: Vec<Symbol>) {
         use dashmap::mapref::entry::Entry;
 
+        // Project files always have an occurrences entry; jar virtual paths
+        // and dir-lib files never do.
         let ns_owned_by_project = self
             .namespaces
             .get(&meta.name)
-            .map(|ns| !ns.file.to_string_lossy().contains("!/"))
+            .map(|ns| self.occurrences.contains_key(&ns.file))
             .unwrap_or(false);
         if ns_owned_by_project {
             return;

@@ -33,12 +33,12 @@ The core investment. The index stores only definitions today; an
 occurrence index records every resolved symbol usage per file and unlocks
 most of what follows.
 
-- [ ] Occurrence index (usages resolved through aliases/refers, updated
+- [x] Occurrence index (usages resolved through aliases/refers, updated
       on save/open like definitions).
-- [ ] `textDocument/references`.
-- [ ] `textDocument/rename` — cross-file `WorkspaceEdit` built on
+- [x] `textDocument/references`.
+- [x] `textDocument/rename` — cross-file `WorkspaceEdit` built on
       references.
-- [ ] `workspace/didChangeWatchedFiles` — keep the index correct on git
+- [x] `workspace/didChangeWatchedFiles` — keep the index correct on git
       pulls and branch switches, not just editor saves.
 
 ## Phase 3 — editing assistance
