@@ -240,6 +240,17 @@ impl LspClient {
             }),
         )
     }
+
+    fn document_symbols(&mut self, path: &Path) -> Value {
+        self.request(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": format!("file://{}", path.display()) } }),
+        )
+    }
+
+    fn workspace_symbols(&mut self, query: &str) -> Value {
+        self.request("workspace/symbol", json!({ "query": query }))
+    }
 }
 
 impl Drop for LspClient {
@@ -776,6 +787,129 @@ fn test_e2e_definition_on_alias_shadowing_core_symbol() {
         result.is_null(),
         "bare core symbol in body must not navigate to the alias ns: {:?}",
         result
+    );
+}
+
+#[test]
+fn test_e2e_document_symbols_outline() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+
+    let result = client.document_symbols(&core);
+    assert!(!result.is_null(), "documentSymbol returned null");
+    let symbols = result.as_array().expect("expected DocumentSymbol array");
+
+    let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert_eq!(names, vec!["VERSION", "add", "multiply"]);
+
+    // SymbolKind: Variable = 13, Function = 12
+    let version = &symbols[0];
+    assert_eq!(version["kind"], json!(13));
+    let add = &symbols[1];
+    assert_eq!(add["kind"], json!(12));
+
+    // selectionRange points at the name, range covers the whole form
+    let (def_line, _) = position_of(&core, "defn add");
+    assert_eq!(add["selectionRange"]["start"]["line"], json!(def_line));
+    assert_eq!(add["range"]["start"]["line"], json!(def_line));
+    assert!(add["range"]["end"]["line"].as_u64().unwrap() > def_line as u64);
+
+    // Live (unsaved) edits are reflected in the outline
+    let last_line = std::fs::read_to_string(&core).unwrap().lines().count() as u32;
+    client.did_change_insert(&core, last_line, 0, "(defn fresh [] 1)\n");
+    let result = client.document_symbols(&core);
+    let names: Vec<String> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str().map(String::from))
+        .collect();
+    assert!(
+        names.contains(&"fresh".to_string()),
+        "outline missing unsaved defn: {:?}",
+        names
+    );
+
+    // Non-file documents (jar: virtual sources opened by the editor) must
+    // be outlined from their open text, not rejected with a server error.
+    let jar_uri = "jar:file:///some/lib.jar!/mylib/util.clj";
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": jar_uri,
+                "languageId": "clojure",
+                "version": 1,
+                "text": "(ns mylib.util)\n\n(defn helper [x] x)\n"
+            }
+        }),
+    );
+    let result = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": jar_uri } }),
+    );
+    let names: Vec<&str> = result
+        .as_array()
+        .expect("expected symbols for jar document")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["helper"]);
+}
+
+#[test]
+fn test_e2e_workspace_symbols_ranked_and_project_only() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // A library JAR defining `addition` — must NOT appear in results
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn addition [x] x)\n")
+        .unwrap();
+    zip.finish().unwrap();
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let result = client.workspace_symbols("add");
+    let symbols = result.as_array().expect("expected SymbolInformation array");
+    let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
+
+    // Exact match ranks before prefix match; library symbol excluded
+    assert_eq!(names, vec!["add", "add-and-double"]);
+    let add = &symbols[0];
+    assert_eq!(add["containerName"], json!("simple.core"));
+    assert!(add["location"]["uri"]
+        .as_str()
+        .unwrap()
+        .ends_with("/src/core.clj"));
+
+    // Subsequence matching: "aad" finds add-and-double
+    let result = client.workspace_symbols("aad");
+    let names: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"add-and-double"),
+        "subsequence match failed: {:?}",
+        names
     );
 }
 

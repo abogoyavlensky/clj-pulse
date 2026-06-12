@@ -41,13 +41,10 @@ impl DocumentStore {
         for change in changes {
             match change.range {
                 Some(range) => {
-                    let start_line = range.start.line as usize;
-                    let start_char = range.start.character as usize;
-                    let end_line = range.end.line as usize;
-                    let end_char = range.end.character as usize;
-
-                    let start_idx = rope.line_to_char(start_line) + start_char;
-                    let end_idx = rope.line_to_char(end_line) + end_char;
+                    let start_idx = position_to_char(&rope, range.start)
+                        .ok_or_else(|| anyhow!("position out of range: {:?}", range.start))?;
+                    let end_idx = position_to_char(&rope, range.end)
+                        .ok_or_else(|| anyhow!("position out of range: {:?}", range.end))?;
 
                     rope.remove(start_idx..end_idx);
                     rope.insert(start_idx, &change.text);
@@ -70,14 +67,12 @@ impl DocumentStore {
 
         let line_start = rope.line_to_char(line_idx);
         let line = rope.line(line_idx);
-        let line_text: String = line.chars().collect();
-        let col = pos.character as usize;
+        let chars: Vec<char> = line.chars().collect();
+        let col = utf16_col_to_char(&chars, pos.character as usize);
 
-        if col > line_text.len() {
+        if col > chars.len() {
             return None;
         }
-
-        let chars: Vec<char> = line_text.chars().collect();
 
         let mut start = col;
         while start > 0 && is_clj_ident_char(chars[start - 1]) {
@@ -97,14 +92,15 @@ impl DocumentStore {
         Some(chars[start..end].iter().collect())
     }
 
+    /// Returns the full text of an open document.
+    pub fn text(&self, uri: &Url) -> Option<String> {
+        self.docs.get(uri).map(|rope| rope.to_string())
+    }
+
     /// Returns the document text from the start up to (not including) `pos`.
     pub fn text_up_to(&self, uri: &Url, pos: Position) -> Option<String> {
         let rope = self.docs.get(uri)?;
-        let line_idx = pos.line as usize;
-        if line_idx >= rope.len_lines() {
-            return None;
-        }
-        let char_idx = (rope.line_to_char(line_idx) + pos.character as usize).min(rope.len_chars());
+        let char_idx = position_to_char(&rope, pos)?;
         Some(rope.slice(..char_idx).to_string())
     }
 
@@ -116,6 +112,31 @@ impl DocumentStore {
         }
         Some(rope.line(line_idx).chars().collect())
     }
+}
+
+/// Converts an LSP position (UTF-16 code units) to a rope char index.
+/// Columns past the end of the line clamp to the line end.
+fn position_to_char(rope: &Rope, pos: Position) -> Option<usize> {
+    let line_idx = pos.line as usize;
+    if line_idx >= rope.len_lines() {
+        return None;
+    }
+    let chars: Vec<char> = rope.line(line_idx).chars().collect();
+    let col = utf16_col_to_char(&chars, pos.character as usize);
+    Some(rope.line_to_char(line_idx) + col)
+}
+
+/// Converts a UTF-16 column to a char offset within a line, clamping to
+/// the line end.
+fn utf16_col_to_char(chars: &[char], utf16_col: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in chars.iter().enumerate() {
+        if units >= utf16_col {
+            return i;
+        }
+        units += c.len_utf16();
+    }
+    chars.len()
 }
 
 pub fn is_clj_ident_char(c: char) -> bool {
@@ -137,4 +158,62 @@ pub fn is_clj_ident_char(c: char) -> bool {
                 | '&'
                 | '%'
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_with(text: &str) -> (DocumentStore, Url) {
+        let store = DocumentStore::new();
+        let uri = Url::parse("file:///test.clj").unwrap();
+        store.open(uri.clone(), text.to_string());
+        (store, uri)
+    }
+
+    /// LSP positions are UTF-16 code units: '😀' is two units but one char.
+    /// A single-char token makes any off-by-one shift miss the word.
+    #[test]
+    fn test_word_at_utf16_after_emoji() {
+        let line = "(def s \"😀\") (f 1 2)";
+        let (store, uri) = store_with(line);
+
+        // Cursor on `f`, in UTF-16 units
+        let prefix = "(def s \"😀\") (";
+        let col = prefix.encode_utf16().count() as u32;
+        let word = store.word_at(&uri, Position::new(0, col));
+        assert_eq!(word.as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn test_apply_changes_utf16_after_emoji() {
+        let (store, uri) = store_with("(str \"😀\")");
+        // Insert right before the closing paren, position in UTF-16 units
+        let col = "(str \"😀\"".encode_utf16().count() as u32;
+        store
+            .apply_changes(
+                &uri,
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(tower_lsp::lsp_types::Range {
+                        start: Position::new(0, col),
+                        end: Position::new(0, col),
+                    }),
+                    range_length: None,
+                    text: " :x".to_string(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            store.line_text(&uri, 0).unwrap().trim_end(),
+            "(str \"😀\" :x)"
+        );
+    }
+
+    #[test]
+    fn test_text_up_to_utf16() {
+        let (store, uri) = store_with("(str \"😀\") tail");
+        let col = "(str \"😀\")".encode_utf16().count() as u32;
+        let text = store.text_up_to(&uri, Position::new(0, col)).unwrap();
+        assert_eq!(text, "(str \"😀\")");
+    }
 }

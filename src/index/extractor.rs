@@ -242,8 +242,8 @@ fn extract_def(
         doc,
         file: file.to_path_buf(),
         source: super::SymbolSource::Project,
-        range: node_to_lsp_range(form_node),
-        name_range: node_to_lsp_range(sym_name_node(name_node)),
+        range: node_to_lsp_range(form_node, source),
+        name_range: node_to_lsp_range(sym_name_node(name_node), source),
     });
 }
 
@@ -280,18 +280,24 @@ fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
     &source[node.start_byte()..node.end_byte()]
 }
 
-fn node_to_lsp_range(node: Node) -> Range {
-    let start = node.start_position();
-    let end = node.end_position();
+fn node_to_lsp_range(node: Node, source: &str) -> Range {
     Range {
-        start: Position {
-            line: start.row as u32,
-            character: start.column as u32,
-        },
-        end: Position {
-            line: end.row as u32,
-            character: end.column as u32,
-        },
+        start: point_to_position(node.start_position(), node.start_byte(), source),
+        end: point_to_position(node.end_position(), node.end_byte(), source),
+    }
+}
+
+/// Tree-sitter columns are bytes; LSP wants UTF-16 code units. Re-measures
+/// the line prefix (from line start to the node boundary) in UTF-16.
+fn point_to_position(point: tree_sitter::Point, byte_offset: usize, source: &str) -> Position {
+    let line_start = byte_offset - point.column;
+    let character = source
+        .get(line_start..byte_offset)
+        .map(|prefix| prefix.encode_utf16().count())
+        .unwrap_or(point.column);
+    Position {
+        line: point.row as u32,
+        character: character as u32,
     }
 }
 

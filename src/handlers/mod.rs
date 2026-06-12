@@ -2,6 +2,7 @@ pub mod completion;
 pub mod definition;
 pub mod hover;
 pub mod signature;
+pub mod symbols;
 
 use crate::index::{CoreSymbol, Index, Symbol};
 

@@ -21,10 +21,10 @@ roadmap is about the "understand usages and change code" half.
 
 ## Phase 1 — quick wins
 
-- [ ] `textDocument/documentSymbol` — outline view; the index already has
+- [x] `textDocument/documentSymbol` — outline view; the index already has
       names, kinds, and ranges per file.
-- [ ] `workspace/symbol` — fuzzy search over the symbol index (Cmd+T).
-- [ ] UTF-16 position handling — `word_at` treats LSP positions as char
+- [x] `workspace/symbol` — fuzzy search over the symbol index (Cmd+T).
+- [x] UTF-16 position handling — `word_at` treats LSP positions as char
       offsets; non-ASCII lines resolve the wrong word.
 
 ## Phase 2 — occurrence index, references, rename

@@ -10,7 +10,7 @@ use super::{NsMeta, Symbol};
 /// Bump whenever the extractor or `Symbol`/`NsMeta` layout changes, so
 /// caches written by older binaries are discarded (JAR mtimes never change,
 /// so mtime alone cannot invalidate them).
-pub const CACHE_FORMAT_VERSION: u32 = 3;
+pub const CACHE_FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

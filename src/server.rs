@@ -179,6 +179,8 @@ impl LanguageServer for Backend {
                     retrigger_characters: None,
                     work_done_progress_options: Default::default(),
                 }),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -286,5 +288,25 @@ impl LanguageServer for Backend {
             tracing::error!("signature help error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        handlers::symbols::document_symbols(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("document symbol error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        Ok(Some(handlers::symbols::workspace_symbols(
+            &self.index,
+            &params.query,
+        )))
     }
 }

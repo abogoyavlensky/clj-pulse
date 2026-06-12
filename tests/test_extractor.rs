@@ -158,3 +158,16 @@ fn test_extracts_def_with_metadata() {
         .expect("old-fn extracted");
     assert_eq!(old.fqn, "my.app/old-fn");
 }
+
+#[test]
+fn test_ranges_are_utf16_columns() {
+    // '😀' is 4 bytes, 2 UTF-16 units, 1 char — ranges must use UTF-16
+    let src = "(def smile \"😀\") (defn add [a b] a)";
+    let (_, syms) = extract(src, Path::new("u.clj")).unwrap();
+    let add = syms.iter().find(|s| s.name == "add").unwrap();
+
+    let name_start = src.find("add").unwrap();
+    let expected = src[..name_start].encode_utf16().count() as u32;
+    assert_eq!(add.name_range.start.character, expected);
+    assert_eq!(add.name_range.end.character, expected + 3);
+}
