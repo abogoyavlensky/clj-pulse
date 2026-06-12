@@ -149,7 +149,7 @@ impl LanguageServer for Backend {
                         client_jars.log_message(MessageType::WARNING, msg).await;
                         return;
                     }
-                    scanner::index_classpath_jars(&root_path_jars, classpath, &index_jars);
+                    scanner::index_classpath_libs(&root_path_jars, classpath, &index_jars);
                     let sym_count = index_jars.symbols.len();
                     let msg = format!(
                         "clj-lsp: library indexing complete ({} total symbols)",

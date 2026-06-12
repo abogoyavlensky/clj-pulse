@@ -2,44 +2,65 @@ use std::path::{Path, PathBuf};
 
 /// Discovers classpath entries from the project's `.cpcache/` directory.
 ///
-/// Reads the most recently modified `.cp` file in `.cpcache/` and returns
-/// all entries that exist on disk. Uses `std::env::split_paths` for
-/// cross-platform parsing (`:` on Unix, `;` on Windows).
+/// Tries `.cp` files newest-first and returns the entries of the first one
+/// that still resolves (at least one absolute path exists on disk). Older
+/// files are a fallback for stale caches — e.g. after an `~/.m2` cleanup or
+/// when caches were created on another machine. Uses `std::env::split_paths`
+/// for cross-platform parsing (`:` on Unix, `;` on Windows).
 pub fn discover(root: &Path) -> Vec<PathBuf> {
     let cpcache = root.join(".cpcache");
     if !cpcache.exists() {
         return vec![];
     }
 
-    let cp_file = match find_most_recent_cp(&cpcache) {
-        Some(f) => f,
-        None => return vec![],
-    };
+    for cp_file in cp_files_newest_first(&cpcache) {
+        let content = match std::fs::read_to_string(&cp_file) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("failed to read {}: {}", cp_file.display(), e);
+                continue;
+            }
+        };
 
-    let content = match std::fs::read_to_string(&cp_file) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("failed to read {}: {}", cp_file.display(), e);
-            return vec![];
+        let mut entries: Vec<PathBuf> = Vec::new();
+        // A .cp file only counts as current if at least one of its
+        // *absolute* entries (a library path) still exists — relative
+        // entries ("src") resolve under any project root and prove nothing.
+        let mut has_lib_entry = false;
+        for raw in std::env::split_paths(content.trim()) {
+            let was_absolute = raw.is_absolute();
+            // Relative entries are relative to the project root, not the
+            // server process's cwd.
+            let resolved = if was_absolute { raw } else { root.join(raw) };
+            if resolved.exists() {
+                has_lib_entry |= was_absolute;
+                entries.push(resolved);
+            }
         }
-    };
 
-    std::env::split_paths(content.trim())
-        .filter(|p| p.exists())
-        .collect()
+        if has_lib_entry {
+            return entries;
+        }
+        tracing::debug!("skipping stale classpath file {}", cp_file.display());
+    }
+
+    vec![]
 }
 
-fn find_most_recent_cp(cpcache: &Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(cpcache).ok()?;
-    entries
+fn cp_files_newest_first(cpcache: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(cpcache) else {
+        return vec![];
+    };
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map(|x| x == "cp").unwrap_or(false))
         .filter_map(|e| {
             let mtime = e.metadata().ok()?.modified().ok()?;
             Some((e.path(), mtime))
         })
-        .max_by_key(|(_, mtime)| *mtime)
-        .map(|(path, _)| path)
+        .collect();
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.into_iter().map(|(p, _)| p).collect()
 }
 
 #[cfg(test)]
@@ -105,5 +126,34 @@ mod tests {
         let result = discover(root);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], lib2);
+    }
+
+    #[test]
+    fn test_discover_falls_back_when_newest_cp_is_stale() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let cpcache = root.join(".cpcache");
+        fs::create_dir(&cpcache).unwrap();
+
+        let lib = root.join("lib");
+        fs::create_dir(&lib).unwrap();
+
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        // Older .cp resolves; newest one references another machine's paths
+        fs::write(
+            cpcache.join("old.cp"),
+            format!("src{}{}", sep, lib.display()),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(
+            cpcache.join("new.cp"),
+            format!("src{}/machine/gone/lib.jar", sep),
+        )
+        .unwrap();
+
+        let result = discover(root);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], lib);
     }
 }

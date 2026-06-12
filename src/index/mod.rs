@@ -15,6 +15,9 @@ use tower_lsp::lsp_types::Range;
 pub enum SymbolSource {
     Project,
     Jar(PathBuf),
+    /// Library source directory on the classpath (git deps in ~/.gitlibs,
+    /// :local/root deps). Files are real paths on disk.
+    Dir(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,11 +142,11 @@ impl Index {
         self.file_to_ns.get(path).map(|r| r.clone())
     }
 
-    /// Inserts a JAR-indexed namespace without ever shadowing project code.
-    /// Project and JAR indexing run concurrently, so insertion order is
-    /// nondeterministic; project sources must win regardless of which task
-    /// finishes last.
-    pub fn insert_jar_file(&self, meta: NsMeta, symbols: Vec<Symbol>) {
+    /// Inserts a library namespace (from a JAR or a classpath source dir)
+    /// without ever shadowing project code. Project and library indexing run
+    /// concurrently, so insertion order is nondeterministic; project sources
+    /// must win regardless of which task finishes last.
+    pub fn insert_lib_file(&self, meta: NsMeta, symbols: Vec<Symbol>) {
         use dashmap::mapref::entry::Entry;
 
         let ns_owned_by_project = self

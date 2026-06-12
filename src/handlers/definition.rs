@@ -28,7 +28,9 @@ pub fn handle(
 
     match resolve_symbol(index, &word, &current_ns) {
         Some(ResolvedSymbol::Project(sym)) => match sym.source {
-            SymbolSource::Project => {
+            // Dir-based library sources are real files on disk, same as
+            // project files — plain file: URIs work for both.
+            SymbolSource::Project | SymbolSource::Dir(_) => {
                 let target_uri = Url::from_file_path(&sym.file)
                     .map_err(|_| anyhow::anyhow!("invalid path: {:?}", sym.file))?;
                 Ok(Some(GotoDefinitionResponse::Scalar(Location {

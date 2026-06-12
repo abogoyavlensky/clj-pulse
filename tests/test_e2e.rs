@@ -460,6 +460,54 @@ fn test_e2e_jar_definition_and_content() {
     assert!(text.contains("(defn helper"), "wrong JAR content: {}", text);
 }
 
+#[test]
+fn test_e2e_gitlib_directory_dependency() {
+    // Git deps (and :local/root deps) appear on the classpath as source
+    // *directories* (~/.gitlibs/libs/...), not JARs. They must be indexed
+    // and navigable via plain file: URIs.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let libdir = tempfile::TempDir::new().unwrap();
+    let lib_src = libdir.path().join("src");
+    std::fs::create_dir_all(lib_src.join("gitlib")).unwrap();
+    let lib_file = lib_src.join("gitlib/util.clj");
+    std::fs::write(
+        &lib_file,
+        "(ns gitlib.util)\n\n(defn helper\n  \"From a git dep.\"\n  [x]\n  x)\n",
+    )
+    .unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), lib_src.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_gitlib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-gitlib\n  (:require [gitlib.util :as u]))\n\n(u/helper 42)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (line, ch) = position_of(&consumer, "u/helper");
+    let result = client.goto_definition(&consumer, line, ch);
+
+    assert!(
+        !result.is_null(),
+        "goto-definition into a directory dep returned null"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    let expected = format!("file://{}", lib_file.canonicalize().unwrap().display());
+    assert_eq!(uri, expected, "expected file: URI into the lib directory");
+    let (def_line, _) = position_of(&lib_file, "defn helper");
+    assert_eq!(result["range"]["start"]["line"], json!(def_line));
+}
+
 /// Full realistic scenario against a real Maven classpath. Requires the
 /// `clojure` CLI and network/m2 access, so it is ignored by default:
 /// `cargo test --test test_e2e -- --ignored`

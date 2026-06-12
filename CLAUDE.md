@@ -37,9 +37,12 @@ protocol changes should also pass `bb e2e-nvim`.
 
 ## Invariants
 
-- Project symbols always win over JAR symbols with the same fqn; project and
-  JAR indexing run concurrently, so JAR insertion uses
-  `Index::insert_jar_file` (never plain `insert_file`).
+- Project symbols always win over library symbols with the same fqn; project
+  and library indexing run concurrently, so library insertion uses
+  `Index::insert_lib_file` (never plain `insert_file`).
+- Classpath libraries come in two shapes: JARs (`SymbolSource::Jar`, navigated
+  via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
+  `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
 
