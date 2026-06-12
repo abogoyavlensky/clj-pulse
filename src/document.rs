@@ -97,6 +97,17 @@ impl DocumentStore {
         Some(chars[start..end].iter().collect())
     }
 
+    /// Returns the document text from the start up to (not including) `pos`.
+    pub fn text_up_to(&self, uri: &Url, pos: Position) -> Option<String> {
+        let rope = self.docs.get(uri)?;
+        let line_idx = pos.line as usize;
+        if line_idx >= rope.len_lines() {
+            return None;
+        }
+        let char_idx = (rope.line_to_char(line_idx) + pos.character as usize).min(rope.len_chars());
+        Some(rope.slice(..char_idx).to_string())
+    }
+
     pub fn line_text(&self, uri: &Url, line: u32) -> Option<String> {
         let rope = self.docs.get(uri)?;
         let line_idx = line as usize;
@@ -107,7 +118,7 @@ impl DocumentStore {
     }
 }
 
-fn is_clj_ident_char(c: char) -> bool {
+pub fn is_clj_ident_char(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(
             c,

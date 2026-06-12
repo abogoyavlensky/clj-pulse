@@ -230,6 +230,16 @@ impl LspClient {
     fn text_document_content(&mut self, uri: &str) -> Value {
         self.request("workspace/textDocumentContent", json!({ "uri": uri }))
     }
+
+    fn signature_help(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
 }
 
 impl Drop for LspClient {
@@ -593,6 +603,131 @@ fn test_e2e_completion_namespaces_and_aliases() {
             .iter()
             .map(|i| i["label"].as_str().unwrap_or(""))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_e2e_signature_help_while_typing_call() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+
+    // Project fn via alias: "(core/add " — first parameter active
+    client.did_change_insert(&utils, last_line, 0, "(core/add \n");
+    let result = client.signature_help(&utils, last_line, 10);
+    assert!(!result.is_null(), "no signature help for core/add");
+    let label = result["signatures"][0]["label"].as_str().unwrap();
+    assert_eq!(label, "(add a b)");
+    assert_eq!(result["activeParameter"], json!(0));
+    assert_eq!(
+        result["signatures"][0]["parameters"][0]["label"],
+        json!("a")
+    );
+
+    // Second argument: "(core/add 1 " — second parameter active
+    client.did_change_insert(&utils, last_line + 1, 0, "(core/add 1 \n");
+    let result = client.signature_help(&utils, last_line + 1, 12);
+    assert_eq!(result["activeParameter"], json!(1));
+
+    // clojure.core builtin with multiple arities
+    client.did_change_insert(&utils, last_line + 2, 0, "(reduce f init ");
+    let result = client.signature_help(&utils, last_line + 2, 15);
+    assert!(!result.is_null(), "no signature help for reduce");
+    let labels: Vec<&str> = result["signatures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["label"].as_str())
+        .collect();
+    assert!(
+        labels.iter().any(|l| l.contains("coll")),
+        "expected reduce arities, got {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_e2e_definition_on_require_alias_and_namespace() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    // Cursor on the alias in `[simple.core :as core]`
+    let (line, ch) = position_of(&utils, "core]");
+    let result = client.goto_definition(&utils, line, ch);
+    assert!(!result.is_null(), "no definition for require alias");
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/src/core.clj"),
+        "alias should navigate to core.clj, got {}",
+        uri
+    );
+    assert_eq!(result["range"]["start"]["line"], json!(0));
+
+    // Cursor on the namespace symbol itself
+    let (line, ch) = position_of(&utils, "simple.core");
+    let result = client.goto_definition(&utils, line, ch);
+    assert!(!result.is_null(), "no definition for required namespace");
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/src/core.clj"),
+        "namespace should navigate to core.clj, got {}",
+        uri
+    );
+}
+
+#[test]
+fn test_e2e_definition_on_alias_shadowing_core_symbol() {
+    // `[simple.core :as str]`: the alias shadows clojure.core/str. On the
+    // alias declaration it must navigate to the namespace; on a body usage
+    // of bare `str` (which is clojure.core/str) it must not.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let consumer = root.join("src/shadow.clj");
+    std::fs::write(
+        &consumer,
+        "(ns shadow\n  (:require [simple.core :as str]))\n\n(defn f [x]\n  (str/add x 1)\n  (str \"x\"))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&consumer);
+
+    // Alias declaration → namespace file
+    let (line, ch) = position_of(&consumer, ":as str");
+    let result = client.goto_definition(&consumer, line, ch + 2);
+    assert!(
+        !result.is_null(),
+        "alias shadowing a core symbol did not navigate"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/src/core.clj"),
+        "expected core.clj, got {}",
+        uri
+    );
+
+    // Bare core-symbol usage in the body → no navigation (clojure.core/str)
+    let (line, ch) = position_of(&consumer, "(str \"x\")");
+    let result = client.goto_definition(&consumer, line, ch);
+    assert!(
+        result.is_null(),
+        "bare core symbol in body must not navigate to the alias ns: {:?}",
+        result
     );
 }
 

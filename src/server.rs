@@ -174,6 +174,11 @@ impl LanguageServer for Backend {
                 completion_provider: Some(CompletionOptions::default()),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), " ".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -272,6 +277,13 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         handlers::hover::handle(&self.index, &self.documents, params).map_err(|e| {
             tracing::error!("hover error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        handlers::signature::handle(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("signature help error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
     }
