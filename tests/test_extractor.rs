@@ -128,3 +128,33 @@ fn test_extracts_defonce() {
     assert_eq!(s.kind, DefKind::Defonce);
     assert_eq!(s.fqn, "my.app/state");
 }
+
+#[test]
+fn test_extracts_ns_with_metadata() {
+    // Real-world pattern (clojure.core, data.json, …): metadata on the ns name
+    let src = "(ns ^{:author \"X\"\n      :doc \"docs\"}\n  my.lib\n  (:require [other.ns :as o]))\n\n(defn run [x] x)";
+    let (meta, syms) = extract(src, Path::new("lib.clj")).unwrap();
+    assert_eq!(meta.name, "my.lib");
+    assert_eq!(meta.aliases.get("o"), Some(&"other.ns".to_string()));
+    assert_eq!(syms[0].fqn, "my.lib/run");
+}
+
+#[test]
+fn test_extracts_def_with_metadata() {
+    let src = "(ns my.app)\n(def ^:dynamic *conn* nil)\n(defn ^:deprecated old-fn [x] x)";
+    let (_, syms) = extract(src, Path::new("app.clj")).unwrap();
+
+    let conn = syms
+        .iter()
+        .find(|s| s.name == "*conn*")
+        .expect("*conn* extracted");
+    assert_eq!(conn.fqn, "my.app/*conn*");
+    // name_range must cover just the symbol, not the ^:dynamic metadata
+    assert_eq!(conn.name_range.start.character, 15);
+
+    let old = syms
+        .iter()
+        .find(|s| s.name == "old-fn")
+        .expect("old-fn extracted");
+    assert_eq!(old.fqn, "my.app/old-fn");
+}

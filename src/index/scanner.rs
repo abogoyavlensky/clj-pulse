@@ -89,6 +89,7 @@ pub fn index_classpath_jars(root: &Path, classpath: Vec<PathBuf>, index: &Index)
                         let all_syms: Vec<Symbol> =
                             pairs.iter().flat_map(|(_, s)| s.iter().cloned()).collect();
                         let entry = jar_cache::JarCacheEntry {
+                            format_version: jar_cache::CACHE_FORMAT_VERSION,
                             mtime,
                             namespaces: all_ns,
                             symbols: all_syms,

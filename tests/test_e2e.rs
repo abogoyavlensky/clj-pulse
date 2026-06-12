@@ -189,6 +189,47 @@ impl LspClient {
             }),
         )
     }
+
+    fn hover(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    fn completion(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    /// Incremental edit: inserts `text` at (line, character), version bump.
+    fn did_change_insert(&mut self, path: &Path, line: u32, character: u32, text: &str) {
+        self.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()), "version": 2 },
+                "contentChanges": [{
+                    "range": {
+                        "start": { "line": line, "character": character },
+                        "end": { "line": line, "character": character }
+                    },
+                    "text": text
+                }]
+            }),
+        )
+    }
+
+    fn text_document_content(&mut self, uri: &str) -> Value {
+        self.request("workspace/textDocumentContent", json!({ "uri": uri }))
+    }
 }
 
 impl Drop for LspClient {
@@ -291,6 +332,187 @@ fn test_e2e_definition_from_file_outside_source_paths() {
         "expected core.clj, got {}",
         uri
     );
+}
+
+#[test]
+fn test_e2e_hover_shows_doc() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let result = client.hover(&utils, line, ch);
+
+    assert!(!result.is_null(), "hover returned null");
+    let value = result["contents"]["value"].as_str().unwrap();
+    assert!(value.contains("```clojure"), "no code block: {}", value);
+    assert!(value.contains("Adds two numbers."), "no doc: {}", value);
+}
+
+#[test]
+fn test_e2e_completion_with_alias_prefix() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let result = client.completion(&utils, line, ch);
+
+    assert!(!result.is_null(), "completion returned null");
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("expected CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"core/add"),
+        "expected core/add in completions, got {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_e2e_definition_after_in_memory_edit() {
+    // Type new code without saving: didChange must keep the in-memory
+    // document in sync so navigation works from unsaved edits.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    let core = root.join("src/core.clj");
+    client.did_open(&utils);
+
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(core/multiply 3 4)\n");
+
+    let result = client.goto_definition(&utils, last_line, 8);
+
+    assert!(
+        !result.is_null(),
+        "goto-definition on unsaved edit returned null"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/src/core.clj"),
+        "expected core.clj, got {}",
+        uri
+    );
+    let (def_line, _) = position_of(&core, "defn multiply");
+    assert_eq!(result["range"]["start"]["line"], json!(def_line));
+}
+
+#[test]
+fn test_e2e_jar_definition_and_content() {
+    // Library symbol: definition must return a jar: URI, and
+    // workspace/textDocumentContent must serve the source behind it.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn helper\n  \"Does helping.\"\n  [x]\n  x)\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n\n(u/helper 42)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (line, ch) = position_of(&consumer, "u/helper");
+    let result = client.goto_definition(&consumer, line, ch);
+
+    assert!(!result.is_null(), "goto-definition into JAR returned null");
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.starts_with("jar:file://"), "expected jar: URI: {}", uri);
+    assert!(uri.ends_with("!/mylib/util.clj"), "wrong entry: {}", uri);
+
+    let content = client.text_document_content(uri);
+    let text = content["text"].as_str().expect("expected text");
+    assert!(text.contains("(defn helper"), "wrong JAR content: {}", text);
+}
+
+/// Full realistic scenario against a real Maven classpath. Requires the
+/// `clojure` CLI and network/m2 access, so it is ignored by default:
+/// `cargo test --test test_e2e -- --ignored`
+#[test]
+#[ignore = "requires clojure CLI (downloads deps on first run)"]
+fn test_e2e_real_classpath_navigation() {
+    let project = tempfile::TempDir::new().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("deps.edn"),
+        r#"{:paths ["src"]
+ :deps {org.clojure/data.json {:mvn/version "2.5.0"}}}
+"#,
+    )
+    .unwrap();
+    let app = root.join("src/app.clj");
+    std::fs::write(
+        &app,
+        "(ns app\n  (:require [clojure.data.json :as json]))\n\n(json/write-str {:a 1})\n",
+    )
+    .unwrap();
+
+    // Produce .cpcache the same way a real project gets one
+    let out = std::process::Command::new("clojure")
+        .args(["-Spath"])
+        .current_dir(&root)
+        .output()
+        .expect("clojure CLI not available");
+    assert!(out.status.success(), "clojure -Spath failed");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&app);
+
+    let (line, ch) = position_of(&app, "json/write-str");
+    let result = client.goto_definition(&app, line, ch);
+
+    assert!(
+        !result.is_null(),
+        "goto-definition into data.json returned null"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.starts_with("jar:file://") && uri.ends_with("!/clojure/data/json.clj"),
+        "unexpected URI: {}",
+        uri
+    );
+
+    let content = client.text_document_content(uri);
+    let text = content["text"].as_str().expect("expected text");
+    assert!(text.contains("(defn write-str"), "wrong JAR content");
 }
 
 #[test]

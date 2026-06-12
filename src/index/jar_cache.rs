@@ -7,20 +7,30 @@ use serde::{Deserialize, Serialize};
 
 use super::{NsMeta, Symbol};
 
+/// Bump whenever the extractor or `Symbol`/`NsMeta` layout changes, so
+/// caches written by older binaries are discarded (JAR mtimes never change,
+/// so mtime alone cannot invalidate them).
+pub const CACHE_FORMAT_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {
+    pub format_version: u32,
     pub mtime: u64,
     pub namespaces: Vec<NsMeta>,
     pub symbols: Vec<Symbol>,
 }
 
 /// Loads a cached index entry for the given JAR, returning `None` if the
-/// cache file doesn't exist or the JAR's mtime has changed (stale).
+/// cache file doesn't exist, was written by a different binary version, or
+/// the JAR's mtime has changed (stale).
 pub fn load(cache_dir: &Path, jar: &Path) -> Option<JarCacheEntry> {
     let cache_file = cache_file_path(cache_dir, jar);
     let bytes = std::fs::read(&cache_file).ok()?;
     let entry: JarCacheEntry = bincode::deserialize(&bytes).ok()?;
 
+    if entry.format_version != CACHE_FORMAT_VERSION {
+        return None; // written by an incompatible binary
+    }
     let current_mtime = jar_mtime(jar)?;
     if entry.mtime != current_mtime {
         return None; // stale
@@ -98,10 +108,25 @@ mod tests {
             name_range: make_range(2, 5, 10),
         };
         JarCacheEntry {
+            format_version: CACHE_FORMAT_VERSION,
             mtime,
             namespaces: vec![ns_meta],
             symbols: vec![symbol],
         }
+    }
+
+    #[test]
+    fn test_cache_miss_wrong_format_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let jar = dir.path().join("lib.jar");
+        std::fs::write(&jar, b"fake jar").unwrap();
+        let mtime = jar_mtime(&jar).unwrap();
+
+        let mut entry = make_entry(mtime, &jar);
+        entry.format_version = CACHE_FORMAT_VERSION - 1;
+        save(dir.path(), &jar, &entry).unwrap();
+
+        assert!(load(dir.path(), &jar).is_none());
     }
 
     #[test]

@@ -104,7 +104,7 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
 
     let name_node = children[1];
     if name_node.kind() == "sym_lit" {
-        ns_meta.name = node_text(name_node, source).to_string();
+        ns_meta.name = sym_text(name_node, source).to_string();
     }
 
     // Look for (:require ...) forms
@@ -133,7 +133,7 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
     }
 
     let ns_name = if items[0].kind() == "sym_lit" {
-        node_text(items[0], source).to_string()
+        sym_text(items[0], source).to_string()
     } else {
         return;
     };
@@ -191,7 +191,7 @@ fn extract_def(
         return;
     }
 
-    let name = node_text(name_node, source).to_string();
+    let name = sym_text(name_node, source).to_string();
     let fqn = if ns_name.is_empty() {
         name.clone()
     } else {
@@ -243,8 +243,19 @@ fn extract_def(
         file: file.to_path_buf(),
         source: super::SymbolSource::Project,
         range: node_to_lsp_range(form_node),
-        name_range: node_to_lsp_range(name_node),
+        name_range: node_to_lsp_range(sym_name_node(name_node)),
     });
+}
+
+/// For a `sym_lit` carrying metadata (`^:private foo`, `^{:doc "…"} my.ns`)
+/// the node's text spans the metadata too; the symbol itself is the `name`
+/// field. Returns the name node, or the node itself when there is no field.
+fn sym_name_node(node: Node) -> Node {
+    node.child_by_field_name("name").unwrap_or(node)
+}
+
+fn sym_text<'a>(node: Node, source: &'a str) -> &'a str {
+    node_text(sym_name_node(node), source)
 }
 
 fn strip_string_quotes(s: &str) -> String {

@@ -13,6 +13,16 @@
   test {:doc "Run tests"
         :task (shell "cargo test")}
 
+  e2e {:doc "End-to-end tests (spawns real binary, speaks LSP over stdio)"
+       :task (shell "cargo test --test test_e2e")}
+
+  e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
+            :task (shell "cargo test --test test_e2e -- --ignored")}
+
+  e2e-nvim {:doc "Real-editor-client e2e via headless Neovim"
+            :task (do (shell "cargo build")
+                      (shell "nvim --headless -l scripts/e2e_nvim.lua tests/fixtures/simple_project target/debug/clj-lsp"))}
+
   check {:doc "Run all code checks and tests"
          :depends [fmt lint test]}
 
