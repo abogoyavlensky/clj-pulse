@@ -138,4 +138,40 @@ impl Index {
     pub fn file_ns(&self, path: &Path) -> Option<String> {
         self.file_to_ns.get(path).map(|r| r.clone())
     }
+
+    /// Inserts a JAR-indexed namespace without ever shadowing project code.
+    /// Project and JAR indexing run concurrently, so insertion order is
+    /// nondeterministic; project sources must win regardless of which task
+    /// finishes last.
+    pub fn insert_jar_file(&self, meta: NsMeta, symbols: Vec<Symbol>) {
+        use dashmap::mapref::entry::Entry;
+
+        let ns_owned_by_project = self
+            .namespaces
+            .get(&meta.name)
+            .map(|ns| !ns.file.to_string_lossy().contains("!/"))
+            .unwrap_or(false);
+        if ns_owned_by_project {
+            return;
+        }
+
+        let mut fqns = Vec::with_capacity(symbols.len());
+        for sym in symbols {
+            fqns.push(sym.fqn.clone());
+            match self.symbols.entry(sym.fqn.clone()) {
+                Entry::Occupied(mut e) => {
+                    if e.get().source != SymbolSource::Project {
+                        e.insert(sym);
+                    }
+                }
+                Entry::Vacant(e) => {
+                    e.insert(sym);
+                }
+            }
+        }
+
+        self.ns_symbols.insert(meta.name.clone(), fqns);
+        self.file_to_ns.insert(meta.file.clone(), meta.name.clone());
+        self.namespaces.insert(meta.name.clone(), meta);
+    }
 }

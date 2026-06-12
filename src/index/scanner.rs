@@ -107,10 +107,12 @@ pub fn index_classpath_jars(root: &Path, classpath: Vec<PathBuf>, index: &Index)
         })
         .collect();
 
-    // Insert all results into the shared index
+    // Insert all results into the shared index; project symbols always win
+    // over JAR symbols with the same fqn (e.g. the project itself installed
+    // in ~/.m2).
     for jar_results in all_results {
         for (meta, symbols) in jar_results {
-            index.insert_file(meta, symbols);
+            index.insert_jar_file(meta, symbols);
         }
     }
 }

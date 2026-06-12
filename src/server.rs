@@ -193,6 +193,24 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
+
+        // Files outside deps.edn :paths (dev/, scratch files, test dirs that
+        // only appear in alias :extra-paths) are not indexed at startup;
+        // index them on open so navigation from them works.
+        if let Ok(path) = uri.to_file_path() {
+            if self.index.file_ns(&path).is_none() {
+                match extractor::extract(&text, &path) {
+                    Ok((meta, symbols)) => {
+                        tracing::info!("indexed opened file {}", path.display());
+                        self.index.insert_file(meta, symbols);
+                    }
+                    Err(e) => {
+                        tracing::debug!("failed to index opened {}: {}", path.display(), e)
+                    }
+                }
+            }
+        }
+
         self.documents.open(uri, text);
     }
 
