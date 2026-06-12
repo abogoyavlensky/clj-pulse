@@ -142,6 +142,11 @@ impl LanguageServer for Backend {
                 tokio::spawn(async move {
                     let classpath = classpath::discover(&root_path_jars);
                     if classpath.is_empty() {
+                        let msg = "clj-lsp: no classpath found (no .cpcache/ in project root?) \
+                                   — library symbols will not be indexed. Run `clojure -Spath` \
+                                   or start a REPL once to generate it.";
+                        tracing::warn!("{}", msg);
+                        client_jars.log_message(MessageType::WARNING, msg).await;
                         return;
                     }
                     scanner::index_classpath_jars(&root_path_jars, classpath, &index_jars);

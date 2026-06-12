@@ -13,6 +13,10 @@ Rust LSP server for Clojure (tower-lsp, tree-sitter). See ARCHITECTURE.md for da
   Needs the clojure CLI; ignored in plain `cargo test`.
 - `bb e2e-nvim` — drives the server through a real editor client
   (headless Neovim's built-in LSP client, `scripts/e2e_nvim.lua`).
+- `bb e2e-calva` — the user's exact setup, headless: real VS Code + real Calva
+  (`calva.clojureLspPath` → our binary) under Xvfb (`scripts/calva-e2e/`).
+  Covers project + jar: navigation through Calva's own definition pipeline and
+  jar content provider. First run downloads VS Code + Calva (~150MB).
 
 Server behavior changes are not done until `bb e2e` passes; client-visible
 protocol changes should also pass `bb e2e-nvim`.
