@@ -72,6 +72,7 @@ meantime and keeping the server dependency-free is worth more early on.
       the maintainer, but required for wider adoption. Do not run java at all - inspect project.clj.
 - [ ] shadow-cljs classpath and cljs-aware indexing.
 - [ ] Keyword indexing for re-frame subs
+- [ ] Transitive Clojure deps
 - [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
 
 ## Out of scope for now
