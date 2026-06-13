@@ -56,8 +56,9 @@ most of what follows.
 Deliberately after references/rename: clj-kondo covers linting well in the
 meantime and keeping the server dependency-free is worth more early on.
 
-- [ ] Native fallback lints from our own index (unresolved
-      symbol/namespace, unused require) for setups without clj-kondo.
+- [x] Native unresolved-namespace lint — warns on qualified usages whose
+      prefix isn't required (debounced, powers the add-require lightbulb).
+- [ ] Native fallback lints: unused require, unresolved (unqualified) symbol.
 - [ ] clj-kondo bridge — shell out to a `clj-kondo` binary when present,
       translate JSON findings to LSP diagnostics.
 

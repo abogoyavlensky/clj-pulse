@@ -69,6 +69,16 @@ pub struct NsMeta {
     pub requires: Vec<String>,
 }
 
+impl NsMeta {
+    /// Whether `prefix` is resolvable from this file: its own namespace name,
+    /// an `:as` alias, or a required namespace (plain `[clojure.set]` included).
+    pub fn resolves_prefix(&self, prefix: &str) -> bool {
+        prefix == self.name
+            || self.aliases.contains_key(prefix)
+            || self.requires.iter().any(|r| r == prefix)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreSymbol {
     pub name: String,

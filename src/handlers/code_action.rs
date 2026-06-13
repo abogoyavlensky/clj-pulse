@@ -31,6 +31,16 @@ pub fn handle(
         return Ok(None);
     };
 
+    // The unresolved-namespace diagnostics at this position, so VS Code binds
+    // the fix to the squiggle (and marks the diagnostic resolved on apply).
+    let fixed: Vec<Diagnostic> = params
+        .context
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == Some(NumberOrString::String("unresolved-namespace".to_string())))
+        .cloned()
+        .collect();
+
     let actions: Vec<CodeActionOrCommand> = candidates(index, &ns_meta, &token)
         .into_iter()
         .filter_map(|candidate| {
@@ -41,6 +51,11 @@ pub fn handle(
             Some(CodeActionOrCommand::CodeAction(CodeAction {
                 title: format!("Add require `{}`", spec),
                 kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: if fixed.is_empty() {
+                    None
+                } else {
+                    Some(fixed.clone())
+                },
                 edit: Some(WorkspaceEdit {
                     changes: Some(changes),
                     ..Default::default()
@@ -106,13 +121,10 @@ pub fn candidates(index: &Index, ns_meta: &NsMeta, token: &str) -> Vec<Candidate
         return vec![];
     }
 
-    // Already available in this file: the file's own namespace, aliased, or
-    // required (with or without an alias — `requires` captures plain
-    // `[clojure.set]` too).
-    if prefix == ns_meta.name
-        || ns_meta.aliases.contains_key(prefix)
-        || ns_meta.requires.iter().any(|r| r == prefix)
-    {
+    // Already available in this file: own namespace, an alias, or a required
+    // namespace (see `NsMeta::resolves_prefix`). Shared with the
+    // unresolved-namespace diagnostic so squiggle and fix never disagree.
+    if ns_meta.resolves_prefix(prefix) {
         return vec![];
     }
 

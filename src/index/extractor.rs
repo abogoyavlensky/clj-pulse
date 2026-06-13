@@ -23,6 +23,106 @@ pub fn extract(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>)> {
     extract_full(source, file).map(|(meta, symbols, _)| (meta, symbols))
 }
 
+/// A namespace-qualified symbol usage (`str/join`), used by the
+/// unresolved-namespace diagnostic. `range` covers the whole symbol.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualifiedUsage {
+    pub prefix: String,
+    pub name: String,
+    pub range: Range,
+}
+
+/// Collects every namespace-qualified symbol usage in `source`. Skips
+/// `'`-quoted data and `(quote …)` forms (which are data, not var usages);
+/// syntax-quote is kept, since macro bodies reference real vars.
+pub fn qualified_usages(source: &str) -> Vec<QualifiedUsage> {
+    let mut parser = Parser::new();
+    if parser.set_language(language()).is_err() {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    collect_qualified(tree.root_node(), source, &mut out);
+    out
+}
+
+fn collect_qualified(node: Node, source: &str, out: &mut Vec<QualifiedUsage>) {
+    match node.kind() {
+        // 'foo/bar is data; #_foo/bar is discarded by the reader.
+        "quoting_lit" | "dis_expr" => {}
+        "sym_lit" => {
+            if let (Some(ns_node), Some(name_node)) = (
+                node.child_by_field_name("namespace"),
+                node.child_by_field_name("name"),
+            ) {
+                let prefix = node_text(ns_node, source).to_string();
+                let name = node_text(name_node, source).to_string();
+                if !prefix.is_empty() && !name.is_empty() {
+                    // Range the symbol itself (`foo/bar`), not any leading
+                    // metadata/type-hint the sym_lit node also spans.
+                    let range = Range {
+                        start: point_to_position(
+                            ns_node.start_position(),
+                            ns_node.start_byte(),
+                            source,
+                        ),
+                        end: point_to_position(
+                            name_node.end_position(),
+                            name_node.end_byte(),
+                            source,
+                        ),
+                    };
+                    out.push(QualifiedUsage {
+                        prefix,
+                        name,
+                        range,
+                    });
+                }
+            }
+        }
+        "list_lit" => {
+            let kids = named_children(node);
+            if let Some(first) = kids.first() {
+                if first.kind() == "sym_lit" && node_text(*first, source) == "quote" {
+                    return; // (quote …) is data
+                }
+            }
+            for child in kids {
+                collect_qualified(child, source, out);
+            }
+        }
+        "map_lit" => {
+            // Skip `:keys`/`:syms`/`:strs` destructuring vectors: a symbol like
+            // `foo/bar` there binds a local from key `:foo/bar`, it isn't a
+            // namespace usage. Everything else (including a qualified symbol
+            // used as a real map key/value) is still walked.
+            let kids = named_children(node);
+            let mut i = 0;
+            while i < kids.len() {
+                let key = kids[i];
+                let val = kids.get(i + 1).copied();
+                let is_destructure = key.kind() == "kwd_lit"
+                    && matches!(node_text(key, source), ":keys" | ":syms" | ":strs")
+                    && val.map(|v| v.kind() == "vec_lit").unwrap_or(false);
+                collect_qualified(key, source, out);
+                if let Some(v) = val {
+                    if !is_destructure {
+                        collect_qualified(v, source, out);
+                    }
+                }
+                i += 2;
+            }
+        }
+        _ => {
+            for child in named_children(node) {
+                collect_qualified(child, source, out);
+            }
+        }
+    }
+}
+
 /// Like [`extract`] but also collects every resolved symbol usage
 /// (occurrences) in a second pass over the same parse tree.
 pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
@@ -138,19 +238,47 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
             let kw = inner[0];
             if kw.kind() == "kwd_lit" && node_text(kw, source) == ":require" {
                 for require_spec in &inner[1..] {
-                    match require_spec.kind() {
-                        "vec_lit" => parse_require_vector(*require_spec, source, ns_meta),
-                        // Bare `(:require clojure.set)` — no alias/refer, but
-                        // the namespace is still required. (Legacy prefix-list
-                        // libspecs `(clojure set)` are not expanded.)
-                        "sym_lit" => ns_meta
-                            .requires
-                            .push(sym_text(*require_spec, source).to_string()),
-                        _ => {}
-                    }
+                    process_require_spec(*require_spec, source, ns_meta);
                 }
             }
         }
+    }
+}
+
+/// Records one `:require` spec into `ns_meta`. Handles plain libspecs
+/// (`[a.b :as x]`), bare namespaces (`clojure.set`), and reader conditionals
+/// (`#?(:clj [a :as x])` / `#?@(:clj [[a :as x]])`) — every branch's aliases
+/// are recorded so conditional requires aren't reported as unresolved. (Legacy
+/// prefix-list libspecs `(clojure set)` are still not expanded.)
+fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
+    match spec.kind() {
+        "vec_lit" => {
+            let items = named_children(spec);
+            match items.first().map(|n| n.kind()) {
+                // [a.b :as x] — a single libspec.
+                Some("sym_lit") => parse_require_vector(spec, source, ns_meta),
+                // [[a.b :as x] [c.d]] — a vector of specs spliced by #?@.
+                Some("vec_lit") => {
+                    for item in items {
+                        process_require_spec(item, source, ns_meta);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "sym_lit" => ns_meta.requires.push(sym_text(spec, source).to_string()),
+        // Reader conditional: descend into each branch's form (skip platform
+        // keywords). Other shapes (e.g. legacy prefix-lists `(clojure set)`)
+        // are unsupported and intentionally record nothing, so they don't
+        // mask real unresolved-namespace diagnostics.
+        "read_cond_lit" | "splicing_read_cond_lit" => {
+            for child in named_children(spec) {
+                if child.kind() != "kwd_lit" {
+                    process_require_spec(child, source, ns_meta);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

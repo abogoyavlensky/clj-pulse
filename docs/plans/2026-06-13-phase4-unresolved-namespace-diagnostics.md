@@ -1,5 +1,7 @@
 # Unresolved-Namespace Diagnostics Implementation Plan
 
+> **Status: COMPLETED (2026-06-13).** See the summary at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Publish a native `unresolved-namespace` warning for qualified usages whose namespace prefix isn't required, so the editor shows a squiggle that triggers the existing add-require quickfix lightbulb.
@@ -102,24 +104,24 @@ the token via `word_at`, so behavior without diagnostics is unchanged.
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write focused tests**
+- [x] **Step 1: Write focused tests**
   In `test_extractor.rs`, assert `qualified_usages` on a snippet with
   `(str/join …)`, `(clojure.set/union …)`, a quoted `'foo/bar` (excluded), and
   a qualified usage inside a reader conditional returns the expected
   (prefix, name) pairs with whole-symbol ranges and excludes the quoted one.
 
-- [ ] **Step 2: Run the focused test (expect failure)**
+- [x] **Step 2: Run the focused test (expect failure)**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --test test_extractor qualified`
   Expected: fails to compile (function missing).
 
-- [ ] **Step 3: Implement `qualified_usages`**
+- [x] **Step 3: Implement `qualified_usages`**
   Add `pub struct QualifiedUsage { pub prefix, pub name, pub range }` and
   `pub fn qualified_usages(source: &str) -> Vec<QualifiedUsage>`. Parse with the
   existing `language()`, walk recursively collecting `sym_lit` with a
   `namespace:` child, skip `quoting_lit` and `(quote …)`, skip empty names, and
   build ranges via `node_to_lsp_range`/`point_to_position`.
 
-- [ ] **Step 4: Run verification**
+- [x] **Step 4: Run verification**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --test test_extractor`
   Expected: all extractor tests pass.
 
@@ -131,17 +133,17 @@ the token via `word_at`, so behavior without diagnostics is unchanged.
 - Create: `src/diagnostics.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: Write focused unit tests in `diagnostics.rs`**
+- [x] **Step 1: Write focused unit tests in `diagnostics.rs`**
   Cover: flags `str/join` when unrequired; no flag when `str` is aliased, when
   the ns is plainly required, for the current ns, for `clojure.core/x`, for
   `Math/PI`, for `js/console`, for `java.util.Date/from`; whole-symbol range,
   `WARNING` severity, `unresolved-namespace` code; empty-name skipped.
 
-- [ ] **Step 2: Run the focused test (expect failure)**
+- [x] **Step 2: Run the focused test (expect failure)**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib diagnostics`
   Expected: fails to compile (module/function missing).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add `NsMeta::resolves_prefix`. Refactor `code_action::candidates` to use it
   (keeping the `clojure.core` guard). Create `src/diagnostics.rs` with
   `compute(source, path)` using `extractor::extract` (for `NsMeta`) +
@@ -149,7 +151,7 @@ the token via `word_at`, so behavior without diagnostics is unchanged.
   filters, and the interop helper (uppercase last segment or `js`). Register
   `pub mod diagnostics;` in `lib.rs`.
 
-- [ ] **Step 4: Run verification**
+- [x] **Step 4: Run verification**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib diagnostics code_action`
   Expected: diagnostics + code_action unit tests pass.
 
@@ -159,21 +161,21 @@ the token via `word_at`, so behavior without diagnostics is unchanged.
 - Modify: `src/document.rs`
 - Modify: `src/server.rs`
 
-- [ ] **Step 1: Implement version tracking**
+- [x] **Step 1: Implement version tracking**
   Add `versions: DashMap<Url, i32>` to `DocumentStore` with `set_version` and
   `current_version`; clear in `close`.
 
-- [ ] **Step 2: Wire publishing + debounce in `server.rs`**
+- [x] **Step 2: Wire publishing + debounce in `server.rs`**
   Record the doc version on `did_open`/`did_change`. Publish immediately on
   `did_open` and `did_save`; on `did_change`, spawn a 300 ms debounce task that
   lints only if `current_version` matches the captured version. Clear on
   `did_close`. Use `client.publish_diagnostics(uri, diags, Some(version))`.
 
-- [ ] **Step 3: Attach diagnostics to the code action**
+- [x] **Step 3: Attach diagnostics to the code action**
   In `code_action::handle`, set the returned `CodeAction.diagnostics` to the
   incoming `context.diagnostics` whose `code` is `unresolved-namespace`.
 
-- [ ] **Step 4: Run full check**
+- [x] **Step 4: Run full check**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo build && bb check`
   Expected: builds; fmt/clippy clean; all tests pass.
 
@@ -182,7 +184,7 @@ the token via `word_at`, so behavior without diagnostics is unchanged.
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Add `wait_for_diagnostics` + test**
+- [x] **Step 1: Add `wait_for_diagnostics` + test**
   Add an `LspClient` helper that reads notifications until a
   `textDocument/publishDiagnostics` for a given uri arrives and returns its
   params. Add `test_e2e_unresolved_namespace_diagnostic`: open `consumer.clj`
@@ -190,11 +192,11 @@ the token via `word_at`, so behavior without diagnostics is unchanged.
   `unresolved-namespace` over the usage, then assert `code_action` at that
   position returns the `[simple.helpers :as helpers]` fix.
 
-- [ ] **Step 2: Run e2e**
+- [x] **Step 2: Run e2e**
   Run: `bb e2e`
   Expected: the new test passes with the suite.
 
-- [ ] **Step 3: Run the editor-client e2e**
+- [x] **Step 3: Run the editor-client e2e**
   Run: `bb e2e-nvim`
   Expected: passes.
 
@@ -203,10 +205,56 @@ the token via `word_at`, so behavior without diagnostics is unchanged.
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Note progress**
+- [x] **Step 1: Note progress**
   Mark the native unresolved-namespace lint as landed in Phase 4 (the broader
   item also covers unused require / unresolved symbol, which remain).
 
-- [ ] **Step 2: Final verification**
+- [x] **Step 2: Final verification**
   Run: `bb check && bb e2e`
   Expected: green.
+
+---
+
+## Completion Summary
+
+Implemented as planned. The server now publishes native `unresolved-namespace`
+warnings, giving the squiggle that triggers the add-require lightbulb in VS
+Code/Calva (previously the fix was reachable only via `Cmd+.`).
+
+**What shipped**
+
+- `extractor::qualified_usages` — collects namespace-qualified symbol usages
+  with whole-symbol ranges, skipping `'`-quote, `(quote …)`, reader discards
+  (`#_`), and `:keys`/`:syms`/`:strs` destructuring binding vectors.
+- `src/diagnostics.rs` — pure, index-free `compute(source, path)` flagging
+  qualified usages whose prefix isn't resolvable (shared
+  `NsMeta::resolves_prefix`) and isn't Java/JS interop.
+- `NsMeta::resolves_prefix` — shared by the diagnostic and
+  `code_action::candidates`, so the squiggle and the fix never disagree.
+  `parse_require_spec` now also records reader-conditional requires
+  (`#?`/`#?@`).
+- `DocumentStore` version tracking + `server.rs` publishing: immediate on
+  open/save, 300 ms debounced on change (version-checked self-cancel), cleared
+  on close. The add-require action now attaches the diagnostic it resolves.
+
+**Issues found and fixed during review** (codex second-opinion):
+
+1. Reader discards `#_foo/bar` were walked — added `dis_expr` skip.
+2. Reader-conditional requires in `.cljc` weren't recorded, causing false
+   positives — `parse_require_spec` now descends `#?`/`#?@` branches.
+3. Type-hint/metadata inflated the diagnostic range — now ranged from the
+   namespace start to the name end.
+4. `:keys` namespaced destructuring (`{:keys [foo/bar]}`) was flagged — added
+   a `map_lit` destructuring skip.
+5. Legacy prefix-list `(:require (clojure set))` recorded bogus `clojure`/`set`
+   prefixes, masking real diagnostics — the require catch-all now matches only
+   reader conditionals.
+
+**Known limitations:** legacy prefix-list libspecs are still not expanded (a
+fully-qualified usage of such a namespace would be flagged); only
+unresolved-namespace is implemented — unused-require and unresolved
+(unqualified) symbol remain on the roadmap.
+
+**Verification:** `bb check` (fmt + clippy `-D warnings` + 75 lib / all
+integration tests), `bb e2e` (31 passed, 1 ignored), and `bb e2e-nvim` (real
+Neovim client) all green.

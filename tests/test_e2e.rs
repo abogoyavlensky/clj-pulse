@@ -289,6 +289,50 @@ impl LspClient {
         )
     }
 
+    /// Code action request carrying a diagnostic in context, as VS Code sends
+    /// when the cursor is on a squiggle.
+    fn code_action_for_diagnostic(&mut self, path: &Path, diagnostic: &Value) -> Value {
+        self.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "range": diagnostic["range"].clone(),
+                "context": { "diagnostics": [diagnostic.clone()] }
+            }),
+        )
+    }
+
+    /// Waits for a `textDocument/publishDiagnostics` whose uri ends with
+    /// `uri_suffix` and returns its `params` (checks already-stashed first).
+    fn wait_for_diagnostics(&mut self, uri_suffix: &str) -> Value {
+        let matches = |m: &Value| {
+            m["method"] == "textDocument/publishDiagnostics"
+                && m["params"]["uri"]
+                    .as_str()
+                    .map(|s| s.ends_with(uri_suffix))
+                    .unwrap_or(false)
+        };
+        if let Some(m) = self.notifications.iter().find(|m| matches(m)) {
+            return m["params"].clone();
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for diagnostics: {}", uri_suffix));
+            let msg = self
+                .incoming
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("timed out waiting for diagnostics: {}", uri_suffix));
+            let found = matches(&msg);
+            let params = msg["params"].clone();
+            self.stash(msg);
+            if found {
+                return params;
+            }
+        }
+    }
+
     fn references(&mut self, path: &Path, line: u32, character: u32, include_decl: bool) -> Value {
         self.request(
             "textDocument/references",
@@ -1014,6 +1058,49 @@ fn test_e2e_add_missing_require() {
         new_text.contains("(:require [simple.helpers :as helpers])"),
         "unexpected edit text: {}",
         new_text
+    );
+}
+
+#[test]
+fn test_e2e_unresolved_namespace_diagnostic() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    // consumer.clj uses `helpers/greet` without requiring simple.helpers.
+    let consumer = root.join("src/consumer.clj");
+    client.did_open(&consumer);
+
+    let params = client.wait_for_diagnostics("/src/consumer.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+    let unresolved = diags
+        .iter()
+        .find(|d| d["code"] == json!("unresolved-namespace"))
+        .expect("expected an unresolved-namespace diagnostic");
+    assert_eq!(unresolved["severity"], json!(2)); // WARNING
+    assert!(unresolved["message"].as_str().unwrap().contains("helpers"));
+
+    // VS Code requests code actions for the squiggle, passing the diagnostic.
+    // The add-require fix is returned and carries that diagnostic so the
+    // client binds them.
+    let result = client.code_action_for_diagnostic(&consumer, unresolved);
+    let actions = result.as_array().expect("code action array");
+    let action = actions
+        .iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .map(|t| t.contains("[simple.helpers :as helpers]"))
+                .unwrap_or(false)
+        })
+        .expect("expected add-require action");
+    assert_eq!(action["kind"], json!("quickfix"));
+    assert_eq!(
+        action["diagnostics"][0]["code"],
+        json!("unresolved-namespace"),
+        "fix should carry the diagnostic it resolves"
     );
 }
 
