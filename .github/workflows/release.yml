@@ -47,10 +47,13 @@ jobs:
       - uses: actions/checkout@v5
 
       # Rust version pinned in .mise.toml, matching local dev and checks;
-      # install only rust (babashka isn't needed for release builds)
+      # install only rust (babashka isn't needed for release builds).
+      # cache off: a mise cache hit restores only a phantom symlink without
+      # the ~/.rustup toolchain, so `rustup target add` would fail (see ci.yml)
       - uses: jdx/mise-action@v3.6.1
         with:
           install_args: "rust"
+          cache: false
 
       - name: Add cross-compilation target
         run: rustup target add ${{ matrix.target }}

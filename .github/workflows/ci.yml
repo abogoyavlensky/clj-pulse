@@ -13,8 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # Installs rust + babashka pinned in .mise.toml, matching local dev
+      # Installs rust + babashka pinned in .mise.toml, matching local dev.
+      # cache must stay off: mise's rust "install" is a symlink into
+      # ~/.cargo/bin while the toolchain lives in ~/.rustup, which the action
+      # doesn't cache — a cache hit restores the symlink only, mise skips the
+      # install, and rustup then auto-installs the toolchain without the
+      # rustfmt/clippy components from .mise.toml.
       - uses: jdx/mise-action@v3.6.1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: bb fmt-check
@@ -25,7 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # cache off — see the lint-fmt job
       - uses: jdx/mise-action@v3.6.1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
       - name: Tests
         run: bb test
