@@ -63,6 +63,20 @@ pub struct NsMeta {
     pub file: PathBuf,
     pub aliases: HashMap<String, String>,
     pub refers: HashMap<String, String>,
+    /// Every namespace required by this file, regardless of `:as`/`:refer`
+    /// (a plain `[clojure.set]` lands here too). Used to tell whether a
+    /// qualified usage's namespace is already required.
+    pub requires: Vec<String>,
+}
+
+impl NsMeta {
+    /// Whether `prefix` is resolvable from this file: its own namespace name,
+    /// an `:as` alias, or a required namespace (plain `[clojure.set]` included).
+    pub fn resolves_prefix(&self, prefix: &str) -> bool {
+        prefix == self.name
+            || self.aliases.contains_key(prefix)
+            || self.requires.iter().any(|r| r == prefix)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -94,6 +94,72 @@ fn test_extracts_ns_aliases_and_refers() {
 }
 
 #[test]
+fn test_extracts_required_namespaces() {
+    let (meta, _) = extract(
+        include_str!("fixtures/snippets/ns_with_requires.clj"),
+        Path::new("ns_with_requires.clj"),
+    )
+    .unwrap();
+    // Every required namespace is recorded, regardless of :as / :refer.
+    assert!(meta.requires.contains(&"clojure.string".to_string()));
+    assert!(meta.requires.contains(&"my.core".to_string()));
+    assert!(meta.requires.contains(&"my.utils".to_string()));
+}
+
+#[test]
+fn test_records_bare_symbol_require() {
+    // `(:require clojure.set)` is a legal non-vector libspec; it must still
+    // land in `requires` so a fully-qualified usage isn't flagged as missing.
+    let (meta, _) = extract(
+        "(ns my.app\n  (:require clojure.set\n            [clojure.string :as str]))\n",
+        Path::new("app.clj"),
+    )
+    .unwrap();
+    assert!(meta.requires.contains(&"clojure.set".to_string()));
+    assert!(meta.requires.contains(&"clojure.string".to_string()));
+}
+
+#[test]
+fn test_qualified_usages_collects_and_skips_quotes() {
+    use clj_lsp::index::extractor::qualified_usages;
+    let src = "(ns my.app\n  (:require [clojure.string :as str]))\n\n\
+               (defn f []\n  \
+                 (str/join \", \" [1 2])\n  \
+                 (clojure.set/union #{1} #{2})\n  \
+                 'foo/bar\n  \
+                 #?(:clj (edn/read-string \"1\")))\n";
+    let usages = qualified_usages(src);
+    let pairs: Vec<(&str, &str)> = usages
+        .iter()
+        .map(|u| (u.prefix.as_str(), u.name.as_str()))
+        .collect();
+
+    assert!(pairs.contains(&("str", "join")));
+    assert!(pairs.contains(&("clojure.set", "union")));
+    // Descends into reader conditionals.
+    assert!(pairs.contains(&("edn", "read-string")));
+    // 'foo/bar is quoted data, not a usage.
+    assert!(
+        !pairs.iter().any(|(p, _)| *p == "foo"),
+        "quoted symbol should be excluded: {:?}",
+        pairs
+    );
+
+    // Range spans the whole `str/join` symbol (8 chars).
+    let join = usages.iter().find(|u| u.name == "join").unwrap();
+    assert_eq!(join.range.end.character - join.range.start.character, 8);
+}
+
+#[test]
+fn test_qualified_usages_skips_reader_discard() {
+    use clj_lsp::index::extractor::qualified_usages;
+    let src = "(ns my.app)\n(defn f []\n  #_unused/sym\n  #_(discarded/call 1)\n  (real/use))\n";
+    let usages = qualified_usages(src);
+    let prefixes: Vec<&str> = usages.iter().map(|u| u.prefix.as_str()).collect();
+    assert_eq!(prefixes, vec!["real"], "discarded forms must be excluded");
+}
+
+#[test]
 fn test_handles_reader_conditionals() {
     let (_, syms) = extract(
         include_str!("fixtures/snippets/reader_conditional.cljc"),

@@ -10,7 +10,7 @@ use super::{NsMeta, Symbol};
 /// Bump whenever the extractor or `Symbol`/`NsMeta` layout changes, so
 /// caches written by older binaries are discarded (JAR mtimes never change,
 /// so mtime alone cannot invalidate them).
-pub const CACHE_FORMAT_VERSION: u32 = 4;
+pub const CACHE_FORMAT_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {
@@ -94,6 +94,7 @@ mod tests {
             file: PathBuf::from(format!("{}!/mylib/core.clj", jar.display())),
             aliases: HashMap::new(),
             refers: HashMap::new(),
+            requires: Vec::new(),
         };
         let symbol = Symbol {
             name: "my-fn".to_string(),

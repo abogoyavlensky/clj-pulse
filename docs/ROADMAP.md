@@ -43,9 +43,10 @@ most of what follows.
 
 ## Phase 3 — editing assistance
 
-- [ ] Add-missing-require code action — the most-used clojure-lsp
+- [x] Add-missing-require code action — the most-used clojure-lsp
       refactoring; the namespace index needed to power it already exists.
-- [ ] Clean ns / sort requires.
+- [ ] Clean ns.
+- [ ] Sort requires.
 - [ ] Completion: auto-require on accept (`additionalTextEdits`), locals
       (params, `let` bindings), keywords, fuzzy matching.
 - [ ] Reference count code lens (free once Phase 2 lands).
@@ -55,10 +56,11 @@ most of what follows.
 Deliberately after references/rename: clj-kondo covers linting well in the
 meantime and keeping the server dependency-free is worth more early on.
 
+- [x] Native unresolved-namespace lint — warns on qualified usages whose
+      prefix isn't required (debounced, powers the add-require lightbulb).
+- [ ] Native fallback lints: unused require, unresolved (unqualified) symbol.
 - [ ] clj-kondo bridge — shell out to a `clj-kondo` binary when present,
       translate JSON findings to LSP diagnostics.
-- [ ] Native fallback lints from our own index (unresolved
-      symbol/namespace, unused require) for setups without clj-kondo.
 
 ## Phase 5 — broader project support (adoption)
 

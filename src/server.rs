@@ -83,7 +83,25 @@ impl Backend {
 
         Ok(TextDocumentContentResult { text })
     }
+
+    /// Computes unresolved-namespace diagnostics from the live buffer and
+    /// publishes them for `uri`.
+    async fn lint_and_publish(&self, uri: Url, version: i32) {
+        let Some(text) = self.documents.text(&uri) else {
+            return;
+        };
+        let Ok(path) = uri.to_file_path() else {
+            return;
+        };
+        let diags = crate::diagnostics::compute(&text, &path);
+        self.client
+            .publish_diagnostics(uri, diags, Some(version))
+            .await;
+    }
 }
+
+/// Idle time after the last edit before re-linting a changed document.
+const DIAGNOSTIC_DEBOUNCE_MS: u64 = 300;
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
@@ -178,6 +196,7 @@ impl LanguageServer for Backend {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -231,6 +250,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
+        let version = params.text_document.version;
 
         // Files outside deps.edn :paths (dev/, scratch files, test dirs that
         // only appear in alias :extra-paths) are not indexed at startup;
@@ -249,15 +269,21 @@ impl LanguageServer for Backend {
             }
         }
 
-        self.documents.open(uri, text);
+        self.documents.open(uri.clone(), text);
+        self.documents.set_version(&uri, version);
+        self.lint_and_publish(uri, version).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.documents.close(&params.text_document.uri);
+        let uri = params.text_document.uri;
+        self.documents.close(&uri);
+        // Clear diagnostics for the closed document.
+        self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let Ok(path) = params.text_document.uri.to_file_path() else {
+        let uri = params.text_document.uri;
+        let Ok(path) = uri.to_file_path() else {
             return;
         };
         let source = match std::fs::read_to_string(&path) {
@@ -276,6 +302,9 @@ impl LanguageServer for Backend {
             }
             Err(e) => tracing::warn!("failed to re-index {}: {}", path.display(), e),
         }
+
+        let version = self.documents.current_version(&uri).unwrap_or(0);
+        self.lint_and_publish(uri, version).await;
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -366,9 +395,31 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
+        let version = params.text_document.version;
         if let Err(e) = self.documents.apply_changes(&uri, params.content_changes) {
             tracing::warn!("failed to apply changes to {}: {}", uri, e);
+            return;
         }
+        self.documents.set_version(&uri, version);
+
+        // Debounced re-lint: only the latest edit (matching version) survives
+        // the sleep, so bursts of keystrokes collapse to one diagnostic pass.
+        let documents = self.documents.clone();
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS)).await;
+            if documents.current_version(&uri) != Some(version) {
+                return;
+            }
+            let Some(text) = documents.text(&uri) else {
+                return;
+            };
+            let Ok(path) = uri.to_file_path() else {
+                return;
+            };
+            let diags = crate::diagnostics::compute(&text, &path);
+            client.publish_diagnostics(uri, diags, Some(version)).await;
+        });
     }
 
     async fn goto_definition(
@@ -433,5 +484,12 @@ impl LanguageServer for Backend {
             &self.index,
             &params.query,
         )))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        handlers::code_action::handle(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("code action error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
     }
 }

@@ -5,12 +5,16 @@ use tower_lsp::lsp_types::{Position, TextDocumentContentChangeEvent, Url};
 
 pub struct DocumentStore {
     docs: DashMap<Url, Rope>,
+    /// Latest LSP version per open document, used to discard superseded
+    /// debounced diagnostic passes.
+    versions: DashMap<Url, i32>,
 }
 
 impl Default for DocumentStore {
     fn default() -> Self {
         Self {
             docs: DashMap::new(),
+            versions: DashMap::new(),
         }
     }
 }
@@ -26,6 +30,16 @@ impl DocumentStore {
 
     pub fn close(&self, uri: &Url) {
         self.docs.remove(uri);
+        self.versions.remove(uri);
+    }
+
+    pub fn set_version(&self, uri: &Url, version: i32) {
+        self.versions.insert(uri.clone(), version);
+    }
+
+    /// The latest recorded version for `uri`, if open.
+    pub fn current_version(&self, uri: &Url) -> Option<i32> {
+        self.versions.get(uri).map(|r| *r)
     }
 
     pub fn apply_changes(
