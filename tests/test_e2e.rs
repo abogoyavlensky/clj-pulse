@@ -23,13 +23,21 @@ impl LspClient {
     /// Spawns the server binary with `cwd` set to the project root,
     /// mirroring how an editor launches it.
     fn start(project_root: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_clj-lsp"))
-            .current_dir(project_root)
+        Self::start_with_env(project_root, &[])
+    }
+
+    /// Like [`start`] but sets extra environment variables on the server
+    /// process (e.g. `LGX_HOME` for hermetic lgx dep resolution).
+    fn start_with_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-lsp"));
+        cmd.current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("failed to spawn clj-lsp");
+            .stderr(Stdio::inherit());
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        let mut child = cmd.spawn().expect("failed to spawn clj-lsp");
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -366,8 +374,14 @@ impl Drop for LspClient {
 /// Copies the simple_project fixture into a temp dir so tests can mutate it
 /// (and so `.clj-lsp/` artifacts don't pollute the repo).
 fn setup_project() -> tempfile::TempDir {
+    setup_named("simple_project")
+}
+
+fn setup_named(name: &str) -> tempfile::TempDir {
     let tmp = tempfile::TempDir::new().unwrap();
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple_project");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
     copy_dir(&src, tmp.path());
     tmp
 }
@@ -394,6 +408,45 @@ fn position_of(path: &Path, needle: &str) -> (u32, u32) {
         }
     }
     panic!("{:?} not found in {}", needle, path.display());
+}
+
+#[test]
+fn test_e2e_letgo_navigation_into_lgx_deps() {
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    // Hermetic: point LGX_HOME at the fixture's gitlibs tree.
+    let lgx_home = root.join("lgxhome");
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let app = root.join("src/app.lg");
+    client.did_open(&app);
+
+    // Into an in-workspace :local/root dep (vendor/loc).
+    let (line, ch) = position_of(&app, "loc/hello");
+    let loc = client.goto_definition(&app, line, ch);
+    let loc_uri = loc["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for loc/hello: {}", loc));
+    assert!(
+        loc_uri.ends_with("/vendor/loc/src/loc/core.lg"),
+        "expected vendor/loc/src/loc/core.lg, got {}",
+        loc_uri
+    );
+
+    // Into a git dep resolved under LGX_HOME/gitlibs.
+    let (line, ch) = position_of(&app, "ext/greet");
+    let ext = client.goto_definition(&app, line, ch);
+    let ext_uri = ext["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for ext/greet: {}", ext));
+    assert!(
+        ext_uri.ends_with("/gitlibs/github.com/ext/lib/DEADBEEF/src/ext/core.lg"),
+        "expected the git dep core.lg, got {}",
+        ext_uri
+    );
 }
 
 #[test]

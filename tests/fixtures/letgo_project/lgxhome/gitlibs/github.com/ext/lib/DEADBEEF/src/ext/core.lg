@@ -1,0 +1,6 @@
+(ns ext.core)
+
+(defn greet
+  "Greets from a git dependency."
+  [name]
+  (str "greetings " name))

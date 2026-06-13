@@ -180,7 +180,7 @@ covers project + git/local deps only.
 **Files:**
 - Modify: `src/server.rs`
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
   In the `initialize` library-indexing task, branch on
   `config::project_kind(root)`: `LetGo` → `lgx::resolve(root)` →
   `scanner::index_classpath_libs(root, dirs, index)`; `Clojure` → existing
@@ -189,11 +189,11 @@ covers project + git/local deps only.
   (re-resolve project paths + deps). Add `.lg` to `did_open` indexing and to
   the `didChangeWatchedFiles` glob patterns (and an `lgx.edn` watcher).
 
-- [ ] **Step 2: Run full check**
+- [x] **Step 2: Run full check**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo build && bb check`
   Expected: builds; fmt/clippy clean; all existing tests pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   Run: `git add -A && git commit -m "Index lgx deps for let-go projects on startup and lgx.edn change"`
 
 ### Task 5: e2e navigation test

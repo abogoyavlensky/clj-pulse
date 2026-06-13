@@ -1,0 +1,6 @@
+(ns loc.core)
+
+(defn hello
+  "Greets locally."
+  [name]
+  (str "hello " name))

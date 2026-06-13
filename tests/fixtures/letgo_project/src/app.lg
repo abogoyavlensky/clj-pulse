@@ -1,0 +1,7 @@
+(ns app
+  (:require [loc.core :as loc]
+            [ext.core :as ext]))
+
+(defn run []
+  (println (loc/hello "world"))
+  (println (ext/greet "world")))

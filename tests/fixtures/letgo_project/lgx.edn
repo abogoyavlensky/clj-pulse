@@ -1,0 +1,5 @@
+{:paths ["src"]
+ :main "src/app.lg"
+ :deps {my/loc {:local/root "vendor/loc"}
+        ext/lib {:git/url "https://github.com/ext/lib"
+                 :git/sha "DEADBEEF"}}}
