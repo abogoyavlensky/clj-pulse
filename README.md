@@ -8,7 +8,35 @@ A minimal and fast Clojure LSP server.
 - Autocomplete (project symbols + clojure.core builtins)
 - Hover / documentation
 
-## Prerequisites
+## Installation
+
+### mise (macOS, Linux)
+
+```sh
+mise use -g ubi:abogoyavlensky/clj-lsp
+```
+
+To find the binary path for editor configuration:
+
+```sh
+mise which clj-lsp
+```
+
+### Manual download
+
+Download the archive for your platform from
+[releases](https://github.com/abogoyavlensky/clj-lsp/releases), unpack it,
+and put the binary on your `PATH`. Checksums for all archives are in
+`checksums.txt` attached to each release.
+
+> [!NOTE]
+> macOS quarantines binaries downloaded through a browser, so Gatekeeper
+> refuses to run them ("cannot be opened because the developer cannot be
+> verified"). Remove the attribute with
+> `xattr -d com.apple.quarantine ./clj-lsp`. Installs via mise are not
+> affected.
+
+## Development
 
 Install [mise](https://mise.jdx.dev/) for managing tool versions, then:
 
@@ -17,8 +45,6 @@ mise install
 ```
 
 This installs the correct versions of Rust and Babashka.
-
-## Development
 
 ```sh
 bb fmt        # fix code formatting
