@@ -5,3 +5,4 @@ pub mod document;
 pub mod handlers;
 pub mod index;
 pub mod jar_content;
+pub mod lgx;

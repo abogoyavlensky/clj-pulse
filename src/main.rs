@@ -10,6 +10,7 @@ mod document;
 mod handlers;
 mod index;
 mod jar_content;
+mod lgx;
 mod server;
 
 use server::Backend;
