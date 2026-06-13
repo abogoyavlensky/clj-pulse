@@ -275,6 +275,20 @@ impl LspClient {
         self.request("workspace/symbol", json!({ "query": query }))
     }
 
+    fn code_action(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "range": {
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character }
+                },
+                "context": { "diagnostics": [] }
+            }),
+        )
+    }
+
     fn references(&mut self, path: &Path, line: u32, character: u32, include_decl: bool) -> Value {
         self.request(
             "textDocument/references",
@@ -955,6 +969,51 @@ fn test_e2e_workspace_symbols_ranked_and_project_only() {
         names.contains(&"add-and-double"),
         "subsequence match failed: {:?}",
         names
+    );
+}
+
+#[test]
+fn test_e2e_add_missing_require() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    // consumer.clj uses `helpers/greet` without requiring simple.helpers.
+    let consumer = root.join("src/consumer.clj");
+    client.did_open(&consumer);
+
+    let (line, ch) = position_of(&consumer, "helpers/greet");
+    let result = client.code_action(&consumer, line, ch);
+
+    let actions = result.as_array().expect("expected code action array");
+    let action = actions
+        .iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .map(|t| t.contains("[simple.helpers :as helpers]"))
+                .unwrap_or(false)
+        })
+        .expect("expected add-require action for simple.helpers");
+
+    assert_eq!(action["kind"], json!("quickfix"));
+
+    // The edit inserts the require spec into consumer.clj.
+    let edits = action["edit"]["changes"]
+        .as_object()
+        .expect("expected WorkspaceEdit.changes")
+        .values()
+        .next()
+        .expect("expected edits for the file")
+        .as_array()
+        .unwrap();
+    let new_text = edits[0]["newText"].as_str().unwrap();
+    assert!(
+        new_text.contains("(:require [simple.helpers :as helpers])"),
+        "unexpected edit text: {}",
+        new_text
     );
 }
 

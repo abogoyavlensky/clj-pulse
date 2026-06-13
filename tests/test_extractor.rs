@@ -94,6 +94,32 @@ fn test_extracts_ns_aliases_and_refers() {
 }
 
 #[test]
+fn test_extracts_required_namespaces() {
+    let (meta, _) = extract(
+        include_str!("fixtures/snippets/ns_with_requires.clj"),
+        Path::new("ns_with_requires.clj"),
+    )
+    .unwrap();
+    // Every required namespace is recorded, regardless of :as / :refer.
+    assert!(meta.requires.contains(&"clojure.string".to_string()));
+    assert!(meta.requires.contains(&"my.core".to_string()));
+    assert!(meta.requires.contains(&"my.utils".to_string()));
+}
+
+#[test]
+fn test_records_bare_symbol_require() {
+    // `(:require clojure.set)` is a legal non-vector libspec; it must still
+    // land in `requires` so a fully-qualified usage isn't flagged as missing.
+    let (meta, _) = extract(
+        "(ns my.app\n  (:require clojure.set\n            [clojure.string :as str]))\n",
+        Path::new("app.clj"),
+    )
+    .unwrap();
+    assert!(meta.requires.contains(&"clojure.set".to_string()));
+    assert!(meta.requires.contains(&"clojure.string".to_string()));
+}
+
+#[test]
 fn test_handles_reader_conditionals() {
     let (_, syms) = extract(
         include_str!("fixtures/snippets/reader_conditional.cljc"),

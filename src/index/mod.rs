@@ -63,6 +63,10 @@ pub struct NsMeta {
     pub file: PathBuf,
     pub aliases: HashMap<String, String>,
     pub refers: HashMap<String, String>,
+    /// Every namespace required by this file, regardless of `:as`/`:refer`
+    /// (a plain `[clojure.set]` lands here too). Used to tell whether a
+    /// qualified usage's namespace is already required.
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

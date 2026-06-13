@@ -12,7 +12,7 @@ use super::{DefKind, NsMeta, Occurrence, Symbol};
 
 static LANGUAGE_REF: OnceLock<tree_sitter::Language> = OnceLock::new();
 
-fn language() -> &'static tree_sitter::Language {
+pub(crate) fn language() -> &'static tree_sitter::Language {
     LANGUAGE_REF.get_or_init(|| {
         let lang_fn: LanguageFn = LANGUAGE;
         lang_fn.into()
@@ -41,6 +41,7 @@ pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, V
         file: file.to_path_buf(),
         aliases: HashMap::new(),
         refers: HashMap::new(),
+        requires: Vec::new(),
     };
     let mut symbols = Vec::new();
 
@@ -137,8 +138,15 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
             let kw = inner[0];
             if kw.kind() == "kwd_lit" && node_text(kw, source) == ":require" {
                 for require_spec in &inner[1..] {
-                    if require_spec.kind() == "vec_lit" {
-                        parse_require_vector(*require_spec, source, ns_meta);
+                    match require_spec.kind() {
+                        "vec_lit" => parse_require_vector(*require_spec, source, ns_meta),
+                        // Bare `(:require clojure.set)` — no alias/refer, but
+                        // the namespace is still required. (Legacy prefix-list
+                        // libspecs `(clojure set)` are not expanded.)
+                        "sym_lit" => ns_meta
+                            .requires
+                            .push(sym_text(*require_spec, source).to_string()),
+                        _ => {}
                     }
                 }
             }
@@ -157,6 +165,7 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
     } else {
         return;
     };
+    ns_meta.requires.push(ns_name.clone());
 
     let mut i = 1;
     while i < items.len() {
@@ -305,7 +314,11 @@ fn node_to_lsp_range(node: Node, source: &str) -> Range {
 
 /// Tree-sitter columns are bytes; LSP wants UTF-16 code units. Re-measures
 /// the line prefix (from line start to the node boundary) in UTF-16.
-fn point_to_position(point: tree_sitter::Point, byte_offset: usize, source: &str) -> Position {
+pub(crate) fn point_to_position(
+    point: tree_sitter::Point,
+    byte_offset: usize,
+    source: &str,
+) -> Position {
     let line_start = byte_offset - point.column;
     let character = source
         .get(line_start..byte_offset)

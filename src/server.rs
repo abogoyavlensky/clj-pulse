@@ -178,6 +178,7 @@ impl LanguageServer for Backend {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -433,5 +434,12 @@ impl LanguageServer for Backend {
             &self.index,
             &params.query,
         )))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        handlers::code_action::handle(&self.index, &self.documents, params).map_err(|e| {
+            tracing::error!("code action error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
     }
 }

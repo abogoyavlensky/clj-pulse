@@ -1,5 +1,7 @@
 # Add-Missing-Require Code Action Implementation Plan
 
+> **Status: COMPLETED (2026-06-13).** See the summary at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Offer a `quickfix` code action that adds a missing `:require` clause when the cursor sits on an alias- or namespace-qualified symbol whose prefix is not yet required.
@@ -126,7 +128,7 @@ client-visible capability, `bb e2e-nvim` must pass too.
 - Create: `src/handlers/code_action.rs`
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Write focused unit tests for candidate resolution**
+- [x] **Step 1: Write focused unit tests for candidate resolution**
   In `code_action.rs` `#[cfg(test)]`, build an `Index` by hand
   (`Index::new`, `insert_file`/`insert_lib_file`) containing `clojure.string`
   with `join`, `clojure.set` with `union`, and `simple.helpers` with `greet`.
@@ -139,11 +141,11 @@ client-visible capability, `bb e2e-nvim` must pass too.
   (`"str/nope"`), when the alias is already in `NsMeta.aliases`, and for
   `clojure.core/x`.
 
-- [ ] **Step 2: Run the focused test (expect failure)**
+- [x] **Step 2: Run the focused test (expect failure)**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib code_action`
   Expected: fails to compile / tests fail (function not implemented yet).
 
-- [ ] **Step 3: Implement detection + candidate resolution**
+- [x] **Step 3: Implement detection + candidate resolution**
   Add the curated table, `split prefix/name`, the "already required" guard
   using a passed-in `&NsMeta`, last-segment scan over `index.namespaces`,
   fully-qualified check, the `lookup_in_ns` verification filter, dedup by
@@ -151,7 +153,7 @@ client-visible capability, `bb e2e-nvim` must pass too.
   function taking `(&Index, &NsMeta, &str)` so it is unit-testable without a
   server.
 
-- [ ] **Step 4: Run verification**
+- [x] **Step 4: Run verification**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib code_action`
   Expected: all candidate-resolution tests pass.
 
@@ -160,7 +162,7 @@ client-visible capability, `bb e2e-nvim` must pass too.
 **Files:**
 - Modify: `src/handlers/code_action.rs`
 
-- [ ] **Step 1: Write focused unit tests for the require edit**
+- [x] **Step 1: Write focused unit tests for the require edit**
   Assert a helper `require_edit(source, "[clojure.string :as str]")` returns a
   `TextEdit` whose application yields the expected text for: (a) an ns with an
   existing `(:require [a.b :as b])` clause — new spec appended as a new
@@ -169,17 +171,17 @@ client-visible capability, `bb e2e-nvim` must pass too.
   with metadata (`^{:doc "…"}`). Verify by applying the edit to the source
   string and comparing.
 
-- [ ] **Step 2: Run the focused test (expect failure)**
+- [x] **Step 2: Run the focused test (expect failure)**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib code_action`
   Expected: edit tests fail (not implemented).
 
-- [ ] **Step 3: Implement the edit builder**
+- [x] **Step 3: Implement the edit builder**
   Parse with tree-sitter, locate the `(ns …)` list and any `(:require …)`
   child, compute the insertion `Position` via `point_to_position`, and return
   the `TextEdit`. Reuse extractor helpers where practical; if they are private,
   add a small local parse rather than widening their visibility unnecessarily.
 
-- [ ] **Step 4: Run verification**
+- [x] **Step 4: Run verification**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib code_action`
   Expected: all `code_action` unit tests pass.
 
@@ -189,7 +191,7 @@ client-visible capability, `bb e2e-nvim` must pass too.
 - Modify: `src/handlers/code_action.rs` (the `handle` entry point)
 - Modify: `src/server.rs`
 
-- [ ] **Step 1: Implement `handle` and wire the server**
+- [x] **Step 1: Implement `handle` and wire the server**
   Write `handle(index, documents, params)` that takes the request range start,
   resolves the token, re-extracts the live `NsMeta`, gathers candidates, and
   returns one `CodeActionResponse` entry per candidate (each a `CodeAction`
@@ -198,7 +200,7 @@ client-visible capability, `bb e2e-nvim` must pass too.
   `internal_error()`), and add `code_action_provider:
   Some(CodeActionProviderCapability::Simple(true))`.
 
-- [ ] **Step 2: Run full check**
+- [x] **Step 2: Run full check**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo build && bb check`
   Expected: builds, fmt/clippy clean, all unit + integration tests pass.
 
@@ -209,18 +211,18 @@ client-visible capability, `bb e2e-nvim` must pass too.
 - Create: `tests/fixtures/simple_project/src/helpers.clj`
 - Modify: a consumer fixture file (new or existing) using `helpers/<fn>`
 
-- [ ] **Step 1: Add fixture + e2e test**
+- [x] **Step 1: Add fixture + e2e test**
   Add `helpers.clj` (`(ns simple.helpers)` + a `defn`). Add a consumer file
   that uses `helpers/<fn>` with no require. Add a `code_action` client helper
   to `LspClient` and a test that opens the consumer, sends
   `textDocument/codeAction` at the usage, and asserts one action titled with
   `[simple.helpers :as helpers]` and an edit inserting that spec.
 
-- [ ] **Step 2: Run e2e**
+- [x] **Step 2: Run e2e**
   Run: `bb e2e`
   Expected: the new test passes alongside the existing suite.
 
-- [ ] **Step 3: Run the editor-client e2e**
+- [x] **Step 3: Run the editor-client e2e**
   Run: `bb e2e-nvim`
   Expected: passes (capability is advertised and the action is returned).
 
@@ -229,9 +231,53 @@ client-visible capability, `bb e2e-nvim` must pass too.
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Check off the item**
+- [x] **Step 1: Check off the item**
   Mark "Add-missing-require code action" done in Phase 3.
 
-- [ ] **Step 2: Final verification**
+- [x] **Step 2: Final verification**
   Run: `bb check && bb e2e`
   Expected: green.
+
+---
+
+## Completion Summary
+
+Implemented as planned. The `textDocument/codeAction` handler offers an
+"Add require `[…]`" quickfix when the cursor is on a qualified symbol whose
+prefix isn't yet required, drawing candidates from a curated alias table, the
+fully-qualified-namespace case, and last-segment matches — each verified
+against the index (the symbol must actually exist in the candidate namespace)
+and rendered as an inline `WorkspaceEdit`.
+
+**What shipped**
+
+- `src/handlers/code_action.rs` — candidate resolution (`candidates`), edit
+  construction (`require_edit`), and the `handle` entry point, with 15 unit
+  tests.
+- `NsMeta.requires` — new field recording every required namespace regardless
+  of `:as`/`:refer`, so already-required namespaces (including plain
+  `[clojure.set]` and bare `(:require clojure.set)`) aren't re-suggested.
+  Bumped `CACHE_FORMAT_VERSION` 4 → 5 per the jar-cache invariant.
+- `server.rs` — `code_action` method + `code_action_provider` capability.
+- `tests/test_e2e.rs` — `code_action` client helper + `test_e2e_add_missing_require`,
+  with `simple.helpers` / `simple.consumer` fixtures.
+
+**Issues found and fixed during review** (codex second-opinion, one per task):
+
+1. Self-require via fully-qualified prefix (`simple.helpers/greet` inside
+   `simple.helpers`) — added a `prefix == ns_meta.name` guard.
+2. Self-require via last-segment match (`helpers/greet` inside
+   `simple.helpers`) — added a `ns != ns_meta.name` filter on resolved
+   candidates.
+3. Bare-symbol requires `(:require clojure.set)` weren't recorded in
+   `requires`, risking duplicate suggestions — `extract_ns` now handles
+   `sym_lit` specs.
+
+**Known limitation:** legacy prefix-list libspecs `(:require (clojure set))`
+are not expanded (consistent with the extractor's existing alias/refer
+handling); a fully-qualified usage of such a namespace could still be
+suggested. Out of scope for v1.
+
+**Verification:** `bb check` (fmt + clippy `-D warnings` + 60 lib / all
+integration tests), `bb e2e` (30 passed, 1 ignored), and `bb e2e-nvim` (real
+Neovim client) all green.

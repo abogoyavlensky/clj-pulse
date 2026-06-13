@@ -43,7 +43,7 @@ most of what follows.
 
 ## Phase 3 — editing assistance
 
-- [ ] Add-missing-require code action — the most-used clojure-lsp
+- [x] Add-missing-require code action — the most-used clojure-lsp
       refactoring; the namespace index needed to power it already exists.
 - [ ] Clean ns / sort requires.
 - [ ] Completion: auto-require on accept (`additionalTextEdits`), locals
