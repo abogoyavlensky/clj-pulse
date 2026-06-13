@@ -64,11 +64,11 @@ meantime and keeping the server dependency-free is worth more early on.
 
 ## Phase 5 — broader project support (adoption)
 
-- [ ] install with my homebrew-tap repo
 - [ ] let-go support with lgx (~/.lgx/gitlibs) deps resolver
 - [ ] Keyword indexing — navigation/rename for namespaced keywords
       (re-frame subs, Integrant keys).
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
+- [ ] Install with my homebrew-tap repo.
 - [ ] Leiningen classpath (`project.clj` / NO `lein classpath`) — not used by
       the maintainer, but required for wider adoption. Do not run java at all - inspect project.clj.
 - [ ] shadow-cljs classpath and cljs-aware indexing.
