@@ -153,26 +153,26 @@ covers project + git/local deps only.
 - Modify: `src/config.rs`
 - Modify: `src/index/scanner.rs`
 
-- [ ] **Step 1: Write focused unit tests**
+- [x] **Step 1: Write focused unit tests**
   In `config.rs`: `find_project_root` stops at a dir with only `lgx.edn`;
   `source_paths` returns `:paths` parsed from an `lgx.edn`; `project_kind`
   returns `LetGo` for `lgx.edn` and `Clojure` for `deps.edn`. (Scanner `.lg`
   pickup is covered by the Task 5 e2e.)
 
-- [ ] **Step 2: Run the focused test (expect failure)**
+- [x] **Step 2: Run the focused test (expect failure)**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib config`
   Expected: new tests fail (not implemented).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add `ProjectKind` + `project_kind`; teach `find_project_root` and
   `source_paths` about `lgx.edn` (parse `:paths` via `edn-rs`). Add `"lg"` to
   the extension check in `scanner::collect_clojure_files`.
 
-- [ ] **Step 4: Run verification**
+- [x] **Step 4: Run verification**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib config`
   Expected: config tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   Run: `git add -A && git commit -m "Recognize let-go projects (lgx.edn) and index .lg files"`
 
 ### Task 4: Server wiring

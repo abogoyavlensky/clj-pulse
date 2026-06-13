@@ -75,6 +75,18 @@ pub fn index_classpath_libs(root: &Path, classpath: Vec<PathBuf>, index: &Index)
     index_classpath_jars(&root, jars, index);
 }
 
+/// Indexes explicit library source directories (e.g. resolved lgx deps).
+/// Unlike [`index_classpath_libs`], it never splits out JARs or skips dirs
+/// under the project root — every dir is a real dependency, including a
+/// `:local/root` dep that happens to live inside the workspace. Paths are
+/// canonicalized so navigation targets are clean absolute paths.
+pub fn index_dir_libs(dirs: &[PathBuf], index: &Index) {
+    for dir in dirs {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        index_classpath_dir(&dir, index);
+    }
+}
+
 /// Indexes a library source directory from the classpath. No disk cache:
 /// directories are cheap to walk and, unlike JARs, can change in place.
 fn index_classpath_dir(dir: &Path, index: &Index) {

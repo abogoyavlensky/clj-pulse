@@ -12,6 +12,29 @@ use crate::index::extractor;
 use crate::index::scanner;
 use crate::index::Index;
 use crate::jar_content;
+use crate::lgx;
+
+/// Resolves and indexes a project's libraries: lgx git/local deps (indexed as
+/// source dirs, including in-workspace `:local/root` deps) for let-go projects,
+/// or the `.cpcache` classpath (JARs + dirs) for Clojure projects. Returns the
+/// number of resolved entries; 0 means nothing was found to index.
+fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> usize {
+    match config::project_kind(root) {
+        config::ProjectKind::LetGo => {
+            let dirs = lgx::resolve(root);
+            scanner::index_dir_libs(&dirs, index);
+            dirs.len()
+        }
+        config::ProjectKind::Clojure => {
+            let classpath = classpath::discover(root);
+            let n = classpath.len();
+            if n > 0 {
+                scanner::index_classpath_libs(root, classpath, index);
+            }
+            n
+        }
+    }
+}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct TextDocumentContentParams {
@@ -153,16 +176,23 @@ impl LanguageServer for Backend {
                 let index_jars = self.index.clone();
                 let client_jars = self.client.clone();
                 tokio::spawn(async move {
-                    let classpath = classpath::discover(&root_path_jars);
-                    if classpath.is_empty() {
-                        let msg = "clj-lsp: no classpath found (no .cpcache/ in project root?) \
-                                   — library symbols will not be indexed. Run `clojure -Spath` \
-                                   or start a REPL once to generate it.";
+                    if resolve_and_index_libs(&root_path_jars, &index_jars) == 0 {
+                        let msg = match config::project_kind(&root_path_jars) {
+                            config::ProjectKind::LetGo => {
+                                "clj-lsp: no lgx deps resolved (no ~/.lgx/gitlibs, or deps not \
+                                 fetched — run `lgx run`/`lgx build` once) — library symbols \
+                                 will not be indexed."
+                            }
+                            config::ProjectKind::Clojure => {
+                                "clj-lsp: no classpath found (no .cpcache/ in project root?) \
+                                 — library symbols will not be indexed. Run `clojure -Spath` \
+                                 or start a REPL once to generate it."
+                            }
+                        };
                         tracing::warn!("{}", msg);
                         client_jars.log_message(MessageType::WARNING, msg).await;
                         return;
                     }
-                    scanner::index_classpath_libs(&root_path_jars, classpath, &index_jars);
                     let sym_count = index_jars.symbols.len();
                     let msg = format!(
                         "clj-lsp: library indexing complete ({} total symbols)",
@@ -217,11 +247,15 @@ impl LanguageServer for Backend {
         // simply reject this; everything else still works.
         let watchers = vec![
             FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/*.{clj,cljs,cljc}".to_string()),
+                glob_pattern: GlobPattern::String("**/*.{clj,cljs,cljc,lg}".to_string()),
                 kind: None,
             },
             FileSystemWatcher {
                 glob_pattern: GlobPattern::String("**/deps.edn".to_string()),
+                kind: None,
+            },
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/lgx.edn".to_string()),
                 kind: None,
             },
             FileSystemWatcher {
@@ -315,9 +349,13 @@ impl LanguageServer for Backend {
                 continue;
             };
 
-            // deps.edn affects both the classpath and the project's own
-            // :paths; .cpcache only the classpath.
-            if path.file_name().map(|n| n == "deps.edn").unwrap_or(false) {
+            // deps.edn / lgx.edn affect both the classpath/deps and the
+            // project's own :paths; .cpcache only the classpath.
+            let manifest = path
+                .file_name()
+                .map(|n| n == "deps.edn" || n == "lgx.edn")
+                .unwrap_or(false);
+            if manifest {
                 classpath_changed = true;
                 source_paths_changed = true;
                 continue;
@@ -327,11 +365,11 @@ impl LanguageServer for Backend {
                 continue;
             }
 
-            let is_clj = path
+            let is_source = path
                 .extension()
-                .map(|e| e == "clj" || e == "cljs" || e == "cljc")
+                .map(|e| e == "clj" || e == "cljs" || e == "cljc" || e == "lg")
                 .unwrap_or(false);
-            if !is_clj {
+            if !is_source {
                 continue;
             }
 
@@ -380,11 +418,9 @@ impl LanguageServer for Backend {
 
                     // Drop symbols of removed/replaced dependencies first
                     index.clear_libs();
-                    let classpath = classpath::discover(&root);
-                    if classpath.is_empty() {
+                    if resolve_and_index_libs(&root, &index) == 0 {
                         return;
                     }
-                    scanner::index_classpath_libs(&root, classpath, &index);
                     let msg = "clj-lsp: library re-indexing complete";
                     tracing::info!("{}", msg);
                     client.log_message(MessageType::INFO, msg).await;
