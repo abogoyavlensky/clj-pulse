@@ -1,5 +1,8 @@
 # let-go / lgx Deps Resolver Implementation Plan
 
+> **Status: COMPLETED (2026-06-14).** See the summary at the end. Note: the
+> EDN parser used is `edn-format`, not `edn-rs` (the latter is deprecated).
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Index and navigate let-go projects — their `.lg`/`.cljc`/`.clj` files and their lgx-managed git/local dependencies — so go-to-definition, hover, completion, and references work across a let-go project and its libraries.
@@ -204,7 +207,7 @@ covers project + git/local deps only.
   and a fixture gitlibs tree for `LGX_HOME`.
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Add fixtures + test**
+- [x] **Step 1: Add fixtures + test**
   Create a let-go project whose `lgx.edn` has `:paths ["src"]` and two deps: a
   `:local/root` dep and a `:git/sha` dep resolvable under a fixture
   `LGX_HOME`. The project `.lg` requires both and uses a symbol from each.
@@ -214,15 +217,15 @@ covers project + git/local deps only.
   dep `.lg` files (plain `file:` URIs). The `LspClient` may need to set an env
   var on spawn — extend `start` if required.
 
-- [ ] **Step 2: Run e2e**
+- [x] **Step 2: Run e2e**
   Run: `bb e2e`
   Expected: the new test passes with the suite.
 
-- [ ] **Step 3: Run the editor-client e2e**
+- [x] **Step 3: Run the editor-client e2e**
   Run: `bb e2e-nvim`
   Expected: passes.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   Run: `git add -A && git commit -m "e2e: navigate a let-go project into its lgx deps"`
 
 ### Task 6: Roadmap + final verification
@@ -230,13 +233,64 @@ covers project + git/local deps only.
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Mark the item landed**
+- [x] **Step 1: Mark the item landed**
   Update the Phase 5 "let-go support with lgx deps resolver" entry (note
   let-go core navigation remains deferred).
 
-- [ ] **Step 2: Final verification**
+- [x] **Step 2: Final verification**
   Run: `bb check && bb e2e`
   Expected: green.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   Run: `git add -A && git commit -m "Mark lgx deps resolver landed in roadmap"`
+
+---
+
+## Completion Summary
+
+Implemented as planned. clj-lsp now recognizes let-go projects (`lgx.edn`),
+indexes their `.lg`/`.cljc`/`.clj` files, and resolves lgx git/`:local/root`
+dependencies (transitively, first-wins) so definition/hover/completion/
+references work across a let-go project and its libraries — via plain `file:`
+URIs, no `jar:` machinery.
+
+**What shipped**
+
+- `src/lgx.rs` — `lgx.edn` `:deps` parsing and `resolve()` (gitlib path
+  mapping, sha/tag ref encoding, `:deps/root` default, transitive BFS,
+  first-wins), plus `paths()` for `:paths`. 10 unit tests.
+- `src/config.rs` — `ProjectKind`/`project_kind`, `lgx.edn` in
+  `find_project_root`, `source_paths` from `lgx.edn`.
+- `src/index/scanner.rs` — `.lg` extension; new `index_dir_libs` that indexes
+  dep source dirs without the classpath root filter (so in-workspace
+  `:local/root` deps are indexed).
+- `src/server.rs` — `resolve_and_index_libs` branches lib indexing on project
+  kind for startup and `lgx.edn`/`.cpcache` changes; `.lg` + `lgx.edn` added to
+  the watched-file globs and change handling.
+- `tests/fixtures/letgo_project/` + `tests/test_e2e.rs` —
+  `LspClient::start_with_env` and an e2e asserting navigation from a project
+  `.lg` into both an in-workspace `:local/root` dep and an `LGX_HOME` gitlib.
+
+**Deviations / decisions**
+
+- **EDN parser:** used `edn-format` (maintained) instead of the planned
+  `edn-rs` (deprecated). Same role; cleaner `Value`/`Keyword`/`Symbol` API.
+- **let-go built-in `core` navigation:** deferred as agreed — it lives in the
+  runtime, not the project/`~/.lgx`, and needs separate discovery.
+
+**Issues found and fixed during review** (codex second-opinion):
+
+- In-workspace `:local/root` deps were dropped by `index_classpath_libs`'s
+  "skip dirs under project root" filter (correct for Clojure, wrong for lgx).
+  Fixed by routing lgx deps through the new `index_dir_libs`; the e2e
+  regression-tests it with a `vendor/loc` dep under the project root.
+- Earlier mid-plan reviews flagged not-yet-wired indexing, the `.lg` extension,
+  and watched-file handling — all delivered by later tasks; plus a rustfmt gate
+  fix on the e2e test.
+
+**Known limitations:** legacy prefix-list libspecs `(:require (clojure set))`
+are not expanded; let-go `core`/stdlib navigation is deferred.
+
+**Verification:** `bb check` (fmt + clippy `-D warnings` + 89 lib / all
+integration tests), `bb e2e` (32 passed, 1 ignored), and `bb e2e-nvim` (real
+Neovim client) all green.
