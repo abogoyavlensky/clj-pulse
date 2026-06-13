@@ -52,6 +52,17 @@ fn resolve_with_home(project_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
+/// Parses the top-level `:paths` vector of an `lgx.edn`. Empty when absent.
+pub fn paths(edn: &str) -> Vec<String> {
+    let Ok(Value::Map(top)) = edn_format::parse_str(edn) else {
+        return vec![];
+    };
+    let Some(Value::Vector(v)) = get(&top, kw("paths")) else {
+        return vec![];
+    };
+    v.iter().filter_map(as_str).map(str::to_string).collect()
+}
+
 fn read_deps(root: &Path) -> Vec<(String, Dep)> {
     std::fs::read_to_string(root.join("lgx.edn"))
         .ok()

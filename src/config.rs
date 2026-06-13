@@ -1,5 +1,23 @@
 use std::path::{Path, PathBuf};
 
+/// The dependency-management flavor of a project, decided by its manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectKind {
+    /// Clojure project (`deps.edn` / `project.clj`, classpath via `.cpcache`).
+    Clojure,
+    /// let-go project (`lgx.edn`, deps via `~/.lgx/gitlibs`).
+    LetGo,
+}
+
+/// A project with an `lgx.edn` is a let-go project; otherwise Clojure.
+pub fn project_kind(root: &Path) -> ProjectKind {
+    if root.join("lgx.edn").exists() {
+        ProjectKind::LetGo
+    } else {
+        ProjectKind::Clojure
+    }
+}
+
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_file() {
         start.parent()?.to_path_buf()
@@ -8,7 +26,10 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     };
 
     loop {
-        if dir.join("deps.edn").exists() || dir.join("project.clj").exists() {
+        if dir.join("deps.edn").exists()
+            || dir.join("project.clj").exists()
+            || dir.join("lgx.edn").exists()
+        {
             return Some(dir);
         }
         if !dir.pop() {
@@ -18,6 +39,17 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 }
 
 pub fn source_paths(root: &Path) -> Vec<PathBuf> {
+    // let-go projects declare their source paths in lgx.edn.
+    if project_kind(root) == ProjectKind::LetGo {
+        if let Ok(contents) = std::fs::read_to_string(root.join("lgx.edn")) {
+            let paths = crate::lgx::paths(&contents);
+            if !paths.is_empty() {
+                return paths.into_iter().map(|p| root.join(p)).collect();
+            }
+        }
+        return vec![root.join("src"), root.join("test")];
+    }
+
     let deps_edn = root.join("deps.edn");
     if let Ok(contents) = std::fs::read_to_string(&deps_edn) {
         if let Some(paths) = parse_paths_from_deps_edn(&contents) {
@@ -155,5 +187,51 @@ mod tests {
     fn test_extra_paths_not_matched() {
         let edn = r#"{:extra-paths ["dev"]}"#;
         assert_eq!(parse_paths_from_deps_edn(edn), None);
+    }
+
+    #[test]
+    fn test_project_kind_detects_letgo_and_clojure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lgx.edn"), "{:paths [\"src\"]}").unwrap();
+        assert_eq!(project_kind(dir.path()), ProjectKind::LetGo);
+
+        let dir2 = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir2.path().join("deps.edn"), "{:paths [\"src\"]}").unwrap();
+        assert_eq!(project_kind(dir2.path()), ProjectKind::Clojure);
+    }
+
+    #[test]
+    fn test_find_project_root_stops_at_lgx_edn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lgx.edn"), "{}").unwrap();
+        let nested = root.join("src").join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            find_project_root(&nested).unwrap().canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_source_paths_from_lgx_edn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lgx.edn"), r#"{:paths ["src" "test"] :deps {}}"#).unwrap();
+        assert_eq!(
+            source_paths(root),
+            vec![root.join("src"), root.join("test")]
+        );
+    }
+
+    #[test]
+    fn test_source_paths_letgo_defaults_without_paths() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lgx.edn"), "{:deps {}}").unwrap();
+        assert_eq!(
+            source_paths(root),
+            vec![root.join("src"), root.join("test")]
+        );
     }
 }

@@ -184,7 +184,8 @@ fn collect_clojure_files(source_paths: &[PathBuf]) -> Vec<PathBuf> {
             if path.is_file() {
                 if let Some(ext) = path.extension() {
                     let ext = ext.to_string_lossy();
-                    if ext == "clj" || ext == "cljs" || ext == "cljc" {
+                    // `.lg` is let-go source (Clojure syntax).
+                    if ext == "clj" || ext == "cljs" || ext == "cljc" || ext == "lg" {
                         files.push(path.to_path_buf());
                     }
                 }

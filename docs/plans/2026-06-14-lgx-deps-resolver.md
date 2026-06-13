@@ -98,7 +98,7 @@ covers project + git/local deps only.
 - Create: `src/lgx.rs`
 - Modify: `src/lib.rs`, `src/main.rs`
 
-- [ ] **Step 1: Add `edn-rs` and register the module**
+- [x] **Step 1: Add `edn-rs` and register the module**
   Add `edn-rs` to `[dependencies]`; add `pub mod lgx;` to `lib.rs` and
   `mod lgx;` to `main.rs`. Define `Coord` (Git{ url, reff } | Local{ root })
   and a `Dep { coord, deps_root: Option<String> }`, plus
@@ -106,17 +106,17 @@ covers project + git/local deps only.
   pairs (lib name is the coord symbol). For git coords compute `reff` = sha if
   present, else the tag with `/` → `_`.
 
-- [ ] **Step 2: Write focused unit tests**
+- [x] **Step 2: Write focused unit tests**
   In `lgx.rs` `#[cfg(test)]`: parse a `:deps` map covering a `:git/sha` coord,
   a `:git/tag` coord (assert `/`→`_` encoding), a `:local/root` coord, and a
   coord with explicit `:deps/root`; assert lib names and coord fields. Assert
   an absent/empty `:deps` yields an empty vec.
 
-- [ ] **Step 3: Run the focused test**
+- [x] **Step 3: Run the focused test**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib lgx`
   Expected: parsing tests pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   Run: `git add -A && git commit -m "Parse lgx.edn :deps coords"`
 
 ### Task 2: Dependency resolution
@@ -124,7 +124,7 @@ covers project + git/local deps only.
 **Files:**
 - Modify: `src/lgx.rs`
 
-- [ ] **Step 1: Implement resolution**
+- [x] **Step 1: Implement resolution**
   Add `lgx_home()` (`$LGX_HOME` else `~/.lgx`), `gitlib_dir(url, reff)`
   (`lgx_home/gitlibs/<url sans scheme sans .git>/<reff>`), `source_dir(root,
   deps_root)` (explicit `:deps/root`, else `src` if present, else root), and
@@ -132,7 +132,7 @@ covers project + git/local deps only.
   walk that reads each dep's own `lgx.edn` for transitive deps. Warn+skip
   missing dirs.
 
-- [ ] **Step 2: Write focused unit tests**
+- [x] **Step 2: Write focused unit tests**
   Build a temp `$LGX_HOME` (override the env) with a fake gitlib checkout
   (`gitlibs/github.com/x/lib/<sha>/src/...`) and a `:local/root` dep dir, plus
   a project `lgx.edn` referencing both; assert `resolve` returns both source
@@ -140,11 +140,11 @@ covers project + git/local deps only.
   and a first-wins conflict case. Assert `deps_root` default picks `src` vs
   repo root.
 
-- [ ] **Step 3: Run the focused test**
+- [x] **Step 3: Run the focused test**
   Run: `CARGO_TARGET_DIR=/tmp/clj-lsp-target cargo test --lib lgx`
   Expected: resolution tests pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   Run: `git add -A && git commit -m "Resolve lgx git/local deps to source dirs (transitive, first-wins)"`
 
 ### Task 3: Project recognition + `.lg` extension
