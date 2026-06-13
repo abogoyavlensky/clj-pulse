@@ -62,6 +62,7 @@ meantime and keeping the server dependency-free is worth more early on.
 
 ## Phase 5 — broader project support (adoption)
 
+- [ ] install with my homebrew-tap repo
 - [ ] let-go support with lgx (~/.lgx/gitlibs) deps resolver
 - [ ] Keyword indexing — navigation/rename for namespaced keywords
       (re-frame subs, Integrant keys).
