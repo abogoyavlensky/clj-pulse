@@ -72,13 +72,13 @@ meantime and keeping the server dependency-free is worth more early on.
 - [ ] Leiningen classpath (`project.clj` / NO `lein classpath`) — not used by
       the maintainer, but required for wider adoption. Do not run java at all - inspect project.clj.
 - [ ] shadow-cljs classpath and cljs-aware indexing.
+- [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
 
 ## Out of scope for now
 
 - Formatting — Calva ships and defaults to its own formatter.
 - The full clojure-lsp refactoring suite (extract function, inline symbol,
   thread/unthread, move-to-let, …) — each is its own project.
-- Java interop (class navigation/completion, decompilation, stubs).
 - Semantic tokens, call hierarchy, protocol implementations, Calva custom
   APIs (`clojure/serverInfo`, test tree, project tree), `.lsp/config.edn`
   settings system, persistent project analysis cache.
