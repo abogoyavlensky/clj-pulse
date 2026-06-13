@@ -62,11 +62,13 @@ meantime and keeping the server dependency-free is worth more early on.
 
 ## Phase 5 — broader project support (adoption)
 
-- [ ] Leiningen classpath (`project.clj` / `lein classpath`) — not used by
-      the maintainer, but required for wider adoption.
-- [ ] shadow-cljs classpath and cljs-aware indexing.
+- [ ] let-go support with lgx (~/.lgx/gitlibs) deps resolver
 - [ ] Keyword indexing — navigation/rename for namespaced keywords
       (re-frame subs, Integrant keys).
+- [ ] Download docs for built-in functions from https://clojuredocs.org/
+- [ ] Leiningen classpath (`project.clj` / NO `lein classpath`) — not used by
+      the maintainer, but required for wider adoption. Do not run java at all - inspect project.clj.
+- [ ] shadow-cljs classpath and cljs-aware indexing.
 
 ## Out of scope for now
 
