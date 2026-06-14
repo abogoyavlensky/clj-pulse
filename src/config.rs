@@ -67,7 +67,10 @@ pub fn source_paths(root: &Path) -> Vec<PathBuf> {
     };
 
     let mut rel: Vec<String> = Vec::new();
-    for p in declared.into_iter().chain(["src".to_string(), "test".to_string()]) {
+    for p in declared
+        .into_iter()
+        .chain(["src".to_string(), "test".to_string()])
+    {
         if !rel.contains(&p) {
             rel.push(p);
         }
@@ -193,7 +196,12 @@ mod tests {
                                 :dev {:extra-paths ["dev" "env/dev"]}}}"#;
         let paths = parse_paths_from_deps_edn(edn).unwrap();
         for p in ["src", "test", "dev", "env/dev"] {
-            assert!(paths.contains(&p.to_string()), "missing {} in {:?}", p, paths);
+            assert!(
+                paths.contains(&p.to_string()),
+                "missing {} in {:?}",
+                p,
+                paths
+            );
         }
     }
 
@@ -207,8 +215,16 @@ mod tests {
         )
         .unwrap();
         let paths = source_paths(root);
-        assert!(paths.contains(&root.join("src")), "missing src: {:?}", paths);
-        assert!(paths.contains(&root.join("test")), "missing test: {:?}", paths);
+        assert!(
+            paths.contains(&root.join("src")),
+            "missing src: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&root.join("test")),
+            "missing test: {:?}",
+            paths
+        );
         // No duplicate `src`.
         assert_eq!(
             paths.iter().filter(|p| **p == root.join("src")).count(),
