@@ -19,9 +19,15 @@ pub fn project_kind(root: &Path) -> ProjectKind {
 }
 
 /// Whether `path` is a Clojure source file we provide language intelligence
-/// for (`.clj`, `.cljs`, `.cljc`, and let-go `.lg`). EDN config files like
-/// `deps.edn` / `lgx.edn` are not source and must not be indexed or linted.
+/// for (`.clj`, `.cljs`, `.cljc`, and let-go `.lg`). Config files are not
+/// source and must not be indexed or linted: EDN ones (`deps.edn` / `lgx.edn`)
+/// are excluded by extension, and Leiningen's `project.clj` — a build manifest
+/// whose dependency coordinates would otherwise be flagged as unresolved
+/// namespaces — is excluded by name despite its `.clj` extension.
 pub fn is_clojure_source(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) == Some("project.clj") {
+        return false;
+    }
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some("clj") | Some("cljs") | Some("cljc") | Some("lg")
@@ -60,10 +66,18 @@ pub fn source_paths(root: &Path) -> Vec<PathBuf> {
             .map(|c| crate::lgx::paths(&c))
             .unwrap_or_default()
     } else {
+        // deps.edn `:paths` is authoritative; fall back to a Leiningen
+        // `project.clj`'s `:source-paths`/`:test-paths` only when deps.edn
+        // declares nothing.
         std::fs::read_to_string(root.join("deps.edn"))
             .ok()
             .and_then(|c| parse_paths_from_deps_edn(&c))
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                std::fs::read_to_string(root.join("project.clj"))
+                    .ok()
+                    .map(|c| crate::leiningen::source_paths(&c))
+                    .unwrap_or_default()
+            })
     };
 
     let mut rel: Vec<String> = Vec::new();
@@ -244,6 +258,11 @@ mod tests {
         assert!(!is_clojure_source(Path::new("lgx.edn")));
         assert!(!is_clojure_source(Path::new("foo.edn")));
         assert!(!is_clojure_source(Path::new("Makefile")));
+        // project.clj is a Leiningen build manifest, not a namespace.
+        assert!(!is_clojure_source(Path::new("project.clj")));
+        assert!(!is_clojure_source(Path::new("/a/b/project.clj")));
+        // build.clj (tools.build) is real source and must stay linted.
+        assert!(is_clojure_source(Path::new("build.clj")));
     }
 
     #[test]
@@ -278,6 +297,56 @@ mod tests {
         assert_eq!(
             source_paths(root),
             vec![root.join("src"), root.join("test")]
+        );
+    }
+
+    #[test]
+    fn test_source_paths_from_project_clj() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("project.clj"),
+            r#"(defproject app "0.1.0" :source-paths ["src/main/clojure"])"#,
+        )
+        .unwrap();
+        let paths = source_paths(root);
+        assert!(
+            paths.contains(&root.join("src/main/clojure")),
+            "missing project.clj source-path: {:?}",
+            paths
+        );
+        // src/test defaults still unioned in.
+        assert!(paths.contains(&root.join("src")));
+        assert!(paths.contains(&root.join("test")));
+    }
+
+    #[test]
+    fn test_source_paths_standard_project_clj_defaults() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("project.clj"), r#"(defproject app "0.1.0")"#).unwrap();
+        let paths = source_paths(root);
+        assert_eq!(paths, vec![root.join("src"), root.join("test")]);
+    }
+
+    #[test]
+    fn test_deps_edn_paths_win_over_project_clj() {
+        // A project carrying both files: deps.edn :paths is authoritative; the
+        // project.clj :source-paths must be ignored.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("deps.edn"), r#"{:paths ["xyz"]}"#).unwrap();
+        std::fs::write(
+            root.join("project.clj"),
+            r#"(defproject app "0.1.0" :source-paths ["abc"])"#,
+        )
+        .unwrap();
+        let paths = source_paths(root);
+        assert!(paths.contains(&root.join("xyz")), "missing deps.edn path");
+        assert!(
+            !paths.contains(&root.join("abc")),
+            "project.clj path leaked despite deps.edn: {:?}",
+            paths
         );
     }
 

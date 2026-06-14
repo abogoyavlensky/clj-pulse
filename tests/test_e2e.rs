@@ -690,6 +690,153 @@ fn test_e2e_completion_from_jar_library() {
 }
 
 #[test]
+fn test_e2e_no_diagnostics_on_project_clj() {
+    // Opening project.clj must not flag dependency coordinates
+    // (`org.clojure/clojure`, `ring/ring-defaults`) as unresolved namespaces —
+    // it is a build manifest, not source (like deps.edn / lgx.edn).
+    let project = setup_named("lein_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let project_clj = root.join("project.clj");
+    std::fs::write(
+        &project_clj,
+        "(defproject app \"0.1.0\"\n  :dependencies [[org.clojure/clojure \"1.11.1\"]\n                 [ring/ring-defaults \"0.3.2\"]])\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&project_clj);
+
+    let diags = client.wait_for_diagnostics("/project.clj");
+    let list = diags["diagnostics"].as_array().expect("diagnostics array");
+    assert!(
+        list.is_empty(),
+        "expected no diagnostics on project.clj, got {}",
+        diags["diagnostics"]
+    );
+}
+
+#[test]
+fn test_e2e_leiningen_navigation_into_m2_jar() {
+    // A Leiningen project with no .cpcache: deps are read from project.clj and
+    // mapped to JARs under its :local-repo Maven tree. The fixture's
+    // project.clj also carries `^{:protect false}` metadata and a `#"user"`
+    // regex, proving the masked parser resolves :dependencies regardless.
+    let project = setup_named("lein_project");
+    let root = project.path().canonicalize().unwrap();
+
+    // Lay down the declared dep [mylib "1.0.0"] at its Maven coordinate inside
+    // the hermetic :local-repo (<root>/m2).
+    let jar_path = root.join("m2/mylib/mylib/1.0.0/mylib-1.0.0.jar");
+    std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn helper\n  \"Does helping.\"\n  [x]\n  x)\n\n(defn helper-two [x] x)\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let consumer = root.join("src/uses_lib.clj");
+    client.did_open(&consumer);
+
+    client.did_change_insert(&consumer, 2, 0, "(u/hel");
+    let result = client.completion(&consumer, 2, 6);
+
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("expected CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"u/helper") && labels.contains(&"u/helper-two"),
+        "expected u/helper completions from project.clj-resolved JAR, got {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_e2e_project_clj_change_indexes_new_deps() {
+    // Editing project.clj while the server runs must re-resolve Leiningen deps
+    // (it is a manifest, like deps.edn), not merely re-index it as source.
+    let project = setup_named("lein_project");
+    let root = project.path().canonicalize().unwrap();
+
+    // The dep JAR exists on disk, but project.clj initially declares nothing.
+    let jar_path = root.join("m2/mylib/mylib/1.0.0/mylib-1.0.0.jar");
+    std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n(defn helper [x] x)\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let project_clj = root.join("project.clj");
+    std::fs::write(
+        &project_clj,
+        "(defproject lein-app \"0.1.0\" :local-repo \"m2\" :source-paths [\"src\"])\n",
+    )
+    .unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n\n(u/helper 42)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    // No deps yet, so the library task logs a warning rather than completion;
+    // sync on the project index instead.
+    client.wait_for_log("Indexed");
+    client.did_open(&consumer);
+
+    let (line, ch) = position_of(&consumer, "u/helper");
+    assert!(
+        client.goto_definition(&consumer, line, ch).is_null(),
+        "lib resolved before being declared in project.clj"
+    );
+
+    // Declare the dependency and signal the manifest change.
+    std::fs::write(
+        &project_clj,
+        "(defproject lein-app \"0.1.0\" :local-repo \"m2\"\n  :dependencies [[mylib \"1.0.0\"]]\n  :source-paths [\"src\"])\n",
+    )
+    .unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", project_clj.display()), "type": 2 }] }),
+    );
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let result = client.goto_definition(&consumer, line, ch);
+        if let Some(uri) = result["uri"].as_str() {
+            assert!(
+                uri.starts_with("jar:file://") && uri.ends_with("!/mylib/util.clj"),
+                "expected jar navigation after project.clj edit, got {}",
+                uri
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "new dep not indexed after project.clj change"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn test_e2e_completion_from_directory_library() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();

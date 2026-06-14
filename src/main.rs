@@ -11,6 +11,7 @@ mod edn;
 mod handlers;
 mod index;
 mod jar_content;
+mod leiningen;
 mod lgx;
 mod server;
 
