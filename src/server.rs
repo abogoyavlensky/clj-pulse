@@ -320,21 +320,23 @@ impl LanguageServer for Backend {
         let Ok(path) = uri.to_file_path() else {
             return;
         };
-        let source = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("failed to read {}: {}", path.display(), e);
-                return;
+        // Only re-index Clojure source files; saving an EDN config file
+        // (deps.edn / lgx.edn) must not insert a junk empty namespace.
+        if config::is_clojure_source(&path) {
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    self.index.remove_file(&path);
+                    match extractor::extract_full(&source, &path) {
+                        Ok((meta, symbols, occurrences)) => {
+                            let count = symbols.len();
+                            self.index.insert_file(meta, symbols, occurrences);
+                            tracing::info!("re-indexed {} ({} symbols)", path.display(), count);
+                        }
+                        Err(e) => tracing::warn!("failed to re-index {}: {}", path.display(), e),
+                    }
+                }
+                Err(e) => tracing::warn!("failed to read {}: {}", path.display(), e),
             }
-        };
-        self.index.remove_file(&path);
-        match extractor::extract_full(&source, &path) {
-            Ok((meta, symbols, occurrences)) => {
-                let count = symbols.len();
-                self.index.insert_file(meta, symbols, occurrences);
-                tracing::info!("re-indexed {} ({} symbols)", path.display(), count);
-            }
-            Err(e) => tracing::warn!("failed to re-index {}: {}", path.display(), e),
         }
 
         let version = self.documents.current_version(&uri).unwrap_or(0);
