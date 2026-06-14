@@ -12,12 +12,15 @@ use crate::index::extractor;
 use crate::index::scanner;
 use crate::index::Index;
 use crate::jar_content;
+use crate::leiningen;
 use crate::lgx;
 
 /// Resolves and indexes a project's libraries: lgx git/local deps (indexed as
 /// source dirs, including in-workspace `:local/root` deps) for let-go projects,
-/// or the `.cpcache` classpath (JARs + dirs) for Clojure projects. Returns the
-/// number of resolved entries; 0 means nothing was found to index.
+/// or the `.cpcache` classpath (JARs + dirs) for Clojure projects. When there
+/// is no usable `.cpcache` but a Leiningen `project.clj` is present, falls back
+/// to resolving its direct deps to `~/.m2` JARs. Returns the number of resolved
+/// entries; 0 means nothing was found to index.
 fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> usize {
     match config::project_kind(root) {
         config::ProjectKind::LetGo => {
@@ -26,7 +29,13 @@ fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> usize {
             dirs.len()
         }
         config::ProjectKind::Clojure => {
-            let classpath = classpath::discover(root);
+            // deps.edn's `.cpcache` is authoritative (full transitive
+            // classpath). Only when it is empty do we consult a Leiningen
+            // `project.clj` for its direct dependencies.
+            let mut classpath = classpath::discover(root);
+            if classpath.is_empty() && root.join("project.clj").exists() {
+                classpath = leiningen::resolve(root);
+            }
             let n = classpath.len();
             if n > 0 {
                 scanner::index_classpath_libs(root, classpath, index);
