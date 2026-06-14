@@ -360,11 +360,11 @@ impl LanguageServer for Backend {
                 continue;
             };
 
-            // deps.edn / lgx.edn affect both the classpath/deps and the
-            // project's own :paths; .cpcache only the classpath.
+            // deps.edn / lgx.edn / project.clj affect both the classpath/deps
+            // and the project's own :paths; .cpcache only the classpath.
             let manifest = path
                 .file_name()
-                .map(|n| n == "deps.edn" || n == "lgx.edn")
+                .map(|n| n == "deps.edn" || n == "lgx.edn" || n == "project.clj")
                 .unwrap_or(false);
             if manifest {
                 classpath_changed = true;

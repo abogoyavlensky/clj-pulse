@@ -28,78 +28,163 @@ struct Coord {
     version: String,
 }
 
-/// Returns a same-length copy of `src` with the *contents* of strings, line
-/// comments, and character literals blanked to spaces. Brackets and keywords
-/// that are real code keep their positions (so the original can be sliced by
-/// index); ones hiding inside strings or comments are erased so they cannot
-/// mislead the scan.
-fn mask(src: &str) -> Vec<char> {
-    let chars: Vec<char> = src.chars().collect();
-    let mut out = chars.clone();
+/// Builds two same-length char views of `src`:
+///
+/// - **locator** — string/comment/char-literal contents *and* reader-discarded
+///   (`#_`) forms blanked to spaces, so keywords and delimiters can be located
+///   without matching ones that hide in strings, comments, or disabled config.
+/// - **parse_buf** — only comments and discarded forms blanked; string contents
+///   are preserved. This is the text actually handed to `edn_format`, which
+///   rejects `#_` discards inside a vector (it fails the whole parse), so they
+///   must be stripped first while keeping the real version/path strings.
+///
+/// Both are indexed identically, so a position found in `locator` slices
+/// `parse_buf` at the same offset.
+fn prepare(src: &str) -> (Vec<char>, Vec<char>) {
+    let original: Vec<char> = src.chars().collect();
+    let mut locator = original.clone();
+    let mut parse_buf = original.clone();
     let mut i = 0;
-    // Parser state across the single pass.
+    // Single pass: blank string/comment/char-literal content in `locator`, and
+    // comment content in `parse_buf` (edn handles `;` but it is cleaner gone).
     let mut in_string = false;
     let mut in_comment = false;
-    while i < chars.len() {
-        let c = chars[i];
+    while i < original.len() {
+        let c = original[i];
         if in_comment {
             if c == '\n' {
                 in_comment = false;
             } else {
-                out[i] = ' ';
+                locator[i] = ' ';
+                parse_buf[i] = ' ';
             }
         } else if in_string {
             if c == '\\' {
-                // Escape: blank the backslash and the char it escapes.
-                out[i] = ' ';
-                if i + 1 < chars.len() {
-                    out[i + 1] = ' ';
+                locator[i] = ' ';
+                if i + 1 < original.len() {
+                    locator[i + 1] = ' ';
                     i += 1;
                 }
             } else if c == '"' {
-                in_string = false; // keep the closing quote
+                in_string = false; // keep the closing quote in `locator`
             } else {
-                out[i] = ' ';
+                locator[i] = ' '; // blank string content in `locator` only
             }
         } else if c == '"' {
-            in_string = true; // keep the opening quote
+            in_string = true; // keep the opening quote in `locator`
         } else if c == ';' {
-            out[i] = ' ';
+            locator[i] = ' ';
+            parse_buf[i] = ' ';
             in_comment = true;
         } else if c == '\\' {
-            // Character literal (`\[`, `\;`, …): blank it and the next char so
-            // it is never mistaken for a delimiter or comment.
-            out[i] = ' ';
-            if i + 1 < chars.len() {
-                out[i + 1] = ' ';
+            // Character literal (`\[`, `\;`, …): blank in `locator` so it is
+            // never mistaken for a delimiter or comment.
+            locator[i] = ' ';
+            if i + 1 < original.len() {
+                locator[i + 1] = ' ';
                 i += 1;
             }
         }
         i += 1;
     }
-    out
+
+    // Blank `#_`-discarded forms in both views (found on `locator`, where
+    // strings are already neutralized so brackets/quotes inside them can't
+    // throw off form scanning).
+    for (start, end) in discard_ranges(&locator) {
+        for k in start..end {
+            locator[k] = ' ';
+            parse_buf[k] = ' ';
+        }
+    }
+
+    (locator, parse_buf)
 }
 
-/// For each token-boundary occurrence of `keyword` in `masked`, seek the next
-/// `open` delimiter and EDN-parse one value from the *original* `chars` at that
-/// point. `parse_str` reads exactly one form and stops, so trailing
-/// reader-macro junk is ignored. Slices that fail to parse are skipped.
+/// Spans of every `#_ <form>` reader-discard in `loc` (a string/comment-masked
+/// buffer), each from the `#` through the end of the form it discards.
+fn discard_ranges(loc: &[char]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + 1 < loc.len() {
+        if loc[i] == '#' && loc[i + 1] == '_' {
+            let end = form_end(loc, i + 2);
+            ranges.push((i, end));
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
+/// Index just past the next EDN form starting at/after `start` in `loc`.
+/// Handles a bracketed collection (balanced, skipping masked strings), a
+/// string, or a bare atom.
+fn form_end(loc: &[char], start: usize) -> usize {
+    let mut i = start;
+    while i < loc.len() && loc[i].is_whitespace() {
+        i += 1;
+    }
+    if i >= loc.len() {
+        return i;
+    }
+    match loc[i] {
+        '(' | '[' | '{' => {
+            let mut depth = 0usize;
+            let mut in_str = false;
+            while i < loc.len() {
+                match loc[i] {
+                    '"' => in_str = !in_str,
+                    '(' | '[' | '{' if !in_str => depth += 1,
+                    ')' | ']' | '}' if !in_str => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return i + 1;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            i
+        }
+        '"' => {
+            i += 1;
+            while i < loc.len() && loc[i] != '"' {
+                i += 1;
+            }
+            (i + 1).min(loc.len())
+        }
+        _ => {
+            while i < loc.len() && !loc[i].is_whitespace() && !matches!(loc[i], ')' | ']' | '}') {
+                i += 1;
+            }
+            i
+        }
+    }
+}
+
+/// For each token-boundary occurrence of `keyword` in `locator`, seek the next
+/// `open` delimiter and EDN-parse one value from `parse_buf` at that point.
+/// `parse_str` reads exactly one form and stops, so trailing reader-macro junk
+/// is ignored. Slices that fail to parse are skipped.
 ///
 /// Seeking the opening delimiter (rather than the next non-space char) lets us
 /// step over Leiningen metadata such as `^:replace` or `^{:protect false}`,
 /// which `edn_format` cannot parse, that may sit between the key and its value.
-fn forms_after(chars: &[char], masked: &[char], keyword: &str, open: char) -> Vec<Value> {
+fn forms_after(parse_buf: &[char], locator: &[char], keyword: &str, open: char) -> Vec<Value> {
     let word: Vec<char> = keyword.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
-    while i < masked.len() {
-        if at_word(masked, i, &word) {
+    while i < locator.len() {
+        if at_word(locator, i, &word) {
             let mut j = i + word.len();
-            while j < masked.len() && masked[j] != open {
+            while j < locator.len() && locator[j] != open {
                 j += 1;
             }
-            if j < masked.len() {
-                let slice: String = chars[j..].iter().collect();
+            if j < locator.len() {
+                let slice: String = parse_buf[j..].iter().collect();
                 if let Ok(v) = edn_format::parse_str(&slice) {
                     out.push(v);
                 }
@@ -150,10 +235,9 @@ fn coord_from(parts: &[Value]) -> Option<Coord> {
 /// Coordinates from every `:dependencies` vector in `src` (top-level and
 /// nested under `:profiles`/`:cljsbuild`), de-duplicated, first-wins.
 fn parse_deps(src: &str) -> Vec<Coord> {
-    let chars: Vec<char> = src.chars().collect();
-    let masked = mask(src);
+    let (locator, parse_buf) = prepare(src);
     let mut out: Vec<Coord> = Vec::new();
-    for form in forms_after(&chars, &masked, ":dependencies", '[') {
+    for form in forms_after(&parse_buf, &locator, ":dependencies", '[') {
         let Value::Vector(items) = form else { continue };
         for item in items {
             if let Value::Vector(parts) = item {
@@ -171,11 +255,10 @@ fn parse_deps(src: &str) -> Vec<Coord> {
 /// Union of all `:source-paths` and `:test-paths` declared in `edn`
 /// (top-level and within `:profiles`/`:cljsbuild`).
 pub fn source_paths(edn: &str) -> Vec<String> {
-    let chars: Vec<char> = edn.chars().collect();
-    let masked = mask(edn);
+    let (locator, parse_buf) = prepare(edn);
     let mut out: Vec<String> = Vec::new();
     for key in [":source-paths", ":test-paths"] {
-        for form in forms_after(&chars, &masked, key, '[') {
+        for form in forms_after(&parse_buf, &locator, key, '[') {
             let Value::Vector(items) = form else { continue };
             for item in items {
                 if let Some(s) = as_str(&item) {
@@ -205,9 +288,8 @@ fn read_project_clj(root: &Path) -> Option<String> {
 /// The local Maven repository for the project: `:local-repo` if declared
 /// (absolute, or relative to `root`), else `~/.m2/repository`.
 fn m2_repo(root: &Path, edn: &str) -> Option<PathBuf> {
-    let chars: Vec<char> = edn.chars().collect();
-    let masked = mask(edn);
-    if let Some(s) = forms_after(&chars, &masked, ":local-repo", '"')
+    let (locator, parse_buf) = prepare(edn);
+    if let Some(s) = forms_after(&parse_buf, &locator, ":local-repo", '"')
         .iter()
         .find_map(as_str)
     {
@@ -333,6 +415,25 @@ mod tests {
         let mut want = vec!["dev", "src/clj", "src/cljs", "test/clj"];
         want.sort();
         assert_eq!(paths, want);
+    }
+
+    #[test]
+    fn skips_reader_discarded_forms() {
+        // `#_` discards the next form. Cases: a discarded entry inside the
+        // vector (also handled by edn), a discarded vector right after the key,
+        // and a discarded key + vector.
+        let edn = r#"(defproject x "1"
+          :dependencies [[active "1.0"] #_[disabled "9.9"]]
+          :source-paths #_["discarded"] ["src"]
+          #_:test-paths #_["nope"])"#;
+        let deps = parse_deps(edn);
+        assert!(coord(&deps, "active").is_some(), "active dep dropped");
+        assert!(coord(&deps, "disabled").is_none(), "discarded dep parsed");
+
+        let paths = source_paths(edn);
+        // The real ["src"] wins; the discarded ["discarded"] and the
+        // discarded :test-paths key are ignored.
+        assert_eq!(paths, vec!["src".to_string()]);
     }
 
     #[test]
