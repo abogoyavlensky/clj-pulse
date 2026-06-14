@@ -7,6 +7,7 @@ mod classpath;
 mod config;
 mod diagnostics;
 mod document;
+mod edn;
 mod handlers;
 mod index;
 mod jar_content;

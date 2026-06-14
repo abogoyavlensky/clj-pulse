@@ -5,10 +5,12 @@
 //! `$LGX_HOME/gitlibs`, and hands them to the library indexer as plain
 //! source dirs (`SymbolSource::Dir`).
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use edn_format::{Keyword, Value};
+use edn_format::Value;
+
+use crate::edn::{as_str, get, kw, kw_ns, str_vec_at};
 
 /// Resolves a let-go project's lgx dependencies to their source directories,
 /// following transitive `:deps` breadth-first with first-wins on lib name.
@@ -57,10 +59,7 @@ pub fn paths(edn: &str) -> Vec<String> {
     let Ok(Value::Map(top)) = edn_format::parse_str(edn) else {
         return vec![];
     };
-    let Some(Value::Vector(v)) = get(&top, kw("paths")) else {
-        return vec![];
-    };
-    v.iter().filter_map(as_str).map(str::to_string).collect()
+    str_vec_at(&top, kw("paths")).unwrap_or_default()
 }
 
 fn read_deps(root: &Path) -> Vec<(String, Dep)> {
@@ -178,25 +177,6 @@ fn parse_deps(edn: &str) -> Vec<(String, Dep)> {
         out.push((lib, Dep { coord, deps_root }));
     }
     out
-}
-
-fn kw(name: &str) -> Value {
-    Value::Keyword(Keyword::from_name(name))
-}
-
-fn kw_ns(namespace: &str, name: &str) -> Value {
-    Value::Keyword(Keyword::from_namespace_and_name(namespace, name))
-}
-
-fn get(map: &BTreeMap<Value, Value>, key: Value) -> Option<&Value> {
-    map.get(&key)
-}
-
-fn as_str(value: &Value) -> Option<&str> {
-    match value {
-        Value::String(s) => Some(s),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
