@@ -1,6 +1,6 @@
 # Index Declared Source Roots at Startup Implementation Plan
 
-> **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make "find references" / rename see usages across the whole project at startup by scanning declared source roots (`deps.edn` top-level `:paths` plus every alias's `:extra-paths`) and always including `src/` and `test/` by default — not just top-level `:paths`.
 
@@ -73,24 +73,24 @@ startup / deps.edn|lgx.edn change
 - Create: `src/edn.rs`
 - Modify: `src/lib.rs`, `src/lgx.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   In `src/edn.rs`, add a `#[cfg(test)]` test `str_vec_at_reads_string_vector`: parse `{:paths ["a" "b"] :n 1}` with `edn_format::parse_str`, assert `str_vec_at(&map, kw("paths"))` returns `Some(vec!["a","b"])`, and that a missing key and a non-vector value both return `None`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
   Run: `cargo test --lib edn::tests::str_vec_at_reads_string_vector`
   Expected: FAIL (module/function does not exist).
 
-- [ ] **Step 3: Implement the shared helpers**
+- [x] **Step 3: Implement the shared helpers**
   Create `src/edn.rs` with `pub(crate)` fns moved from `lgx.rs`: `kw(name) -> Value`, `kw_ns(ns, name) -> Value`, `get(&BTreeMap<Value,Value>, Value) -> Option<&Value>`, `as_str(&Value) -> Option<&str>`, plus `str_vec_at(&BTreeMap<Value,Value>, Value) -> Option<Vec<String>>` (returns the strings of a `Value::Vector` at the key, `None` if absent or not a vector). Register `pub mod edn;` in `src/lib.rs`.
 
-- [ ] **Step 4: Refactor lgx to use the shared helpers**
-  In `src/lgx.rs`, replace the private `kw`/`kw_ns`/`get`/`as_str` with `use crate::edn::{...}`; delete the duplicated definitions. Behavior is unchanged.
+- [x] **Step 4: Refactor lgx to use the shared helpers**
+  In `src/lgx.rs`, replace the private `kw`/`kw_ns`/`get`/`as_str` with `use crate::edn::{...}`; delete the duplicated definitions. Behavior is unchanged. (`paths()` now uses `str_vec_at`.)
 
-- [ ] **Step 5: Run tests to verify they pass**
-  Run: `cargo test --lib edn:: lgx::`
+- [x] **Step 5: Run tests to verify they pass**
+  Run: `cargo test --lib` (clippy `--lib -D warnings` + 92 tests)
   Expected: PASS — new `edn` test plus all existing `lgx` tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Add shared edn helper module and reuse it in lgx"`
 
 ### Task 2: deps.edn alias `:extra-paths` + default `src`/`test` roots
@@ -98,28 +98,28 @@ startup / deps.edn|lgx.edn change
 **Files:**
 - Modify: `src/config.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In `config.rs` tests:
   - `test_alias_extra_paths_included`: `parse_paths_from_deps_edn(r#"{:paths ["src"] :aliases {:test {:extra-paths ["test"]}}}"#)` returns `Some(vec!["src","test"])`.
   - `test_multiple_alias_extra_paths_unioned`: two aliases each contributing `:extra-paths` are all collected.
   - `test_source_paths_always_includes_src_and_test`: in a temp project whose `deps.edn` is `{:paths ["src"]}`, `source_paths(root)` contains both `root/src` and `root/test` with no duplicate `src`.
   Keep the existing parser tests (`test_alias_paths_are_ignored`, `test_top_level_paths_after_aliases`, `test_extra_paths_not_matched`, comment/string tests, `test_no_paths_returns_none`) — they must still pass under the new implementation.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib config::tests`
   Expected: FAIL on the new tests (alias `:extra-paths` not collected; `test` default not added).
 
-- [ ] **Step 3: Rewrite the parser with `edn-format`**
+- [x] **Step 3: Rewrite the parser with `edn-format`**
   Replace `parse_paths_from_deps_edn` internals (and delete `find_top_level_paths`) with an `edn_format::parse_str` implementation using `crate::edn` helpers: collect top-level `:paths` strings, then for each value in the `:aliases` map collect its `:extra-paths` strings; union (top-level first, then aliases). Return `None` when nothing is collected. On parse error return `None`.
 
-- [ ] **Step 4: Add `src`/`test` defaults + de-dup in `source_paths`**
+- [x] **Step 4: Add `src`/`test` defaults + de-dup in `source_paths`**
   Update `source_paths` so that, for both project kinds, it takes the declared roots (deps.edn parse, or `lgx::paths` for let-go; empty if none), then appends `"src"` and `"test"` if not already present, de-duplicates, and maps each to `root.join(p)`. Remove the old "return defaults only when `:paths` absent" branch — defaults are now always unioned.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
   Run: `cargo test --lib config::tests`
   Expected: PASS — new and existing tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Scan alias :extra-paths and always include src/test source roots"`
 
 ### Task 3: e2e references into unopened test/ directories
@@ -127,24 +127,63 @@ startup / deps.edn|lgx.edn change
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the e2e test(s)**
+- [x] **Step 1: Write the e2e test(s)**
   Add `test_e2e_references_into_unopened_test_dir`: in the `simple_project` fixture, write `deps.edn` as `{:paths ["src"] :aliases {:test {:extra-paths ["test"]}} :deps {...}}`, create `test/core_test.clj` with `(ns simple.core-test (:require [simple.core :as core])) (core/add 1 2)`, start + `initialize`, `wait_for_log("Indexed")`, `did_open` **only** `src/core.clj`, then `references` at the `add` definition (declaration excluded) and assert the result contains a location ending `/test/core_test.clj`. Add a second assertion variant (or sibling test) where `deps.edn` is `{:paths ["src"] :deps {...}}` (no test alias) to prove the `test/` **default** also works.
 
-- [ ] **Step 2: Run the test(s)**
+- [x] **Step 2: Run the test(s)**
   Run: `cargo test --test test_e2e test_e2e_references_into_unopened_test_dir`
   Expected: PASS (with Tasks 1–2 in place).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "e2e: references find usages in unopened test/ dirs"`
 
 ### Task 4: Full verification
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Run the full check suite**
+- [x] **Step 1: Run the full check suite**
   Run: `bb check`
   Expected: PASS — fmt clean, clippy `-D warnings` clean, all unit tests pass.
 
-- [ ] **Step 2: Run the e2e suite**
+- [x] **Step 2: Run the e2e suite**
   Run: `bb e2e`
   Expected: PASS — including the new references tests and all existing navigation/diagnostics tests.
+
+---
+
+## Outcome
+
+**Status: complete.** Find-references / rename now see usages across the whole
+project at startup, not only in opened files.
+
+Root cause: references already searched the full occurrence index, but only
+top-level `:paths` was scanned at startup, so `test/`/`dev/` usages were absent
+until their files were opened.
+
+What shipped:
+- New `src/edn.rs` — shared typed accessors over `edn_format::Value`
+  (`kw`, `kw_ns`, `get`, `as_str`, `str_vec_at`); `lgx.rs` reuses them (its
+  `paths()` is now a one-liner via `str_vec_at`). Registered in both `lib.rs`
+  and `main.rs` (the binary re-declares modules separately).
+- `config::source_paths` now unions declared roots with `src`/`test` defaults
+  and de-duplicates. Declared roots for `deps.edn` = top-level `:paths` ∪ every
+  alias's `:extra-paths`, parsed with `edn-format` (the hand-rolled scanner and
+  `find_top_level_paths` are gone). Alias `:paths` is still intentionally
+  ignored (build tooling). let-go keeps its `lgx.edn` `:paths`, now plus the
+  defaults.
+- Tests: `edn::str_vec_at`; config parser/`source_paths` cases (alias
+  extra-paths, multi-alias union, always-src/test, no dup); two e2e tests
+  proving references find a `test/` usage without opening it (alias-declared and
+  default-only).
+
+Verification: `bb check` (exit 0) and `bb e2e` (35 passed, 1 ignored — the
+`e2e-real` test needs the Clojure CLI) both green.
+
+Review: codex second-opinion pass found no actionable regressions.
+
+Notes:
+- A long line in `config.rs` needed a follow-up rustfmt commit.
+- Out of scope by design: a blind whole-root walk (would overturn the
+  `:paths`-gates-indexing model and swallow in-root dependency checkouts);
+  usages in a directory declared nowhere *and* not named `src`/`test` are still
+  indexed on open only.
