@@ -450,6 +450,30 @@ fn test_e2e_letgo_navigation_into_lgx_deps() {
 }
 
 #[test]
+fn test_e2e_no_diagnostics_on_lgx_edn() {
+    // Opening lgx.edn must not flag dependency coordinates (`my/loc`,
+    // `ext/lib`) as unresolved namespaces — EDN config files are not source.
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let lgx = root.join("lgx.edn");
+    client.did_open(&lgx);
+
+    let diags = client.wait_for_diagnostics("/lgx.edn");
+    let list = diags["diagnostics"].as_array().expect("diagnostics array");
+    assert!(
+        list.is_empty(),
+        "expected no diagnostics on lgx.edn, got {}",
+        diags["diagnostics"]
+    );
+}
+
+#[test]
 fn test_e2e_cross_file_definition() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
