@@ -71,8 +71,13 @@ meantime and keeping the server dependency-free is worth more early on.
 - [ ] Keyword indexing — navigation/rename for namespaced keywords. + Navigation on Integrant keys from integratn system edn file to components
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
 - [ ] Install with my homebrew-tap repo.
-- [ ] Leiningen classpath (`project.clj` / NO `lein classpath`) — not used by
-      the maintainer, but required for wider adoption. Do not run java at all - inspect project.clj.
+- [x] Leiningen classpath (`project.clj` / NO `lein classpath`) — inspects
+      `project.clj` only (no java): masks strings/comments then EDN-parses just
+      the `:dependencies`/`:source-paths`/`:test-paths`/`:local-repo` vectors,
+      so metadata (`^…`) and regex (`#"…"`) elsewhere don't break it. Maps
+      direct deps (top-level + profiles) to existing `~/.m2`/`:local-repo` JARs
+      and reuses the classpath JAR indexer. Used only when there is no
+      `.cpcache`. Transitive deps deferred (see below).
 - [ ] shadow-cljs classpath and cljs-aware indexing.
 - [ ] Keyword indexing for re-frame subs
 - [ ] Transitive Clojure deps

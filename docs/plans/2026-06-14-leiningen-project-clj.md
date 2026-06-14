@@ -1,10 +1,12 @@
 # Leiningen `project.clj` Support Implementation Plan
 
+> **Status: COMPLETED (2026-06-15).** See the summary at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Index and navigate the dependencies of a Leiningen project by reading `project.clj` directly — mapping its declared Maven coordinates to the JARs already in `~/.m2/repository` — so completion, hover, and go-to-definition reach library code without running `java` or `lein classpath`.
 
-**Tech Stack:** Rust, `edn-format` (parses the `(defproject …)` form as a `Value::List`), the existing `index_classpath_libs` JAR pipeline.
+**Tech Stack:** Rust, `edn-format` (parses each extracted `[…]` vector after masking strings/comments — not the whole `(defproject …)` form), the existing `index_classpath_libs` JAR pipeline.
 
 ---
 
@@ -139,7 +141,7 @@ doc-comment style, and the `resolve_with_<x>` test seam.
 - Create: `src/leiningen.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   In `src/leiningen.rs` `#[cfg(test)]`, cover pure parsing (no filesystem). Use
   a realistic fixture string modeled on `../tickets/project.clj` — it MUST
   include `^{:protect false}`, `^:replace`, `#"user"`, and a `:profiles` block
@@ -162,11 +164,11 @@ doc-comment style, and the `resolve_with_<x>` test seam.
   - Coord→path: `org.clojure/clojure 1.11.1` under a given repo dir →
     `<repo>/org/clojure/clojure/1.11.1/clojure-1.11.1.jar`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib leiningen`
   Expected: FAIL (module/functions do not exist).
 
-- [ ] **Step 3: Implement the extractor + parser**
+- [x] **Step 3: Implement the extractor + parser**
   Add `pub mod leiningen;` to `src/lib.rs`. In `src/leiningen.rs`:
   - `mask(src) -> Vec<char>` (or same-length `String`): single pass over chars
     tracking normal / in-string / in-line-comment state. Blank string contents
@@ -189,11 +191,11 @@ doc-comment style, and the `resolve_with_<x>` test seam.
   - Reuse `crate::edn::{as_str, str_vec_at}` where they fit. Keep every function
     total: malformed input → empty, mirroring `lgx.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib leiningen`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Add Leiningen project.clj extractor (masked per-vector parse)"`
 
 ### Task 2: Resolve deps to existing m2 JARs (`src/leiningen.rs`)
@@ -201,7 +203,7 @@ doc-comment style, and the `resolve_with_<x>` test seam.
 **Files:**
 - Modify: `src/leiningen.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   Using `tempfile`, mirror `lgx.rs`'s filesystem tests:
   - Lay out a fake repo dir with `org/clojure/clojure/1.11.1/clojure-1.11.1.jar`
     and `hiccup/hiccup/1.0.5/hiccup-1.0.5.jar`; write a `project.clj` declaring
@@ -212,11 +214,11 @@ doc-comment style, and the `resolve_with_<x>` test seam.
     public `resolve` builds on (test the default-repo wiring only via the
     `:local-repo` path to stay hermetic).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib leiningen`
   Expected: FAIL (`resolve_with_repo`/`m2_repo` not implemented).
 
-- [ ] **Step 3: Implement resolution**
+- [x] **Step 3: Implement resolution**
   - `m2_repo(root, edn)`: extract `:local-repo` via `forms_after` (it yields a
     `Value::String`); if present, use it absolute or joined to `root`. Else
     `~/.m2/repository` via `HOME`/`USERPROFILE` (mirror `lgx::lgx_home`).
@@ -226,11 +228,11 @@ doc-comment style, and the `resolve_with_<x>` test seam.
     `resolve_with_repo`. Return empty (with a `tracing::debug!`) when there is
     no `project.clj`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib leiningen`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Resolve Leiningen deps to existing ~/.m2 JARs"`
 
 ### Task 3: Source paths from `project.clj` (`src/config.rs`)
@@ -238,7 +240,7 @@ doc-comment style, and the `resolve_with_<x>` test seam.
 **Files:**
 - Modify: `src/config.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   In `config.rs` tests:
   - A project with only `project.clj` declaring `:source-paths
     ["src/main/clojure"]` makes `source_paths` include
@@ -246,20 +248,20 @@ doc-comment style, and the `resolve_with_<x>` test seam.
   - A standard `project.clj` (no `:source-paths`) still yields `src`/`test`.
   - deps.edn `:paths` still takes precedence when both files exist.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib config`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `source_paths`, after the let-go and deps.edn branches: when the declared
   set is empty and `root.join("project.clj")` exists, read it and use
   `leiningen::source_paths`. Keep the existing `src`/`test` union and dedup.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib config`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Read :source-paths/:test-paths from project.clj"`
 
 ### Task 4: Wire the Leiningen fallback into indexing (`src/server.rs`)
@@ -267,7 +269,7 @@ doc-comment style, and the `resolve_with_<x>` test seam.
 **Files:**
 - Modify: `src/server.rs`
 
-- [ ] **Step 1: Implement the fallback**
+- [x] **Step 1: Implement the fallback**
   In `resolve_and_index_libs`, Clojure branch: keep
   `classpath::discover(root)` first. When it returns empty **and**
   `root.join("project.clj")` exists, call `leiningen::resolve(root)`; if it
@@ -275,11 +277,11 @@ doc-comment style, and the `resolve_with_<x>` test seam.
   count. Add a `use crate::leiningen;` import. Update the function doc-comment
   to mention the Leiningen fallback.
 
-- [ ] **Step 2: Verify the workspace builds and unit tests pass**
+- [x] **Step 2: Verify the workspace builds and unit tests pass**
   Run: `bb check`
   Expected: PASS (fmt clean, clippy `-D warnings` clean, all unit tests green).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Index Leiningen deps when no .cpcache is present"`
 
 ### Task 5: End-to-end navigation into an m2 JAR
@@ -288,7 +290,7 @@ doc-comment style, and the `resolve_with_<x>` test seam.
 - Create: `tests/fixtures/lein_project/` (`project.clj`, `src/`)
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e test**
+- [x] **Step 1: Write the failing e2e test**
   Model on `test_e2e_completion_from_jar_library`:
   - Fixture `project.clj`: `(defproject lein-app "0.1.0" :local-repo "m2"
     :dependencies [[mylib "1.0.0"]] :source-paths ["src"])`. (`:local-repo`
@@ -301,20 +303,20 @@ doc-comment style, and the `resolve_with_<x>` test seam.
     complete")`, `did_open`, then assert completion offers `u/<fn>` (and/or
     `goto_definition` returns a `jar:` URI ending in `!/mylib/util.clj`).
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
   Run: `bb e2e` (or `cargo test --test test_e2e e2e_lein`)
   Expected: FAIL (no completion / no definition) before wiring is exercised end
   to end.
 
-- [ ] **Step 3: Make it pass**
+- [x] **Step 3: Make it pass**
   No new production code expected — Tasks 1–4 supply the behavior. Fix any
   fixture-path or coordinate-mapping mismatches the test reveals.
 
-- [ ] **Step 4: Run the full e2e + check suite**
+- [x] **Step 4: Run the full e2e + check suite**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Smoke-test against the real project (manual, not CI)**
+- [x] **Step 5: Smoke-test against the real project (manual, not CI)**
   The maintainer has a real Leiningen project at `../tickets` (relative to this
   repo). Build the binary and point it there; confirm the server resolves the
   declared deps that are actually downloaded in `~/.m2` (in the current VM only
@@ -322,7 +324,7 @@ doc-comment style, and the `resolve_with_<x>` test seam.
   This is a sanity check on the masked parser against a real file with
   `^`/`#"…"`/profiles — not a CI gate (it depends on local `~/.m2` contents).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "e2e: navigate into m2 JAR resolved from project.clj"`
 
 ### Task 6: Mark the roadmap item done
@@ -330,13 +332,13 @@ doc-comment style, and the `resolve_with_<x>` test seam.
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Check the box**
+- [x] **Step 1: Check the box**
   Change the Phase 5 Leiningen line from `- [ ]` to `- [x]` and append a short
   note: direct deps only (transitive deferred), `~/.m2`/`:local-repo`, JARs
   reuse the existing classpath indexer, reader-macro `project.clj` falls back to
   default source indexing.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -m "Mark Leiningen project.clj support complete in roadmap"`
 
 ---
@@ -356,3 +358,62 @@ doc-comment style, and the `resolve_with_<x>` test seam.
   JARs are not resolved.
 - **Precedence.** deps.edn `.cpcache`, when present, always wins over
   `project.clj`.
+
+---
+
+## Implementation summary (2026-06-15)
+
+Implemented as designed, on branch `leiningen-project-clj`. All `bb check`
+(fmt + clippy `-D warnings` + 107 lib tests) and `bb e2e` (37 tests) pass.
+
+- **`src/leiningen.rs`** (new) — `mask()` blanks string/comment/char-literal
+  contents; `forms_after()` finds each targeted keyword in the masked text,
+  seeks the opening delimiter (stepping over `^:replace`-style metadata), and
+  `edn_format::parse_str`es one value from the original. `parse_deps()`,
+  `source_paths()`, `m2_repo()` (`:local-repo` else `~/.m2/repository`),
+  `jar_path()`, `resolve_with_repo()`, and `pub fn resolve()`. 8 unit tests,
+  including a fixture carrying `^{:protect false}`, `^:replace`, `#"user"`, and
+  profile-level `:dependencies`.
+- **`src/config.rs`** — `source_paths` falls back to `project.clj`'s
+  `:source-paths`/`:test-paths` when not let-go and deps.edn declares no
+  `:paths`. 3 new tests (incl. deps.edn-wins precedence).
+- **`src/server.rs`** + **`src/main.rs`** — `resolve_and_index_libs` consults
+  `leiningen::resolve` only when `.cpcache` is empty and `project.clj` exists;
+  registered the module in the binary's module tree (`main.rs` re-declares
+  modules separately from `lib.rs` — both needed).
+- **`tests/fixtures/lein_project/` + `tests/test_e2e.rs`** — hermetic e2e
+  (`:local-repo "m2"`) proving completion from a project.clj-resolved JAR.
+
+### Notes & deviations
+
+- **Tasks 1 & 2 share one commit.** Codex's first review correctly flagged that
+  Task 1 alone left private items used only by tests, failing
+  `clippy -D warnings`. Task 2 makes `resolve`/`source_paths` public and wires
+  the chain, so the two were committed together to keep every commit green.
+- **Implementation-first, not strict per-task TDD-then-wire.** Because the
+  feature was wired across Tasks 1–4 before the e2e, the Task 5 test passed on
+  first run rather than failing first.
+- **Real-project smoke (Task 5, step 5) exceeded expectations.** A throwaway
+  `leiningen::resolve("../tickets")` resolved 4 downloaded jars — `slingshot`,
+  `cheshire`, `cljs-ajax` (top-level) and `eftest` (from the `:coverage`
+  profile) — confirming the masked parser handles the real file's
+  metadata/regex and that profile-dep unioning works end to end.
+- **Branching.** Initial commits landed on `master`; moved to branch
+  `leiningen-project-clj` and restored `master` to `origin/master`.
+
+### Codex review follow-ups (both fixed)
+
+A second-opinion codex review surfaced two P2 correctness issues, fixed in a
+follow-up commit:
+
+- **`#_` reader-discard breaks parsing.** Empirically, `edn_format` 3.3.0 fails
+  the *entire* parse on a `#_` discard inside a vector (`UnexpectedCharacter`),
+  so one disabled dep entry would drop all deps. Fixed by stripping discarded
+  forms before parsing: `prepare()` now returns a `locator` (strings/comments/
+  discards blanked, for finding keywords) and a `parse_buf` (only comments and
+  discards blanked, strings preserved, fed to `edn_format`). `discard_ranges()`
+  + `form_end()` compute the spans. Covered by `skips_reader_discarded_forms`.
+- **project.clj edits left indexes stale.** The watcher only treated
+  `deps.edn`/`lgx.edn` as manifests. Added `project.clj`, so live edits
+  re-resolve deps and source-paths via the existing re-index path. Covered by
+  the `test_e2e_project_clj_change_indexes_new_deps` e2e.
