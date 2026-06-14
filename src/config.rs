@@ -18,6 +18,16 @@ pub fn project_kind(root: &Path) -> ProjectKind {
     }
 }
 
+/// Whether `path` is a Clojure source file we provide language intelligence
+/// for (`.clj`, `.cljs`, `.cljc`, and let-go `.lg`). EDN config files like
+/// `deps.edn` / `lgx.edn` are not source and must not be indexed or linted.
+pub fn is_clojure_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("clj") | Some("cljs") | Some("cljc") | Some("lg")
+    )
+}
+
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_file() {
         start.parent()?.to_path_buf()
@@ -187,6 +197,18 @@ mod tests {
     fn test_extra_paths_not_matched() {
         let edn = r#"{:extra-paths ["dev"]}"#;
         assert_eq!(parse_paths_from_deps_edn(edn), None);
+    }
+
+    #[test]
+    fn test_is_clojure_source() {
+        for ext in ["clj", "cljs", "cljc", "lg"] {
+            let p = format!("foo.{}", ext);
+            assert!(is_clojure_source(Path::new(&p)), "{} should be source", p);
+        }
+        assert!(!is_clojure_source(Path::new("deps.edn")));
+        assert!(!is_clojure_source(Path::new("lgx.edn")));
+        assert!(!is_clojure_source(Path::new("foo.edn")));
+        assert!(!is_clojure_source(Path::new("Makefile")));
     }
 
     #[test]
