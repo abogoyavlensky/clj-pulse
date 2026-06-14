@@ -77,6 +77,7 @@ meantime and keeping the server dependency-free is worth more early on.
 - [ ] Keyword indexing for re-frame subs
 - [ ] Transitive Clojure deps
 - [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
+- [ ] Local cahce for project's files
 
 ## Out of scope for now
 
