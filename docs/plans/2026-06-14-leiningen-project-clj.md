@@ -417,3 +417,12 @@ follow-up commit:
   `deps.edn`/`lgx.edn` as manifests. Added `project.clj`, so live edits
   re-resolve deps and source-paths via the existing re-index path. Covered by
   the `test_e2e_project_clj_change_indexes_new_deps` e2e.
+
+### Post-completion fix
+
+- **project.clj was linted as source.** Reported after merge: opening
+  `project.clj` flagged its dependency coordinates (`org.clojure/clojure`,
+  `ring/ring-defaults`) as unresolved namespaces, because `is_clojure_source`
+  matched its `.clj` extension. Excluded `project.clj` by name (so `build.clj`
+  and real sources stay linted), mirroring the EDN-config exclusion. Covered by
+  `test_e2e_no_diagnostics_on_project_clj` and a `config` unit test.
