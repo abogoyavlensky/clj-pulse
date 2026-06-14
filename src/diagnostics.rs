@@ -10,6 +10,13 @@ use crate::index::extractor;
 /// from the file's own `ns` form, so a project without an indexed classpath
 /// never produces false positives.
 pub fn compute(source: &str, path: &Path) -> Vec<Diagnostic> {
+    // EDN config files (deps.edn / lgx.edn) are not source: their dependency
+    // coordinates (`my/loc`, `org.clojure/clojure`) look like qualified usages
+    // but must never be flagged.
+    if !crate::config::is_clojure_source(path) {
+        return vec![];
+    }
+
     let Ok((ns_meta, _)) = extractor::extract(source, path) else {
         return vec![];
     };
@@ -61,6 +68,19 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn no_flag_on_edn_dependency_coordinates() {
+        // Dependency coordinates (`my/loc`, `org.clojure/clojure`) are
+        // namespaced symbols structurally identical to qualified usages, but
+        // EDN config files are not source and must never be linted.
+        let lgx = r#"{:deps {my/loc {:local/root "v"}
+                             ext/lib {:git/url "u" :git/sha "s"}}}"#;
+        assert!(compute(lgx, Path::new("lgx.edn")).is_empty());
+
+        let deps = r#"{:deps {org.clojure/clojure {:mvn/version "1.11.1"}}}"#;
+        assert!(compute(deps, Path::new("deps.edn")).is_empty());
     }
 
     #[test]
