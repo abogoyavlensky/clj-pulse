@@ -67,6 +67,8 @@ meantime and keeping the server dependency-free is worth more early on.
 - [x] let-go support with lgx (~/.lgx/gitlibs) deps resolver — indexes `.lg`
       project files and resolves lgx git/`:local/root` deps (transitive,
       first-wins) for navigation. let-go built-in `core` nav still deferred.
+- [ ] Clojure protocols support: navigation to protocol's method, navigation from map->DB to DB protocol
+- [ ] Transitive Clojure deps
 - [ ] let-go core navigation
 - [ ] Keyword indexing — navigation/rename for namespaced keywords. + Navigation on Integrant keys from integratn system edn file to components
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
@@ -80,7 +82,6 @@ meantime and keeping the server dependency-free is worth more early on.
       `.cpcache`. Transitive deps deferred (see below).
 - [ ] shadow-cljs classpath and cljs-aware indexing.
 - [ ] Keyword indexing for re-frame subs
-- [ ] Transitive Clojure deps
 - [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
 - [ ] Local cahce for project's files
 
