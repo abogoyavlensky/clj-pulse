@@ -68,6 +68,10 @@ meantime and keeping the server dependency-free is worth more early on.
       project files and resolves lgx git/`:local/root` deps (transitive,
       first-wins) for navigation. let-go built-in `core` nav still deferred.
 - [ ] Clojure protocols support: navigation to protocol's method, navigation from map->DB to DB protocol
+- [ ] resolve and navigate to libs that required with common syntax:
+      ```[flock.staff.spec
+          [common :as c]
+          [helpers :as h]]```
 - [ ] Transitive Clojure deps
 - [ ] Custom macros definitions (example `defcomponent` from flockman)
 - [ ] let-go core navigation
