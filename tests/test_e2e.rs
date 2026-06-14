@@ -1232,6 +1232,79 @@ fn test_e2e_find_references() {
 }
 
 #[test]
+fn test_e2e_references_find_usage_in_unopened_alias_test_dir() {
+    // A usage in test/ declared via an alias :extra-paths must be found at
+    // startup, without opening the test file.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("deps.edn"),
+        "{:paths [\"src\"]\n :aliases {:test {:extra-paths [\"test\"]}}\n \
+         :deps {org.clojure/clojure {:mvn/version \"1.11.1\"}}}\n",
+    )
+    .unwrap();
+    let test_file = root.join("test/core_test.clj");
+    std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &test_file,
+        "(ns simple.core-test\n  (:require [simple.core :as core]))\n(core/add 1 2)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core); // open ONLY the definition file
+    let (line, ch) = position_of(&core, "add");
+    let result = client.references(&core, line, ch, false);
+    let locs = result.as_array().cloned().unwrap_or_default();
+    assert!(
+        locs.iter().any(|l| l["uri"]
+            .as_str()
+            .map(|u| u.ends_with("/test/core_test.clj"))
+            .unwrap_or(false)),
+        "test/ usage (alias :extra-paths) not found without opening it: {:?}",
+        locs
+    );
+}
+
+#[test]
+fn test_e2e_references_find_usage_in_unopened_default_test_dir() {
+    // Even when test/ is declared nowhere, the default src/test scan roots
+    // index it at startup so its usages are found without opening the file.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    // deps.edn keeps the default :paths ["src"] (no :test alias).
+    let test_file = root.join("test/core_test.clj");
+    std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &test_file,
+        "(ns simple.core-test\n  (:require [simple.core :as core]))\n(core/add 1 2)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+    let (line, ch) = position_of(&core, "add");
+    let result = client.references(&core, line, ch, false);
+    let locs = result.as_array().cloned().unwrap_or_default();
+    assert!(
+        locs.iter().any(|l| l["uri"]
+            .as_str()
+            .map(|u| u.ends_with("/test/core_test.clj"))
+            .unwrap_or(false)),
+        "test/ usage (default scan root) not found without opening it: {:?}",
+        locs
+    );
+}
+
+#[test]
 fn test_e2e_references_work_without_indexed_definition() {
     // References of an alias-qualified usage must work even when the target
     // library isn't indexed (yet) — the fqn is derivable from the alias.
