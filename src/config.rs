@@ -48,90 +48,65 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The directories to index as the project's own source. Declared roots
+/// (deps.edn top-level `:paths` plus every alias's `:extra-paths`, or
+/// `lgx.edn` `:paths`) are unioned with the conventional `src`/`test`
+/// defaults so that test/dev usages are indexed at startup even when not
+/// opened. Non-existent directories are skipped later by the file walker.
 pub fn source_paths(root: &Path) -> Vec<PathBuf> {
-    // let-go projects declare their source paths in lgx.edn.
-    if project_kind(root) == ProjectKind::LetGo {
-        if let Ok(contents) = std::fs::read_to_string(root.join("lgx.edn")) {
-            let paths = crate::lgx::paths(&contents);
-            if !paths.is_empty() {
-                return paths.into_iter().map(|p| root.join(p)).collect();
-            }
-        }
-        return vec![root.join("src"), root.join("test")];
-    }
+    let declared = if project_kind(root) == ProjectKind::LetGo {
+        std::fs::read_to_string(root.join("lgx.edn"))
+            .ok()
+            .map(|c| crate::lgx::paths(&c))
+            .unwrap_or_default()
+    } else {
+        std::fs::read_to_string(root.join("deps.edn"))
+            .ok()
+            .and_then(|c| parse_paths_from_deps_edn(&c))
+            .unwrap_or_default()
+    };
 
-    let deps_edn = root.join("deps.edn");
-    if let Ok(contents) = std::fs::read_to_string(&deps_edn) {
-        if let Some(paths) = parse_paths_from_deps_edn(&contents) {
-            return paths.into_iter().map(|p| root.join(p)).collect();
+    let mut rel: Vec<String> = Vec::new();
+    for p in declared.into_iter().chain(["src".to_string(), "test".to_string()]) {
+        if !rel.contains(&p) {
+            rel.push(p);
         }
     }
-
-    vec![root.join("src"), root.join("test")]
+    rel.into_iter().map(|p| root.join(p)).collect()
 }
 
+/// Declared source roots in a `deps.edn`: top-level `:paths` plus every
+/// alias's `:extra-paths`. An alias's own `:paths` *replaces* the base paths
+/// (typically build tooling, e.g. tools.build `:build`) and is intentionally
+/// ignored. Returns `None` when nothing is declared or the EDN is malformed.
 fn parse_paths_from_deps_edn(contents: &str) -> Option<Vec<String>> {
-    let paths_idx = find_top_level_paths(contents)?;
-    let after_paths = &contents[paths_idx + ":paths".len()..];
-    let bracket_start = after_paths.find('[')?;
-    let bracket_end = after_paths[bracket_start..].find(']')?;
-    let inside = &after_paths[bracket_start + 1..bracket_start + bracket_end];
+    use crate::edn::{get, kw, str_vec_at};
 
-    let paths: Vec<String> = inside
-        .split('"')
-        .enumerate()
-        .filter(|(i, _)| i % 2 == 1)
-        .map(|(_, s)| s.to_string())
-        .collect();
+    let Ok(edn_format::Value::Map(top)) = edn_format::parse_str(contents) else {
+        return None;
+    };
+
+    let mut paths: Vec<String> = str_vec_at(&top, kw("paths")).unwrap_or_default();
+
+    if let Some(edn_format::Value::Map(aliases)) = get(&top, kw("aliases")) {
+        for alias in aliases.values() {
+            if let edn_format::Value::Map(spec) = alias {
+                if let Some(extra) = str_vec_at(spec, kw("extra-paths")) {
+                    for p in extra {
+                        if !paths.contains(&p) {
+                            paths.push(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if paths.is_empty() {
         None
     } else {
         Some(paths)
     }
-}
-
-/// Finds `:paths` at the top level of the deps.edn map. A plain substring
-/// search would match `:paths` nested inside `:aliases` (e.g. a tools.build
-/// `:build` alias), so track nesting depth and skip strings and comments.
-fn find_top_level_paths(contents: &str) -> Option<usize> {
-    let bytes = contents.as_bytes();
-    let mut depth = 0i32;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                i += 1;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'\\' => i += 1,
-                        b'"' => break,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-            }
-            b';' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'{' | b'[' | b'(' => depth += 1,
-            b'}' | b']' | b')' => depth -= 1,
-            b':' if depth == 1 && contents[i..].starts_with(":paths") => {
-                let next = bytes.get(i + ":paths".len());
-                let at_boundary = next
-                    .map(|c| c.is_ascii_whitespace() || *c == b'[')
-                    .unwrap_or(true);
-                if at_boundary {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -195,8 +170,52 @@ mod tests {
 
     #[test]
     fn test_extra_paths_not_matched() {
+        // Top-level :extra-paths is not a real deps.edn key; only :paths and
+        // alias :extra-paths count.
         let edn = r#"{:extra-paths ["dev"]}"#;
         assert_eq!(parse_paths_from_deps_edn(edn), None);
+    }
+
+    #[test]
+    fn test_alias_extra_paths_included() {
+        let edn = r#"{:paths ["src"]
+                      :aliases {:test {:extra-paths ["test"]}}}"#;
+        assert_eq!(
+            parse_paths_from_deps_edn(edn),
+            Some(vec!["src".to_string(), "test".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_multiple_alias_extra_paths_unioned() {
+        let edn = r#"{:paths ["src"]
+                      :aliases {:test {:extra-paths ["test"]}
+                                :dev {:extra-paths ["dev" "env/dev"]}}}"#;
+        let paths = parse_paths_from_deps_edn(edn).unwrap();
+        for p in ["src", "test", "dev", "env/dev"] {
+            assert!(paths.contains(&p.to_string()), "missing {} in {:?}", p, paths);
+        }
+    }
+
+    #[test]
+    fn test_source_paths_always_includes_src_and_test() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("deps.edn"),
+            r#"{:paths ["src"] :deps {org.clojure/clojure {:mvn/version "1.11.1"}}}"#,
+        )
+        .unwrap();
+        let paths = source_paths(root);
+        assert!(paths.contains(&root.join("src")), "missing src: {:?}", paths);
+        assert!(paths.contains(&root.join("test")), "missing test: {:?}", paths);
+        // No duplicate `src`.
+        assert_eq!(
+            paths.iter().filter(|p| **p == root.join("src")).count(),
+            1,
+            "duplicate src: {:?}",
+            paths
+        );
     }
 
     #[test]
