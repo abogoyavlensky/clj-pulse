@@ -290,7 +290,7 @@ impl LanguageServer for Backend {
         // only appear in alias :extra-paths) are not indexed at startup;
         // index them on open so navigation from them works.
         if let Ok(path) = uri.to_file_path() {
-            if self.index.file_ns(&path).is_none() {
+            if config::is_clojure_source(&path) && self.index.file_ns(&path).is_none() {
                 match extractor::extract_full(&text, &path) {
                     Ok((meta, symbols, occurrences)) => {
                         tracing::info!("indexed opened file {}", path.display());
@@ -365,11 +365,7 @@ impl LanguageServer for Backend {
                 continue;
             }
 
-            let is_source = path
-                .extension()
-                .map(|e| e == "clj" || e == "cljs" || e == "cljc" || e == "lg")
-                .unwrap_or(false);
-            if !is_source {
+            if !config::is_clojure_source(&path) {
                 continue;
             }
 

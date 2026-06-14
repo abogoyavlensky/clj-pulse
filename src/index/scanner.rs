@@ -193,14 +193,8 @@ fn collect_clojure_files(source_paths: &[PathBuf]) -> Vec<PathBuf> {
                 Err(_) => continue,
             };
             let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    let ext = ext.to_string_lossy();
-                    // `.lg` is let-go source (Clojure syntax).
-                    if ext == "clj" || ext == "cljs" || ext == "cljc" || ext == "lg" {
-                        files.push(path.to_path_buf());
-                    }
-                }
+            if path.is_file() && crate::config::is_clojure_source(path) {
+                files.push(path.to_path_buf());
             }
         }
     }
