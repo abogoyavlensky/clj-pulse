@@ -690,6 +690,34 @@ fn test_e2e_completion_from_jar_library() {
 }
 
 #[test]
+fn test_e2e_no_diagnostics_on_project_clj() {
+    // Opening project.clj must not flag dependency coordinates
+    // (`org.clojure/clojure`, `ring/ring-defaults`) as unresolved namespaces —
+    // it is a build manifest, not source (like deps.edn / lgx.edn).
+    let project = setup_named("lein_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let project_clj = root.join("project.clj");
+    std::fs::write(
+        &project_clj,
+        "(defproject app \"0.1.0\"\n  :dependencies [[org.clojure/clojure \"1.11.1\"]\n                 [ring/ring-defaults \"0.3.2\"]])\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&project_clj);
+
+    let diags = client.wait_for_diagnostics("/project.clj");
+    let list = diags["diagnostics"].as_array().expect("diagnostics array");
+    assert!(
+        list.is_empty(),
+        "expected no diagnostics on project.clj, got {}",
+        diags["diagnostics"]
+    );
+}
+
+#[test]
 fn test_e2e_leiningen_navigation_into_m2_jar() {
     // A Leiningen project with no .cpcache: deps are read from project.clj and
     // mapped to JARs under its :local-repo Maven tree. The fixture's

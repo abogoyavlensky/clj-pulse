@@ -19,9 +19,15 @@ pub fn project_kind(root: &Path) -> ProjectKind {
 }
 
 /// Whether `path` is a Clojure source file we provide language intelligence
-/// for (`.clj`, `.cljs`, `.cljc`, and let-go `.lg`). EDN config files like
-/// `deps.edn` / `lgx.edn` are not source and must not be indexed or linted.
+/// for (`.clj`, `.cljs`, `.cljc`, and let-go `.lg`). Config files are not
+/// source and must not be indexed or linted: EDN ones (`deps.edn` / `lgx.edn`)
+/// are excluded by extension, and Leiningen's `project.clj` — a build manifest
+/// whose dependency coordinates would otherwise be flagged as unresolved
+/// namespaces — is excluded by name despite its `.clj` extension.
 pub fn is_clojure_source(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) == Some("project.clj") {
+        return false;
+    }
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some("clj") | Some("cljs") | Some("cljc") | Some("lg")
@@ -252,6 +258,11 @@ mod tests {
         assert!(!is_clojure_source(Path::new("lgx.edn")));
         assert!(!is_clojure_source(Path::new("foo.edn")));
         assert!(!is_clojure_source(Path::new("Makefile")));
+        // project.clj is a Leiningen build manifest, not a namespace.
+        assert!(!is_clojure_source(Path::new("project.clj")));
+        assert!(!is_clojure_source(Path::new("/a/b/project.clj")));
+        // build.clj (tools.build) is real source and must stay linted.
+        assert!(is_clojure_source(Path::new("build.clj")));
     }
 
     #[test]
