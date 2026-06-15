@@ -27,13 +27,14 @@ pub fn handle(
         .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
-    // Prefer the resolved occurrence recorded at this exact position when it
-    // points at a known symbol: it is context-aware (e.g. a protocol method
-    // impl resolves to the protocol's declaration even when the bare name also
-    // names a core/current-ns var) and otherwise matches `resolve_symbol`.
-    // When it doesn't resolve to a symbol, fall through to the word resolver,
-    // which also handles aliases, namespaces, and the static core list.
-    if let Some(fqn) = index.occurrence_at(&path, pos) {
+    // Prefer the definition/occurrence resolved at this exact position when it
+    // points at a known symbol. This is context-aware — a protocol method impl
+    // resolves to the protocol's declaration even when the bare name also names
+    // a core/current-ns var — and is computed from the live buffer (like
+    // references/rename), so unsaved edits resolve correctly. When it doesn't
+    // resolve to a known symbol, fall through to the bare-word resolver, which
+    // also handles aliases, namespaces, and the static core list.
+    if let Some(fqn) = super::references::resolve_fqn_at(index, documents, &uri, pos) {
         if let Some(sym) = index.lookup(&fqn) {
             let location = location_for(&sym.file, sym.name_range, &sym.source)?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));

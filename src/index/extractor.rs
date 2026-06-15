@@ -808,17 +808,36 @@ fn walk_method_impl(
         });
     }
 
-    let mut frame = HashSet::new();
-    let mut body_start = 1;
-    if let Some(params) = inner.get(1).filter(|n| n.kind() == "vec_lit") {
-        collect_binding_names(*params, ctx, scope, out, &mut frame);
-        body_start = 2;
+    let rest = &inner[1..];
+    if rest.first().map(|n| n.kind() == "vec_lit").unwrap_or(false) {
+        // Single arity: (name [params] body…).
+        let mut frame = HashSet::new();
+        collect_binding_names(rest[0], ctx, scope, out, &mut frame);
+        scope.push(frame);
+        for body in rest.iter().skip(1) {
+            walk_occurrences(*body, ctx, scope, out);
+        }
+        scope.pop();
+    } else {
+        // Multi-arity: (name ([params] body…) ([params] body…) …) — bind each
+        // arity's params for its own body, like `defn`.
+        for arity in rest {
+            if arity.kind() == "list_lit" && arity_body(*arity) {
+                let parts = named_children(*arity);
+                let mut frame = HashSet::new();
+                if let Some(params) = parts.first() {
+                    collect_binding_names(*params, ctx, scope, out, &mut frame);
+                }
+                scope.push(frame);
+                for body in parts.iter().skip(1) {
+                    walk_occurrences(*body, ctx, scope, out);
+                }
+                scope.pop();
+            } else {
+                walk_occurrences(*arity, ctx, scope, out);
+            }
+        }
     }
-    scope.push(frame);
-    for body in inner.iter().skip(body_start) {
-        walk_occurrences(*body, ctx, scope, out);
-    }
-    scope.pop();
 }
 
 /// The namespace a protocol symbol's methods live in: a qualified `a/B`

@@ -399,6 +399,31 @@ fn test_occurrence_extend_type_methods_resolve_to_protocol() {
 }
 
 #[test]
+fn test_occurrence_multi_arity_method_impl_binds_params() {
+    let src = "(ns app\n  (:require [proto.ns :as p]))\n(extend-type String\n  p/Worker\n  (run-task ([x] x) ([x y] y)))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    // Each arity's params are bound, not recorded as phantom global usages.
+    assert!(
+        occurrences_of(&occs, "app/x").is_empty(),
+        "occs: {:?}",
+        occs
+    );
+    assert!(
+        occurrences_of(&occs, "app/y").is_empty(),
+        "occs: {:?}",
+        occs
+    );
+    // The head still resolves to the protocol, recorded once.
+    assert_eq!(
+        occurrences_of(&occs, "proto.ns/run-task").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
 fn test_occurrence_reify_methods_resolve_to_protocol() {
     let src = "(ns app\n  (:require [proto.ns :as p]))\n(defn make []\n  (reify p/Worker\n    (run-task [this job] job)))";
     let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
