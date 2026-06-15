@@ -12,7 +12,8 @@ use super::{NsMeta, Symbol};
 /// so mtime alone cannot invalidate them).
 ///
 /// 7: `.impl`/`.internal` namespaces are now indexed (previously skipped).
-pub const CACHE_FORMAT_VERSION: u32 = 7;
+/// 8: private (`defn-`) library symbols are now indexed (previously skipped).
+pub const CACHE_FORMAT_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

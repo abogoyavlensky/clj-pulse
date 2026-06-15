@@ -2588,6 +2588,67 @@ fn test_e2e_definition_from_percent_encoded_jar_uri() {
 }
 
 #[test]
+fn test_e2e_navigate_to_private_fn_in_jar() {
+    // Private (`defn-`) functions in library files are navigable from inside the
+    // library source. `caller` calls the private `secret` unqualified.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn- secret [x] x)\n\n(defn caller [x] (secret x))\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n\n(u/caller 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "u/caller");
+    let util_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let util_src = client.text_document_content(&util_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&util_uri, &util_src);
+
+    let (line, ch) = position_in_text(&util_src, "(secret x)");
+    let loc = client.goto_definition_uri(&util_uri, line, ch);
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("!/mylib/util.clj"),
+        "expected nav to a private fn in the lib, got {}",
+        loc
+    );
+    assert_eq!(
+        loc["range"]["start"]["line"].as_u64(),
+        Some(2),
+        "expected the `(defn- secret ...)` line, got {}",
+        loc
+    );
+}
+
+#[test]
 fn test_e2e_navigate_into_impl_namespace_from_jar() {
     // Library-internal `.impl` namespaces are indexed, so navigating from one
     // library file into the lib's `.impl` namespace works (the claypoole
