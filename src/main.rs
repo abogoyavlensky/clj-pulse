@@ -14,6 +14,7 @@ mod jar_content;
 mod leiningen;
 mod lgx;
 mod server;
+mod uri;
 
 use server::Backend;
 

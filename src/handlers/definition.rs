@@ -3,7 +3,8 @@ use std::path::Path;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::{Index, SymbolSource};
+use crate::index::Index;
+use crate::uri;
 
 use super::{resolve_symbol, ResolvedSymbol};
 
@@ -22,9 +23,13 @@ pub fn handle(
 
     tracing::info!("goto_definition: word={}", word);
 
-    let path = uri
-        .to_file_path()
-        .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
+    // Works whether the open document is a project file, a directory-library
+    // file (`file:` URIs), or a JAR entry (`jar:` URIs → virtual index path) —
+    // the latter is what lets navigation continue into transitive deps.
+    let path = match uri::to_index_path(&uri) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
     // Prefer the definition/occurrence resolved at this exact position when it
@@ -36,14 +41,14 @@ pub fn handle(
     // also handles aliases, namespaces, and the static core list.
     if let Some(fqn) = super::references::resolve_fqn_at(index, documents, &uri, pos) {
         if let Some(sym) = index.lookup(&fqn) {
-            let location = location_for(&sym.file, sym.name_range, &sym.source)?;
+            let location = location_for(&sym.file, sym.name_range)?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
     }
 
     match resolve_symbol(index, &word, &current_ns) {
         Some(ResolvedSymbol::Project(sym)) => {
-            let location = location_for(&sym.file, sym.name_range, &sym.source)?;
+            let location = location_for(&sym.file, sym.name_range)?;
             Ok(Some(GotoDefinitionResponse::Scalar(location)))
         }
         Some(ResolvedSymbol::Core(core)) => {
@@ -56,7 +61,7 @@ pub fn handle(
             // Built-ins live in the clojure JAR like any other library
             // symbol; the static core list is only a doc shortcut.
             if let Some(sym) = index.lookup_in_ns("clojure.core", &core.name) {
-                let location = location_for(&sym.file, sym.name_range, &sym.source)?;
+                let location = location_for(&sym.file, sym.name_range)?;
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
             }
             Ok(None)
@@ -95,39 +100,17 @@ fn namespace_location(
 
     if let Some(ns) = target_ns {
         if let Some(meta) = index.ns_meta(&ns) {
-            // NsMeta has no source tag; jar virtual paths are recognizable
-            // by their `!/` separator.
-            let is_jar = meta.file.to_string_lossy().contains("!/");
-            let source = if is_jar {
-                SymbolSource::Jar(Default::default())
-            } else {
-                SymbolSource::Project
-            };
-            let location = location_for(&meta.file, Range::default(), &source)?;
+            let location = location_for(&meta.file, Range::default())?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
     }
     Ok(None)
 }
 
-/// Builds an LSP Location for a symbol file: plain `file:` URIs for real
-/// paths (project sources and directory-based libs), `jar:` URIs for files
-/// inside JARs (stored as virtual `jar_path!/entry` paths).
-fn location_for(file: &Path, range: Range, source: &SymbolSource) -> Result<Location> {
-    let uri = match source {
-        SymbolSource::Project | SymbolSource::Dir(_) => {
-            Url::from_file_path(file).map_err(|_| anyhow::anyhow!("invalid path: {:?}", file))?
-        }
-        SymbolSource::Jar(_) => {
-            let file_str = file.to_string_lossy();
-            let (jar_part, entry_part) = file_str
-                .split_once("!/")
-                .ok_or_else(|| anyhow::anyhow!("malformed jar path: {}", file_str))?;
-            let jar_url = Url::from_file_path(jar_part)
-                .map_err(|_| anyhow::anyhow!("invalid jar path: {}", jar_part))?;
-            let jar_uri = format!("jar:{}!/{}", jar_url, entry_part);
-            Url::parse(&jar_uri).map_err(|_| anyhow::anyhow!("invalid jar URI: {}", jar_uri))?
-        }
-    };
+/// Builds an LSP Location for a symbol file. The URI scheme follows the path
+/// shape: plain `file:` URIs for real paths (project sources and directory
+/// libs), `jar:` URIs for virtual `jar_path!/entry` paths inside JARs.
+fn location_for(file: &Path, range: Range) -> Result<Location> {
+    let uri = uri::from_index_path(file)?;
     Ok(Location { uri, range })
 }
