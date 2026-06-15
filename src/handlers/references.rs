@@ -65,6 +65,16 @@ pub fn rename(
         anyhow::bail!("cannot rename: '{}' is not a valid symbol name", new_name);
     }
 
+    // Rename may only be initiated from an editable project file. Library
+    // buffers (jar: entries, dir-dep file:s) are read-only — and since the
+    // resolver is fqn-only, a rename started there could otherwise edit a
+    // project symbol that shadows the library one.
+    let origin = crate::uri::to_index_path(&uri)
+        .ok_or_else(|| anyhow::anyhow!("cannot rename from this document"))?;
+    if !index.is_project_path(&origin) {
+        anyhow::bail!("cannot rename from a library file");
+    }
+
     let fqn = resolve_fqn_at(index, documents, &uri, pos)
         .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?;
     let sym = index

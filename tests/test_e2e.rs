@@ -417,6 +417,19 @@ impl LspClient {
             }),
         )
     }
+
+    /// Rename by URI, returning the raw JSON-RPC message so the caller can
+    /// assert on either `result` or `error`.
+    fn rename_uri(&mut self, uri: &str, line: u32, character: u32, new_name: &str) -> Value {
+        self.request_full(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "newName": new_name
+            }),
+        )
+    }
 }
 
 impl Drop for LspClient {
@@ -2495,5 +2508,44 @@ fn test_e2e_hover_from_inside_library_file() {
         value.contains("helper") && value.contains("mylib.util"),
         "expected hover for mylib.util/helper from inside the JAR, got {}",
         hover
+    );
+}
+
+#[test]
+fn test_e2e_rename_rejected_from_library_file() {
+    // Navigation/inspection work from a JAR buffer, but rename must not: a
+    // library file is read-only, and the fqn-only resolver could otherwise edit
+    // a project symbol that shadows the library one.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "util/helper");
+    let util_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let util_src = client.text_document_content(&util_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&util_uri, &util_src);
+
+    let (line, ch) = position_in_text(&util_src, "helper");
+    let msg = client.rename_uri(&util_uri, line, ch, "renamed");
+    let err = msg
+        .get("error")
+        .unwrap_or_else(|| panic!("rename from a JAR buffer should be rejected, got {}", msg));
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("library file"),
+        "expected a library-file rejection, got {}",
+        err
     );
 }
