@@ -1,6 +1,8 @@
 # Transitive Deps Navigation Implementation Plan
 
-> **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: COMPLETED (2026-06-15).** See the summary at the end.
+
+> **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** When the current document is an external library file (a `jar:` entry,
 or a `file:` source-dir dep), go-to-definition, find-references, hover, and
@@ -132,7 +134,7 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
 - Create: `src/uri.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: Write the failing unit tests** (in `src/uri.rs` `#[cfg(test)]`):
+- [x] **Step 1: Write the failing unit tests** (in `src/uri.rs` `#[cfg(test)]`):
   - `to_index_path` on a `file:///a/b.clj` URL returns `PathBuf("/a/b.clj")`.
   - `to_index_path` on `jar:file:///x.jar!/mylib/util.clj` returns the virtual
     path `PathBuf("/x.jar!/mylib/util.clj")`.
@@ -141,11 +143,11 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
     URL string `jar:file:///x.jar!/mylib/util.clj`.
   - Round-trip: `to_index_path(from_index_path(p)) == p` for both shapes.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib uri::`
   Expected: FAIL (module/functions don't exist yet).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   - `to_index_path(uri: &Url) -> Option<PathBuf>`: if `uri.scheme() == "jar"`,
     call `jar_content::parse_jar_uri(uri.as_str())` and rebuild the virtual path
     as `format!("{}!/{}", jar_path.display(), entry)`; otherwise
@@ -157,11 +159,11 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
     logic, minus the `Range`/`SymbolSource`.)
   - `pub mod uri;` in `src/lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib uri::`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Add uri module for file:/jar: index-path translation"`
 
 ### Task 2: Definition + hover + signature — accept library-file URIs
@@ -171,7 +173,7 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
 - Modify: `src/handlers/hover.rs`
 - Modify: `src/handlers/signature.rs`
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
   - In all three handlers, replace the `uri.to_file_path()` step that computes
     the path for `index.file_ns(&path)` with `uri::to_index_path(&uri)` (return
     `Ok(None)` when it yields `None`). This makes `current_ns` correct when the
@@ -183,11 +185,11 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
     via `uri::from_index_path(&meta.file)`, removing the local `is_jar` /
     synthesized-`SymbolSource` dance.
 
-- [ ] **Step 2: Verify build + existing tests (no regressions)**
+- [x] **Step 2: Verify build + existing tests (no regressions)**
   Run: `bb check`
   Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Resolve definition/hover/signature from inside library files"`
 
 ### Task 3: References — resolve, search, and render library-file locations
@@ -195,7 +197,7 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
 **Files:**
 - Modify: `src/handlers/references.rs`
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
   - `resolve_fqn_at`: replace `uri.to_file_path().ok()?` with
     `uri::to_index_path(uri)?` so the symbol under the cursor resolves when the
     current document is a `jar:` entry.
@@ -211,11 +213,11 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
     declaration is listed too.
   - Leave `rename` untouched (it independently refuses non-`Project` symbols).
 
-- [ ] **Step 2: Verify build + existing tests (no regressions)**
+- [x] **Step 2: Verify build + existing tests (no regressions)**
   Run: `bb check`
   Expected: PASS — existing references/rename e2e and unit tests still pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "References: resolve and render usages from library files"`
 
 ### Task 4: End-to-end — navigate and find references from a JAR file
@@ -223,7 +225,7 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Add the e2e scaffolding**
+- [x] **Step 1: Add the e2e scaffolding**
   - `LspClient` helpers that take a raw URI string rather than a `&Path`:
     `did_open_uri(uri, text)`, `goto_definition_uri(uri, line, ch)`,
     `references_uri(uri, line, ch, include_decl)`, `hover_uri(uri, line, ch)`.
@@ -239,7 +241,7 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
     - Write the JAR's absolute path into `.cpcache/1.cp` (same mechanism as
       `test_e2e_completion_from_directory_library`).
 
-- [ ] **Step 2: Write the failing behavioral tests**
+- [x] **Step 2: Write the failing behavioral tests**
   - **Transitive jar→jar definition.** Project consumer
     `src/uses_lib.clj`:
     `(ns uses-lib\n  (:require [mylib.core :as core]\n            [mylib.util :as util]))\n\n(core/run 1)\n(util/helper 2)\n`.
@@ -259,15 +261,15 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
     open `core.clj` jar doc returns markdown mentioning `helper` and
     `mylib.util`.
 
-- [ ] **Step 3: Run to verify they fail, then pass after Tasks 1–3**
+- [x] **Step 3: Run to verify they fail, then pass after Tasks 1–3**
   Run: `cargo test --test test_e2e transitive` (and the references/hover names)
   Expected: PASS (they exercise the Task 1–3 changes).
 
-- [ ] **Step 4: Full suite**
+- [x] **Step 4: Full suite**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "e2e: navigate and find references from inside library files"`
 
 ### Task 5: Roadmap note
@@ -275,12 +277,12 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Check the item**
+- [x] **Step 1: Check the item**
   Mark the Phase 5 "Transitive Clojure deps navigation" item done, noting that
   definition/references/hover/signature now work from inside `jar:` (and
   `file:` dir-dep) library files, reaching transitive dependencies.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -m "Roadmap: note transitive deps navigation"`
 
 ---
@@ -297,3 +299,64 @@ Reuse `jar_content::parse_jar_uri`, `references::resolve_fqn_at`,
   the stdio `bb e2e` harness, which drives `jar:` URIs through `didOpen`.
 - **Completion / code_action are out of scope** for `jar:` docs (read-only);
   they keep working for `file:` dir-deps via their existing path handling.
+- **A real directory named literally `<name>.jar!`** would have its files
+  mistaken for JAR entries by the `.jar!/` path heuristic (see the
+  `split_jar_virtual_path` note). Pathological and accepted; string-only
+  detection cannot resolve it without disk probing.
+
+---
+
+## Implementation summary (2026-06-15)
+
+Implemented on branch `transitive-deps-navigation`. All `bb check` and `bb e2e`
+(46 tests) pass.
+
+- **`src/uri.rs` (new)** — `to_index_path` / `from_index_path` translate between
+  editor URIs and index paths across `file:`/`jar:` schemes; 5 round-trip unit
+  tests. Registered in both `src/lib.rs` and `src/main.rs` (the binary
+  re-declares modules, so it needed its own `mod uri;`).
+- **`src/handlers/definition.rs`, `hover.rs`, `signature.rs`** — current-ns path
+  resolved via `uri::to_index_path`, so a JAR buffer is a valid "current file".
+  `location_for`/`namespace_location` collapsed onto `uri::from_index_path`,
+  dropping the `SymbolSource`-based URI branching.
+- **`src/handlers/references.rs`** — `resolve_fqn_at` and the `occurrences_for`
+  open-doc loop convert via `to_index_path`; result and declaration locations
+  render via `from_index_path` (jar/dir decls now included).
+- **`tests/test_e2e.rs`** — `*_uri` client helpers, `position_in_text`, a
+  two-namespace JAR fixture, and tests for transitive jar→jar definition,
+  references from inside a library file (project + lib→lib + declaration), and
+  hover from inside a library file.
+- **`docs/ROADMAP.md`** — Phase 5 transitive-deps item checked.
+
+### Codex review follow-ups (both fixed)
+
+Two `review-with-codex` passes each surfaced a real P2 regression introduced by
+this change:
+
+1. **Rename from a read-only library buffer.** Routing `rename` through the
+   now-jar-aware `resolve_fqn_at` meant a rename initiated from a JAR buffer
+   could, when a project symbol shadows the library symbol's fqn, resolve to the
+   project symbol and edit project files (before this change, the `to_file_path`
+   failure stopped it). Fixed by gating `rename` on the originating document
+   being an editable project file: added `Index::is_project_path` (a path with an
+   occurrences entry — project files always have one, JAR/dir-lib paths never do)
+   and a guard that bails with "cannot rename from a library file".
+   Definition/references/hover still work from library buffers (project-wins
+   navigation is intended there); only the mutating `rename` is restricted.
+   Regression test: `test_e2e_rename_rejected_from_library_file`.
+2. **Project paths containing `!/` misrouted as JAR URIs.** The refactor replaced
+   `location_for`'s `SymbolSource`-based dispatch with bare `!/` sniffing, so a
+   real path under a directory named e.g. `work!` would be emitted as a bogus
+   `jar:` URI, breaking navigation. Fixed by detecting JAR virtual paths on their
+   actual construction shape `.jar!/` rather than a bare `!/`
+   (`split_jar_virtual_path`). Source metadata can't be used uniformly here — the
+   references occurrences path arrives without a `SymbolSource`. Regression tests:
+   `real_path_with_bang_slash_is_not_a_jar`, `jar_under_bang_dir_still_splits_at_archive`.
+
+A third pass downgraded the residual edge to P3 and confirmed the behavior +
+tests are correct: a real path under a directory named literally `<name>.jar!`
+is still string-indistinguishable from a JAR entry. Accepted as a documented
+limitation (see `split_jar_virtual_path`) rather than fixed — the alternatives
+are strictly worse: filesystem probing would break round-tripping for archives
+not currently on disk (and the unit tests' synthetic paths), and source-metadata
+threading can't reach the path-only references-occurrences call site.

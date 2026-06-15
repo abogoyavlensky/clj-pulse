@@ -44,6 +44,12 @@ pub fn from_index_path(path: &Path) -> Result<Url> {
 /// for a `.jar` archive (see `jar::index_jar`), so the boundary is matched on
 /// `.jar!/` — a real filesystem path that merely contains `!/` (e.g. a directory
 /// named `work!`) has no `.jar!/` and stays a plain file path.
+///
+/// Limitation: a real path under a directory named literally `<name>.jar!` is
+/// indistinguishable by string alone from a JAR entry and is treated as one.
+/// This is inherent to the `path!/entry` representation; resolving it would
+/// require filesystem probing (which would break round-tripping for archives not
+/// currently on disk) and is not worth it for so pathological a directory name.
 fn split_jar_virtual_path(path: &str) -> Option<(&str, &str)> {
     let boundary = path.find(".jar!/")?;
     let split = boundary + ".jar".len();
