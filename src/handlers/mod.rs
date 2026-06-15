@@ -39,6 +39,14 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
                 if let Some(sym) = index.lookup(fqn) {
                     return Some(ResolvedSymbol::Project(sym));
                 }
+                // A referred record constructor (`:refer [->DB map->DB]`): the
+                // ctor fqn is not indexed, but its record is — resolve it in the
+                // referred namespace.
+                if let Some((refer_ns, _)) = fqn.rsplit_once('/') {
+                    if let Some(sym) = resolve_factory(index, refer_ns, word) {
+                        return Some(ResolvedSymbol::Project(sym));
+                    }
+                }
             }
         }
 
@@ -58,22 +66,32 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
     None
 }
 
-/// The record/type name a constructor function refers to: `map->DB` and `->DB`
-/// both target `DB`. `None` for non-factory names (and the bare `->`/`map->`).
-fn factory_target_name(name: &str) -> Option<&str> {
-    let target = name
-        .strip_prefix("map->")
-        .or_else(|| name.strip_prefix("->"))?;
-    (!target.is_empty()).then_some(target)
+/// The type a constructor function builds, plus whether it is the map
+/// constructor: `map->DB` → `("DB", true)`, `->DB` → `("DB", false)`. `None`
+/// for non-factory names (and the bare `->`/`map->`).
+fn factory_target(name: &str) -> Option<(&str, bool)> {
+    if let Some(t) = name.strip_prefix("map->") {
+        (!t.is_empty()).then_some((t, true))
+    } else if let Some(t) = name.strip_prefix("->") {
+        (!t.is_empty()).then_some((t, false))
+    } else {
+        None
+    }
 }
 
-/// Resolves an auto-generated record/type constructor (`->X` / `map->X`) to the
-/// `defrecord`/`deftype` `X` it builds, so navigation/hover land on the type.
-/// Gated on the target's kind so a plain fn named `->foo` is never hijacked.
+/// Resolves an auto-generated record/type constructor to the `defrecord`/
+/// `deftype` it builds, so navigation/hover land on the type. Gated on kind so
+/// a plain fn named `->foo` is never hijacked; `map->X` is records-only, since
+/// `deftype` generates `->X` but no map constructor.
 fn resolve_factory(index: &Index, ns: &str, name: &str) -> Option<Symbol> {
-    let target = factory_target_name(name)?;
+    let (target, is_map_ctor) = factory_target(name)?;
     let sym = index.lookup_in_ns(ns, target)?;
-    matches!(sym.kind, DefKind::Defrecord | DefKind::Deftype).then_some(sym)
+    let ok = match sym.kind {
+        DefKind::Defrecord => true,
+        DefKind::Deftype => !is_map_ctor,
+        _ => false,
+    };
+    ok.then_some(sym)
 }
 
 #[cfg(test)]
@@ -85,12 +103,12 @@ mod tests {
     use tower_lsp::lsp_types::Range;
 
     #[test]
-    fn factory_target_name_strips_known_prefixes() {
-        assert_eq!(factory_target_name("map->DB"), Some("DB"));
-        assert_eq!(factory_target_name("->DB"), Some("DB"));
-        assert_eq!(factory_target_name("plain"), None);
-        assert_eq!(factory_target_name("->"), None);
-        assert_eq!(factory_target_name("map->"), None);
+    fn factory_target_strips_prefixes_and_flags_map_ctor() {
+        assert_eq!(factory_target("map->DB"), Some(("DB", true)));
+        assert_eq!(factory_target("->DB"), Some(("DB", false)));
+        assert_eq!(factory_target("plain"), None);
+        assert_eq!(factory_target("->"), None);
+        assert_eq!(factory_target("map->"), None);
     }
 
     fn sym(name: &str, ns: &str, kind: DefKind) -> Symbol {
@@ -140,5 +158,55 @@ mod tests {
         // A plain fn named `foo` must not be reachable via `->foo`.
         let index = index_with(vec![sym("foo", "my.ns", DefKind::Defn)]);
         assert!(resolve_symbol(&index, "->foo", "my.ns").is_none());
+    }
+
+    #[test]
+    fn map_constructor_is_record_only() {
+        // deftype generates `->T` but no `map->T`.
+        let index = index_with(vec![sym("T", "my.ns", DefKind::Deftype)]);
+        assert!(matches!(
+            resolve_symbol(&index, "->T", "my.ns"),
+            Some(ResolvedSymbol::Project(_))
+        ));
+        assert!(resolve_symbol(&index, "map->T", "my.ns").is_none());
+    }
+
+    #[test]
+    fn resolve_symbol_navigates_referred_factory() {
+        let index = Index::new();
+        // The record lives in `recs`.
+        index.insert_file(
+            NsMeta {
+                name: "recs".to_string(),
+                file: PathBuf::from("recs.clj"),
+                aliases: HashMap::new(),
+                refers: HashMap::new(),
+                requires: vec![],
+            },
+            vec![sym("DB", "recs", DefKind::Defrecord)],
+            vec![],
+        );
+        // `app` refers the (un-indexed) constructors.
+        let mut refers = HashMap::new();
+        refers.insert("->DB".to_string(), "recs/->DB".to_string());
+        refers.insert("map->DB".to_string(), "recs/map->DB".to_string());
+        index.insert_file(
+            NsMeta {
+                name: "app".to_string(),
+                file: PathBuf::from("app.clj"),
+                aliases: HashMap::new(),
+                refers,
+                requires: vec![],
+            },
+            vec![],
+            vec![],
+        );
+
+        for factory in ["->DB", "map->DB"] {
+            match resolve_symbol(&index, factory, "app") {
+                Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "DB"),
+                other => panic!("referred {} did not resolve: {:?}", factory, other),
+            }
+        }
     }
 }
