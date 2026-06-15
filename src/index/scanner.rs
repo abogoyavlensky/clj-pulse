@@ -100,10 +100,8 @@ fn index_classpath_dir(dir: &Path, index: &Index) {
         .collect();
 
     for (meta, mut symbols) in results {
-        // Same filtering as JAR indexing (see jar.rs)
-        if meta.name.ends_with(".impl") || meta.name.ends_with(".internal") {
-            continue;
-        }
+        // `.impl`/`.internal` namespaces are indexed (navigation reaches them);
+        // completion hides them. Same policy as JAR indexing (see jar.rs).
         for sym in &mut symbols {
             sym.source = super::SymbolSource::Dir(dir.to_path_buf());
         }

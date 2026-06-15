@@ -10,7 +10,7 @@ use super::{DefKind, NsMeta, Symbol, SymbolSource};
 ///
 /// Returns one `(NsMeta, Vec<Symbol>)` pair per namespace found.
 /// All symbols are tagged with `SymbolSource::Jar(jar_path)`.
-/// Private symbols (`defn-`) and impl/internal namespaces are filtered out.
+/// Private symbols (`defn-`) are filtered out.
 pub fn index_jar(jar_path: &Path) -> Result<Vec<(NsMeta, Vec<Symbol>)>> {
     let file = std::fs::File::open(jar_path)?;
     let mut zip = zip::ZipArchive::new(file)?;
@@ -46,10 +46,9 @@ pub fn index_jar(jar_path: &Path) -> Result<Vec<(NsMeta, Vec<Symbol>)>> {
 
         match extractor::extract(&source, &virtual_path) {
             Ok((meta, mut symbols)) => {
-                // Skip impl/internal namespaces
-                if meta.name.ends_with(".impl") || meta.name.ends_with(".internal") {
-                    continue;
-                }
+                // `.impl`/`.internal` namespaces are indexed so navigation,
+                // hover, and references reach them from inside library sources;
+                // they are merely kept out of completion's namespace list.
 
                 // Tag all symbols as JAR-sourced and drop private ones
                 for sym in &mut symbols {
@@ -134,11 +133,15 @@ mod tests {
     }
 
     #[test]
-    fn test_index_jar_skips_impl_namespace() {
-        let tmp = make_jar(&[("mylib/impl.clj", b"(ns mylib.impl)\n(defn internal [] nil)")]);
+    fn test_index_jar_includes_impl_namespace() {
+        // `.impl`/`.internal` namespaces are indexed so navigation into library
+        // internals works; completion hides them separately.
+        let tmp = make_jar(&[("mylib/impl.clj", b"(ns mylib.impl)\n(defn helper [] nil)")]);
 
         let results = index_jar(tmp.path()).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.name, "mylib.impl");
+        assert_eq!(results[0].1[0].name, "helper");
     }
 
     #[test]

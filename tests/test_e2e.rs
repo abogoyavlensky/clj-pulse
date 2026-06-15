@@ -2588,6 +2588,67 @@ fn test_e2e_definition_from_percent_encoded_jar_uri() {
 }
 
 #[test]
+fn test_e2e_navigate_into_impl_namespace_from_jar() {
+    // Library-internal `.impl` namespaces are indexed, so navigating from one
+    // library file into the lib's `.impl` namespace works (the claypoole
+    // `impl/validate-future-pool` case).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/impl.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.impl)\n\n(defn validate [x] x)\n")
+        .unwrap();
+    zip.start_file("mylib/core.clj", opts).unwrap();
+    zip.write_all(
+        b"(ns mylib.core\n  (:require [mylib.impl :as impl]))\n\n(defn run [x] (impl/validate x))\n",
+    )
+    .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.core :as core]))\n\n(core/run 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let core_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let core_src = client.text_document_content(&core_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&core_uri, &core_src);
+
+    let (line, ch) = position_in_text(&core_src, "impl/validate");
+    let loc = client.goto_definition_uri(&core_uri, line, ch);
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("!/mylib/impl.clj"),
+        "expected nav into the .impl namespace, got {}",
+        loc
+    );
+}
+
+#[test]
 fn test_e2e_definition_bare_same_ns_symbol_in_jar() {
     // The reported claypoole case: inside a JAR file, go-to-definition on a
     // BARE, same-namespace symbol (`completable-future-call`), not a qualified
