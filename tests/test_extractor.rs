@@ -330,6 +330,18 @@ fn test_occurrence_bare_symbol_resolves_to_current_ns() {
 }
 
 #[test]
+fn test_occurrence_protocol_method_decl_not_recorded() {
+    // The method declaration inside defprotocol must not count as a usage,
+    // else references/rename double-count it. Only the real call does.
+    let src = "(ns my.ns)\n(defprotocol Storage (fetch [this id]))\n(defn use-it [s] (fetch s 1))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    let found = occurrences_of(&occs, "my.ns/fetch");
+    assert_eq!(found.len(), 1, "occurrences: {:?}", occs);
+    assert_eq!(found[0].name_range.start.line, 2);
+}
+
+#[test]
 fn test_occurrence_refer_usage_and_vector_entry() {
     let src = "(ns my.app\n  (:require [other.lib :refer [process]]))\n\n(process 1)";
     let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();

@@ -625,6 +625,14 @@ fn walk_def_form(
     scope: &mut Vec<HashSet<String>>,
     out: &mut Vec<Occurrence>,
 ) {
+    // A defprotocol body is only method *declarations* (signatures, no bodies),
+    // each indexed as its own def. Walking it would record those declarations
+    // as usages, double-counting them in references/rename. There are no real
+    // usages to find, so skip the body entirely.
+    if kind == DefKind::Defprotocol {
+        return;
+    }
+
     let binds_vector = matches!(
         kind,
         DefKind::Defn
