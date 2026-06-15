@@ -26,9 +26,10 @@ pub fn handle(
 
     tracing::info!("signature_help: fn={} arg={}", fn_word, active_arg);
 
-    let path = uri
-        .to_file_path()
-        .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
+    let path = match crate::uri::to_index_path(&uri) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
     let (name, arities, doc) = match resolve_symbol(index, &fn_word, &current_ns) {

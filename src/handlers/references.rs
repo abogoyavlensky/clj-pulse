@@ -22,21 +22,19 @@ pub fn references(
     let mut locations = Vec::new();
     if params.context.include_declaration {
         if let Some(sym) = index.lookup(&fqn) {
-            // Library declarations inside JARs are not listed; project and
-            // dir-lib files are real paths.
-            if matches!(sym.source, SymbolSource::Project | SymbolSource::Dir(_)) {
-                if let Ok(decl_uri) = Url::from_file_path(&sym.file) {
-                    locations.push(Location {
-                        uri: decl_uri,
-                        range: sym.name_range,
-                    });
-                }
+            // Declarations in any source are listed: project/dir files as
+            // `file:` URIs, JAR entries as `jar:` URIs.
+            if let Ok(decl_uri) = crate::uri::from_index_path(&sym.file) {
+                locations.push(Location {
+                    uri: decl_uri,
+                    range: sym.name_range,
+                });
             }
         }
     }
 
     for (file, occs) in occurrences_for(index, documents, &fqn) {
-        let Ok(file_uri) = Url::from_file_path(&file) else {
+        let Ok(file_uri) = crate::uri::from_index_path(&file) else {
             continue;
         };
         for occ in occs {
@@ -65,6 +63,16 @@ pub fn rename(
 
     if !is_valid_symbol_name(&new_name) {
         anyhow::bail!("cannot rename: '{}' is not a valid symbol name", new_name);
+    }
+
+    // Rename may only be initiated from an editable project file. Library
+    // buffers (jar: entries, dir-dep file:s) are read-only — and since the
+    // resolver is fqn-only, a rename started there could otherwise edit a
+    // project symbol that shadows the library one.
+    let origin = crate::uri::to_index_path(&uri)
+        .ok_or_else(|| anyhow::anyhow!("cannot rename from this document"))?;
+    if !index.is_project_path(&origin) {
+        anyhow::bail!("cannot rename from a library file");
     }
 
     let fqn = resolve_fqn_at(index, documents, &uri, pos)
@@ -141,7 +149,7 @@ pub fn resolve_fqn_at(
     pos: Position,
 ) -> Option<String> {
     let word = documents.word_at(uri, pos)?;
-    let path = uri.to_file_path().ok()?;
+    let path = crate::uri::to_index_path(uri)?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
     // word_at succeeded, so the document is open: resolve against live
@@ -191,7 +199,9 @@ pub fn occurrences_for(
 ) -> Vec<(PathBuf, Vec<Occurrence>)> {
     let mut live: HashMap<PathBuf, Vec<Occurrence>> = HashMap::new();
     for uri in documents.open_uris() {
-        let Ok(path) = uri.to_file_path() else {
+        // Open JAR docs (`jar:` URIs) convert to their virtual index path, so a
+        // library file the user is viewing contributes its live occurrences.
+        let Some(path) = crate::uri::to_index_path(&uri) else {
             continue;
         };
         let Some(text) = documents.text(&uri) else {

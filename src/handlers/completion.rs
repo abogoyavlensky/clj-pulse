@@ -98,11 +98,14 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             }
 
             // Pool E: namespace names (project + libraries) — makes
-            // completion inside (:require …) work
+            // completion inside (:require …) work. Library-internal
+            // `.impl`/`.internal` namespaces are indexed for navigation but
+            // omitted here to keep require completion clean.
             for entry in index.namespaces.iter() {
-                if entry.key().starts_with(prefix) {
+                let ns = entry.key();
+                if ns.starts_with(prefix) && !is_internal_ns(ns) {
                     items.push(CompletionItem {
-                        label: entry.key().clone(),
+                        label: ns.clone(),
                         detail: Some("namespace".to_string()),
                         kind: Some(CompletionItemKind::MODULE),
                         ..Default::default()
@@ -113,6 +116,12 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
     }
 
     items
+}
+
+/// Library-internal namespaces (`*.impl` / `*.internal`) are indexed for
+/// navigation/hover/references but kept out of require completion.
+fn is_internal_ns(ns: &str) -> bool {
+    ns.ends_with(".impl") || ns.ends_with(".internal")
 }
 
 fn symbol_to_completion(sym: &crate::index::Symbol, alias: Option<&str>) -> CompletionItem {

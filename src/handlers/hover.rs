@@ -21,9 +21,10 @@ pub fn handle(
 
     tracing::info!("hover: word={}", word);
 
-    let path = uri
-        .to_file_path()
-        .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
+    let path = match crate::uri::to_index_path(&uri) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
     let md = resolve_and_format(index, &word, &current_ns);

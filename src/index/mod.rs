@@ -170,6 +170,13 @@ impl Index {
         self.file_to_ns.get(path).map(|r| r.clone())
     }
 
+    /// Whether `path` is an editable project file. Project files always have an
+    /// occurrences entry; JAR virtual paths and dir-library files never do, so
+    /// this tells an editable buffer apart from read-only library source.
+    pub fn is_project_path(&self, path: &Path) -> bool {
+        self.occurrences.contains_key(path)
+    }
+
     /// Merges a freshly built project index into this one, removing project
     /// files that no longer exist in the new scan (e.g. source roots dropped
     /// from deps.edn `:paths`). Files in `keep` (currently open documents,

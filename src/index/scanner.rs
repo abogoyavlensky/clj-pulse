@@ -100,17 +100,13 @@ fn index_classpath_dir(dir: &Path, index: &Index) {
         .collect();
 
     for (meta, mut symbols) in results {
-        // Same filtering as JAR indexing (see jar.rs)
-        if meta.name.ends_with(".impl") || meta.name.ends_with(".internal") {
-            continue;
-        }
+        // `.impl`/`.internal` namespaces and private (`defn-`) symbols are all
+        // indexed so navigation reaches library internals; completion hides
+        // `.impl`/`.internal`, and workspace search is project-only. Same policy
+        // as JAR indexing (see jar.rs).
         for sym in &mut symbols {
             sym.source = super::SymbolSource::Dir(dir.to_path_buf());
         }
-        let symbols: Vec<Symbol> = symbols
-            .into_iter()
-            .filter(|s| s.kind != super::DefKind::DefnPrivate)
-            .collect();
         index.insert_lib_file(meta, symbols);
     }
 }

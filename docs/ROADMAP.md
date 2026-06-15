@@ -79,7 +79,11 @@ meantime and keeping the server dependency-free is worth more early on.
       ```[flock.staff.spec
           [common :as c]
           [helpers :as h]]```
-- [ ] Transitive Clojure deps navigation
+- [x] Transitive Clojure deps navigation — definition, references, hover, and
+      signature work from inside `jar:` (and `file:` dir-dep) library files, so
+      navigation reaches transitive dependencies. References from a library
+      symbol cover project usages plus currently-open library files (the
+      occurrence index stays project-only).
 - [ ] Keyword indexing — navigation/rename for namespaced keywords. + Navigation on Integrant keys from integratn system edn file to components
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
 - [ ] Custom macros definitions (example `defcomponent` from flockman)

@@ -262,6 +262,12 @@ impl LspClient {
         self.request("workspace/textDocumentContent", json!({ "uri": uri }))
     }
 
+    /// clojure-lsp's custom jar content request (what Calva calls). Returns the
+    /// raw content string.
+    fn dependency_contents(&mut self, uri: &str) -> Value {
+        self.request("clojure/dependencyContents", json!({ "uri": uri }))
+    }
+
     fn signature_help(&mut self, path: &Path, line: u32, character: u32) -> Value {
         self.request(
             "textDocument/signatureHelp",
@@ -362,6 +368,74 @@ impl LspClient {
             }),
         )
     }
+
+    // URI-addressed variants: a JAR entry the editor displays is identified by
+    // its `jar:` URI, not a filesystem path, so these drive navigation/inspection
+    // from inside a library file.
+
+    fn did_open_uri(&mut self, uri: &str, text: &str) {
+        self.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "clojure",
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        );
+    }
+
+    fn goto_definition_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    fn references_uri(
+        &mut self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        include_decl: bool,
+    ) -> Value {
+        self.request(
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "context": { "includeDeclaration": include_decl }
+            }),
+        )
+    }
+
+    fn hover_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    /// Rename by URI, returning the raw JSON-RPC message so the caller can
+    /// assert on either `result` or `error`.
+    fn rename_uri(&mut self, uri: &str, line: u32, character: u32, new_name: &str) -> Value {
+        self.request_full(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "newName": new_name
+            }),
+        )
+    }
 }
 
 impl Drop for LspClient {
@@ -408,6 +482,53 @@ fn position_of(path: &Path, needle: &str) -> (u32, u32) {
         }
     }
     panic!("{:?} not found in {}", needle, path.display());
+}
+
+/// Like [`position_of`] but over an in-memory string — JAR content is served
+/// from the archive, not from a file on disk.
+fn position_in_text(text: &str, needle: &str) -> (u32, u32) {
+    for (i, line) in text.lines().enumerate() {
+        if let Some(col) = line.find(needle) {
+            return (i as u32, (col + needle.len() / 2) as u32);
+        }
+    }
+    panic!("{:?} not found in text", needle);
+}
+
+/// A deps.edn project whose classpath holds a JAR with two namespaces where
+/// `mylib.core` requires `mylib.util` (the transitive-dependency shape). The
+/// project consumer requires and uses both. Returns the tempdir (keep it alive)
+/// and the canonicalized project root.
+fn two_ns_jar_project() -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn helper [x] x)\n")
+        .unwrap();
+    zip.start_file("mylib/core.clj", opts).unwrap();
+    zip.write_all(
+        b"(ns mylib.core\n  (:require [mylib.util :as util]))\n\n(defn run [x] (util/helper x))\n",
+    )
+    .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.core :as core]\n            [mylib.util :as util]))\n\n(core/run 1)\n(util/helper 2)\n",
+    )
+    .unwrap();
+
+    (project, root)
 }
 
 #[test]
@@ -2257,5 +2378,434 @@ fn test_e2e_project_symbols_not_shadowed_by_jars() {
         uri.ends_with("/src/core.clj"),
         "project symbol shadowed by JAR: {}",
         uri
+    );
+}
+
+#[test]
+fn test_e2e_transitive_definition_jar_to_jar() {
+    // Navigate project → mylib.core (a JAR entry), then from *inside* that JAR
+    // entry on into its own dependency mylib.util — the transitive hop.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (line, ch) = position_of(&consumer, "core/run");
+    let core_loc = client.goto_definition(&consumer, line, ch);
+    let core_uri = core_loc["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no jar nav into mylib.core: {}", core_loc))
+        .to_string();
+    assert!(
+        core_uri.ends_with("!/mylib/core.clj"),
+        "expected jar nav into mylib.core, got {}",
+        core_uri
+    );
+
+    // Open the JAR entry the way the editor would, then navigate from within it.
+    let core_src = client.text_document_content(&core_uri)["text"]
+        .as_str()
+        .expect("jar content")
+        .to_string();
+    client.did_open_uri(&core_uri, &core_src);
+
+    let (line, ch) = position_in_text(&core_src, "util/helper");
+    let util_loc = client.goto_definition_uri(&core_uri, line, ch);
+    let util_uri = util_loc["uri"].as_str().unwrap_or_default();
+    assert!(
+        util_uri.ends_with("!/mylib/util.clj"),
+        "expected transitive nav into mylib.util, got {}",
+        util_loc
+    );
+}
+
+#[test]
+fn test_e2e_references_from_inside_library_file() {
+    // Find-references invoked from the `helper` declaration inside the JAR file
+    // returns the project usage, the lib→lib usage in mylib.core, and the
+    // declaration itself.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    // Open both JAR entries as editor docs.
+    let (l, c) = position_of(&consumer, "util/helper");
+    let util_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let util_src = client.text_document_content(&util_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&util_uri, &util_src);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let core_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let core_src = client.text_document_content(&core_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&core_uri, &core_src);
+
+    let (line, ch) = position_in_text(&util_src, "helper");
+    let result = client.references_uri(&util_uri, line, ch, true);
+    let uris: Vec<&str> = result
+        .as_array()
+        .expect("references array")
+        .iter()
+        .filter_map(|loc| loc["uri"].as_str())
+        .collect();
+
+    assert!(
+        uris.iter().any(|u| u.ends_with("/src/uses_lib.clj")),
+        "expected the project usage, got {:?}",
+        uris
+    );
+    assert!(
+        uris.iter().any(|u| u.ends_with("!/mylib/core.clj")),
+        "expected the lib→lib usage in mylib.core, got {:?}",
+        uris
+    );
+    assert!(
+        uris.iter().any(|u| u.ends_with("!/mylib/util.clj")),
+        "expected the declaration in mylib.util, got {:?}",
+        uris
+    );
+}
+
+#[test]
+fn test_e2e_hover_from_inside_library_file() {
+    // Hovering a symbol inside a JAR file resolves it through that file's own
+    // requires and shows its docs.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let core_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let core_src = client.text_document_content(&core_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&core_uri, &core_src);
+
+    let (line, ch) = position_in_text(&core_src, "util/helper");
+    let hover = client.hover_uri(&core_uri, line, ch);
+    let value = hover["contents"]["value"].as_str().unwrap_or_default();
+    assert!(
+        value.contains("helper") && value.contains("mylib.util"),
+        "expected hover for mylib.util/helper from inside the JAR, got {}",
+        hover
+    );
+}
+
+#[test]
+fn test_e2e_dependency_contents_serves_jar_source() {
+    // clojure-lsp's `clojure/dependencyContents` returns the raw entry text for
+    // a jar: URI — the request Calva issues to open a navigation target.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let core_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let contents = client.dependency_contents(&core_uri);
+    let text = contents.as_str().unwrap_or_default();
+    assert!(
+        text.contains("(ns mylib.core") && text.contains("util/helper"),
+        "expected raw mylib.core source from dependencyContents, got {:?}",
+        contents
+    );
+}
+
+#[test]
+fn test_e2e_definition_from_percent_encoded_jar_uri() {
+    // VS Code / Calva re-encode the jar URI before sending didOpen / definition
+    // (`file:`→`file%3A`, `!`→`%21`). The server must still resolve from it —
+    // this is the real-world Calva failure mode.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let clean = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let encoded = clean.replace("file:", "file%3A").replace("!/", "%21/");
+    assert!(
+        encoded.contains("file%3A") && encoded.contains("%21/"),
+        "encoding sanity check failed: {}",
+        encoded
+    );
+
+    let src = client.text_document_content(&clean)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&encoded, &src);
+
+    let (line, ch) = position_in_text(&src, "util/helper");
+    let loc = client.goto_definition_uri(&encoded, line, ch);
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("!/mylib/util.clj"),
+        "expected nav from a percent-encoded jar buffer, got {}",
+        loc
+    );
+}
+
+#[test]
+fn test_e2e_navigate_to_private_fn_in_jar() {
+    // Private (`defn-`) functions in library files are navigable from inside the
+    // library source. `caller` calls the private `secret` unqualified.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn- secret [x] x)\n\n(defn caller [x] (secret x))\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n\n(u/caller 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "u/caller");
+    let util_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let util_src = client.text_document_content(&util_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&util_uri, &util_src);
+
+    let (line, ch) = position_in_text(&util_src, "(secret x)");
+    let loc = client.goto_definition_uri(&util_uri, line, ch);
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("!/mylib/util.clj"),
+        "expected nav to a private fn in the lib, got {}",
+        loc
+    );
+    assert_eq!(
+        loc["range"]["start"]["line"].as_u64(),
+        Some(2),
+        "expected the `(defn- secret ...)` line, got {}",
+        loc
+    );
+}
+
+#[test]
+fn test_e2e_navigate_into_impl_namespace_from_jar() {
+    // Library-internal `.impl` namespaces are indexed, so navigating from one
+    // library file into the lib's `.impl` namespace works (the claypoole
+    // `impl/validate-future-pool` case).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/impl.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.impl)\n\n(defn validate [x] x)\n")
+        .unwrap();
+    zip.start_file("mylib/core.clj", opts).unwrap();
+    zip.write_all(
+        b"(ns mylib.core\n  (:require [mylib.impl :as impl]))\n\n(defn run [x] (impl/validate x))\n",
+    )
+    .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.core :as core]))\n\n(core/run 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let core_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let core_src = client.text_document_content(&core_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&core_uri, &core_src);
+
+    let (line, ch) = position_in_text(&core_src, "impl/validate");
+    let loc = client.goto_definition_uri(&core_uri, line, ch);
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("!/mylib/impl.clj"),
+        "expected nav into the .impl namespace, got {}",
+        loc
+    );
+}
+
+#[test]
+fn test_e2e_definition_bare_same_ns_symbol_in_jar() {
+    // The reported claypoole case: inside a JAR file, go-to-definition on a
+    // BARE, same-namespace symbol (`completable-future-call`), not a qualified
+    // cross-ns ref. `caller` calls `helper` unqualified, both in mylib.util.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn helper [x] x)\n\n(defn caller [x] (helper x))\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n\n(u/caller 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    // Into the JAR, then open it the way the editor would.
+    let (l, c) = position_of(&consumer, "u/caller");
+    let util_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let util_src = client.text_document_content(&util_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&util_uri, &util_src);
+
+    // Cursor on the bare `helper` inside `(helper x)` → its definition above.
+    let (line, ch) = position_in_text(&util_src, "(helper x)");
+    let loc = client.goto_definition_uri(&util_uri, line, ch);
+    let uri = loc["uri"].as_str().unwrap_or_default();
+    assert!(
+        uri.ends_with("!/mylib/util.clj"),
+        "expected same-file nav for a bare same-ns symbol, got {}",
+        loc
+    );
+    assert_eq!(
+        loc["range"]["start"]["line"].as_u64(),
+        Some(2),
+        "expected the `(defn helper ...)` line, got {}",
+        loc
+    );
+}
+
+#[test]
+fn test_e2e_rename_rejected_from_library_file() {
+    // Navigation/inspection work from a JAR buffer, but rename must not: a
+    // library file is read-only, and the fqn-only resolver could otherwise edit
+    // a project symbol that shadows the library one.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "util/helper");
+    let util_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let util_src = client.text_document_content(&util_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&util_uri, &util_src);
+
+    let (line, ch) = position_in_text(&util_src, "helper");
+    let msg = client.rename_uri(&util_uri, line, ch, "renamed");
+    let err = msg
+        .get("error")
+        .unwrap_or_else(|| panic!("rename from a JAR buffer should be rejected, got {}", msg));
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("library file"),
+        "expected a library-file rejection, got {}",
+        err
     );
 }

@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use super::extractor;
-use super::{DefKind, NsMeta, Symbol, SymbolSource};
+use super::{NsMeta, Symbol, SymbolSource};
 
 /// Indexes all Clojure source files within a JAR (ZIP) file.
 ///
 /// Returns one `(NsMeta, Vec<Symbol>)` pair per namespace found.
 /// All symbols are tagged with `SymbolSource::Jar(jar_path)`.
-/// Private symbols (`defn-`) and impl/internal namespaces are filtered out.
+/// Private symbols (`defn-`) are filtered out.
 pub fn index_jar(jar_path: &Path) -> Result<Vec<(NsMeta, Vec<Symbol>)>> {
     let file = std::fs::File::open(jar_path)?;
     let mut zip = zip::ZipArchive::new(file)?;
@@ -46,20 +46,14 @@ pub fn index_jar(jar_path: &Path) -> Result<Vec<(NsMeta, Vec<Symbol>)>> {
 
         match extractor::extract(&source, &virtual_path) {
             Ok((meta, mut symbols)) => {
-                // Skip impl/internal namespaces
-                if meta.name.ends_with(".impl") || meta.name.ends_with(".internal") {
-                    continue;
-                }
-
-                // Tag all symbols as JAR-sourced and drop private ones
+                // `.impl`/`.internal` namespaces and private (`defn-`) symbols
+                // are all indexed so navigation, hover, and references reach
+                // library internals from inside library sources. Completion keeps
+                // `.impl`/`.internal` out of its require list, and workspace
+                // symbol search is project-only — so neither floods the user.
                 for sym in &mut symbols {
                     sym.source = SymbolSource::Jar(jar_path.to_path_buf());
                 }
-                let symbols: Vec<Symbol> = symbols
-                    .into_iter()
-                    .filter(|s| s.kind != DefKind::DefnPrivate)
-                    .collect();
-
                 results.push((meta, symbols));
             }
             Err(e) => {
@@ -119,7 +113,9 @@ mod tests {
     }
 
     #[test]
-    fn test_index_jar_filters_private_symbols() {
+    fn test_index_jar_keeps_private_symbols() {
+        // Private (`defn-`) symbols are indexed so navigation into library
+        // internals works; they are not surfaced by completion/workspace search.
         let tmp = make_jar(&[(
             "mylib/core.clj",
             b"(ns mylib.core)\n(defn public-fn [] nil)\n(defn- private-fn [] nil)",
@@ -128,17 +124,20 @@ mod tests {
         let results = index_jar(tmp.path()).unwrap();
         assert_eq!(results.len(), 1);
         let (_, symbols) = &results[0];
-        // private-fn should be filtered out
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].name, "public-fn");
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"public-fn") && names.contains(&"private-fn"));
     }
 
     #[test]
-    fn test_index_jar_skips_impl_namespace() {
-        let tmp = make_jar(&[("mylib/impl.clj", b"(ns mylib.impl)\n(defn internal [] nil)")]);
+    fn test_index_jar_includes_impl_namespace() {
+        // `.impl`/`.internal` namespaces are indexed so navigation into library
+        // internals works; completion hides them separately.
+        let tmp = make_jar(&[("mylib/impl.clj", b"(ns mylib.impl)\n(defn helper [] nil)")]);
 
         let results = index_jar(tmp.path()).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.name, "mylib.impl");
+        assert_eq!(results[0].1[0].name, "helper");
     }
 
     #[test]
