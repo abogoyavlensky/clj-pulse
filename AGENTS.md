@@ -46,6 +46,13 @@ protocol changes should also pass `bb e2e-nvim`.
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
 
+## Releasing
+
+Releases are tag-driven: `bb tag` reads the version from `Cargo.toml`, tags it
+`v<version>`, and pushes to `origin`, which triggers the release CI (build matrix
++ checksums + GitHub Release). `Cargo.toml` is the source of truth — bump it
+first. See [docs/RELEASE.md](docs/RELEASE.md) for the full flow.
+
 ## User's setup
 
 The maintainer tests manually in VS Code on macOS via Calva

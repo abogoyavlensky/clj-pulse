@@ -37,4 +37,16 @@
          :task (shell "cargo build")}
   
   release {:doc "Build application release binary"
-           :task (shell "cargo build --release")}}}
+           :task (shell "cargo build --release")}
+
+  tag {:doc "Tag HEAD as v<version from Cargo.toml> and push to origin (triggers release CI)"
+       :task (let [version (second (re-find (re-pattern "(?m)^version\\s*=\\s*\"([^\"]+)\"")
+                                            (slurp "Cargo.toml")))]
+               (when-not version
+                 (binding [*out* *err*]
+                   (println "Could not read version from Cargo.toml"))
+                 (System/exit 1))
+               (let [tag (str "v" version)]
+                 (println "Tagging" tag "and pushing to origin...")
+                 (shell "git tag" tag)
+                 (shell "git push origin" tag)))}}}
