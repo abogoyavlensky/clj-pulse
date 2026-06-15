@@ -242,11 +242,23 @@ Implemented as designed on branch `protocols-records-navigation`. All `bb check`
   `resolve_symbol`/`factory_target_name` unit tests, and two e2e tests
   (protocol-method call → signature; `map->DB`/`->DB` → defrecord).
 
-### Codex review follow-up (fixed)
+### Codex review follow-ups (all fixed, final re-review clean)
 
-A second-opinion codex review caught a P2: once protocol methods are indexed,
-the occurrence pass walked the `defprotocol` body and recorded each method
-*declaration* as a usage, double-counting it in references/rename. Fixed by
-skipping the protocol body in `walk_def_form` (its signatures hold no usages),
-covered by `test_occurrence_protocol_method_decl_not_recorded`. The final
-re-review was clean.
+Iterative second-opinion codex reviews caught four P2 correctness issues, each
+fixed with a regression test:
+
+- **Protocol declarations double-counted as occurrences.** Once methods are
+  indexed, the occurrence pass walked the `defprotocol` body and recorded each
+  method declaration as a usage (breaking references/rename). Fixed by skipping
+  the protocol body in `walk_def_form`. Test:
+  `test_occurrence_protocol_method_decl_not_recorded`.
+- **`map->` accepted `deftype`.** `deftype` generates `->X` but no `map->X`;
+  `resolve_factory` now allows `map->` only for `defrecord`. Test:
+  `map_constructor_is_record_only`.
+- **Referred constructors didn't resolve.** `(:require [recs :refer [->DB]])`
+  failed because the ctor fqn isn't indexed; the refer branch now resolves the
+  factory in the referred namespace. Test:
+  `resolve_symbol_navigates_referred_factory`.
+- **Core shadowed a local constructor.** A local record whose `->X` collides
+  with a `clojure.core` name (e.g. `->Eduction`) must win; the factory fallback
+  now runs before the core fallback. Test: `local_constructor_shadows_core`.
