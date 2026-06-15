@@ -71,8 +71,10 @@ meantime and keeping the server dependency-free is worth more early on.
       from map->DB to DB protocol — protocol method signatures are indexed as
       namespace-level vars (so definition/hover/completion/references reach
       them); `->X`/`map->X` resolve to the `defrecord`/`deftype` `X` via a
-      resolve-time fallback. Method impls in defrecord/extend-* and "find
-      implementations" are not in scope.
+      resolve-time fallback. Method *implementations* in
+      `defrecord`/`deftype`/`extend-type`/`extend-protocol`/`reify` now navigate
+      to the protocol's declaration too. The reverse ("find implementations")
+      is not in scope.
 - [ ] resolve and navigate to libs that required with common syntax:
       ```[flock.staff.spec
           [common :as c]
