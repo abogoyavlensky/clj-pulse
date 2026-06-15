@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use clj_lsp::index::extractor;
-use clj_lsp::index::scanner;
+use clj_pulse::index::extractor;
+use clj_pulse::index::scanner;
 
 #[test]
 fn test_indexes_all_files_in_project() {
@@ -65,7 +65,7 @@ fn test_insert_file_updates_index() {
 
 #[test]
 fn test_clear_libs_allows_dir_lib_reinsert() {
-    use clj_lsp::index::{Index, SymbolSource};
+    use clj_pulse::index::{Index, SymbolSource};
     use std::path::PathBuf;
 
     let index = Index::new();

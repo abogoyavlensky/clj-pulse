@@ -1,9 +1,9 @@
 {
-  "name": "clj-lsp-e2e-host",
-  "displayName": "clj-lsp e2e host",
+  "name": "clj-pulse-e2e-host",
+  "displayName": "clj-pulse e2e host",
   "description": "Empty host extension required by @vscode/test-electron",
   "version": "0.0.1",
-  "publisher": "clj-lsp",
+  "publisher": "clj-pulse",
   "engines": { "vscode": "^1.80.0" },
   "main": "./extension.js",
   "activationEvents": []

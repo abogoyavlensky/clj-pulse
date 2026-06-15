@@ -18,7 +18,7 @@ const CALVA_VSIX_URL =
   "https://open-vsx.org/api/betterthantomorrow/calva/2.0.591/file/betterthantomorrow.calva-2.0.591.vsix";
 
 async function main() {
-  const serverBin = path.resolve(__dirname, "../../target/debug/clj-lsp");
+  const serverBin = path.resolve(__dirname, "../../target/debug/clj-pulse");
   if (!fs.existsSync(serverBin)) {
     throw new Error(`server binary not found, run cargo build first: ${serverBin}`);
   }

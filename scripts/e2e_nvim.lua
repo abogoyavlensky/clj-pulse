@@ -1,11 +1,11 @@
--- Real-client e2e: drives clj-lsp through Neovim's built-in LSP client,
+-- Real-client e2e: drives clj-pulse through Neovim's built-in LSP client,
 -- verifying capability negotiation and feature behavior against a real
 -- editor client (not just a raw JSON-RPC harness).
 --
 -- Usage: nvim --headless -l scripts/e2e_nvim.lua [project-root] [server-binary]
 
 local root = arg[1] or "tests/fixtures/simple_project"
-local server = arg[2] or "target/debug/clj-lsp"
+local server = arg[2] or "target/debug/clj-pulse"
 root = vim.fn.fnamemodify(root, ":p"):gsub("/$", "")
 server = vim.fn.fnamemodify(server, ":p")
 
@@ -24,7 +24,7 @@ local buf = vim.api.nvim_get_current_buf()
 
 local indexed = false
 local client_id = vim.lsp.start({
-  name = "clj-lsp",
+  name = "clj-pulse",
   cmd = { server },
   root_dir = root,
   handlers = {

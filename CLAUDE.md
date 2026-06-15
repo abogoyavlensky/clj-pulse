@@ -1,4 +1,4 @@
-# clj-lsp
+# clj-pulse
 
 Rust LSP server for Clojure (tower-lsp, tree-sitter). See ARCHITECTURE.md for data flow.
 
@@ -49,6 +49,6 @@ protocol changes should also pass `bb e2e-nvim`.
 ## User's setup
 
 The maintainer tests manually in VS Code on macOS via Calva
-(`calva.clojureLspPath` → `target/debug/clj-lsp`). Plain vscode-languageclient
+(`calva.clojureLspPath` → `target/debug/clj-pulse`). Plain vscode-languageclient
 9.x has no `workspace/textDocumentContent` support, so `jar:` URI navigation
 needs client-side wiring in the editor extension (not yet done).

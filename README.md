@@ -1,4 +1,4 @@
-# clj-lsp
+# clj-pulse
 
 A minimal and fast Clojure LSP server.
 
@@ -13,19 +13,19 @@ A minimal and fast Clojure LSP server.
 ### mise (macOS, Linux)
 
 ```sh
-mise use -g ubi:abogoyavlensky/clj-lsp
+mise use -g ubi:abogoyavlensky/clj-pulse
 ```
 
 To find the binary path for editor configuration:
 
 ```sh
-mise which clj-lsp
+mise which clj-pulse
 ```
 
 ### Manual download
 
 Download the archive for your platform from
-[releases](https://github.com/abogoyavlensky/clj-lsp/releases), unpack it,
+[releases](https://github.com/abogoyavlensky/clj-pulse/releases), unpack it,
 and put the binary on your `PATH`. Checksums for all archives are in
 `checksums.txt` attached to each release.
 
@@ -33,7 +33,7 @@ and put the binary on your `PATH`. Checksums for all archives are in
 > macOS quarantines binaries downloaded through a browser, so Gatekeeper
 > refuses to run them ("cannot be opened because the developer cannot be
 > verified"). Remove the attribute with
-> `xattr -d com.apple.quarantine ./clj-lsp`. Installs via mise are not
+> `xattr -d com.apple.quarantine ./clj-pulse`. Installs via mise are not
 > affected.
 
 ## Development
@@ -68,7 +68,7 @@ Install [Calva](https://calva.io/) extension, then add to `settings.json`:
 
 ```json
 {
-  "calva.clojureLspPath": "/path/to/clj-lsp"
+  "calva.clojureLspPath": "/path/to/clj-pulse"
 }
 ```
 
@@ -81,7 +81,7 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
   "lsp": {
     "clojure-lsp": {
       "binary": {
-        "path": "/path/to/clj-lsp",
+        "path": "/path/to/clj-pulse",
       },
     },
   },

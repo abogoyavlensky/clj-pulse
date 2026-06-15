@@ -76,19 +76,19 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../clj-lsp-${{ matrix.target }}.tar.gz clj-lsp
+          tar czf ../../../clj-pulse-${{ matrix.target }}.tar.gz clj-pulse
           cd ../../..
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/clj-lsp.exe -DestinationPath clj-lsp-${{ matrix.target }}.zip
+          Compress-Archive -Path target/${{ matrix.target }}/release/clj-pulse.exe -DestinationPath clj-pulse-${{ matrix.target }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: clj-lsp-${{ matrix.target }}
-          path: clj-lsp-${{ matrix.target }}.*
+          name: clj-pulse-${{ matrix.target }}
+          path: clj-pulse-${{ matrix.target }}.*
 
   release:
     needs: build
@@ -99,11 +99,11 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: sha256sum clj-lsp-* > checksums.txt
+        run: sha256sum clj-pulse-* > checksums.txt
 
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            clj-lsp-*
+            clj-pulse-*
             checksums.txt

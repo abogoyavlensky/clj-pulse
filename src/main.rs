@@ -22,7 +22,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--version") {
-        println!("clj-lsp {}", env!("CARGO_PKG_VERSION"));
+        println!("clj-pulse {}", env!("CARGO_PKG_VERSION"));
         return;
     }
 
@@ -31,8 +31,8 @@ async fn main() {
     let log_dir = std::env::current_dir()
         .ok()
         .and_then(|cwd| config::find_project_root(&cwd))
-        .map(|root| root.join(".clj-lsp"))
-        .unwrap_or_else(|| std::env::temp_dir().join("clj-lsp"));
+        .map(|root| root.join(".clj-pulse"))
+        .unwrap_or_else(|| std::env::temp_dir().join("clj-pulse"));
     std::fs::create_dir_all(&log_dir).ok();
 
     let log_path = log_dir.join("server.log");
@@ -49,7 +49,7 @@ async fn main() {
         .with_writer(non_blocking)
         .init();
 
-    tracing::info!("clj-lsp starting");
+    tracing::info!("clj-pulse starting");
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();

@@ -1,4 +1,4 @@
-//! End-to-end tests: spawn the real `clj-lsp` binary and speak LSP over
+//! End-to-end tests: spawn the real `clj-pulse` binary and speak LSP over
 //! stdio with Content-Length framing, the same way VS Code/Calva drives it.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -29,7 +29,7 @@ impl LspClient {
     /// Like [`start`] but sets extra environment variables on the server
     /// process (e.g. `LGX_HOME` for hermetic lgx dep resolution).
     fn start_with_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-lsp"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
         cmd.current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -37,7 +37,7 @@ impl LspClient {
         for (key, value) in envs {
             cmd.env(key, value);
         }
-        let mut child = cmd.spawn().expect("failed to spawn clj-lsp");
+        let mut child = cmd.spawn().expect("failed to spawn clj-pulse");
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -372,7 +372,7 @@ impl Drop for LspClient {
 }
 
 /// Copies the simple_project fixture into a temp dir so tests can mutate it
-/// (and so `.clj-lsp/` artifacts don't pollute the repo).
+/// (and so `.clj-pulse/` artifacts don't pollute the repo).
 fn setup_project() -> tempfile::TempDir {
     setup_named("simple_project")
 }

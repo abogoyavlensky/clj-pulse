@@ -174,7 +174,7 @@ impl LanguageServer for Backend {
                             client
                                 .log_message(
                                     MessageType::ERROR,
-                                    format!("clj-lsp: index build failed: {}", e),
+                                    format!("clj-pulse: index build failed: {}", e),
                                 )
                                 .await;
                         }
@@ -188,12 +188,12 @@ impl LanguageServer for Backend {
                     if resolve_and_index_libs(&root_path_jars, &index_jars) == 0 {
                         let msg = match config::project_kind(&root_path_jars) {
                             config::ProjectKind::LetGo => {
-                                "clj-lsp: no lgx deps resolved (no ~/.lgx/gitlibs, or deps not \
+                                "clj-pulse: no lgx deps resolved (no ~/.lgx/gitlibs, or deps not \
                                  fetched — run `lgx run`/`lgx build` once) — library symbols \
                                  will not be indexed."
                             }
                             config::ProjectKind::Clojure => {
-                                "clj-lsp: no classpath found (no .cpcache/ in project root?) \
+                                "clj-pulse: no classpath found (no .cpcache/ in project root?) \
                                  — library symbols will not be indexed. Run `clojure -Spath` \
                                  or start a REPL once to generate it."
                             }
@@ -204,7 +204,7 @@ impl LanguageServer for Backend {
                     }
                     let sym_count = index_jars.symbols.len();
                     let msg = format!(
-                        "clj-lsp: library indexing complete ({} total symbols)",
+                        "clj-pulse: library indexing complete ({} total symbols)",
                         sym_count
                     );
                     tracing::info!("{}", msg);
@@ -242,14 +242,14 @@ impl LanguageServer for Backend {
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
-                name: "clj-lsp".to_string(),
+                name: "clj-pulse".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
         })
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        tracing::info!("clj-lsp initialized");
+        tracing::info!("clj-pulse initialized");
 
         // Watch source files so git pulls / branch switches keep the index
         // fresh without editor saves. Clients without dynamic registration
@@ -273,7 +273,7 @@ impl LanguageServer for Backend {
             },
         ];
         let registration = Registration {
-            id: "clj-lsp-watched-files".to_string(),
+            id: "clj-pulse-watched-files".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
                 watchers,
@@ -286,7 +286,7 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        tracing::info!("clj-lsp shutting down");
+        tracing::info!("clj-pulse shutting down");
         Ok(())
     }
 
@@ -428,7 +428,7 @@ impl LanguageServer for Backend {
                     if resolve_and_index_libs(&root, &index) == 0 {
                         return;
                     }
-                    let msg = "clj-lsp: library re-indexing complete";
+                    let msg = "clj-pulse: library re-indexing complete";
                     tracing::info!("{}", msg);
                     client.log_message(MessageType::INFO, msg).await;
                 });

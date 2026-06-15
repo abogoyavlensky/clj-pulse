@@ -32,7 +32,7 @@ pub fn compute(source: &str, path: &Path) -> Vec<Diagnostic> {
             range: u.range,
             severity: Some(DiagnosticSeverity::WARNING),
             code: Some(NumberOrString::String("unresolved-namespace".to_string())),
-            source: Some("clj-lsp".to_string()),
+            source: Some("clj-pulse".to_string()),
             message: format!("Unresolved namespace: {}", u.prefix),
             ..Default::default()
         })
@@ -93,7 +93,7 @@ mod tests {
             d.code,
             Some(NumberOrString::String("unresolved-namespace".to_string()))
         );
-        assert_eq!(d.source.as_deref(), Some("clj-lsp"));
+        assert_eq!(d.source.as_deref(), Some("clj-pulse"));
         assert!(d.message.contains("str"), "message: {}", d.message);
         // Whole-symbol range: `str/join` is 8 chars on line 1.
         assert_eq!(d.range.start.line, 1);

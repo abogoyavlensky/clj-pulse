@@ -1,7 +1,7 @@
 {
   "name": "calva-e2e",
   "private": true,
-  "description": "Headless e2e: real VS Code + real Calva driving clj-lsp",
+  "description": "Headless e2e: real VS Code + real Calva driving clj-pulse",
   "scripts": {
     "test": "node runner.js"
   },

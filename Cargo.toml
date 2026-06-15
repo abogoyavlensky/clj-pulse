@@ -1,14 +1,14 @@
 [package]
-name = "clj-lsp"
+name = "clj-pulse"
 version = "0.0.1-alpha-3"
 edition = "2021"
 
 [lib]
-name = "clj_lsp"
+name = "clj_pulse"
 path = "src/lib.rs"
 
 [[bin]]
-name = "clj-lsp"
+name = "clj-pulse"
 path = "src/main.rs"
 
 [dependencies]

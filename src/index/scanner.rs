@@ -116,7 +116,7 @@ fn index_classpath_dir(dir: &Path, index: &Index) {
 }
 
 fn index_classpath_jars(root: &Path, jars: Vec<PathBuf>, index: &Index) {
-    let cache_dir = root.join(".clj-lsp").join("jar-cache");
+    let cache_dir = root.join(".clj-pulse").join("jar-cache");
 
     tracing::info!("indexing {} JAR(s) from classpath", jars.len());
 

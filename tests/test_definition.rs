@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use clj_lsp::handlers::{resolve_symbol, ResolvedSymbol};
-use clj_lsp::index::scanner;
+use clj_pulse::handlers::{resolve_symbol, ResolvedSymbol};
+use clj_pulse::index::scanner;
 
-fn build_test_index() -> clj_lsp::index::Index {
+fn build_test_index() -> clj_pulse::index::Index {
     let root = Path::new("tests/fixtures/simple_project");
     let paths = vec![root.join("src")];
     scanner::build_index(root, &paths).unwrap()
@@ -38,16 +38,16 @@ fn test_resolves_definition_via_alias() {
 #[test]
 fn test_resolves_definition_via_refer() {
     // Build index with a ns that has :refer imports
-    let index = clj_lsp::index::Index::new();
+    let index = clj_pulse::index::Index::new();
     let source = include_str!("fixtures/snippets/ns_with_requires.clj");
     let (meta, syms) =
-        clj_lsp::index::extractor::extract(source, Path::new("ns_with_requires.clj")).unwrap();
+        clj_pulse::index::extractor::extract(source, Path::new("ns_with_requires.clj")).unwrap();
     index.insert_file(meta, syms, vec![]);
 
     // Also add the referred-to symbol
     let utils_source = r#"(ns my.utils) (defn format-date [d] d)"#;
     let (meta2, syms2) =
-        clj_lsp::index::extractor::extract(utils_source, Path::new("utils.clj")).unwrap();
+        clj_pulse::index::extractor::extract(utils_source, Path::new("utils.clj")).unwrap();
     index.insert_file(meta2, syms2, vec![]);
 
     let result = resolve_symbol(&index, "format-date", "my.service");

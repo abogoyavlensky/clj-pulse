@@ -21,7 +21,7 @@
 
   e2e-nvim {:doc "Real-editor-client e2e via headless Neovim"
             :task (do (shell "cargo build")
-                      (shell "nvim --headless -l scripts/e2e_nvim.lua tests/fixtures/simple_project target/debug/clj-lsp"))}
+                      (shell "nvim --headless -l scripts/e2e_nvim.lua tests/fixtures/simple_project target/debug/clj-pulse"))}
 
   e2e-calva {:doc "Full-stack e2e: real VS Code + Calva under Xvfb (needs npm install in scripts/calva-e2e)"
              :task (do (shell "cargo build")

@@ -5,5 +5,5 @@
 .DS_Store
 .clj-kondo
 .lsp/
-.clj-lsp
+.clj-pulse
 .tmp/

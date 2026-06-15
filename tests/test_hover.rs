@@ -1,14 +1,14 @@
 use std::path::Path;
 
-use clj_lsp::handlers::hover::{format_for_symbol, resolve_and_format};
-use clj_lsp::index::scanner;
-use clj_lsp::index::Index;
+use clj_pulse::handlers::hover::{format_for_symbol, resolve_and_format};
+use clj_pulse::index::scanner;
+use clj_pulse::index::Index;
 
 fn build_test_index() -> Index {
     let root = Path::new("tests/fixtures/simple_project");
     let paths = vec![root.join("src")];
     let mut index = scanner::build_index(root, &paths).unwrap();
-    index.core_symbols = clj_lsp::index::core::core_symbols();
+    index.core_symbols = clj_pulse::index::core::core_symbols();
     index
 }
 

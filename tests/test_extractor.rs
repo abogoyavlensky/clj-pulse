@@ -1,5 +1,5 @@
-use clj_lsp::index::extractor::extract;
-use clj_lsp::index::DefKind;
+use clj_pulse::index::extractor::extract;
+use clj_pulse::index::DefKind;
 use std::path::Path;
 
 #[test]
@@ -121,7 +121,7 @@ fn test_records_bare_symbol_require() {
 
 #[test]
 fn test_qualified_usages_collects_and_skips_quotes() {
-    use clj_lsp::index::extractor::qualified_usages;
+    use clj_pulse::index::extractor::qualified_usages;
     let src = "(ns my.app\n  (:require [clojure.string :as str]))\n\n\
                (defn f []\n  \
                  (str/join \", \" [1 2])\n  \
@@ -152,7 +152,7 @@ fn test_qualified_usages_collects_and_skips_quotes() {
 
 #[test]
 fn test_qualified_usages_skips_reader_discard() {
-    use clj_lsp::index::extractor::qualified_usages;
+    use clj_pulse::index::extractor::qualified_usages;
     let src = "(ns my.app)\n(defn f []\n  #_unused/sym\n  #_(discarded/call 1)\n  (real/use))\n";
     let usages = qualified_usages(src);
     let prefixes: Vec<&str> = usages.iter().map(|u| u.prefix.as_str()).collect();
@@ -292,12 +292,12 @@ fn test_ranges_are_utf16_columns() {
 
 // --- occurrence extraction (Phase 2) ---
 
-use clj_lsp::index::extractor::extract_full;
+use clj_pulse::index::extractor::extract_full;
 
 fn occurrences_of<'a>(
-    occs: &'a [clj_lsp::index::Occurrence],
+    occs: &'a [clj_pulse::index::Occurrence],
     fqn: &str,
-) -> Vec<&'a clj_lsp::index::Occurrence> {
+) -> Vec<&'a clj_pulse::index::Occurrence> {
     occs.iter().filter(|o| o.fqn == fqn).collect()
 }
 

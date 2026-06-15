@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use clj_lsp::handlers::{resolve_symbol, ResolvedSymbol};
-use clj_lsp::index::{Index, SymbolSource};
+use clj_pulse::handlers::{resolve_symbol, ResolvedSymbol};
+use clj_pulse::index::{Index, SymbolSource};
 use tower_lsp::lsp_types::Url;
 
 fn make_jar(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
@@ -26,7 +26,7 @@ fn test_goto_definition_jar_returns_jar_uri() {
     )]);
     let jar_path = tmp.path().to_path_buf();
 
-    let results = clj_lsp::index::jar::index_jar(&jar_path).unwrap();
+    let results = clj_pulse::index::jar::index_jar(&jar_path).unwrap();
     let index = Index::new();
     for (meta, syms) in results {
         index.insert_file(meta, syms, vec![]);
@@ -54,7 +54,7 @@ fn test_goto_definition_jar_returns_jar_uri() {
     );
 
     // Verify round-trip: parse the URI back
-    let (parsed_path, parsed_entry) = clj_lsp::jar_content::parse_jar_uri(&jar_uri).unwrap();
+    let (parsed_path, parsed_entry) = clj_pulse::jar_content::parse_jar_uri(&jar_uri).unwrap();
     assert_eq!(parsed_path, jar_path);
     assert_eq!(parsed_entry, "mylib/core.clj");
 }
@@ -64,7 +64,7 @@ fn test_jar_content_extract_roundtrip() {
     let source = b"(ns mylib.core)\n\n(defn hello [] \"hello\")";
     let tmp = make_jar(&[("mylib/core.clj", source)]);
 
-    let content = clj_lsp::jar_content::extract_content(tmp.path(), "mylib/core.clj").unwrap();
+    let content = clj_pulse::jar_content::extract_content(tmp.path(), "mylib/core.clj").unwrap();
     assert!(
         content.contains("(ns mylib.core)"),
         "unexpected content: {}",
@@ -75,7 +75,7 @@ fn test_jar_content_extract_roundtrip() {
 #[test]
 fn test_parse_jar_uri_roundtrip() {
     let uri = "jar:file:///tmp/test.jar!/mylib/core.clj";
-    let (jar_path, entry_path) = clj_lsp::jar_content::parse_jar_uri(uri).unwrap();
+    let (jar_path, entry_path) = clj_pulse::jar_content::parse_jar_uri(uri).unwrap();
     assert_eq!(jar_path, PathBuf::from("/tmp/test.jar"));
     assert_eq!(entry_path, "mylib/core.clj");
 }

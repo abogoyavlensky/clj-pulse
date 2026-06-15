@@ -4,7 +4,7 @@ const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 let client;
 
 function activate(context) {
-  const serverPath = path.resolve(__dirname, "..", "..", "target", "debug", "clj-lsp");
+  const serverPath = path.resolve(__dirname, "..", "..", "target", "debug", "clj-pulse");
 
   const serverOptions = {
     command: serverPath,
@@ -18,8 +18,8 @@ function activate(context) {
   };
 
   client = new LanguageClient(
-    "clj-lsp",
-    "clj-lsp",
+    "clj-pulse",
+    "clj-pulse",
     serverOptions,
     clientOptions,
   );
