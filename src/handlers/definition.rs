@@ -27,6 +27,19 @@ pub fn handle(
         .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
+    // Prefer the resolved occurrence recorded at this exact position when it
+    // points at a known symbol: it is context-aware (e.g. a protocol method
+    // impl resolves to the protocol's declaration even when the bare name also
+    // names a core/current-ns var) and otherwise matches `resolve_symbol`.
+    // When it doesn't resolve to a symbol, fall through to the word resolver,
+    // which also handles aliases, namespaces, and the static core list.
+    if let Some(fqn) = index.occurrence_at(&path, pos) {
+        if let Some(sym) = index.lookup(&fqn) {
+            let location = location_for(&sym.file, sym.name_range, &sym.source)?;
+            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+        }
+    }
+
     match resolve_symbol(index, &word, &current_ns) {
         Some(ResolvedSymbol::Project(sym)) => {
             let location = location_for(&sym.file, sym.name_range, &sym.source)?;
@@ -48,16 +61,6 @@ pub fn handle(
             Ok(None)
         }
         None => {
-            // The bare-word resolver can't resolve some usages — notably a
-            // protocol method impl whose protocol lives in another namespace
-            // (`(start [c] …)` under `component/Lifecycle`). Fall back to the
-            // resolved occurrence recorded at the cursor.
-            if let Some(fqn) = index.occurrence_at(&path, pos) {
-                if let Some(sym) = index.lookup(&fqn) {
-                    let location = location_for(&sym.file, sym.name_range, &sym.source)?;
-                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
-                }
-            }
             // The word may be a require alias (`[ring.util.response :as
             // response]` with the cursor on `response`) or a namespace name
             // itself — navigate to the top of that namespace's file.
