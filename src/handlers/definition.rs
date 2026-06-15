@@ -28,9 +28,21 @@ pub fn handle(
     // the latter is what lets navigation continue into transitive deps.
     let path = match uri::to_index_path(&uri) {
         Some(p) => p,
-        None => return Ok(None),
+        None => {
+            tracing::debug!(
+                "goto_definition: unresolvable document URI {}",
+                uri.as_str()
+            );
+            return Ok(None);
+        }
     };
     let current_ns = index.file_ns(&path).unwrap_or_default();
+    tracing::debug!(
+        "goto_definition: uri={} index_path={} current_ns={:?}",
+        uri.as_str(),
+        path.display(),
+        current_ns
+    );
 
     // Prefer the definition/occurrence resolved at this exact position when it
     // points at a known symbol. This is context-aware — a protocol method impl
@@ -39,7 +51,9 @@ pub fn handle(
     // references/rename), so unsaved edits resolve correctly. When it doesn't
     // resolve to a known symbol, fall through to the bare-word resolver, which
     // also handles aliases, namespaces, and the static core list.
-    if let Some(fqn) = super::references::resolve_fqn_at(index, documents, &uri, pos) {
+    let resolved = super::references::resolve_fqn_at(index, documents, &uri, pos);
+    tracing::debug!("goto_definition: resolved={:?}", resolved);
+    if let Some(fqn) = resolved {
         if let Some(sym) = index.lookup(&fqn) {
             let location = location_for(&sym.file, sym.name_range)?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));

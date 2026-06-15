@@ -2545,6 +2545,49 @@ fn test_e2e_dependency_contents_serves_jar_source() {
 }
 
 #[test]
+fn test_e2e_definition_from_percent_encoded_jar_uri() {
+    // VS Code / Calva re-encode the jar URI before sending didOpen / definition
+    // (`file:`→`file%3A`, `!`→`%21`). The server must still resolve from it —
+    // this is the real-world Calva failure mode.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let clean = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let encoded = clean.replace("file:", "file%3A").replace("!/", "%21/");
+    assert!(
+        encoded.contains("file%3A") && encoded.contains("%21/"),
+        "encoding sanity check failed: {}",
+        encoded
+    );
+
+    let src = client.text_document_content(&clean)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&encoded, &src);
+
+    let (line, ch) = position_in_text(&src, "util/helper");
+    let loc = client.goto_definition_uri(&encoded, line, ch);
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("!/mylib/util.clj"),
+        "expected nav from a percent-encoded jar buffer, got {}",
+        loc
+    );
+}
+
+#[test]
 fn test_e2e_definition_bare_same_ns_symbol_in_jar() {
     // The reported claypoole case: inside a JAR file, go-to-definition on a
     // BARE, same-namespace symbol (`completable-future-call`), not a qualified

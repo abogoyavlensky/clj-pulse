@@ -5,10 +5,15 @@ use tower_lsp::lsp_types::Url;
 
 /// Parses a JAR URI of the form `jar:file:///path/to.jar!/entry/path.clj`
 /// into `(PathBuf("/path/to.jar"), "entry/path.clj")`.
+///
+/// Tolerates percent-encoding: VS Code / Calva send the inner URI encoded
+/// (`jar:file%3A///…claypoole.jar%21/…`), so the `!` and `:` arrive as `%21`
+/// and `%3A`. We decode before splitting; a clean URI decodes to itself.
 pub fn parse_jar_uri(uri: &str) -> anyhow::Result<(PathBuf, String)> {
-    let without_jar = uri
+    let raw = uri
         .strip_prefix("jar:")
         .ok_or_else(|| anyhow::anyhow!("URI does not start with 'jar:': {}", uri))?;
+    let without_jar = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
 
     let (file_url_str, entry_path) = without_jar
         .split_once("!/")
@@ -69,6 +74,15 @@ mod tests {
     #[test]
     fn test_parse_jar_uri_valid() {
         let (path, entry) = parse_jar_uri("jar:file:///tmp/lib.jar!/clojure/string.clj").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/lib.jar"));
+        assert_eq!(entry, "clojure/string.clj");
+    }
+
+    #[test]
+    fn test_parse_jar_uri_percent_encoded() {
+        // VS Code / Calva send the inner URI percent-encoded: `:`→%3A, `!`→%21.
+        let (path, entry) =
+            parse_jar_uri("jar:file%3A///tmp/lib.jar%21/clojure/string.clj").unwrap();
         assert_eq!(path, PathBuf::from("/tmp/lib.jar"));
         assert_eq!(entry, "clojure/string.clj");
     }
