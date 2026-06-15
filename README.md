@@ -10,16 +10,16 @@ A minimal and fast Clojure LSP server.
 
 ## Installation
 
+### Homebrew (macOS, Linux)
+
+```sh
+brew install abogoyavlensky/tap/clj-pulse
+```
+
 ### mise (macOS, Linux)
 
 ```sh
 mise use -g ubi:abogoyavlensky/clj-pulse
-```
-
-To find the binary path for editor configuration:
-
-```sh
-mise which clj-pulse
 ```
 
 ### Manual download
