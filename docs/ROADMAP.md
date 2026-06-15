@@ -79,12 +79,13 @@ meantime and keeping the server dependency-free is worth more early on.
       ```[flock.staff.spec
           [common :as c]
           [helpers :as h]]```
-- [ ] Transitive Clojure deps
-- [ ] Custom macros definitions (example `defcomponent` from flockman)
-- [ ] let-go core navigation
+- [ ] Transitive Clojure deps navigation
 - [ ] Keyword indexing — navigation/rename for namespaced keywords. + Navigation on Integrant keys from integratn system edn file to components
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
-- [ ] Install with my homebrew-tap repo.
+- [ ] Custom macros definitions (example `defcomponent` from flockman)
+- [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
+- [ ] let-go core navigation
+- [X] Install with my homebrew-tap repo.
 - [x] Leiningen classpath (`project.clj` / NO `lein classpath`) — inspects
       `project.clj` only (no java): masks strings/comments then EDN-parses just
       the `:dependencies`/`:source-paths`/`:test-paths`/`:local-repo` vectors,
@@ -94,8 +95,7 @@ meantime and keeping the server dependency-free is worth more early on.
       `.cpcache`. Transitive deps deferred (see below).
 - [ ] shadow-cljs classpath and cljs-aware indexing.
 - [ ] Keyword indexing for re-frame subs
-- [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
-- [ ] Local cahce for project's files
+- [ ] Local cache for project's files
 
 ## Out of scope for now
 

@@ -2,22 +2,30 @@
 
 A fast, lightweight Clojure language server.
 
+> [!NOTE]
+> **Status:** clj-pulse is early-stage and a bit experimental, but it already
+> covers much of the day-to-day Clojure workflow - go-to-definition, completion,
+> hover, find references, and rename. It's under active development and
+> real-world testing, so expect the occasional rough edge. Bug reports and
+> feature requests via
+> [issues](https://github.com/abogoyavlensky/clj-pulse/issues) are very welcome.
+
 ## Features
 
 Language features:
 
-- **Go to definition** — across project source, library JARs (via `jar:` URIs),
+- **Go to definition** - across project source, library JARs (via `jar:` URIs),
   and source-directory deps (git deps in `~/.gitlibs`, `:local/root`).
-- **Autocomplete** — project symbols and `clojure.core` builtins.
-- **Hover** — docstrings and signatures for the symbol under the cursor.
-- **Signature help** — argument hints while typing a call (after `(` and spaces).
-- **Find references** — locate every usage of a symbol across the project.
-- **Rename** — rename a project symbol and all of its references.
-- **Document symbols** — outline of the definitions in the current file.
-- **Workspace symbols** — fuzzy symbol search across the whole project.
-- **Code actions** — "Add require" quickfix for a qualified symbol whose
+- **Autocomplete** - project symbols and `clojure.core` builtins.
+- **Hover** - docstrings and signatures for the symbol under the cursor.
+- **Signature help** - argument hints while typing a call (after `(` and spaces).
+- **Find references** - locate every usage of a symbol across the project.
+- **Rename** - rename a project symbol and all of its references.
+- **Document symbols** - outline of the definitions in the current file.
+- **Workspace symbols** - fuzzy symbol search across the whole project.
+- **Code actions** - "Add require" quickfix for a qualified symbol whose
   namespace isn't required yet.
-- **Diagnostics** — unresolved-namespace warnings, updated live as you type.
+- **Diagnostics** - unresolved-namespace warnings, updated live as you type.
 
 Clojure & project support:
 
