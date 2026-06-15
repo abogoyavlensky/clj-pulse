@@ -2,6 +2,8 @@
 
 A fast, lightweight Clojure language server.
 
+*With first-class [let-go](https://github.com/nooga/let-go) support: `.lg` projects and their [lgx](https://github.com/abogoyavlensky/lgx) deps are indexed and navigable.*
+
 > [!NOTE]
 > **Status:** clj-pulse is early-stage and a bit experimental, but it already
 > covers much of the day-to-day Clojure workflow - go-to-definition, completion,
@@ -29,9 +31,10 @@ Language features:
 
 Clojure & project support:
 
-- **File types:** `.clj`, `.cljs`, `.cljc`.
-- **Project types:** `deps.edn` (resolved from the `.cpcache` classpath) and
-  Leiningen `project.clj`.
+- **File types:** `.clj`, `.cljs`, `.cljc`, `.lg`.
+- **Project types:** `deps.edn` (resolved from the `.cpcache` classpath),
+  Leiningen `project.clj`, and let-go `.lg` projects, whose lgx dependencies at `lgx.edn`
+  (git and `:local/root` deps under `~/.lgx/gitlibs`) are indexed and navigable.
 - **Library indexing:** symbols from JAR dependencies and source-directory deps
   are indexed and navigable, with project symbols always taking precedence.
 - **Live index:** incremental edits, re-index on save, and file watching keep the
