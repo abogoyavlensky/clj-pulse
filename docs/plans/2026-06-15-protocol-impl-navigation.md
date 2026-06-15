@@ -1,5 +1,7 @@
 # Protocol Method Implementation → Declaration Navigation Implementation Plan
 
+> **Status: COMPLETED (2026-06-15).** See the summary at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Go-to-definition on a protocol *method implementation* — e.g. `start`
@@ -109,18 +111,18 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
 - Modify: `src/index/extractor.rs`
 - Modify: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing unit tests** (in `tests/test_extractor.rs`, using
+- [x] **Step 1: Write failing unit tests** (in `tests/test_extractor.rs`, using
   `extract_full` + the existing `occurrences_of` helper):
   - defrecord cross-ns impl: `(ns a (:require [proto.ns :as p]))\n(defrecord R [x]\n  p/Worker\n  (run-task [this job] x))` records an occurrence `proto.ns/run-task` at the impl head, and records **no** occurrence for the param `this`/`job` and **none** for the field `x` inside the body.
   - `Object` method head skipped: `(defrecord R [x] Object (toString [this] "s"))` records no occurrence whose name is `toString`.
   - `extend-protocol` shape: `(ns a (:require [proto.ns :as p]))\n(extend-protocol p/Worker String (run-task [this job] job))` records `proto.ns/run-task` for the method and records `String` as a (type) occurrence.
   - `extend-type` shape: `(extend-type String p/Worker (run-task [this job] job))` records `proto.ns/run-task`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --test test_extractor`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   - `protocol_ns(sym, ctx) -> Option<String>` as described in the design.
   - `walk_method_impl(list, proto_ns: Option<&str>, ctx, scope, out)`: from
     `named_children`, take the head name node and the first `vec_lit` (params);
@@ -139,11 +141,11 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
     `walk_type_specs(children[2..], fixed)`), and `"reify"` (record head;
     `walk_type_specs(children[1..], interleaved)`).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --test test_extractor`
   Expected: PASS (including the existing tests — no regressions).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Resolve protocol method impls to their declaring namespace"`
 
 ### Task 2: `Index::occurrence_at`
@@ -151,26 +153,26 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
 **Files:**
 - Modify: `src/index/mod.rs`
 
-- [ ] **Step 1: Write failing unit test**
+- [x] **Step 1: Write failing unit test**
   In `src/index/mod.rs` `#[cfg(test)]`: insert a file with an `Occurrence`
   whose `name_range` covers a known span; `occurrence_at(path, pos_inside)`
   returns its fqn; a position outside returns `None`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
   Run: `cargo test --lib index::tests` (or the chosen test name)
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `occurrence_at(&self, path: &Path, pos: Position) -> Option<String>`: look up
   the file's occurrences and return the `fqn` of the first whose `name_range`
   contains `pos` (single-line: `pos.line == start.line && start.character <=
   pos.character <= end.character`).
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
   Run: `cargo test --lib`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Add Index::occurrence_at for position-based usage lookup"`
 
 ### Task 3: Definition handler — occurrence fallback
@@ -178,17 +180,17 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
 **Files:**
 - Modify: `src/handlers/definition.rs`
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
   In `handle`, in the `None` arm (before `namespace_location`): call
   `index.occurrence_at(&path, pos)`; if it yields an fqn that `index.lookup`
   resolves to a symbol, return `location_for(&sym.file, sym.name_range,
   &sym.source)`. Otherwise fall through to `namespace_location` as today.
 
-- [ ] **Step 2: Verify build + existing tests**
+- [x] **Step 2: Verify build + existing tests**
   Run: `bb check`
   Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Definition: fall back to the resolved occurrence at the cursor"`
 
 ### Task 4: End-to-end impl → declaration navigation
@@ -196,7 +198,7 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e test**
+- [x] **Step 1: Write the failing e2e test**
   A cross-namespace setup (exercises the fallback, since same-ns method names
   already resolve directly):
   - `src/proto.clj`: `(ns app.proto)\n(defprotocol Worker\n  (run-task [this job]))`
@@ -206,11 +208,11 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
     URI ends with `/src/proto.clj` and whose `range.start.line` is the
     `(run-task [this job])` declaration line.
 
-- [ ] **Step 2: Run + full suite**
+- [x] **Step 2: Run + full suite**
   Run: `cargo test --test test_e2e protocol_impl` then `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "e2e: navigate from a protocol method impl to its declaration"`
 
 ### Task 5: Roadmap note
@@ -218,12 +220,12 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Extend the protocols line**
+- [x] **Step 1: Extend the protocols line**
   Add to the (already checked) Phase 5 protocols item a note that method
   implementations in `defrecord`/`deftype`/`extend-type`/`extend-protocol`/
   `reify` now navigate to the protocol's declaration.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -m "Roadmap: note protocol impl→declaration navigation"`
 
 ---
@@ -237,3 +239,44 @@ Reuse `record_occurrence`, `collect_binding_names`, `named_children`,
   declaration to target); their params are still bound.
 - **Definition only** — hover/references are unchanged beyond the incidental
   phantom-occurrence cleanup.
+
+---
+
+## Implementation summary (2026-06-15)
+
+Implemented on branch `protocol-impl-navigation` (stacked on
+`protocols-records-navigation`, which it depends on for protocol-method
+indexing). All `bb check` and `bb e2e` (42 tests) pass.
+
+- **`src/index/extractor.rs`** — `walk_type_specs`/`walk_method_impl`/
+  `protocol_ns` and `walk_list` arms for `extend-type`/`extend-protocol`/
+  `reify`; `defrecord`/`deftype` bodies route through `walk_type_specs`. Impl
+  heads resolve to the protocol's namespace; params are bound; `Object`/
+  interface heads are skipped. Fixes the phantom head/param occurrences.
+- **`src/handlers/definition.rs`** — position-based resolution via the existing
+  live resolver `references::resolve_fqn_at` (see follow-ups).
+- **Tests** — extractor occurrence unit tests for all five forms, an
+  `occurrence_at` unit test, and e2e tests (cross-ns impl→decl, plus a
+  colliding-name regression).
+
+### Codex review follow-ups (all fixed)
+
+Iterative codex reviews drove the resolution design to its final form:
+
+- **Position-based resolution preferred over bare-word resolution.** The first
+  cut made the occurrence a *fallback* only in the `None` arm, so a protocol
+  method impl whose name also resolves as a core/current-ns var navigated to
+  that var. Now the handler resolves the cursor position first; only known
+  symbols short-circuit, else it falls through to `resolve_symbol` (aliases,
+  namespaces, static core list). Regression test:
+  `test_e2e_protocol_impl_wins_over_colliding_def`.
+- **Live-buffer resolution.** Rather than a new `Index::occurrence_at` over the
+  stale index, the handler reuses `references::resolve_fqn_at`, which
+  re-extracts the open document — so navigation is correct under unsaved edits
+  and consistent with references/rename. `Index::occurrence_at` was removed as
+  redundant.
+- **Multi-arity method impls.** `(m ([x] …) ([x y] …))` previously bound no
+  params (it expected a single `[params]` vector), leaking `x`/`y` and their
+  body uses as global occurrences. `walk_method_impl` now binds per arity like
+  `defn`. Regression test:
+  `test_occurrence_multi_arity_method_impl_binds_params`.
