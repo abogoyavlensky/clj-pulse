@@ -1,12 +1,34 @@
 # clj-pulse
 
-A minimal and fast Clojure LSP server.
+A fast, lightweight Clojure language server.
 
-## V1 Scope
+## Features
 
-- Jump to definition (project source)
-- Autocomplete (project symbols + clojure.core builtins)
-- Hover / documentation
+Language features:
+
+- **Go to definition** — across project source, library JARs (via `jar:` URIs),
+  and source-directory deps (git deps in `~/.gitlibs`, `:local/root`).
+- **Autocomplete** — project symbols and `clojure.core` builtins.
+- **Hover** — docstrings and signatures for the symbol under the cursor.
+- **Signature help** — argument hints while typing a call (after `(` and spaces).
+- **Find references** — locate every usage of a symbol across the project.
+- **Rename** — rename a project symbol and all of its references.
+- **Document symbols** — outline of the definitions in the current file.
+- **Workspace symbols** — fuzzy symbol search across the whole project.
+- **Code actions** — "Add require" quickfix for a qualified symbol whose
+  namespace isn't required yet.
+- **Diagnostics** — unresolved-namespace warnings, updated live as you type.
+
+Clojure & project support:
+
+- **File types:** `.clj`, `.cljs`, `.cljc`.
+- **Project types:** `deps.edn` (resolved from the `.cpcache` classpath) and
+  Leiningen `project.clj`.
+- **Library indexing:** symbols from JAR dependencies and source-directory deps
+  are indexed and navigable, with project symbols always taking precedence.
+- **Live index:** incremental edits, re-index on save, and file watching keep the
+  index fresh across git pulls and branch switches; files outside the project's
+  `:paths` are indexed when opened.
 
 ## Installation
 
