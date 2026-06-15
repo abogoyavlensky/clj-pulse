@@ -262,6 +262,12 @@ impl LspClient {
         self.request("workspace/textDocumentContent", json!({ "uri": uri }))
     }
 
+    /// clojure-lsp's custom jar content request (what Calva calls). Returns the
+    /// raw content string.
+    fn dependency_contents(&mut self, uri: &str) -> Value {
+        self.request("clojure/dependencyContents", json!({ "uri": uri }))
+    }
+
     fn signature_help(&mut self, path: &Path, line: u32, character: u32) -> Value {
         self.request(
             "textDocument/signatureHelp",
@@ -2508,6 +2514,33 @@ fn test_e2e_hover_from_inside_library_file() {
         value.contains("helper") && value.contains("mylib.util"),
         "expected hover for mylib.util/helper from inside the JAR, got {}",
         hover
+    );
+}
+
+#[test]
+fn test_e2e_dependency_contents_serves_jar_source() {
+    // clojure-lsp's `clojure/dependencyContents` returns the raw entry text for
+    // a jar: URI — the request Calva issues to open a navigation target.
+    let (_project, root) = two_ns_jar_project();
+    let consumer = root.join("src/uses_lib.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    let (l, c) = position_of(&consumer, "core/run");
+    let core_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let contents = client.dependency_contents(&core_uri);
+    let text = contents.as_str().unwrap_or_default();
+    assert!(
+        text.contains("(ns mylib.core") && text.contains("util/helper"),
+        "expected raw mylib.core source from dependencyContents, got {:?}",
+        contents
     );
 }
 

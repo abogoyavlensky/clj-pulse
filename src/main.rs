@@ -59,6 +59,9 @@ async fn main() {
             "workspace/textDocumentContent",
             Backend::text_document_content,
         )
+        // clojure-lsp-compatible jar content provider — what Calva calls to open
+        // `jar:` navigation targets (clojure.core and library sources).
+        .custom_method("clojure/dependencyContents", Backend::dependency_contents)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

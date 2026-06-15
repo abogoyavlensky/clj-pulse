@@ -82,12 +82,12 @@ impl Backend {
             .collect()
     }
 
-    pub async fn text_document_content(
-        &self,
-        params: TextDocumentContentParams,
-    ) -> tower_lsp::jsonrpc::Result<TextDocumentContentResult> {
-        let (jar_path, entry_path) = jar_content::parse_jar_uri(&params.uri).map_err(|e| {
-            tracing::warn!("text_document_content: bad URI {}: {}", params.uri, e);
+    /// Reads the text of a `jar:` URI entry. Shared by the LSP 3.17
+    /// `workspace/textDocumentContent` method and clojure-lsp's
+    /// `clojure/dependencyContents`.
+    fn read_jar_uri(uri: &str) -> tower_lsp::jsonrpc::Result<String> {
+        let (jar_path, entry_path) = jar_content::parse_jar_uri(uri).map_err(|e| {
+            tracing::warn!("jar content: bad URI {}: {}", uri, e);
             tower_lsp::jsonrpc::Error::invalid_params(e.to_string())
         })?;
 
@@ -99,21 +99,36 @@ impl Backend {
             });
         }
 
-        let text = jar_content::extract_content(&jar_path, &entry_path).map_err(|e| {
-            tracing::warn!(
-                "text_document_content: failed to extract {}: {}",
-                params.uri,
-                e
-            );
+        jar_content::extract_content(&jar_path, &entry_path).map_err(|e| {
+            tracing::warn!("jar content: failed to extract {}: {}", uri, e);
             let msg = e.to_string();
             if msg.contains("not found") {
                 tower_lsp::jsonrpc::Error::invalid_params(msg)
             } else {
                 tower_lsp::jsonrpc::Error::internal_error()
             }
-        })?;
+        })
+    }
 
-        Ok(TextDocumentContentResult { text })
+    /// LSP 3.17 `workspace/textDocumentContent` — used by clients that support
+    /// the standardized content-provider method.
+    pub async fn text_document_content(
+        &self,
+        params: TextDocumentContentParams,
+    ) -> tower_lsp::jsonrpc::Result<TextDocumentContentResult> {
+        Self::read_jar_uri(&params.uri).map(|text| TextDocumentContentResult { text })
+    }
+
+    /// clojure-lsp-compatible `clojure/dependencyContents`: returns the raw
+    /// content string for a `jar:` URI. Calva (and other clojure-lsp clients)
+    /// register a `jar`-scheme content provider that calls this; without it they
+    /// cannot open any library or clojure.core navigation target, since plain
+    /// vscode-languageclient does not support `workspace/textDocumentContent`.
+    pub async fn dependency_contents(
+        &self,
+        params: TextDocumentContentParams,
+    ) -> tower_lsp::jsonrpc::Result<String> {
+        Self::read_jar_uri(&params.uri)
     }
 
     /// Computes unresolved-namespace diagnostics from the live buffer and
