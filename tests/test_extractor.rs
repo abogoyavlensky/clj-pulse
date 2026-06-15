@@ -196,6 +196,58 @@ fn test_extracts_defonce() {
 }
 
 #[test]
+fn test_extracts_protocol_methods_as_symbols() {
+    let src =
+        "(ns my.ns)\n(defprotocol Storage\n  (fetch [this id])\n  (store [this x] [this x y]))";
+    let (_, syms) = extract(src, Path::new("a.clj")).unwrap();
+
+    // The protocol itself is still extracted.
+    assert!(syms
+        .iter()
+        .any(|s| s.name == "Storage" && s.kind == DefKind::Defprotocol));
+
+    let fetch = syms
+        .iter()
+        .find(|s| s.name == "fetch")
+        .expect("fetch method not extracted");
+    assert_eq!(fetch.kind, DefKind::Defn);
+    assert_eq!(fetch.fqn, "my.ns/fetch");
+    // name_range points at the method name, not the whole signature.
+    assert_eq!(fetch.name_range.start.line, 2);
+    assert_eq!(fetch.name_range.start.character, 3);
+    assert_eq!(fetch.name_range.end.character, 3 + "fetch".len() as u32);
+
+    let store = syms
+        .iter()
+        .find(|s| s.name == "store")
+        .expect("store method not extracted");
+    assert_eq!(store.fqn, "my.ns/store");
+    assert_eq!(store.params, vec!["[this x]", "[this x y]"]);
+}
+
+#[test]
+fn test_protocol_doc_and_options_skipped() {
+    let src =
+        "(ns my.ns)\n(defprotocol P\n  \"proto doc\"\n  :extend-via-metadata true\n  (foo [this] \"foo doc\"))";
+    let (_, syms) = extract(src, Path::new("a.clj")).unwrap();
+
+    let foo = syms
+        .iter()
+        .find(|s| s.name == "foo")
+        .expect("foo method not extracted");
+    assert_eq!(foo.kind, DefKind::Defn);
+    assert_eq!(foo.doc.as_deref(), Some("foo doc"));
+
+    // Options (kwd + value) and the protocol doc string must not become symbols.
+    assert_eq!(
+        syms.iter().filter(|s| s.kind == DefKind::Defn).count(),
+        1,
+        "expected exactly one method symbol, got {:?}",
+        syms.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_extracts_ns_with_metadata() {
     // Real-world pattern (clojure.core, data.json, …): metadata on the ns name
     let src = "(ns ^{:author \"X\"\n      :doc \"docs\"}\n  my.lib\n  (:require [other.ns :as o]))\n\n(defn run [x] x)";
@@ -273,6 +325,18 @@ fn test_occurrence_bare_symbol_resolves_to_current_ns() {
 
     // Only the usage in `caller` — the defn name itself is not an occurrence
     let found = occurrences_of(&occs, "my.app/helper");
+    assert_eq!(found.len(), 1, "occurrences: {:?}", occs);
+    assert_eq!(found[0].name_range.start.line, 2);
+}
+
+#[test]
+fn test_occurrence_protocol_method_decl_not_recorded() {
+    // The method declaration inside defprotocol must not count as a usage,
+    // else references/rename double-count it. Only the real call does.
+    let src = "(ns my.ns)\n(defprotocol Storage (fetch [this id]))\n(defn use-it [s] (fetch s 1))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    let found = occurrences_of(&occs, "my.ns/fetch");
     assert_eq!(found.len(), 1, "occurrences: {:?}", occs);
     assert_eq!(found[0].name_range.start.line, 2);
 }

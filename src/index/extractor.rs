@@ -390,7 +390,7 @@ fn extract_def(
         name,
         fqn,
         ns: ns_name.to_string(),
-        kind,
+        kind: kind.clone(),
         params,
         doc,
         file: file.to_path_buf(),
@@ -398,6 +398,62 @@ fn extract_def(
         range: node_to_lsp_range(form_node, source),
         name_range: node_to_lsp_range(sym_name_node(name_node), source),
     });
+
+    // A protocol's method signatures are namespace-level vars too; index each
+    // so go-to-definition / hover / completion / references reach them.
+    if kind == DefKind::Defprotocol {
+        extract_protocol_methods(&children[2..], source, file, ns_name, symbols);
+    }
+}
+
+/// Extracts each method signature of a `defprotocol` as a `Defn` symbol.
+/// `rest` is the protocol form's children after the name; method signatures are
+/// the `list_lit`s among them — a leading doc string and `:option value` pairs
+/// are skipped. Each method `list_lit` is `(name [params]+ docstring?)`.
+fn extract_protocol_methods(
+    rest: &[Node],
+    source: &str,
+    file: &Path,
+    ns_name: &str,
+    symbols: &mut Vec<Symbol>,
+) {
+    for sig in rest.iter().filter(|n| n.kind() == "list_lit") {
+        let inner = named_children(*sig);
+        let Some(name_node) = inner.first().filter(|n| n.kind() == "sym_lit") else {
+            continue;
+        };
+
+        let name = sym_text(*name_node, source).to_string();
+        let fqn = if ns_name.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", ns_name, name)
+        };
+
+        let params: Vec<String> = inner
+            .iter()
+            .filter(|n| n.kind() == "vec_lit")
+            .map(|n| node_text(*n, source).to_string())
+            .collect();
+        let doc = inner
+            .iter()
+            .rev()
+            .find(|n| n.kind() == "str_lit")
+            .map(|n| strip_string_quotes(node_text(*n, source)));
+
+        symbols.push(Symbol {
+            name,
+            fqn,
+            ns: ns_name.to_string(),
+            kind: DefKind::Defn,
+            params,
+            doc,
+            file: file.to_path_buf(),
+            source: super::SymbolSource::Project,
+            range: node_to_lsp_range(*sig, source),
+            name_range: node_to_lsp_range(sym_name_node(*name_node), source),
+        });
+    }
 }
 
 /// For a `sym_lit` carrying metadata (`^:private foo`, `^{:doc "…"} my.ns`)
@@ -569,6 +625,14 @@ fn walk_def_form(
     scope: &mut Vec<HashSet<String>>,
     out: &mut Vec<Occurrence>,
 ) {
+    // A defprotocol body is only method *declarations* (signatures, no bodies),
+    // each indexed as its own def. Walking it would record those declarations
+    // as usages, double-counting them in references/rename. There are no real
+    // usages to find, so skip the body entirely.
+    if kind == DefKind::Defprotocol {
+        return;
+    }
+
     let binds_vector = matches!(
         kind,
         DefKind::Defn

@@ -474,6 +474,71 @@ fn test_e2e_no_diagnostics_on_lgx_edn() {
 }
 
 #[test]
+fn test_e2e_definition_on_protocol_method() {
+    // Go-to-definition on a protocol-method call lands on the method's
+    // signature inside the defprotocol.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let proto = root.join("src/proto.clj");
+    std::fs::write(
+        &proto,
+        "(ns proto)\n(defprotocol Storage\n  (fetch [this id]))\n\n(defn run [s] (fetch s 1))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&proto);
+
+    let (uline, uch) = position_of(&proto, "fetch s");
+    let result = client.goto_definition(&proto, uline, uch);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.ends_with("/src/proto.clj"), "got {}", uri);
+
+    let (decl_line, _) = position_of(&proto, "fetch [this");
+    assert_eq!(result["range"]["start"]["line"], json!(decl_line));
+}
+
+#[test]
+fn test_e2e_definition_on_record_factory() {
+    // Go-to-definition on the auto-generated `map->DB` / `->DB` factory fns
+    // lands on the `defrecord`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let recs = root.join("src/recs.clj");
+    std::fs::write(
+        &recs,
+        "(ns recs)\n(defrecord DB [conn])\n\n(defn make [c] (map->DB {:conn c}))\n(defn make2 [c] (->DB c))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&recs);
+
+    let (decl_line, _) = position_of(&recs, "defrecord DB");
+
+    for usage in ["map->DB {", "->DB c"] {
+        let (l, c) = position_of(&recs, usage);
+        let result = client.goto_definition(&recs, l, c);
+        let uri = result["uri"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no def for {}: {}", usage, result));
+        assert!(uri.ends_with("/src/recs.clj"), "{} -> {}", usage, uri);
+        assert_eq!(
+            result["range"]["start"]["line"],
+            json!(decl_line),
+            "{} did not navigate to the defrecord",
+            usage
+        );
+    }
+}
+
+#[test]
 fn test_e2e_cross_file_definition() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();

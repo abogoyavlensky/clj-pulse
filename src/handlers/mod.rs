@@ -6,7 +6,7 @@ pub mod references;
 pub mod signature;
 pub mod symbols;
 
-use crate::index::{CoreSymbol, Index, Symbol};
+use crate::index::{CoreSymbol, DefKind, Index, Symbol};
 
 #[derive(Debug, Clone)]
 pub enum ResolvedSymbol {
@@ -28,6 +28,10 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
         if let Some(sym) = index.lookup_in_ns(full_ns, name) {
             return Some(ResolvedSymbol::Project(sym));
         }
+
+        if let Some(sym) = resolve_factory(index, full_ns, name) {
+            return Some(ResolvedSymbol::Project(sym));
+        }
     } else {
         // Bare symbol: check refers, then current ns, then core
         if let Some(meta) = &ns_meta {
@@ -35,10 +39,24 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
                 if let Some(sym) = index.lookup(fqn) {
                     return Some(ResolvedSymbol::Project(sym));
                 }
+                // A referred record constructor (`:refer [->DB map->DB]`): the
+                // ctor fqn is not indexed, but its record is — resolve it in the
+                // referred namespace.
+                if let Some((refer_ns, _)) = fqn.rsplit_once('/') {
+                    if let Some(sym) = resolve_factory(index, refer_ns, word) {
+                        return Some(ResolvedSymbol::Project(sym));
+                    }
+                }
             }
         }
 
         if let Some(sym) = index.lookup_in_ns(current_ns, word) {
+            return Some(ResolvedSymbol::Project(sym));
+        }
+
+        // A locally generated record/type constructor shadows a clojure.core
+        // symbol of the same name, so resolve it before the core fallback.
+        if let Some(sym) = resolve_factory(index, current_ns, word) {
             return Some(ResolvedSymbol::Project(sym));
         }
 
@@ -48,4 +66,165 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
     }
 
     None
+}
+
+/// The type a constructor function builds, plus whether it is the map
+/// constructor: `map->DB` → `("DB", true)`, `->DB` → `("DB", false)`. `None`
+/// for non-factory names (and the bare `->`/`map->`).
+fn factory_target(name: &str) -> Option<(&str, bool)> {
+    if let Some(t) = name.strip_prefix("map->") {
+        (!t.is_empty()).then_some((t, true))
+    } else if let Some(t) = name.strip_prefix("->") {
+        (!t.is_empty()).then_some((t, false))
+    } else {
+        None
+    }
+}
+
+/// Resolves an auto-generated record/type constructor to the `defrecord`/
+/// `deftype` it builds, so navigation/hover land on the type. Gated on kind so
+/// a plain fn named `->foo` is never hijacked; `map->X` is records-only, since
+/// `deftype` generates `->X` but no map constructor.
+fn resolve_factory(index: &Index, ns: &str, name: &str) -> Option<Symbol> {
+    let (target, is_map_ctor) = factory_target(name)?;
+    let sym = index.lookup_in_ns(ns, target)?;
+    let ok = match sym.kind {
+        DefKind::Defrecord => true,
+        DefKind::Deftype => !is_map_ctor,
+        _ => false,
+    };
+    ok.then_some(sym)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{NsMeta, SymbolSource};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use tower_lsp::lsp_types::Range;
+
+    #[test]
+    fn factory_target_strips_prefixes_and_flags_map_ctor() {
+        assert_eq!(factory_target("map->DB"), Some(("DB", true)));
+        assert_eq!(factory_target("->DB"), Some(("DB", false)));
+        assert_eq!(factory_target("plain"), None);
+        assert_eq!(factory_target("->"), None);
+        assert_eq!(factory_target("map->"), None);
+    }
+
+    fn sym(name: &str, ns: &str, kind: DefKind) -> Symbol {
+        Symbol {
+            name: name.to_string(),
+            fqn: format!("{}/{}", ns, name),
+            ns: ns.to_string(),
+            kind,
+            params: vec![],
+            doc: None,
+            file: PathBuf::from("a.clj"),
+            source: SymbolSource::Project,
+            range: Range::default(),
+            name_range: Range::default(),
+        }
+    }
+
+    fn index_with(symbols: Vec<Symbol>) -> Index {
+        let index = Index::new();
+        index.insert_file(
+            NsMeta {
+                name: "my.ns".to_string(),
+                file: PathBuf::from("a.clj"),
+                aliases: HashMap::new(),
+                refers: HashMap::new(),
+                requires: vec![],
+            },
+            symbols,
+            vec![],
+        );
+        index
+    }
+
+    #[test]
+    fn resolve_symbol_navigates_factory_to_record() {
+        let index = index_with(vec![sym("DB", "my.ns", DefKind::Defrecord)]);
+        for factory in ["map->DB", "->DB"] {
+            match resolve_symbol(&index, factory, "my.ns") {
+                Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "DB"),
+                other => panic!("{} did not resolve to DB: {:?}", factory, other),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_factory_ignores_non_record_targets() {
+        // A plain fn named `foo` must not be reachable via `->foo`.
+        let index = index_with(vec![sym("foo", "my.ns", DefKind::Defn)]);
+        assert!(resolve_symbol(&index, "->foo", "my.ns").is_none());
+    }
+
+    #[test]
+    fn map_constructor_is_record_only() {
+        // deftype generates `->T` but no `map->T`.
+        let index = index_with(vec![sym("T", "my.ns", DefKind::Deftype)]);
+        assert!(matches!(
+            resolve_symbol(&index, "->T", "my.ns"),
+            Some(ResolvedSymbol::Project(_))
+        ));
+        assert!(resolve_symbol(&index, "map->T", "my.ns").is_none());
+    }
+
+    #[test]
+    fn local_constructor_shadows_core() {
+        // A local record generating a ctor that collides with clojure.core
+        // (e.g. `->Eduction`) must resolve to the local record, not core.
+        let mut index = index_with(vec![sym("Foo", "my.ns", DefKind::Defrecord)]);
+        index.core_symbols = vec![CoreSymbol {
+            name: "->Foo".to_string(),
+            params: String::new(),
+            doc: String::new(),
+        }];
+        match resolve_symbol(&index, "->Foo", "my.ns") {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "Foo"),
+            other => panic!("local ctor did not shadow core: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_symbol_navigates_referred_factory() {
+        let index = Index::new();
+        // The record lives in `recs`.
+        index.insert_file(
+            NsMeta {
+                name: "recs".to_string(),
+                file: PathBuf::from("recs.clj"),
+                aliases: HashMap::new(),
+                refers: HashMap::new(),
+                requires: vec![],
+            },
+            vec![sym("DB", "recs", DefKind::Defrecord)],
+            vec![],
+        );
+        // `app` refers the (un-indexed) constructors.
+        let mut refers = HashMap::new();
+        refers.insert("->DB".to_string(), "recs/->DB".to_string());
+        refers.insert("map->DB".to_string(), "recs/map->DB".to_string());
+        index.insert_file(
+            NsMeta {
+                name: "app".to_string(),
+                file: PathBuf::from("app.clj"),
+                aliases: HashMap::new(),
+                refers,
+                requires: vec![],
+            },
+            vec![],
+            vec![],
+        );
+
+        for factory in ["->DB", "map->DB"] {
+            match resolve_symbol(&index, factory, "app") {
+                Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "DB"),
+                other => panic!("referred {} did not resolve: {:?}", factory, other),
+            }
+        }
+    }
 }

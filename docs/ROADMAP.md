@@ -67,7 +67,12 @@ meantime and keeping the server dependency-free is worth more early on.
 - [x] let-go support with lgx (~/.lgx/gitlibs) deps resolver — indexes `.lg`
       project files and resolves lgx git/`:local/root` deps (transitive,
       first-wins) for navigation. let-go built-in `core` nav still deferred.
-- [ ] Clojure protocols support: navigation to protocol's method, navigation from map->DB to DB protocol
+- [x] Clojure protocols support: navigation to protocol's method, navigation
+      from map->DB to DB protocol — protocol method signatures are indexed as
+      namespace-level vars (so definition/hover/completion/references reach
+      them); `->X`/`map->X` resolve to the `defrecord`/`deftype` `X` via a
+      resolve-time fallback. Method impls in defrecord/extend-* and "find
+      implementations" are not in scope.
 - [ ] resolve and navigate to libs that required with common syntax:
       ```[flock.staff.spec
           [common :as c]
