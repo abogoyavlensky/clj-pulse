@@ -170,6 +170,27 @@ impl Index {
         self.file_to_ns.get(path).map(|r| r.clone())
     }
 
+    /// The fully-qualified name of the resolved usage whose name span covers
+    /// `pos` in `path`, if any. Lets go-to-definition resolve usages the
+    /// bare-word resolver can't — e.g. a protocol method impl whose protocol
+    /// lives in another namespace.
+    pub fn occurrence_at(
+        &self,
+        path: &Path,
+        pos: tower_lsp::lsp_types::Position,
+    ) -> Option<String> {
+        let occs = self.occurrences.get(path)?;
+        occs.iter()
+            .find(|o| {
+                let r = o.name_range;
+                r.start.line == pos.line
+                    && r.end.line == pos.line
+                    && r.start.character <= pos.character
+                    && pos.character <= r.end.character
+            })
+            .map(|o| o.fqn.clone())
+    }
+
     /// Merges a freshly built project index into this one, removing project
     /// files that no longer exist in the new scan (e.g. source roots dropped
     /// from deps.edn `:paths`). Files in `keep` (currently open documents,
@@ -271,5 +292,73 @@ impl Index {
         self.ns_symbols.insert(meta.name.clone(), fqns);
         self.file_to_ns.insert(meta.file.clone(), meta.name.clone());
         self.namespaces.insert(meta.name.clone(), meta);
+    }
+}
+
+#[cfg(test)]
+mod occurrence_tests {
+    use super::*;
+    use tower_lsp::lsp_types::Position;
+
+    #[test]
+    fn occurrence_at_finds_covering_usage() {
+        let index = Index::new();
+        let path = PathBuf::from("a.clj");
+        let name_range = Range {
+            start: Position {
+                line: 4,
+                character: 6,
+            },
+            end: Position {
+                line: 4,
+                character: 14,
+            },
+        };
+        index.insert_file(
+            NsMeta {
+                name: "app".to_string(),
+                file: path.clone(),
+                aliases: HashMap::new(),
+                refers: HashMap::new(),
+                requires: vec![],
+            },
+            vec![],
+            vec![Occurrence {
+                fqn: "other.ns/run-task".to_string(),
+                name_range,
+            }],
+        );
+
+        assert_eq!(
+            index
+                .occurrence_at(
+                    &path,
+                    Position {
+                        line: 4,
+                        character: 8
+                    }
+                )
+                .as_deref(),
+            Some("other.ns/run-task")
+        );
+        // Past the end of the span, and on another line.
+        assert!(index
+            .occurrence_at(
+                &path,
+                Position {
+                    line: 4,
+                    character: 20
+                }
+            )
+            .is_none());
+        assert!(index
+            .occurrence_at(
+                &path,
+                Position {
+                    line: 5,
+                    character: 8
+                }
+            )
+            .is_none());
     }
 }
