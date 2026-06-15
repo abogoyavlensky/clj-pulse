@@ -2512,6 +2512,68 @@ fn test_e2e_hover_from_inside_library_file() {
 }
 
 #[test]
+fn test_e2e_definition_bare_same_ns_symbol_in_jar() {
+    // The reported claypoole case: inside a JAR file, go-to-definition on a
+    // BARE, same-namespace symbol (`completable-future-call`), not a qualified
+    // cross-ns ref. `caller` calls `helper` unqualified, both in mylib.util.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let jar_path = root.join("mylib.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("mylib/util.clj", opts).unwrap();
+    zip.write_all(b"(ns mylib.util)\n\n(defn helper [x] x)\n\n(defn caller [x] (helper x))\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+
+    let consumer = root.join("src/uses_lib.clj");
+    std::fs::write(
+        &consumer,
+        "(ns uses-lib\n  (:require [mylib.util :as u]))\n\n(u/caller 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&consumer);
+
+    // Into the JAR, then open it the way the editor would.
+    let (l, c) = position_of(&consumer, "u/caller");
+    let util_uri = client.goto_definition(&consumer, l, c)["uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let util_src = client.text_document_content(&util_uri)["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&util_uri, &util_src);
+
+    // Cursor on the bare `helper` inside `(helper x)` → its definition above.
+    let (line, ch) = position_in_text(&util_src, "(helper x)");
+    let loc = client.goto_definition_uri(&util_uri, line, ch);
+    let uri = loc["uri"].as_str().unwrap_or_default();
+    assert!(
+        uri.ends_with("!/mylib/util.clj"),
+        "expected same-file nav for a bare same-ns symbol, got {}",
+        loc
+    );
+    assert_eq!(
+        loc["range"]["start"]["line"].as_u64(),
+        Some(2),
+        "expected the `(defn helper ...)` line, got {}",
+        loc
+    );
+}
+
+#[test]
 fn test_e2e_rename_rejected_from_library_file() {
     // Navigation/inspection work from a JAR buffer, but rename must not: a
     // library file is read-only, and the fqn-only resolver could otherwise edit
