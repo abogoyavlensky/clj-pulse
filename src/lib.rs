@@ -8,3 +8,4 @@ pub mod index;
 pub mod jar_content;
 pub mod leiningen;
 pub mod lgx;
+pub mod uri;
