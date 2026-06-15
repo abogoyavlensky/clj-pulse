@@ -54,12 +54,14 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
             return Some(ResolvedSymbol::Project(sym));
         }
 
-        if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
-            return Some(ResolvedSymbol::Core(core.clone()));
-        }
-
+        // A locally generated record/type constructor shadows a clojure.core
+        // symbol of the same name, so resolve it before the core fallback.
         if let Some(sym) = resolve_factory(index, current_ns, word) {
             return Some(ResolvedSymbol::Project(sym));
+        }
+
+        if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
+            return Some(ResolvedSymbol::Core(core.clone()));
         }
     }
 
@@ -169,6 +171,22 @@ mod tests {
             Some(ResolvedSymbol::Project(_))
         ));
         assert!(resolve_symbol(&index, "map->T", "my.ns").is_none());
+    }
+
+    #[test]
+    fn local_constructor_shadows_core() {
+        // A local record generating a ctor that collides with clojure.core
+        // (e.g. `->Eduction`) must resolve to the local record, not core.
+        let mut index = index_with(vec![sym("Foo", "my.ns", DefKind::Defrecord)]);
+        index.core_symbols = vec![CoreSymbol {
+            name: "->Foo".to_string(),
+            params: String::new(),
+            doc: String::new(),
+        }];
+        match resolve_symbol(&index, "->Foo", "my.ns") {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "Foo"),
+            other => panic!("local ctor did not shadow core: {:?}", other),
+        }
     }
 
     #[test]
