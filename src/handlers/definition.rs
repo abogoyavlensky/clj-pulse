@@ -48,6 +48,16 @@ pub fn handle(
             Ok(None)
         }
         None => {
+            // The bare-word resolver can't resolve some usages — notably a
+            // protocol method impl whose protocol lives in another namespace
+            // (`(start [c] …)` under `component/Lifecycle`). Fall back to the
+            // resolved occurrence recorded at the cursor.
+            if let Some(fqn) = index.occurrence_at(&path, pos) {
+                if let Some(sym) = index.lookup(&fqn) {
+                    let location = location_for(&sym.file, sym.name_range, &sym.source)?;
+                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                }
+            }
             // The word may be a require alias (`[ring.util.response :as
             // response]` with the cursor on `response`) or a namespace name
             // itself — navigate to the top of that namespace's file.
