@@ -66,30 +66,6 @@ and put the binary on your `PATH`. Checksums for all archives are in
 > `xattr -d com.apple.quarantine ./clj-pulse`. Installs via mise are not
 > affected.
 
-## Development
-
-Install [mise](https://mise.jdx.dev/) for managing tool versions, then:
-
-```sh
-mise install
-```
-
-This installs the correct versions of Rust and Babashka.
-
-```sh
-bb fmt        # fix code formatting
-bb fmt-check  # check formatting without fixing
-bb lint       # run clippy linter
-bb test       # run tests
-bb check      # run all checks (fmt + lint + test)
-bb outdated   # check outdated deps 
-bb build      # build the dev binary
-bb release    # build release binary
-```
-
-> [!NOTE]
-> To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.
-
 ## Editor Setup
 
 ### VS Code
@@ -118,7 +94,31 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 }
 ```
 
+## Development
 
-## Architecture
+Install [mise](https://mise.jdx.dev/) for managing tool versions, then:
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for data flow and design decisions.
+```sh
+mise install
+```
+
+This installs the correct versions of Rust and Babashka.
+
+```sh
+bb fmt        # fix code formatting
+bb fmt-check  # check formatting without fixing
+bb lint       # run clippy linter
+bb test       # run tests
+bb check      # run all checks (fmt + lint + test)
+bb outdated   # check outdated deps 
+bb build      # build the dev binary
+bb release    # build release binary
+bb tag.       # create and push new git tag based on version form Cargo.toml
+```
+
+> [!NOTE]
+> To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.
+
+## License
+
+MIT License. Copyright (c) 2026 Andrey Bogoyavlenskiy.
