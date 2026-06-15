@@ -539,6 +539,84 @@ fn test_e2e_definition_on_record_factory() {
 }
 
 #[test]
+fn test_e2e_definition_on_protocol_method_impl() {
+    // A protocol method *implementation* navigates to the protocol's
+    // *declaration* in another namespace — exercises the occurrence fallback,
+    // since `resolve_symbol` can't resolve the bare impl name across namespaces.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let proto = root.join("src/proto.clj");
+    std::fs::write(
+        &proto,
+        "(ns app.proto)\n(defprotocol Worker\n  (run-task [this job]))\n",
+    )
+    .unwrap();
+    let impl_file = root.join("src/impl.clj");
+    std::fs::write(
+        &impl_file,
+        "(ns app.impl\n  (:require [app.proto :as p]))\n(defrecord Runner [id]\n  p/Worker\n  (run-task [this job] job))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&impl_file);
+
+    let (line, ch) = position_of(&impl_file, "run-task");
+    let result = client.goto_definition(&impl_file, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for run-task impl: {}", result));
+    assert!(uri.ends_with("/src/proto.clj"), "got {}", uri);
+
+    let (decl_line, _) = position_of(&proto, "run-task");
+    assert_eq!(result["range"]["start"]["line"], json!(decl_line));
+}
+
+#[test]
+fn test_e2e_protocol_impl_wins_over_colliding_def() {
+    // A same-namespace defn shares the impl method's name. Go-to-definition on
+    // the *impl* must reach the protocol declaration (the position-specific
+    // occurrence), not the colliding local var.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let proto = root.join("src/proto.clj");
+    std::fs::write(
+        &proto,
+        "(ns app.proto)\n(defprotocol Worker\n  (run-task [this job]))\n",
+    )
+    .unwrap();
+    let impl_file = root.join("src/impl.clj");
+    std::fs::write(
+        &impl_file,
+        "(ns app.impl\n  (:require [app.proto :as p]))\n(defn run-task [x] x)\n(defrecord Runner [id]\n  p/Worker\n  (run-task [this job] job))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&impl_file);
+
+    // Target the impl head specifically (`run-task [this …]`), not the defn.
+    let (line, ch) = position_of(&impl_file, "run-task [this");
+    let result = client.goto_definition(&impl_file, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for colliding impl: {}", result));
+    assert!(
+        uri.ends_with("/src/proto.clj"),
+        "impl should reach the protocol decl, not the local defn; got {}",
+        uri
+    );
+    let (decl_line, _) = position_of(&proto, "run-task");
+    assert_eq!(result["range"]["start"]["line"], json!(decl_line));
+}
+
+#[test]
 fn test_e2e_cross_file_definition() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();

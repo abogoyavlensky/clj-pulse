@@ -342,6 +342,100 @@ fn test_occurrence_protocol_method_decl_not_recorded() {
 }
 
 #[test]
+fn test_occurrence_defrecord_impl_resolves_to_protocol_ns() {
+    let src = "(ns app.impl\n  (:require [proto.ns :as p]))\n(defrecord R [x]\n  p/Worker\n  (run-task [this job] x))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    // The impl head resolves to the protocol's namespace, not the current one.
+    assert_eq!(
+        occurrences_of(&occs, "proto.ns/run-task").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    // No phantom current-ns occurrences for the head, params, or fields.
+    assert!(occurrences_of(&occs, "app.impl/run-task").is_empty());
+    assert!(occurrences_of(&occs, "app.impl/this").is_empty());
+    assert!(occurrences_of(&occs, "app.impl/job").is_empty());
+    assert!(occurrences_of(&occs, "app.impl/x").is_empty());
+}
+
+#[test]
+fn test_occurrence_object_method_head_skipped() {
+    // Object/interface methods have no protocol declaration to target, so the
+    // head must not become a phantom occurrence.
+    let src = "(ns app)\n(defrecord R [x]\n  Object\n  (toString [this] \"s\"))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert!(
+        occs.iter().all(|o| !o.fqn.ends_with("/toString")),
+        "Object method head leaked: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_occurrence_extend_protocol_methods_resolve_to_fixed_protocol() {
+    let src = "(ns app\n  (:require [proto.ns :as p]))\n(extend-protocol p/Worker\n  String\n  (run-task [this job] job))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "proto.ns/run-task").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    assert!(occurrences_of(&occs, "app/job").is_empty());
+}
+
+#[test]
+fn test_occurrence_extend_type_methods_resolve_to_protocol() {
+    let src = "(ns app\n  (:require [proto.ns :as p]))\n(extend-type String\n  p/Worker\n  (run-task [this job] job))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "proto.ns/run-task").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_occurrence_multi_arity_method_impl_binds_params() {
+    let src = "(ns app\n  (:require [proto.ns :as p]))\n(extend-type String\n  p/Worker\n  (run-task ([x] x) ([x y] y)))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    // Each arity's params are bound, not recorded as phantom global usages.
+    assert!(
+        occurrences_of(&occs, "app/x").is_empty(),
+        "occs: {:?}",
+        occs
+    );
+    assert!(
+        occurrences_of(&occs, "app/y").is_empty(),
+        "occs: {:?}",
+        occs
+    );
+    // The head still resolves to the protocol, recorded once.
+    assert_eq!(
+        occurrences_of(&occs, "proto.ns/run-task").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_occurrence_reify_methods_resolve_to_protocol() {
+    let src = "(ns app\n  (:require [proto.ns :as p]))\n(defn make []\n  (reify p/Worker\n    (run-task [this job] job)))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "proto.ns/run-task").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
 fn test_occurrence_refer_usage_and_vector_entry() {
     let src = "(ns my.app\n  (:require [other.lib :refer [process]]))\n\n(process 1)";
     let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();

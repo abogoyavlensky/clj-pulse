@@ -605,6 +605,37 @@ fn walk_list(
             record_occurrence(*head, ctx, scope, out);
             walk_fn_form(&children, ctx, scope, out);
         }
+        Some("extend-type") => {
+            record_occurrence(*head, ctx, scope, out);
+            // (extend-type Type & specs): Type is an occurrence; the specs
+            // interleave protocols and their method impls.
+            if let Some(ty) = children.get(1) {
+                walk_occurrences(*ty, ctx, scope, out);
+            }
+            if children.len() > 2 {
+                walk_type_specs(&children[2..], SpecMode::Interleaved, ctx, scope, out);
+            }
+        }
+        Some("extend-protocol") => {
+            record_occurrence(*head, ctx, scope, out);
+            // (extend-protocol Proto & specs): one protocol fixed for all
+            // methods; the interleaved symbols are types.
+            let proto_ns = children.get(1).and_then(|p| {
+                walk_occurrences(*p, ctx, scope, out);
+                (p.kind() == "sym_lit")
+                    .then(|| protocol_ns(*p, ctx))
+                    .flatten()
+            });
+            if children.len() > 2 {
+                walk_type_specs(&children[2..], SpecMode::Fixed(proto_ns), ctx, scope, out);
+            }
+        }
+        Some("reify") => {
+            record_occurrence(*head, ctx, scope, out);
+            if children.len() > 1 {
+                walk_type_specs(&children[1..], SpecMode::Interleaved, ctx, scope, out);
+            }
+        }
         _ => {
             for child in &children {
                 walk_occurrences(*child, ctx, scope, out);
@@ -633,14 +664,24 @@ fn walk_def_form(
         return;
     }
 
+    // (defrecord Name [fields] & specs) / (deftype …): bind the fields, then
+    // walk the protocol/method specs (impl heads resolve to their protocol).
+    if matches!(kind, DefKind::Defrecord | DefKind::Deftype) {
+        let mut frame = HashSet::new();
+        if let Some(fields) = children.get(2).filter(|n| n.kind() == "vec_lit") {
+            collect_binding_names(*fields, ctx, scope, out, &mut frame);
+        }
+        scope.push(frame);
+        if children.len() > 3 {
+            walk_type_specs(&children[3..], SpecMode::Interleaved, ctx, scope, out);
+        }
+        scope.pop();
+        return;
+    }
+
     let binds_vector = matches!(
         kind,
-        DefKind::Defn
-            | DefKind::DefnPrivate
-            | DefKind::Defmacro
-            | DefKind::Defmethod
-            | DefKind::Defrecord
-            | DefKind::Deftype
+        DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro | DefKind::Defmethod
     );
     if !binds_vector {
         for child in children.iter().skip(2) {
@@ -699,6 +740,129 @@ fn arity_body(node: Node) -> bool {
         .first()
         .map(|n| n.kind() == "vec_lit")
         .unwrap_or(false)
+}
+
+/// How to interpret the leading symbols among a type form's specs.
+enum SpecMode {
+    /// Each symbol names a protocol/interface; methods belong to the most
+    /// recent one (`defrecord`/`deftype`/`extend-type`/`reify`).
+    Interleaved,
+    /// One protocol is fixed for every method; symbols are types
+    /// (`extend-protocol`). Carries the protocol's resolved namespace.
+    Fixed(Option<String>),
+}
+
+/// Walks the protocol/method specs of a type form: a leading `sym_lit` is a
+/// protocol or type (recorded as an occurrence), and a `list_lit` is a method
+/// impl resolved against the current protocol's namespace.
+fn walk_type_specs(
+    specs: &[Node],
+    mode: SpecMode,
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let interleaved = matches!(mode, SpecMode::Interleaved);
+    let mut current: Option<String> = match mode {
+        SpecMode::Fixed(ns) => ns,
+        SpecMode::Interleaved => None,
+    };
+    for spec in specs {
+        match spec.kind() {
+            "sym_lit" => {
+                record_occurrence(*spec, ctx, scope, out);
+                if interleaved {
+                    current = protocol_ns(*spec, ctx);
+                }
+            }
+            "list_lit" => walk_method_impl(*spec, current.as_deref(), ctx, scope, out),
+            _ => walk_occurrences(*spec, ctx, scope, out),
+        }
+    }
+}
+
+/// A single method impl `(name [params] body…)`: records the head against the
+/// protocol's namespace (skipped when unknown — e.g. `Object`/interfaces, so no
+/// phantom occurrence is created), binds the params, and walks the body.
+fn walk_method_impl(
+    list: Node,
+    proto_ns: Option<&str>,
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    let inner = named_children(list);
+    let Some(name_node) = inner.first().filter(|n| n.kind() == "sym_lit") else {
+        // Not a method-impl shape; walk its children generically.
+        for child in &inner {
+            walk_occurrences(*child, ctx, scope, out);
+        }
+        return;
+    };
+
+    if let Some(ns) = proto_ns {
+        let nn = sym_name_node(*name_node);
+        out.push(Occurrence {
+            fqn: format!("{}/{}", ns, node_text(nn, ctx.source)),
+            name_range: node_to_lsp_range(nn, ctx.source),
+        });
+    }
+
+    let rest = &inner[1..];
+    if rest.first().map(|n| n.kind() == "vec_lit").unwrap_or(false) {
+        // Single arity: (name [params] body…).
+        let mut frame = HashSet::new();
+        collect_binding_names(rest[0], ctx, scope, out, &mut frame);
+        scope.push(frame);
+        for body in rest.iter().skip(1) {
+            walk_occurrences(*body, ctx, scope, out);
+        }
+        scope.pop();
+    } else {
+        // Multi-arity: (name ([params] body…) ([params] body…) …) — bind each
+        // arity's params for its own body, like `defn`.
+        for arity in rest {
+            if arity.kind() == "list_lit" && arity_body(*arity) {
+                let parts = named_children(*arity);
+                let mut frame = HashSet::new();
+                if let Some(params) = parts.first() {
+                    collect_binding_names(*params, ctx, scope, out, &mut frame);
+                }
+                scope.push(frame);
+                for body in parts.iter().skip(1) {
+                    walk_occurrences(*body, ctx, scope, out);
+                }
+                scope.pop();
+            } else {
+                walk_occurrences(*arity, ctx, scope, out);
+            }
+        }
+    }
+}
+
+/// The namespace a protocol symbol's methods live in: a qualified `a/B`
+/// resolves its alias; a bare `B` uses a `:refer`'s namespace or, if `B` is a
+/// current-file def, the current namespace. `None` for interfaces/`Object` or
+/// otherwise unresolved bare symbols.
+fn protocol_ns(sym: Node, ctx: &OccurrenceCtx) -> Option<String> {
+    if let Some(ns_node) = sym.child_by_field_name("namespace") {
+        let alias = node_text(ns_node, ctx.source);
+        return Some(
+            ctx.ns_meta
+                .aliases
+                .get(alias)
+                .cloned()
+                .unwrap_or_else(|| alias.to_string()),
+        );
+    }
+    let name = node_text(sym_name_node(sym), ctx.source);
+    if let Some(fqn) = ctx.ns_meta.refers.get(name) {
+        return fqn.rsplit_once('/').map(|(ns, _)| ns.to_string());
+    }
+    if ctx.def_names.contains(name) {
+        return Some(ctx.ns_meta.name.clone());
+    }
+    None
 }
 
 /// `(let [pattern expr …] body…)`: RHS expressions are usages evaluated with
