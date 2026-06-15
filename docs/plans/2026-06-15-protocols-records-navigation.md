@@ -1,5 +1,7 @@
 # Clojure Protocols & Records Navigation Implementation Plan
 
+> **Status: COMPLETED (2026-06-15).** See the summary at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make go-to-definition work for Clojure protocol methods and record factory functions — `(fetch x)` jumps to the `fetch` signature in its `defprotocol`, and `(map->DB …)` / `(->DB …)` jump to the `DB` `defrecord` — by extending the existing symbol-extraction and resolution pipeline.
@@ -97,7 +99,7 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
 - Modify: `src/index/extractor.rs`
 - Modify: `src/index/jar_cache.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   In `src/index/extractor.rs` `#[cfg(test)]`, using `extract(source, path)`:
   - `(ns my.ns)\n(defprotocol Storage (fetch [this id]) (store [this x] [this x y]))`
     yields symbols including `Storage` (kind `Defprotocol`) **and** `fetch`
@@ -109,11 +111,11 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
   - `store`'s `params` contains both arities (`[this x]` and `[this x y]`); a
     method's trailing string becomes its `doc`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib extractor`
   Expected: FAIL (method symbols absent).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `extract_def`, after pushing the existing symbol, when
   `kind == DefKind::Defprotocol` call a new
   `extract_protocol_methods(&children[2..], source, file, ns_name, symbols)`
@@ -122,15 +124,15 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
   `params` from each `vec_lit`, `doc` from a trailing `str_lit`. Skip non-list
   children (doc string, `kwd_lit` options and their values).
 
-- [ ] **Step 4: Bump the JAR cache format version**
+- [x] **Step 4: Bump the JAR cache format version**
   In `src/index/jar_cache.rs` set `CACHE_FORMAT_VERSION = 6` (extractor output
   changed — protocol methods now extracted from JARs).
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
   Run: `cargo test --lib extractor jar_cache`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Extract protocol method declarations as navigable symbols"`
 
 ### Task 2: Record/type factory navigation
@@ -138,7 +140,7 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
 **Files:**
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   In `src/handlers/mod.rs` `#[cfg(test)]`:
   - `factory_target_name("map->DB") == Some("DB")`,
     `factory_target_name("->DB") == Some("DB")`,
@@ -148,11 +150,11 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
     `"->DB"` both resolve to the `DB` symbol; a `Defn` named `foo` is **not**
     reachable via `->foo` (gated on record/type kind).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib handlers`
   Expected: FAIL (`factory_target_name`/fallback absent).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add `factory_target_name(name: &str) -> Option<&str>` (strip a leading
   `map->` then `->`; return `None` if the remainder is empty) and
   `resolve_factory(index, ns, name)` that looks up `factory_target_name(name)`
@@ -161,11 +163,11 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
   qualified branch (using the resolved `full_ns`) and the bare branch (using
   `current_ns`), returning `ResolvedSymbol::Project`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib handlers`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Navigate record factory fns (->X / map->X) to the defrecord"`
 
 ### Task 3: End-to-end navigation
@@ -173,7 +175,7 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e tests**
+- [x] **Step 1: Write the failing e2e tests**
   Modeled on existing definition e2e tests (`setup_project`, `did_open`,
   `goto_definition`, assert on the returned `range`):
   - A file defining `(defprotocol Storage (fetch [this id]))` and a usage
@@ -182,16 +184,16 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
   - A file with `(defrecord DB [conn])` and usages `(map->DB {})` and `(->DB c)`:
     go-to-definition on each lands on the `DB` `defrecord` name line.
 
-- [ ] **Step 2: Run to verify it fails / passes**
+- [x] **Step 2: Run to verify it fails / passes**
   Run: `cargo test --test test_e2e protocol` and `... record` (or the chosen
   test names). They should pass once Tasks 1–2 are in; if a test reveals a gap,
   fix it.
 
-- [ ] **Step 3: Run the full check + e2e suite**
+- [x] **Step 3: Run the full check + e2e suite**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "e2e: navigate to protocol methods and record factories"`
 
 ### Task 4: Mark the roadmap item done
@@ -199,13 +201,13 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Check the box**
+- [x] **Step 1: Check the box**
   Change the Phase 5 line `Clojure protocols support: navigation to protocol's
   method, navigation from map->DB to DB protocol` from `- [ ]` to `- [x]` with a
   short note (protocol methods indexed as ns vars; `->X`/`map->X` resolve to the
   record/type; impls in defrecord/extend-* not separately indexed).
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -m "Mark Clojure protocols navigation complete in roadmap"`
 
 ---
@@ -220,3 +222,31 @@ Reuse existing extractor helpers (`named_children`, `sym_name_node`,
   and rename does not treat them as the record.
 - **`reify`/`extend-protocol`/`extend-type` method bodies** are not indexed as
   symbols; only the protocol's own method declarations are.
+
+---
+
+## Implementation summary (2026-06-15)
+
+Implemented as designed on branch `protocols-records-navigation`. All `bb check`
+(fmt + clippy `-D warnings` + 110 lib tests) and `bb e2e` (40 tests) pass.
+
+- **`src/index/extractor.rs`** — `extract_def` now also calls
+  `extract_protocol_methods`, emitting a `Defn` symbol per `defprotocol` method
+  signature (name/range/arities/doc; options and the protocol doc string
+  skipped).
+- **`src/index/jar_cache.rs`** — `CACHE_FORMAT_VERSION` 5 → 6.
+- **`src/handlers/mod.rs`** — `factory_target_name` + `resolve_factory`, wired
+  as the last-resort fallback in both branches of `resolve_symbol`; `->X`/
+  `map->X` resolve to a `Defrecord`/`Deftype` `X`.
+- **Tests** — extractor unit tests (methods extracted, options skipped),
+  `resolve_symbol`/`factory_target_name` unit tests, and two e2e tests
+  (protocol-method call → signature; `map->DB`/`->DB` → defrecord).
+
+### Codex review follow-up (fixed)
+
+A second-opinion codex review caught a P2: once protocol methods are indexed,
+the occurrence pass walked the `defprotocol` body and recorded each method
+*declaration* as a usage, double-counting it in references/rename. Fixed by
+skipping the protocol body in `walk_def_form` (its signatures hold no usages),
+covered by `test_occurrence_protocol_method_decl_not_recorded`. The final
+re-review was clean.
