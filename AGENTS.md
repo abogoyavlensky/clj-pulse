@@ -50,8 +50,10 @@ protocol changes should also pass `bb e2e-nvim`.
 
 Releases are tag-driven: `bb tag` reads the version from `Cargo.toml`, tags it
 `v<version>`, and pushes to `origin`, which triggers the release CI (build matrix
-+ checksums + GitHub Release). `Cargo.toml` is the source of truth — bump it
-first. See [docs/RELEASE.md](docs/RELEASE.md) for the full flow.
++ checksums + GitHub Release). The CI also regenerates the Homebrew formula and
+pushes it to the tap (`brew install abogoyavlensky/tap/clj-pulse`). `Cargo.toml`
+is the source of truth — bump it first. See [docs/RELEASE.md](docs/RELEASE.md)
+for the full flow.
 
 ## User's setup
 

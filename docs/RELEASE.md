@@ -42,10 +42,33 @@ Pushing the tag triggers `.github/workflows/release.yml`:
 3. **`release`** — generates `sha256` checksums (`checksums.txt`) and publishes a
    GitHub Release via `softprops/action-gh-release` with **auto-generated release
    notes** and all artifacts attached.
+4. **`homebrew`** — regenerates the Homebrew formula from the release checksums
+   (`scripts/generate-formula.sh`) and pushes `Formula/clj-pulse.rb` to
+   [`abogoyavlensky/homebrew-tap`](https://github.com/abogoyavlensky/homebrew-tap).
+   It commits only when the formula changed, so a re-run is a clean no-op. macOS
+   and Linux (Intel + ARM) only; the Windows artifact is skipped.
 
 Users install by downloading the archive for their platform from the
 [releases page](https://github.com/abogoyavlensky/clj-pulse/releases) (verifying
-against `checksums.txt`) or via mise — see the README.
+against `checksums.txt`), via mise (see the README), or via Homebrew:
+
+```sh
+brew install abogoyavlensky/tap/clj-pulse
+brew upgrade clj-pulse
+```
+
+## Prerequisites
+
+The `homebrew` job pushes to a **different** repository, which the default
+`GITHUB_TOKEN` cannot do. Add a repository secret on clj-pulse:
+
+- **`HOMEBREW_TAP_TOKEN`** — a personal access token with write access to
+  `abogoyavlensky/homebrew-tap` (classic: `repo` scope; fine-grained: Contents
+  read/write on that repo). The token used for the wtr/lgx tap automation can be
+  reused — just add it as a secret here.
+
+Without this secret the job fails at `git push`. The formula first appears in the
+tap after the next release that runs the job.
 
 ## Notes
 
