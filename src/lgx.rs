@@ -62,6 +62,17 @@ pub fn paths(edn: &str) -> Vec<String> {
     str_vec_at(&top, kw("paths")).unwrap_or_default()
 }
 
+/// The top-level `:lg-version` of an `lgx.edn` — the pinned let-go version that
+/// tells us `lgx install` has fetched the matching let-go source. `None` when
+/// absent, non-string, or blank.
+pub fn lg_version(edn: &str) -> Option<String> {
+    let Ok(Value::Map(top)) = edn_format::parse_str(edn) else {
+        return None;
+    };
+    let version = as_str(get(&top, kw("lg-version"))?)?;
+    (!version.trim().is_empty()).then(|| version.to_string())
+}
+
 fn read_deps(root: &Path) -> Vec<(String, Dep)> {
     std::fs::read_to_string(root.join("lgx.edn"))
         .ok()
@@ -240,6 +251,26 @@ mod tests {
         assert!(parse_deps("{:paths [\"src\"]}").is_empty());
         assert!(parse_deps("{:deps {}}").is_empty());
         assert!(parse_deps("not edn (((").is_empty());
+    }
+
+    #[test]
+    fn lg_version_reads_top_level_pinned_version() {
+        assert_eq!(
+            lg_version(r#"{:lg-version "1.10.0" :paths ["src"]}"#),
+            Some("1.10.0".to_string())
+        );
+    }
+
+    #[test]
+    fn lg_version_absent_or_non_string_is_none() {
+        // Absent entirely.
+        assert_eq!(lg_version(r#"{:paths ["src"]}"#), None);
+        // Present but blank.
+        assert_eq!(lg_version(r#"{:lg-version ""}"#), None);
+        // Present but not a string (a number).
+        assert_eq!(lg_version("{:lg-version 1.10}"), None);
+        // Malformed EDN.
+        assert_eq!(lg_version("not edn ((("), None);
     }
 
     use std::fs;
