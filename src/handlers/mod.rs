@@ -60,6 +60,17 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
             return Some(ResolvedSymbol::Project(sym));
         }
 
+        // In a let-go project, bare names are auto-referred from let-go's
+        // built-in `core` (indexed from `.lg` source), not the static
+        // clojure.core list — which would mis-navigate to a clojure JAR absent
+        // from a let-go classpath. Resolve there and never fall through: a name
+        // missing from `core` (a go-only primitive) simply doesn't navigate.
+        if index.letgo_core() {
+            return index
+                .lookup_in_ns("core", word)
+                .map(ResolvedSymbol::Project);
+        }
+
         if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
             return Some(ResolvedSymbol::Core(core.clone()));
         }
@@ -226,5 +237,53 @@ mod tests {
                 other => panic!("referred {} did not resolve: {:?}", factory, other),
             }
         }
+    }
+
+    fn core_entry(name: &str) -> CoreSymbol {
+        CoreSymbol {
+            name: name.to_string(),
+            params: String::new(),
+            doc: String::new(),
+        }
+    }
+
+    #[test]
+    fn letgo_core_is_the_bare_word_builtin() {
+        // let-go project: `core/map` indexed from .lg source, marker set. Bare
+        // `map` must resolve to that, not the static clojure.core builtin even
+        // when the static list also carries `map`.
+        let mut index = index_with(vec![sym("map", "core", DefKind::Defn)]);
+        index.core_symbols = vec![core_entry("map")];
+        index.mark_letgo_core();
+
+        match resolve_symbol(&index, "map", "app") {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.fqn, "core/map"),
+            other => panic!("bare map did not resolve to let-go core/map: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn without_letgo_marker_bare_word_uses_static_core() {
+        // No marker → unchanged behavior: bare `map` falls through to the
+        // static clojure.core list.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("map")];
+
+        match resolve_symbol(&index, "map", "app") {
+            Some(ResolvedSymbol::Core(c)) => assert_eq!(c.name, "map"),
+            other => panic!("expected static Core(map): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn letgo_marker_skips_static_core_for_missing_builtin() {
+        // Marker set but `core/map` not indexed (e.g. a go-only primitive):
+        // resolution must NOT fall back to the static clojure.core list, which
+        // would mis-navigate to an absent clojure JAR.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("map")];
+        index.mark_letgo_core();
+
+        assert!(resolve_symbol(&index, "map", "app").is_none());
     }
 }
