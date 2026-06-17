@@ -441,6 +441,36 @@ mod tests {
         assert!(index.lookup_in_ns("data", "parse").is_some());
     }
 
+    #[test]
+    fn index_letgo_core_is_a_no_op_for_clojure_projects() {
+        // Isolation: a Clojure project (deps.edn, no lgx.edn) must be entirely
+        // untouched by the let-go core machinery — no marker, no clojure.*
+        // alias injection, so resolve_symbol keeps using the static core list.
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(&tmp.path().join("deps.edn"), r#"{:paths ["src"]}"#);
+
+        let index = Index::new();
+        assert_eq!(index_letgo_core(tmp.path(), &index), 0);
+        assert!(
+            !index.letgo_core(),
+            "a Clojure project must never set the let-go-core marker"
+        );
+        assert!(index.ns_meta("clojure.core").is_none());
+        assert!(index.ns_meta("clojure.string").is_none());
+    }
+
+    #[test]
+    fn index_letgo_core_is_a_no_op_when_unpinned() {
+        // A let-go project that does not pin :lg-version gets no core indexing
+        // (lgx only fetches the source when pinned), so the marker stays unset.
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(&tmp.path().join("lgx.edn"), r#"{:paths ["src"]}"#);
+
+        let index = Index::new();
+        assert_eq!(index_letgo_core(tmp.path(), &index), 0);
+        assert!(!index.letgo_core());
+    }
+
     use std::fs;
     use std::path::Path;
 
