@@ -571,6 +571,58 @@ fn test_e2e_letgo_navigation_into_lgx_deps() {
 }
 
 #[test]
+fn test_e2e_letgo_core_navigation() {
+    // A pinned let-go project (`:lg-version`) with no deps of its own: bare
+    // builtins and clojure.*-aliased stdlib must navigate into the let-go core
+    // source that `lgx install` fetched under LGX_HOME.
+    let project = setup_named("letgo_core_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    // Stand in for what `lgx install` fetched for version 0.0.1.
+    let core = lgx_home.join("let-go/source/0.0.1/pkg/rt/core");
+    std::fs::create_dir_all(&core).unwrap();
+    std::fs::write(core.join("core.lg"), "(ns core)\n(defn map [f c] c)\n").unwrap();
+    std::fs::write(
+        core.join("string.lg"),
+        "(ns string)\n(defn join [sep c] sep)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    // Fires even though the project has no lgx deps — core indexing counts.
+    client.wait_for_log("library indexing complete");
+
+    let app = root.join("src/app.lg");
+    client.did_open(&app);
+
+    // Bare `map` is auto-referred from let-go's built-in core → core.lg.
+    let (line, ch) = position_of(&app, "map");
+    let m = client.goto_definition(&app, line, ch);
+    let m_uri = m["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for bare map: {}", m));
+    assert!(
+        m_uri.ends_with("/pkg/rt/core/core.lg"),
+        "expected let-go core.lg, got {}",
+        m_uri
+    );
+
+    // `str/join` through the `clojure.string` alias → the stdlib string.lg.
+    let (line, ch) = position_of(&app, "str/join");
+    let j = client.goto_definition(&app, line, ch);
+    let j_uri = j["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for str/join: {}", j));
+    assert!(
+        j_uri.ends_with("/pkg/rt/core/string.lg"),
+        "expected let-go string.lg, got {}",
+        j_uri
+    );
+}
+
+#[test]
 fn test_e2e_no_diagnostics_on_lgx_edn() {
     // Opening lgx.edn must not flag dependency coordinates (`my/loc`,
     // `ext/lib`) as unresolved namespaces — EDN config files are not source.

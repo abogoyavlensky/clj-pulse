@@ -238,6 +238,13 @@ impl Index {
     /// project symbols and occurrences. Called when the classpath changes
     /// so removed dependencies don't linger in completion/navigation.
     pub fn clear_libs(&self) {
+        // The let-go-core marker is library-derived state: a re-index that no
+        // longer finds pinned core (`:lg-version` removed, project switched to
+        // Clojure, source dir gone) must drop it, or the bare-word resolver
+        // keeps skipping the static clojure.core fallback while `core` is empty.
+        // `index_letgo_core` re-sets it when core is actually re-indexed.
+        self.letgo_core.store(false, Ordering::Relaxed);
+
         self.symbols
             .retain(|_, sym| sym.source == SymbolSource::Project);
         self.ns_symbols.retain(|ns, fqns| {
@@ -296,5 +303,26 @@ impl Index {
         self.ns_symbols.insert(meta.name.clone(), fqns);
         self.file_to_ns.insert(meta.file.clone(), meta.name.clone());
         self.namespaces.insert(meta.name.clone(), meta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_libs_resets_letgo_core_marker() {
+        // The marker is library-derived: clearing libs (e.g. on an lgx.edn
+        // change that un-pins :lg-version) must drop it so the bare-word
+        // resolver can fall back to the static clojure.core list again.
+        let index = Index::new();
+        index.mark_letgo_core();
+        assert!(index.letgo_core());
+
+        index.clear_libs();
+        assert!(
+            !index.letgo_core(),
+            "clear_libs must reset the let-go core marker"
+        );
     }
 }

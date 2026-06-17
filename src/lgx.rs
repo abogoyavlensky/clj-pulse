@@ -425,8 +425,7 @@ mod tests {
         let proj = tmp.path().join("proj/src/data.lg");
         let proj_src = "(ns data)\n(defn parse [s] s)\n";
         write(&proj, proj_src);
-        let (meta, symbols, occ) =
-            crate::index::extractor::extract_full(proj_src, &proj).unwrap();
+        let (meta, symbols, occ) = crate::index::extractor::extract_full(proj_src, &proj).unwrap();
         index.insert_file(meta, symbols, occ);
 
         index_core_dir(&core_dir, &index);
