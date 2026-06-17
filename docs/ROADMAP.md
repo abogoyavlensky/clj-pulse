@@ -66,7 +66,8 @@ meantime and keeping the server dependency-free is worth more early on.
 
 - [x] let-go support with lgx (~/.lgx/gitlibs) deps resolver — indexes `.lg`
       project files and resolves lgx git/`:local/root` deps (transitive,
-      first-wins) for navigation. let-go built-in `core` nav still deferred.
+      first-wins) for navigation. let-go built-in `core` nav now supported when
+      `:lg-version` is pinned (see below).
 - [x] Clojure protocols support: navigation to protocol's method, navigation
       from map->DB to DB protocol — protocol method signatures are indexed as
       namespace-level vars (so definition/hover/completion/references reach
@@ -88,7 +89,14 @@ meantime and keeping the server dependency-free is worth more early on.
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
 - [ ] Custom macros definitions (example `defcomponent` from flockman)
 - [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
-- [ ] let-go core navigation
+- [x] let-go core navigation — when `:lg-version` is pinned in `lgx.edn` and
+      lgx has fetched the source, indexes let-go's built-in `core`/stdlib from
+      `$LGX_HOME/let-go/source/<version>/pkg/rt/core/*.lg` and navigates into the
+      real `.lg` source. Each stdlib namespace is registered under both its
+      let-go name and the `clojure.*` alias (`[clojure.string :as str]` →
+      `string.lg`), and bare builtins (`map`, `when`) resolve to `core`. Go-only
+      primitives (`+`, `apply*`, special forms) don't navigate — no `.lg`
+      definition exists, same stance as Clojure special forms.
 - [X] Install with my homebrew-tap repo.
 - [x] Leiningen classpath (`project.clj` / NO `lein classpath`) — inspects
       `project.clj` only (no java): masks strings/comments then EDN-parses just
