@@ -514,6 +514,44 @@ pub(crate) fn point_to_position(
     }
 }
 
+// --- keyword resolution ----------------------------------------------------
+
+/// Resolves a `kwd_lit` node to its canonical colon-prefixed fqn (`:ns/name`),
+/// or `None` for an unqualified keyword (`:foo`, which is too ambiguous to
+/// index cross-file). The leading `:` keeps keyword fqns from ever colliding
+/// with var fqns (`ns/name`) in the index.
+///
+/// Auto-resolved keywords (`::`) resolve their namespace: bare `::foo` uses the
+/// current namespace, `::alias/foo` resolves the alias. A single-colon
+/// namespace (`:lib.ns/foo`) is literal and never alias-resolved.
+fn keyword_fqn(node: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
+    let name = node_text(node.child_by_field_name("name")?, source);
+    let auto_resolved = node
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, source) == "::")
+        .unwrap_or(false);
+
+    match node.child_by_field_name("namespace") {
+        Some(ns_node) => {
+            let ns = node_text(ns_node, source);
+            let ns = if auto_resolved {
+                ns_meta.aliases.get(ns).map(String::as_str).unwrap_or(ns)
+            } else {
+                ns
+            };
+            Some(format!(":{}/{}", ns, name))
+        }
+        None if auto_resolved => {
+            if ns_meta.name.is_empty() {
+                None
+            } else {
+                Some(format!(":{}/{}", ns_meta.name, name))
+            }
+        }
+        None => None,
+    }
+}
+
 // --- occurrence collection -------------------------------------------------
 
 struct OccurrenceCtx<'a> {
@@ -1176,5 +1214,82 @@ fn str_to_defkind(s: &str) -> Option<DefKind> {
         "defrecord" => Some(DefKind::Defrecord),
         "deftype" => Some(DefKind::Deftype),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(source: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    fn find_kwd(node: Node) -> Option<Node> {
+        if node.kind() == "kwd_lit" {
+            return Some(node);
+        }
+        for child in named_children(node) {
+            if let Some(found) = find_kwd(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Resolves the first keyword in `source` against a namespace `ns` with the
+    /// given `:as` aliases.
+    fn resolve_kwd(source: &str, ns: &str, aliases: &[(&str, &str)]) -> Option<String> {
+        let tree = parse(source);
+        let kwd = find_kwd(tree.root_node()).expect("no kwd_lit in source");
+        let meta = NsMeta {
+            name: ns.to_string(),
+            file: std::path::PathBuf::new(),
+            aliases: aliases
+                .iter()
+                .map(|(a, f)| (a.to_string(), f.to_string()))
+                .collect(),
+            refers: HashMap::new(),
+            requires: Vec::new(),
+        };
+        keyword_fqn(kwd, &meta, source)
+    }
+
+    #[test]
+    fn keyword_fqn_auto_resolves_bare_to_current_ns() {
+        assert_eq!(
+            resolve_kwd("::db", "readx.db", &[]),
+            Some(":readx.db/db".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_fqn_auto_resolves_alias() {
+        assert_eq!(
+            resolve_kwd("::db2/x", "readx.db", &[("db2", "other.db")]),
+            Some(":other.db/x".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_fqn_single_colon_namespace_is_literal() {
+        // No alias resolution for `:lib/x`; the namespace is taken verbatim
+        // even when an alias of the same name exists.
+        assert_eq!(
+            resolve_kwd(":lit.ns/x", "readx.db", &[("lit.ns", "should.not.win")]),
+            Some(":lit.ns/x".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_fqn_unqualified_is_none() {
+        assert_eq!(resolve_kwd(":plain", "readx.db", &[]), None);
+    }
+
+    #[test]
+    fn keyword_fqn_auto_without_ns_or_current_ns_is_none() {
+        assert_eq!(resolve_kwd("::x", "", &[]), None);
     }
 }
