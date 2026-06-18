@@ -94,9 +94,12 @@ meantime and keeping the server dependency-free is worth more early on.
       `$LGX_HOME/let-go/source/<version>/pkg/rt/core/*.lg` and navigates into the
       real `.lg` source. Each stdlib namespace is registered under both its
       let-go name and the `clojure.*` alias (`[clojure.string :as str]` →
-      `string.lg`), and bare builtins (`map`, `when`) resolve to `core`. Go-only
-      primitives (`+`, `apply*`, special forms) don't navigate — no `.lg`
-      definition exists, same stance as Clojure special forms.
+      `string.lg`), and bare builtins (`map`, `when`) resolve to `core`. Built-ins
+      with no `.lg` source — compiler special forms (`if`, `try`, `catch`, …) and
+      native core fns (`count`, `subs`, `throw`, …, implemented in Go) — get
+      hover descriptions and completion entries (special forms from a curated
+      table; natives from a generated name list with docs borrowed from the
+      clojure.core table), but don't navigate, since no `.lg` definition exists.
 - [X] Install with my homebrew-tap repo.
 - [x] Leiningen classpath (`project.clj` / NO `lein classpath`) — inspects
       `project.clj` only (no java): masks strings/comments then EDN-parses just
