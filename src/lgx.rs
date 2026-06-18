@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use edn_format::Value;
 
+use crate::config::{project_kind, ProjectKind};
 use crate::edn::{as_str, get, kw, kw_ns, str_vec_at};
+use crate::index::{scanner, Index};
 
 /// Resolves a let-go project's lgx dependencies to their source directories,
 /// following transitive `:deps` breadth-first with first-wins on lib name.
@@ -60,6 +62,122 @@ pub fn paths(edn: &str) -> Vec<String> {
         return vec![];
     };
     str_vec_at(&top, kw("paths")).unwrap_or_default()
+}
+
+/// The top-level `:lg-version` of an `lgx.edn` — the pinned let-go version that
+/// tells us `lgx install` has fetched the matching let-go source. `None` when
+/// absent, non-string, or blank.
+pub fn lg_version(edn: &str) -> Option<String> {
+    let Ok(Value::Map(top)) = edn_format::parse_str(edn) else {
+        return None;
+    };
+    let version = as_str(get(&top, kw("lg-version"))?)?;
+    (!version.trim().is_empty()).then(|| version.to_string())
+}
+
+/// let-go aliases Clojure namespace names to its own built-in ones
+/// (`lang.go` `nsAliases`): `(clojure.* name, let-go name)`. A project written
+/// against Clojure (`[clojure.string :as str]`) must resolve into the let-go
+/// source file whose namespace is the bare let-go name (`string`).
+const NS_ALIASES: &[(&str, &str)] = &[
+    ("clojure.core", "core"),
+    ("clojure.string", "string"),
+    ("clojure.set", "set"),
+    ("clojure.walk", "walk"),
+    ("clojure.edn", "edn"),
+    ("clojure.zip", "zip"),
+    ("clojure.data", "data"),
+    ("clojure.pprint", "pprint"),
+    ("clojure.test", "test"),
+];
+
+/// Indexes let-go's built-in `core`/stdlib for a pinned let-go project so that
+/// definition/hover/completion reach the actual `.lg` source `lgx install`
+/// fetched. No-op (returns 0) unless this is a `ProjectKind::LetGo` with a
+/// pinned `:lg-version` whose source directory exists. Returns the number of
+/// core namespaces indexed, so the caller's "nothing to index" check stays
+/// correct even for a project with no other deps.
+pub fn index_letgo_core(root: &Path, index: &Index) -> usize {
+    if project_kind(root) != ProjectKind::LetGo {
+        return 0;
+    }
+    let Some(version) = std::fs::read_to_string(root.join("lgx.edn"))
+        .ok()
+        .and_then(|edn| lg_version(&edn))
+    else {
+        return 0; // unpinned: lgx only fetches let-go source when pinned
+    };
+    let Some(home) = lgx_home() else {
+        return 0;
+    };
+    let core_dir = home
+        .join("let-go")
+        .join("source")
+        .join(&version)
+        .join("pkg/rt/core");
+    if !core_dir.is_dir() {
+        tracing::warn!(
+            "lgx: let-go {} core source not found at {} (run `lgx install`?)",
+            version,
+            core_dir.display()
+        );
+        return 0;
+    }
+    index_core_dir(&core_dir, index)
+}
+
+/// Indexes the let-go `core` source directory and registers each indexed
+/// namespace a second time under its `clojure.*` alias, then flips the index's
+/// let-go-core marker. Threaded through `core_dir` directly (rather than
+/// derived from `LGX_HOME`) so tests stay hermetic.
+fn index_core_dir(core_dir: &Path, index: &Index) -> usize {
+    // Canonicalize the same way `index_dir_libs` does, so indexed file paths
+    // are reliably under `core_dir` for the alias-source check below.
+    let core_dir = core_dir
+        .canonicalize()
+        .unwrap_or_else(|_| core_dir.to_path_buf());
+
+    let before = index.namespaces.len();
+    scanner::index_dir_libs(std::slice::from_ref(&core_dir), index);
+    let indexed = index.namespaces.len().saturating_sub(before);
+
+    for (clojure_ns, letgo_ns) in NS_ALIASES {
+        register_alias_copy(index, &core_dir, clojure_ns, letgo_ns);
+    }
+
+    index.mark_letgo_core();
+    indexed
+}
+
+/// Registers `clojure_ns` as a duplicate of the let-go `letgo_ns`: same source
+/// file and ranges, with the namespace and every fqn rewritten to the
+/// `clojure.*` name. A no-op when `letgo_ns` was not indexed from the let-go
+/// core directory — guarding against cloning an unrelated project/dependency
+/// namespace that merely shares a bare name like `core`/`string`/`test`.
+/// Inserting via `insert_lib_file` keeps project symbols winning, per the
+/// index invariants.
+fn register_alias_copy(index: &Index, core_dir: &Path, clojure_ns: &str, letgo_ns: &str) {
+    let Some(mut meta) = index.ns_meta(letgo_ns) else {
+        return;
+    };
+    // Only alias namespaces actually sourced from the fetched let-go core dir.
+    if !meta.file.starts_with(core_dir) {
+        return;
+    }
+    let Some(fqns) = index.ns_symbols.get(letgo_ns).map(|r| r.clone()) else {
+        return;
+    };
+    meta.name = clojure_ns.to_string();
+
+    let mut symbols = Vec::with_capacity(fqns.len());
+    for fqn in &fqns {
+        if let Some(mut sym) = index.lookup(fqn) {
+            sym.ns = clojure_ns.to_string();
+            sym.fqn = format!("{}/{}", clojure_ns, sym.name);
+            symbols.push(sym);
+        }
+    }
+    index.insert_lib_file(meta, symbols);
 }
 
 fn read_deps(root: &Path) -> Vec<(String, Dep)> {
@@ -240,6 +358,117 @@ mod tests {
         assert!(parse_deps("{:paths [\"src\"]}").is_empty());
         assert!(parse_deps("{:deps {}}").is_empty());
         assert!(parse_deps("not edn (((").is_empty());
+    }
+
+    #[test]
+    fn lg_version_reads_top_level_pinned_version() {
+        assert_eq!(
+            lg_version(r#"{:lg-version "1.10.0" :paths ["src"]}"#),
+            Some("1.10.0".to_string())
+        );
+    }
+
+    #[test]
+    fn lg_version_absent_or_non_string_is_none() {
+        // Absent entirely.
+        assert_eq!(lg_version(r#"{:paths ["src"]}"#), None);
+        // Present but blank.
+        assert_eq!(lg_version(r#"{:lg-version ""}"#), None);
+        // Present but not a string (a number).
+        assert_eq!(lg_version("{:lg-version 1.10}"), None);
+        // Malformed EDN.
+        assert_eq!(lg_version("not edn ((("), None);
+    }
+
+    #[test]
+    fn index_core_dir_aliases_clojure_namespaces_and_sets_marker() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let core_dir = tmp.path().join("pkg/rt/core");
+        write(&core_dir.join("core.lg"), "(ns core)\n(defn map [f c] c)\n");
+        write(
+            &core_dir.join("string.lg"),
+            "(ns string)\n(defn join [sep c] sep)\n",
+        );
+
+        let index = Index::new();
+        assert!(!index.letgo_core(), "marker starts unset");
+        index_core_dir(&core_dir, &index);
+
+        // The let-go ns and its clojure.* alias resolve to the same .lg source.
+        let lg = index
+            .lookup_in_ns("string", "join")
+            .expect("string/join indexed");
+        let cl = index
+            .lookup_in_ns("clojure.string", "join")
+            .expect("clojure.string/join alias registered");
+        assert_eq!(lg.file, cl.file);
+        assert!(lg.file.ends_with("string.lg"), "got {}", lg.file.display());
+
+        // clojure.core is registered as a copy of the let-go `core` ns.
+        assert!(index.ns_meta("clojure.core").is_some());
+        assert!(index.lookup_in_ns("clojure.core", "map").is_some());
+
+        // The marker flips on so the bare-word resolver prefers let-go core.
+        assert!(index.letgo_core());
+    }
+
+    #[test]
+    fn index_core_dir_does_not_alias_unrelated_namespaces() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let core_dir = tmp.path().join("pkg/rt/core");
+        write(&core_dir.join("core.lg"), "(ns core)\n(defn map [f c] c)\n");
+
+        let index = Index::new();
+
+        // A pre-existing project namespace that happens to share a bare let-go
+        // stdlib name (`data`), living outside the core dir.
+        let proj = tmp.path().join("proj/src/data.lg");
+        let proj_src = "(ns data)\n(defn parse [s] s)\n";
+        write(&proj, proj_src);
+        let (meta, symbols, occ) = crate::index::extractor::extract_full(proj_src, &proj).unwrap();
+        index.insert_file(meta, symbols, occ);
+
+        index_core_dir(&core_dir, &index);
+
+        // clojure.core is aliased from the real let-go core source...
+        assert!(index.ns_meta("clojure.core").is_some());
+        // ...but the unrelated project `data` ns must NOT become `clojure.data`.
+        assert!(
+            index.ns_meta("clojure.data").is_none(),
+            "unrelated project ns wrongly aliased as clojure.data"
+        );
+        // The project's own `data` ns stays intact.
+        assert!(index.lookup_in_ns("data", "parse").is_some());
+    }
+
+    #[test]
+    fn index_letgo_core_is_a_no_op_for_clojure_projects() {
+        // Isolation: a Clojure project (deps.edn, no lgx.edn) must be entirely
+        // untouched by the let-go core machinery — no marker, no clojure.*
+        // alias injection, so resolve_symbol keeps using the static core list.
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(&tmp.path().join("deps.edn"), r#"{:paths ["src"]}"#);
+
+        let index = Index::new();
+        assert_eq!(index_letgo_core(tmp.path(), &index), 0);
+        assert!(
+            !index.letgo_core(),
+            "a Clojure project must never set the let-go-core marker"
+        );
+        assert!(index.ns_meta("clojure.core").is_none());
+        assert!(index.ns_meta("clojure.string").is_none());
+    }
+
+    #[test]
+    fn index_letgo_core_is_a_no_op_when_unpinned() {
+        // A let-go project that does not pin :lg-version gets no core indexing
+        // (lgx only fetches the source when pinned), so the marker stays unset.
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(&tmp.path().join("lgx.edn"), r#"{:paths ["src"]}"#);
+
+        let index = Index::new();
+        assert_eq!(index_letgo_core(tmp.path(), &index), 0);
+        assert!(!index.letgo_core());
     }
 
     use std::fs;

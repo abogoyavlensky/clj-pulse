@@ -1,0 +1,6 @@
+(ns app
+  (:require [clojure.string :as str]))
+
+(map identity [])
+(str/join "," [])
+(if true (count []) 0)

@@ -1,7 +1,9 @@
+pub mod builtins;
 pub mod code_action;
 pub mod completion;
 pub mod definition;
 pub mod hover;
+mod letgo_native_names;
 pub mod references;
 pub mod signature;
 pub mod symbols;
@@ -12,6 +14,12 @@ use crate::index::{CoreSymbol, DefKind, Index, Symbol};
 pub enum ResolvedSymbol {
     Project(Symbol),
     Core(CoreSymbol),
+    /// A special form (compiler intrinsic, Clojure or let-go) — hover-only,
+    /// never navigable.
+    SpecialForm(&'static builtins::SpecialForm),
+    /// A let-go native core fn (Go `ns.Def`) — hover-only; doc/arglists borrowed
+    /// from the clojure.core table.
+    LetgoNative(CoreSymbol),
 }
 
 pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<ResolvedSymbol> {
@@ -58,6 +66,38 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
         // symbol of the same name, so resolve it before the core fallback.
         if let Some(sym) = resolve_factory(index, current_ns, word) {
             return Some(ResolvedSymbol::Project(sym));
+        }
+
+        // In a let-go project, bare names are auto-referred from let-go's
+        // built-in `core` (indexed from `.lg` source), not the static
+        // clojure.core list — which would mis-navigate to a clojure JAR absent
+        // from a let-go classpath. Resolve there and never fall through: a name
+        // missing from `core` (a go-only primitive) simply doesn't navigate.
+        if index.letgo_core() {
+            if let Some(sym) = index.lookup_in_ns("core", word) {
+                return Some(ResolvedSymbol::Project(sym));
+            }
+            // Compiler special forms (`if`, `try`, …) have no `.lg` source;
+            // surface a description for hover but never navigate.
+            if let Some(sf) = builtins::special_form(word, true) {
+                return Some(ResolvedSymbol::SpecialForm(sf));
+            }
+            // Native core fns (Go `ns.Def`, e.g. `count`/`str`) also have no
+            // `.lg` source; borrow the clojure.core entry for hover/completion.
+            if builtins::is_native(word) {
+                if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
+                    return Some(ResolvedSymbol::LetgoNative(core.clone()));
+                }
+            }
+            return None;
+        }
+
+        // Clojure compiler special forms (`if`, `do`, `new`, …) have no
+        // clojure.core var and no source; surface a description for hover but
+        // never navigate. Checked after project lookups (a project var named
+        // `new` still wins) and before the static clojure.core list.
+        if let Some(sf) = builtins::special_form(word, false) {
+            return Some(ResolvedSymbol::SpecialForm(sf));
         }
 
         if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
@@ -225,6 +265,103 @@ mod tests {
                 Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "DB"),
                 other => panic!("referred {} did not resolve: {:?}", factory, other),
             }
+        }
+    }
+
+    fn core_entry(name: &str) -> CoreSymbol {
+        CoreSymbol {
+            name: name.to_string(),
+            params: String::new(),
+            doc: String::new(),
+        }
+    }
+
+    #[test]
+    fn letgo_core_is_the_bare_word_builtin() {
+        // let-go project: `core/map` indexed from .lg source, marker set. Bare
+        // `map` must resolve to that, not the static clojure.core builtin even
+        // when the static list also carries `map`.
+        let mut index = index_with(vec![sym("map", "core", DefKind::Defn)]);
+        index.core_symbols = vec![core_entry("map")];
+        index.mark_letgo_core();
+
+        match resolve_symbol(&index, "map", "app") {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.fqn, "core/map"),
+            other => panic!("bare map did not resolve to let-go core/map: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn without_letgo_marker_bare_word_uses_static_core() {
+        // No marker → unchanged behavior: bare `map` falls through to the
+        // static clojure.core list.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("map")];
+
+        match resolve_symbol(&index, "map", "app") {
+            Some(ResolvedSymbol::Core(c)) => assert_eq!(c.name, "map"),
+            other => panic!("expected static Core(map): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn letgo_marker_skips_static_core_for_missing_builtin() {
+        // Marker set but `core/map` not indexed (e.g. a go-only primitive):
+        // resolution must NOT fall back to the static clojure.core list, which
+        // would mis-navigate to an absent clojure JAR.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("map")];
+        index.mark_letgo_core();
+
+        assert!(resolve_symbol(&index, "map", "app").is_none());
+    }
+
+    #[test]
+    fn letgo_special_form_resolves_for_hover() {
+        let index = index_with(vec![]);
+        index.mark_letgo_core();
+        match resolve_symbol(&index, "if", "app") {
+            Some(ResolvedSymbol::SpecialForm(sf)) => assert_eq!(sf.name, "if"),
+            other => panic!("expected SpecialForm(if): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn letgo_native_resolves_with_borrowed_core_entry() {
+        // `count` is a native (no `.lg` source); with the marker set it resolves
+        // to LetgoNative carrying the clojure.core entry for hover text.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("count")];
+        index.mark_letgo_core();
+        match resolve_symbol(&index, "count", "app") {
+            Some(ResolvedSymbol::LetgoNative(c)) => assert_eq!(c.name, "count"),
+            other => panic!("expected LetgoNative(count): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn clojure_special_form_resolves_for_hover() {
+        // Clojure project (no let-go marker): `if` resolves to a special form
+        // (hover-only), while a clojure.core fn still resolves to Core.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("count")];
+        match resolve_symbol(&index, "if", "app") {
+            Some(ResolvedSymbol::SpecialForm(sf)) => assert_eq!(sf.name, "if"),
+            other => panic!("expected SpecialForm(if): {:?}", other),
+        }
+        match resolve_symbol(&index, "count", "app") {
+            Some(ResolvedSymbol::Core(c)) => assert_eq!(c.name, "count"),
+            other => panic!("expected Core(count): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn project_var_shadows_clojure_special_form() {
+        // A project var named `new` wins over the `new` special form.
+        let index = index_with(vec![sym("new", "my.ns", DefKind::Defn)]);
+        match resolve_symbol(&index, "new", "my.ns") {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "new"),
+            other => panic!("project `new` should win: {:?}", other),
         }
     }
 }

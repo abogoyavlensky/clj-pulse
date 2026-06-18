@@ -42,6 +42,10 @@ pub fn handle(
             };
             (core.name.clone(), split_arity_list(&core.params), doc)
         }
+        // Special forms / native core fns: no signature help here.
+        Some(ResolvedSymbol::SpecialForm(_)) | Some(ResolvedSymbol::LetgoNative(_)) => {
+            return Ok(None)
+        }
         None => return Ok(None),
     };
 

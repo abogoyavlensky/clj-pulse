@@ -26,7 +26,11 @@ fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> usize {
         config::ProjectKind::LetGo => {
             let dirs = lgx::resolve(root);
             scanner::index_dir_libs(&dirs, index);
-            dirs.len()
+            // Also index let-go's built-in core/stdlib from the source `lgx
+            // install` fetched (only when `:lg-version` is pinned). Its count is
+            // added so a pinned project with no deps of its own still reports
+            // library indexing as complete rather than "nothing to index".
+            dirs.len() + lgx::index_letgo_core(root, index)
         }
         config::ProjectKind::Clojure => {
             // deps.edn's `.cpcache` is authoritative (full transitive

@@ -1,8 +1,9 @@
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
+use super::builtins;
 use crate::document::DocumentStore;
-use crate::index::{DefKind, Index};
+use crate::index::{CoreSymbol, DefKind, Index};
 
 pub fn handle(
     index: &Index,
@@ -72,10 +73,43 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             }
         }
 
-        // Pool C: clojure.core builtins
-        for core_sym in &index.core_symbols {
-            if core_sym.name.starts_with(prefix) {
-                items.push(core_symbol_to_completion(core_sym));
+        // Pool C: builtins. A let-go project gets its own core — special forms,
+        // native fns, and the live `.lg` `core` namespace — instead of the
+        // static clojure.core list, which would offer names let-go lacks and
+        // mislabel the ones it has. Clojure projects keep the clojure.core list.
+        if index.letgo_core() {
+            for sf in builtins::special_forms(true) {
+                if sf.name.starts_with(prefix) {
+                    items.push(special_form_to_completion(sf));
+                }
+            }
+            for &name in builtins::native_names() {
+                if name.starts_with(prefix) {
+                    if let Some(core) = index.core_symbols.iter().find(|c| c.name == name) {
+                        items.push(letgo_native_to_completion(core));
+                    }
+                }
+            }
+            if let Some(fqns) = index.ns_symbols.get("core") {
+                for fqn in fqns.iter() {
+                    if let Some(sym) = index.symbols.get(fqn) {
+                        if sym.name.starts_with(prefix) {
+                            items.push(symbol_to_completion(&sym, None));
+                        }
+                    }
+                }
+            }
+        } else {
+            for core_sym in &index.core_symbols {
+                if core_sym.name.starts_with(prefix) {
+                    items.push(core_symbol_to_completion(core_sym));
+                }
+            }
+            // Clojure special forms aren't clojure.core vars, so offer them too.
+            for sf in builtins::special_forms(false) {
+                if sf.name.starts_with(prefix) {
+                    items.push(special_form_to_completion(sf));
+                }
             }
         }
 
@@ -161,6 +195,38 @@ fn core_symbol_to_completion(sym: &crate::index::CoreSymbol) -> CompletionItem {
     }
 }
 
+fn special_form_to_completion(sf: &builtins::SpecialForm) -> CompletionItem {
+    CompletionItem {
+        label: sf.name.to_string(),
+        detail: Some(format!("special form {}", sf.usage)),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: sf.doc.to_string(),
+        })),
+        kind: Some(CompletionItemKind::KEYWORD),
+        ..Default::default()
+    }
+}
+
+/// A let-go native core fn in completion — doc/arglists borrowed from the
+/// clojure.core table, labelled native.
+fn letgo_native_to_completion(sym: &CoreSymbol) -> CompletionItem {
+    CompletionItem {
+        label: sym.name.clone(),
+        detail: Some(format!("let-go core (native) ({})", sym.params)),
+        documentation: if sym.doc.is_empty() {
+            None
+        } else {
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: sym.doc.clone(),
+            }))
+        },
+        kind: Some(CompletionItemKind::FUNCTION),
+        ..Default::default()
+    }
+}
+
 fn defkind_to_completion_kind(kind: &DefKind) -> CompletionItemKind {
     match kind {
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro => CompletionItemKind::FUNCTION,
@@ -176,5 +242,118 @@ fn params_display(params: &[String]) -> String {
         String::new()
     } else {
         params.join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{NsMeta, Symbol, SymbolSource};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use tower_lsp::lsp_types::Range;
+
+    fn core_sym(name: &str, params: &str) -> CoreSymbol {
+        CoreSymbol {
+            name: name.to_string(),
+            params: params.to_string(),
+            doc: String::new(),
+        }
+    }
+
+    fn lib_sym(name: &str, ns: &str) -> Symbol {
+        Symbol {
+            name: name.to_string(),
+            fqn: format!("{}/{}", ns, name),
+            ns: ns.to_string(),
+            kind: DefKind::Defn,
+            params: vec![],
+            doc: None,
+            file: PathBuf::from("core.lg"),
+            source: SymbolSource::Dir(PathBuf::from("core")),
+            range: Range::default(),
+            name_range: Range::default(),
+        }
+    }
+
+    fn meta(name: &str, file: &str) -> NsMeta {
+        NsMeta {
+            name: name.to_string(),
+            file: PathBuf::from(file),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: vec![],
+        }
+    }
+
+    fn labels(index: &Index, prefix: &str) -> Vec<String> {
+        complete_symbols(index, prefix, "app")
+            .into_iter()
+            .map(|i| i.label)
+            .collect()
+    }
+
+    fn letgo_index() -> Index {
+        let mut index = Index::new();
+        // Current (project) ns.
+        index.insert_file(meta("app", "app.lg"), vec![], vec![]);
+        // Live `.lg` core ns with `map`.
+        index.insert_lib_file(meta("core", "core.lg"), vec![lib_sym("map", "core")]);
+        index.core_symbols = vec![
+            core_sym("count", "([coll])"),    // a real let-go native
+            core_sym("zzz-clojure-only", ""), // a clojure.core name let-go lacks
+        ];
+        index.mark_letgo_core();
+        index
+    }
+
+    #[test]
+    fn letgo_completion_offers_builtins_not_static_core() {
+        let index = letgo_index();
+        assert!(
+            labels(&index, "i").contains(&"if".to_string()),
+            "special form if"
+        );
+        assert!(
+            labels(&index, "cou").contains(&"count".to_string()),
+            "native count"
+        );
+        assert!(
+            labels(&index, "ma").contains(&"map".to_string()),
+            "live .lg core map"
+        );
+        // The full clojure.core static pool is NOT dumped for let-go: a
+        // clojure.core name that is not a let-go native must not be offered.
+        assert!(!labels(&index, "zzz").contains(&"zzz-clojure-only".to_string()));
+    }
+
+    #[test]
+    fn letgo_native_completion_is_labelled() {
+        let index = letgo_index();
+        let item = complete_symbols(&index, "count", "app")
+            .into_iter()
+            .find(|i| i.label == "count")
+            .expect("count offered");
+        assert!(item.detail.unwrap().contains("native"));
+    }
+
+    #[test]
+    fn clojure_project_uses_static_core_pool() {
+        // Marker unset → the clojure.core static pool is used as before.
+        let mut index = Index::new();
+        index.insert_file(meta("app", "app.clj"), vec![], vec![]);
+        index.core_symbols = vec![core_sym("zzz-clojure-only", "")];
+        assert!(labels(&index, "zzz").contains(&"zzz-clojure-only".to_string()));
+    }
+
+    #[test]
+    fn clojure_completion_offers_special_forms_and_core() {
+        // Marker unset → Clojure path offers clojure.core fns AND special forms.
+        let mut index = Index::new();
+        index.insert_file(meta("app", "app.clj"), vec![], vec![]);
+        index.core_symbols = vec![core_sym("inc", "([x])")];
+        let l = labels(&index, "i");
+        assert!(l.contains(&"if".to_string()), "special form if");
+        assert!(l.contains(&"inc".to_string()), "clojure.core inc");
     }
 }

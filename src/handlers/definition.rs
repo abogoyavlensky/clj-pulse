@@ -80,6 +80,16 @@ pub fn handle(
             }
             Ok(None)
         }
+        // Special forms and native core fns have no `.lg` source to navigate
+        // to. But a native name can also be a require alias (`[clojure.string
+        // :as str]`); when the cursor is on the alias declaration itself,
+        // navigate to that namespace, mirroring the Core arm above.
+        Some(ResolvedSymbol::SpecialForm(_)) | Some(ResolvedSymbol::LetgoNative(_)) => {
+            if on_alias_declaration(documents, &uri, pos.line, &word) {
+                return namespace_location(index, &current_ns, &word);
+            }
+            Ok(None)
+        }
         None => {
             // The word may be a require alias (`[ring.util.response :as
             // response]` with the cursor on `response`) or a namespace name

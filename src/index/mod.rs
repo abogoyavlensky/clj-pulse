@@ -6,6 +6,7 @@ pub mod scanner;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,10 @@ pub struct Index {
     /// Resolved symbol usages per project file (libraries excluded).
     pub occurrences: DashMap<PathBuf, Vec<Occurrence>>,
     pub core_symbols: Vec<CoreSymbol>,
+    /// Set once let-go's built-in `core` namespace has been indexed from the
+    /// fetched let-go source. Interior mutability because the `Arc<Index>` is
+    /// already shared with handlers when background library indexing runs.
+    letgo_core: AtomicBool,
 }
 
 impl Default for Index {
@@ -105,6 +110,7 @@ impl Default for Index {
             file_to_ns: DashMap::new(),
             occurrences: DashMap::new(),
             core_symbols: Vec::new(),
+            letgo_core: AtomicBool::new(false),
         }
     }
 }
@@ -136,6 +142,18 @@ impl Index {
 
     pub fn ns_meta(&self, ns: &str) -> Option<NsMeta> {
         self.namespaces.get(ns).map(|r| r.clone())
+    }
+
+    /// Records that let-go's built-in `core` namespace has been indexed, so the
+    /// bare-word resolver treats `core` as the auto-referred builtin instead of
+    /// the static clojure.core list.
+    pub fn mark_letgo_core(&self) {
+        self.letgo_core.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether let-go core has been indexed (see [`Index::mark_letgo_core`]).
+    pub fn letgo_core(&self) -> bool {
+        self.letgo_core.load(Ordering::Relaxed)
     }
 
     pub fn remove_file(&self, path: &Path) {
@@ -220,6 +238,13 @@ impl Index {
     /// project symbols and occurrences. Called when the classpath changes
     /// so removed dependencies don't linger in completion/navigation.
     pub fn clear_libs(&self) {
+        // The let-go-core marker is library-derived state: a re-index that no
+        // longer finds pinned core (`:lg-version` removed, project switched to
+        // Clojure, source dir gone) must drop it, or the bare-word resolver
+        // keeps skipping the static clojure.core fallback while `core` is empty.
+        // `index_letgo_core` re-sets it when core is actually re-indexed.
+        self.letgo_core.store(false, Ordering::Relaxed);
+
         self.symbols
             .retain(|_, sym| sym.source == SymbolSource::Project);
         self.ns_symbols.retain(|ns, fqns| {
@@ -278,5 +303,26 @@ impl Index {
         self.ns_symbols.insert(meta.name.clone(), fqns);
         self.file_to_ns.insert(meta.file.clone(), meta.name.clone());
         self.namespaces.insert(meta.name.clone(), meta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_libs_resets_letgo_core_marker() {
+        // The marker is library-derived: clearing libs (e.g. on an lgx.edn
+        // change that un-pins :lg-version) must drop it so the bare-word
+        // resolver can fall back to the static clojure.core list again.
+        let index = Index::new();
+        index.mark_letgo_core();
+        assert!(index.letgo_core());
+
+        index.clear_libs();
+        assert!(
+            !index.letgo_core(),
+            "clear_libs must reset the let-go core marker"
+        );
     }
 }
