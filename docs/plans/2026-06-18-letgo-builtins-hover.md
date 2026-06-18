@@ -1,5 +1,9 @@
 # let-go Builtins: Hover & Completion for Special Forms and Native Core Fns
 
+> **Status: ✅ Completed (2026-06-18).** All five tasks implemented, codex-reviewed
+> per task, and verified with `bb check` + `bb e2e`. See the
+> [Implementation summary](#implementation-summary) at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** In a let-go project, give hover and completion for let-go's built-in
@@ -127,7 +131,7 @@ new dependencies; no runtime process spawning.
 **Files:** new `src/handlers/letgo_builtins.rs`; modify `src/handlers/mod.rs`,
 `hover.rs`, `definition.rs`, `signature.rs`.
 
-- [ ] **Step 1:** Create `src/handlers/letgo_builtins.rs` with the `SpecialForm`
+- [x] **Step 1:** Create `src/handlers/letgo_builtins.rs` with the `SpecialForm`
   struct and `SPECIAL_FORMS` table (one entry per form below, each with a `usage`
   string and a one/two-line `doc`), plus `pub fn special_form(name) ->
   Option<&'static SpecialForm>` (linear scan). Forms (let-go 1.10.0 compiler):
@@ -140,26 +144,26 @@ new dependencies; no runtime process spawning.
   `(try body* (catch sym handler*)? (finally cleanup*)?)`; `catch`
   `(catch binding-sym body*)`; `finally` `(finally body*)`. (`throw` is **not**
   here — it is a native fn, handled in Task 2.)
-- [ ] **Step 2:** In `src/handlers/mod.rs`: `pub mod letgo_builtins;`; add
+- [x] **Step 2:** In `src/handlers/mod.rs`: `pub mod letgo_builtins;`; add
   `ResolvedSymbol::SpecialForm(&'static letgo_builtins::SpecialForm)`. In
   `resolve_symbol`'s `if index.letgo_core()` block, after the existing
   `lookup_in_ns("core", word)` Project return, add: if `letgo_builtins::
   special_form(word)` is `Some`, return `ResolvedSymbol::SpecialForm`. (Keep the
   trailing `return None` so the static clojure.core list is still skipped.)
-- [ ] **Step 3:** In `hover.rs`: add `format_for_special_form(&SpecialForm) ->
+- [x] **Step 3:** In `hover.rs`: add `format_for_special_form(&SpecialForm) ->
   String` (` ```clojure\n{usage}\n``` ` + `*special form*` + blank line + doc) and
   a `ResolvedSymbol::SpecialForm(sf) => Some(format_for_special_form(sf))` arm.
-- [ ] **Step 4:** In `definition.rs` and `signature.rs`: add a
+- [x] **Step 4:** In `definition.rs` and `signature.rs`: add a
   `Some(ResolvedSymbol::SpecialForm(_)) => …` arm returning `Ok(None)` (no
   navigation / no signature for special forms).
-- [ ] **Step 5: Unit tests** (`letgo_builtins` and `handlers` `#[cfg(test)]`):
+- [x] **Step 5: Unit tests** (`letgo_builtins` and `handlers` `#[cfg(test)]`):
   `special_form("if")` is `Some`, `special_form("nope")` is `None`; with
   `letgo_core` set, `resolve_symbol(index,"if","app")` → `SpecialForm("if")`, and
   with the marker unset it is unchanged (`None`/static); `format_for_special_form`
-  contains `"special form"` and the usage.
-- [ ] **Step 6:** `cargo test --lib handlers` → PASS; `cargo clippy --all-targets
+  contains `"special form"` and the usage. (Codex review: clean.)
+- [x] **Step 6:** `cargo test --lib handlers` → PASS; `cargo clippy --all-targets
   -- -D warnings` → clean.
-- [ ] **Step 7:** `git commit -m "Hover for let-go special forms"`
+- [x] **Step 7:** `git commit -m "Hover for let-go special forms"`
 
 ### Task 2: native core fns — generate list + resolver/hover
 
@@ -167,7 +171,16 @@ new dependencies; no runtime process spawning.
 `src/handlers/letgo_native_names.rs`; modify `src/handlers/letgo_builtins.rs`,
 `mod.rs`, `hover.rs`, `definition.rs`, `signature.rs`.
 
-- [ ] **Step 1: Generator.** Write `scripts/gen_letgo_native_names.sh` (wired as a
+> **Deviation:** `throw` is a let-go native fn but **not** a clojure.core var, so
+> it is absent from `core.rs` and the generator cannot probe it (Step 2's
+> "contains throw" expectation was wrong). `throw` is instead covered by the
+> hand-authored `SPECIAL_FORMS` table (Task 1) — which is how Clojure tooling
+> presents it anyway. Codex review also fixed: (1) goto-def on a require alias
+> that collides with a native name (e.g. `[clojure.string :as str]`) now mirrors
+> the `Core` arm's `on_alias_declaration` handling; (2) the generator uses a
+> portable `mktemp -d` (BSD/macOS lacks `--suffix`); (3) `cargo fmt` on the test.
+
+- [x] **Step 1: Generator.** Write `scripts/gen_letgo_native_names.sh` (wired as a
   `bb gen-letgo-natives` task). It must: (a) extract clojure.core names from
   `src/index/core.rs` (`grep -oE 'name: "…"'`); (b) emit a temporary `.lg` that,
   for each name as a **string**, prints `name|TYPE` via
@@ -177,33 +190,33 @@ new dependencies; no runtime process spawning.
   `pub static NATIVE_NAMES: &[&str] = &[…];` with a generated-file header comment
   (including the refresh command). Document that it is dev-only and never run by
   clj-pulse.
-- [ ] **Step 2:** Run `bb gen-letgo-natives`. Sanity-check the output: it contains
+- [x] **Step 2:** Run `bb gen-letgo-natives`. Sanity-check the output: it contains
   `"count"`, `"subs"`, `"str"`, `"throw"`, `"reduce"`; it does **not** contain
   `"map"`, `"when"`, `"filter"` (those are `.lg` `Fn`s); the array is sorted.
-- [ ] **Step 3:** In `letgo_builtins.rs`: `mod`/`use` `letgo_native_names`; add
+- [x] **Step 3:** In `letgo_builtins.rs`: `mod`/`use` `letgo_native_names`; add
   `pub fn is_native(name: &str) -> bool` (e.g. `NATIVE_NAMES.binary_search(&name)
   .is_ok()`).
-- [ ] **Step 4:** In `mod.rs`: add `ResolvedSymbol::LetgoNative(CoreSymbol)`. In
+- [x] **Step 4:** In `mod.rs`: add `ResolvedSymbol::LetgoNative(CoreSymbol)`. In
   `resolve_symbol`'s let-go block, after the special-form fallback: if
   `letgo_builtins::is_native(word)`, find the matching `CoreSymbol` in
   `index.core_symbols` by name and return `ResolvedSymbol::LetgoNative(core.clone())`.
-- [ ] **Step 5:** In `hover.rs`: add `format_for_letgo_native(&CoreSymbol)` (like
+- [x] **Step 5:** In `hover.rs`: add `format_for_letgo_native(&CoreSymbol)` (like
   `format_for_core` but labelled `*let-go core (native)*`) and the match arm. In
   `definition.rs`/`signature.rs`: add `LetgoNative(_) => Ok(None)` arms (combine
   with the `SpecialForm` arm).
-- [ ] **Step 6: Unit tests**: `is_native("count")` true, `is_native("map")` false;
+- [x] **Step 6: Unit tests**: `is_native("count")` true, `is_native("map")` false;
   with `letgo_core` set and a `count` `CoreSymbol` present, `resolve_symbol(index,
   "count","app")` → `LetgoNative` whose name is `count`; `format_for_letgo_native`
   contains `"let-go core (native)"` and the arglists.
-- [ ] **Step 7:** `cargo test --lib handlers` → PASS; `cargo clippy --all-targets
+- [x] **Step 7:** `cargo test --lib handlers` → PASS; `cargo clippy --all-targets
   -- -D warnings` → clean.
-- [ ] **Step 8:** `git commit -m "Hover for let-go native core functions"`
+- [x] **Step 8:** `git commit -m "Hover for let-go native core functions"`
 
 ### Task 3: completion for let-go builtins
 
 **Files:** modify `src/handlers/completion.rs`.
 
-- [ ] **Step 1:** In `complete_symbols`, the unqualified (bare-prefix) branch: gate
+- [x] **Step 1:** In `complete_symbols`, the unqualified (bare-prefix) branch: gate
   the existing clojure.core pool (Pool C) on `!index.letgo_core()`. When
   `index.letgo_core()`, add instead: (a) `SPECIAL_FORMS` whose `name` starts with
   the prefix (completion kind `KEYWORD`, detail `"special form"`, usage as
@@ -211,37 +224,37 @@ new dependencies; no runtime process spawning.
   rendered from its `core_symbols()` entry with detail `"let-go core (native)"`;
   (c) the live `core` namespace symbols (`index.ns_symbols.get("core")`) whose name
   starts with the prefix, via the existing `symbol_to_completion`.
-- [ ] **Step 2: Unit test** (`completion` `#[cfg(test)]`): build a let-go-marked
+- [x] **Step 2: Unit test** (`completion` `#[cfg(test)]`): build a let-go-marked
   `Index` (with a `count` `CoreSymbol` and a `.lg` `core/map`); completing prefix
   `"i"` offers `if`; `"cou"` offers `count` (detail mentions native); `"ma"` offers
   `map`; and a clojure.core-only name absent from let-go (not in `NATIVE_NAMES`,
   e.g. `agent`) is **not** offered. With the marker unset, the clojure.core pool is
   used as before.
-- [ ] **Step 3:** `cargo test --lib handlers::completion` → PASS; clippy clean.
-- [ ] **Step 4:** `git commit -m "Completion offers let-go special forms and native core fns"`
+- [x] **Step 3:** `cargo test --lib handlers::completion` → PASS; clippy clean.
+- [x] **Step 4:** `git commit -m "Completion offers let-go special forms and native core fns"`
 
 ### Task 4: e2e + fixture
 
 **Files:** modify `tests/fixtures/letgo_core_project/src/app.lg`, `tests/test_e2e.rs`.
 
-- [ ] **Step 1:** Add to `app.lg` an `if` and a `count` usage (e.g.
+- [x] **Step 1:** Add to `app.lg` an `if` and a `count` usage (e.g.
   `(if true (count []) 0)`), keeping the existing `map`/`str/join` lines.
-- [ ] **Step 2: e2e** in `test_e2e.rs` (extend `test_e2e_letgo_core_navigation` or
+- [x] **Step 2: e2e** in `test_e2e.rs` (extend `test_e2e_letgo_core_navigation` or
   add `test_e2e_letgo_builtins_hover`): after indexing, hover on `if` →
   markdown contains `"special form"`; hover on `count` → contains `"let-go core
   (native)"`. (Goto-def on `if`/`count` returning no location may also be asserted.)
-- [ ] **Step 3:** `cargo test --test test_e2e letgo` → PASS, then `bb check && bb
+- [x] **Step 3:** `cargo test --test test_e2e letgo` → PASS, then `bb check && bb
   e2e` → PASS.
-- [ ] **Step 4:** `git commit -m "e2e: hover let-go special forms and native core fns"`
+- [x] **Step 4:** `git commit -m "e2e: hover let-go special forms and native core fns"`
 
 ### Task 5: ROADMAP note
 
 **Files:** modify `docs/ROADMAP.md`.
 
-- [ ] **Step 1:** Extend the Phase 5 "let-go core navigation" item: hover and
+- [x] **Step 1:** Extend the Phase 5 "let-go core navigation" item: hover and
   completion now also cover let-go special forms and native core functions (no
   navigation — they have no `.lg` source).
-- [ ] **Step 2:** `git commit -m "Roadmap: note let-go builtins hover/completion"`
+- [x] **Step 2:** `git commit -m "Roadmap: note let-go builtins hover/completion"`
 
 ---
 
@@ -254,3 +267,43 @@ new dependencies; no runtime process spawning.
   source; goto-def is a deliberate no-op (same stance as Clojure special forms).
 - **Native docs are Clojure-equivalent**, borrowed from the clojure.core table.
 - **Cache-version note:** none — no jar cache or extractor output changes.
+
+## Implementation summary
+
+Implemented as designed, in five commits on `lg-core-navigation`:
+
+1. **`522947f`** — `src/handlers/letgo_builtins.rs`: `SpecialForm` + `SPECIAL_FORMS`
+   table + `special_form()`; `ResolvedSymbol::SpecialForm`; resolver fallback;
+   hover format; goto-def/signature no-ops.
+2. **`f902865`** — generator `scripts/gen_letgo_native_names.sh` (+ `bb
+   gen-letgo-natives`); committed `letgo_native_names.rs` (227 names);
+   `is_native()`; `ResolvedSymbol::LetgoNative`; native resolver fallback + hover.
+3. **`7bc9bba`** — completion: clojure.core pool gated to non-let-go; let-go gets
+   special forms + natives + live `.lg` `core` ns.
+4. **`a61d483`** — e2e: hover `if` → special form, hover `count` → native,
+   goto-def `if` → no-op, and the `str` alias still navigates.
+5. **`23fe76c`** — ROADMAP note.
+
+**Runtime is pure static** as required: no process spawning; the `lg` generator is
+offline/dev-only and its output is a committed static array.
+
+**Deviation from the written plan:** `throw` is a let-go native fn but **not** a
+clojure.core var, so the generator (which probes clojure.core names) can't find
+it and Step 2's "contains throw" expectation was wrong. `throw` is instead covered
+by the hand-authored special-forms table — which matches how Clojure tooling
+presents it. Documented inline in Task 2.
+
+**Findings fixed during the per-task codex reviews:**
+
+- *Alias-definition navigation regression* — a require alias colliding with a
+  native name (`[clojure.string :as str]`) resolved as `LetgoNative` and the
+  no-op arm returned `None` before the alias fallback. Fixed by mirroring the
+  `Core` arm's `on_alias_declaration` handling; locked with an e2e assertion.
+- *Non-portable `mktemp --suffix`* (fails on the maintainer's macOS) → portable
+  `mktemp -d` + a `.lg` file inside it.
+- *rustfmt* on new test assertions (twice — `bb check` runs fmt before tests).
+
+**Verification.** `bb check` (fmt + clippy `-D warnings` + 142 lib + integration
+tests) and `bb e2e` (53 passed, 1 ignored) both green, including the new
+`test_e2e_letgo_builtins_hover`. All behavior is gated on `Index::letgo_core()`,
+so Clojure projects are unaffected (covered by the marker-off unit tests).
