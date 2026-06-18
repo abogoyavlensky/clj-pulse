@@ -7,7 +7,8 @@ Rust LSP server for Clojure (tower-lsp, tree-sitter). See ARCHITECTURE.md for da
 - `bb check` — fmt + clippy `-D warnings` + all tests. CI runs the same.
 - `bb e2e` — end-to-end: spawns the real binary, speaks framed JSON-RPC over
   stdio like an editor (`tests/test_e2e.rs`). Covers definition (project +
-  jar: URIs), completion, hover, didChange edits, `workspace/textDocumentContent`.
+  jar: URIs), Integrant keyword navigation (`config.edn` key → `ig/init-key`
+  defmethod), completion, hover, didChange edits, `workspace/textDocumentContent`.
 - `bb e2e-real` — same harness against a real Maven classpath: generates
   `.cpcache` via `clojure -Spath` and navigates into a downloaded JAR.
   Needs the clojure CLI; ignored in plain `cargo test`.

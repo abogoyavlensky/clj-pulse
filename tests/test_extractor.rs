@@ -588,7 +588,12 @@ fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
         "occs: {:?}",
         occs
     );
-    assert_eq!(occurrences_of(&occs, ":other/b").len(), 1, "occs: {:?}", occs);
+    assert_eq!(
+        occurrences_of(&occs, ":other/b").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
     // Unqualified `:plain` produces no keyword occurrence.
     assert!(
         occs.iter()
