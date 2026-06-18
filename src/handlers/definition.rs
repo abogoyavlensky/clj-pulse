@@ -58,6 +58,13 @@ pub fn handle(
             let location = location_for(&sym.file, sym.name_range)?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
+        // A keyword (colon-prefixed fqn) resolves only to a keyword definition
+        // (e.g. an Integrant component). With none found, stop here — do NOT
+        // fall through to bare-word resolution, where the colon-stripped name
+        // would wrongly match a same-named var (`::counter` → `(defn counter …)`).
+        if fqn.starts_with(':') {
+            return Ok(None);
+        }
     }
 
     match resolve_symbol(index, &word, &current_ns) {

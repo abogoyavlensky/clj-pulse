@@ -746,7 +746,12 @@ fn walk_list(
     let children = named_children(node);
     let Some(head) = children.first() else { return };
 
-    let head_text = if head.kind() == "sym_lit" {
+    // Only an *unqualified* head names a core/special form. Matching on the
+    // name part alone would misread a qualified call like `s/def` as core `def`
+    // (skipping the keyword in its "name" slot) or `x/let` as a binding form.
+    // Qualified heads fall through to the generic walk, which records them and
+    // every argument (including keywords) as occurrences.
+    let head_text = if head.kind() == "sym_lit" && head.child_by_field_name("namespace").is_none() {
         Some(sym_text(*head, ctx.source))
     } else {
         None

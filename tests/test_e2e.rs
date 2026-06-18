@@ -3091,3 +3091,33 @@ fn test_e2e_integrant_references_span_defmethods_and_config() {
         locs
     );
 }
+
+#[test]
+fn test_e2e_keyword_does_not_navigate_to_same_named_var() {
+    // A namespaced keyword must never goto-def to a same-named var. With no
+    // keyword definition, goto-def yields nothing rather than a wrong jump
+    // (regression: `::counter` used to land on `(defn- counter …)`).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let f = root.join("src/metrics.clj");
+    std::fs::write(
+        &f,
+        "(ns app.metrics)\n(defn- counter [] 1)\n(def m {::counter (counter)})\n(::counter m)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&f);
+
+    // Cursor on the `::counter` keyword (the map key on line 2).
+    let (line, ch) = position_of(&f, "::counter");
+    let result = client.goto_definition(&f, line, ch);
+    assert!(
+        result.is_null(),
+        "keyword must not navigate to the same-named var, got {}",
+        result
+    );
+}

@@ -674,3 +674,29 @@ fn test_extract_edn_records_qualified_keywords_including_ig_ref() {
         occs
     );
 }
+
+#[test]
+fn test_occurrence_spec_def_keyword_at_def_site_recorded() {
+    // `(s/def :kw …)` must record the keyword in the def-name slot — the
+    // occurrence walker must not mistake qualified `s/def` for core `def`
+    // (which would skip the keyword as if it were a def name).
+    let src = "(ns my.ns\n  (:require [clojure.spec.alpha :as s]))\n\
+               (s/def ::not-empty-string string?)\n\
+               (s/def :ticket/title ::not-empty-string)";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    // `::not-empty-string` at its own s/def site (line 2) + the use (line 3).
+    assert_eq!(
+        occurrences_of(&occs, ":my.ns/not-empty-string").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    // The `:ticket/title` keyword in the s/def def-name slot (line 3).
+    assert_eq!(
+        occurrences_of(&occs, ":ticket/title").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
