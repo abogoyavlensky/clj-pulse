@@ -12,6 +12,10 @@ roadmap is about the "understand usages and change code" half.
 - Hover with docstrings and signatures (project, libraries, curated core).
 - Completion: current ns, `:refer`s, alias-qualified, alias names,
   namespace names, clojure.core.
+- Special-forms hover & completion for both Clojure (`if`/`do`/`try`/`new`/…)
+  and let-go (plus `trace`) — compiler intrinsics that have no source: described
+  on hover, offered in completion, with goto-def a deliberate no-op. Backed by a
+  dialect-aware table (`handlers/builtins.rs`).
 - Signature help with multi-arity and rest/destructuring/type-hint support.
 - Indexing: tree-sitter extraction, parallel scan, per-JAR disk cache,
   classpath discovery from `.cpcache` (deps.edn), project symbols always
