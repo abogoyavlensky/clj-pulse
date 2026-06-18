@@ -23,6 +23,9 @@ Language features:
 - **Signature help** - argument hints while typing a call (after `(` and spaces).
 - **Find references** - locate every usage of a symbol across the project.
 - **Rename** - rename a project symbol and all of its references.
+- **Keyword navigation** - go to definition and find references on namespaced
+  keywords, including Integrant component keys: jump from `:my.app/db` in a
+  `config.edn` system map (or an `#ig/ref`) to its `(defmethod ig/init-key ::db …)`.
 - **Document symbols** - outline of the definitions in the current file.
 - **Workspace symbols** - fuzzy symbol search across the whole project.
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
