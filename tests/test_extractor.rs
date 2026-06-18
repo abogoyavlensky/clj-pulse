@@ -597,3 +597,48 @@ fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
         occs
     );
 }
+
+#[test]
+fn test_integrant_init_key_is_definition() {
+    // ig/init-key's dispatch keyword defines the component; ig/halt-key!'s
+    // dispatch on the same keyword is an occurrence (not a second definition).
+    let src = "(ns readx.db\n  (:require [integrant.core :as ig]))\n\
+               (defmethod ig/init-key ::db [_ o] o)\n\
+               (defmethod ig/halt-key! ::db [_ d] nil)";
+    let (_, syms, occs) = extract_full(src, Path::new("db.clj")).unwrap();
+
+    let defs: Vec<_> = syms
+        .iter()
+        .filter(|s| s.kind == DefKind::IntegrantKey)
+        .collect();
+    assert_eq!(defs.len(), 1, "syms: {:?}", syms);
+    assert_eq!(defs[0].fqn, ":readx.db/db");
+    assert_eq!(defs[0].ns, "readx.db");
+    assert_eq!(defs[0].name, "db");
+
+    // Only the halt-key! dispatch is an occurrence — init-key's is the def.
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_non_integrant_defmethod_keyword_is_only_an_occurrence() {
+    let src = "(ns shapes)\n(defmethod area ::circle [_] 3.14)";
+    let (_, syms, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    assert!(
+        syms.iter().all(|s| s.kind != DefKind::IntegrantKey),
+        "syms: {:?}",
+        syms
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":shapes/circle").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}

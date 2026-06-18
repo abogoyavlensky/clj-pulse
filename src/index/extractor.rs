@@ -214,7 +214,11 @@ fn process_top_level_list(
     if first_text == "ns" {
         extract_ns(&children, source, ns_meta);
     } else if let Some(kind) = str_to_defkind(first_text) {
+        let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
+        if is_defmethod {
+            extract_integrant_key(node, &children, source, file, ns_meta, symbols);
+        }
     }
 }
 
@@ -404,6 +408,73 @@ fn extract_def(
     if kind == DefKind::Defprotocol {
         extract_protocol_methods(&children[2..], source, file, ns_name, symbols);
     }
+}
+
+/// The Integrant lifecycle multimethod whose `defmethod` we treat as the
+/// canonical *definition* of a component keyword. Other lifecycle methods
+/// (`halt-key!`, `assert-key`, …) dispatch on the same keyword but are recorded
+/// as occurrences, so go-to-definition lands on the constructor.
+const INTEGRANT_INIT_KEY: &str = "integrant.core/init-key";
+
+/// Resolves the multimethod a `defmethod` extends to its fqn (e.g.
+/// `integrant.core/init-key`) — the single hook point for keyword-defining
+/// macros (re-frame `reg-*`, spec `s/def` would slot in here). A qualified head
+/// resolves its `:as` alias; a bare head resolves a `:refer`. `None` when the
+/// head is missing or unresolvable.
+fn defmethod_multifn_fqn(children: &[Node], ns_meta: &NsMeta, source: &str) -> Option<String> {
+    let head = children.get(1).filter(|n| n.kind() == "sym_lit")?;
+    let name = node_text(sym_name_node(*head), source);
+    if let Some(ns_node) = head.child_by_field_name("namespace") {
+        let alias = node_text(ns_node, source);
+        let ns = ns_meta
+            .aliases
+            .get(alias)
+            .map(String::as_str)
+            .unwrap_or(alias);
+        Some(format!("{}/{}", ns, name))
+    } else {
+        ns_meta.refers.get(name).cloned()
+    }
+}
+
+/// Records `(defmethod ig/init-key ::x …)` as the definition of the Integrant
+/// component keyword `:ns/x`. No-op for any other multimethod or a non-qualified
+/// dispatch value.
+fn extract_integrant_key(
+    form_node: Node,
+    children: &[Node],
+    source: &str,
+    file: &Path,
+    ns_meta: &NsMeta,
+    symbols: &mut Vec<Symbol>,
+) {
+    if defmethod_multifn_fqn(children, ns_meta, source).as_deref() != Some(INTEGRANT_INIT_KEY) {
+        return;
+    }
+    let Some(dispatch) = children.get(2).filter(|n| n.kind() == "kwd_lit") else {
+        return;
+    };
+    let Some(fqn) = keyword_fqn(*dispatch, ns_meta, source) else {
+        return;
+    };
+    let Some(name_node) = dispatch.child_by_field_name("name") else {
+        return;
+    };
+
+    // `fqn` is `:ns/name`; split off the colon to fill the ns/name fields.
+    let (ns, name) = fqn[1..].rsplit_once('/').unwrap_or(("", &fqn[1..]));
+    symbols.push(Symbol {
+        name: name.to_string(),
+        fqn: fqn.clone(),
+        ns: ns.to_string(),
+        kind: DefKind::IntegrantKey,
+        params: Vec::new(),
+        doc: None,
+        file: file.to_path_buf(),
+        source: super::SymbolSource::Project,
+        range: node_to_lsp_range(form_node, source),
+        name_range: node_to_lsp_range(name_node, source),
+    });
 }
 
 /// Extracts each method signature of a `defprotocol` as a `Defn` symbol.
@@ -741,7 +812,17 @@ fn walk_def_form(
             record_occurrence(*name, ctx, scope, out);
         }
         if let Some(dispatch) = children.get(2) {
-            walk_occurrences(*dispatch, ctx, scope, out);
+            // The `ig/init-key` dispatch keyword is the component's *definition*
+            // (recorded as an IntegrantKey symbol in the symbol pass); skip it
+            // here so references doesn't list the declaration twice. Every other
+            // dispatch keyword falls through to the general keyword arm.
+            let is_init_key_def = dispatch.kind() == "kwd_lit"
+                && defmethod_multifn_fqn(children, ctx.ns_meta, ctx.source).as_deref()
+                    == Some(INTEGRANT_INIT_KEY)
+                && keyword_fqn(*dispatch, ctx.ns_meta, ctx.source).is_some();
+            if !is_init_key_def {
+                walk_occurrences(*dispatch, ctx, scope, out);
+            }
         }
         rest_start = 3;
     }
