@@ -1,5 +1,9 @@
 # Goto-Definition from `defmethod` to its `defmulti`
 
+> **Status: ✅ Completed (2026-06-18).** All three tasks implemented,
+> codex-reviewed, and verified with `bb check` + `bb e2e`. See the
+> [Implementation summary](#implementation-summary) at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Goto-definition on the multimethod name in a `(defmethod m/foo …)`
@@ -76,43 +80,43 @@ pattern. No extractor change; no new dependencies.
 
 **Files:** modify `src/handlers/references.rs`.
 
-- [ ] **Step 1:** In `resolve_fqn_at`'s first loop (`for sym in &syms`), `continue`
+- [x] **Step 1:** In `resolve_fqn_at`'s first loop (`for sym in &syms`), `continue`
   when `sym.kind == DefKind::Defmethod`, with a comment that a `defmethod` head
   names the multimethod it extends (resolved via the occurrence below), not a new
   definition. Import `DefKind` (`use crate::index::{..., DefKind, ...}`).
-- [ ] **Step 2:** `cargo test --lib` → PASS; `cargo clippy --all-targets -- -D
+- [x] **Step 2:** `cargo test --lib` → PASS; `cargo clippy --all-targets -- -D
   warnings` clean; `cargo fmt --all`.
-- [ ] **Step 3:** `git commit -m "resolve_fqn_at: defmethod head resolves to its defmulti"`
+- [x] **Step 3:** `git commit -m "resolve_fqn_at: defmethod head resolves to its defmulti"`
 
 ### Task 2: e2e — Clojure and let-go
 
 **Files:** modify `tests/test_e2e.rs`.
 
-- [ ] **Step 1 (Clojure):** `test_e2e_definition_on_defmethod`, mirroring
+- [x] **Step 1 (Clojure):** `test_e2e_definition_on_defmethod`, mirroring
   `test_e2e_definition_on_protocol_method_impl`: write `src/multi_def.clj`
   (`(ns app.multi)\n(defmulti area :kind)\n`) and `src/multi_impl.clj`
   (`(ns app.impl\n  (:require [app.multi :as m]))\n(defmethod m/area :circle [x] (:r x))\n`)
   into a `setup_project()` copy; `start`, `initialize`, `wait_for_log("Indexed")`,
   `did_open` the impl. goto-def on the `area` of `m/area` → uri ends
   `/src/multi_def.clj` and `range.start.line` equals the `defmulti area` line.
-- [ ] **Step 2 (let-go):** `test_e2e_definition_on_defmethod_letgo`: a let-go
+- [x] **Step 2 (let-go):** `test_e2e_definition_on_defmethod_letgo`: a let-go
   project (`setup_named("letgo_core_project")`), `start_with_env` with `LGX_HOME`
   pointed at an empty `root/lgxhome` (hermetic — no core indexed); write
   `src/mdef.lg` (`(ns mdef)\n(defmulti area :kind)\n`) and `src/mimpl.lg`
   (`(ns mimpl\n  (:require [mdef :as m]))\n(defmethod m/area :circle [x] (:r x))\n`);
   `initialize`, `wait_for_log("Indexed")`, `did_open` the impl. goto-def on the
   `area` of `m/area` → uri ends `/src/mdef.lg` at the `defmulti area` line.
-- [ ] **Step 3:** `cargo test --test test_e2e defmethod` → PASS, then `bb check &&
+- [x] **Step 3:** `cargo test --test test_e2e defmethod` → PASS, then `bb check &&
   bb e2e` → PASS.
-- [ ] **Step 4:** `git commit -m "e2e: defmethod head navigates to defmulti (Clojure + let-go)"`
+- [x] **Step 4:** `git commit -m "e2e: defmethod head navigates to defmulti (Clojure + let-go)"`
 
 ### Task 3: ROADMAP note
 
 **Files:** modify `docs/ROADMAP.md`.
 
-- [ ] **Step 1:** Note goto-def from a `defmethod` to its `defmulti` (both
+- [x] **Step 1:** Note goto-def from a `defmethod` to its `defmulti` (both
   dialects), alongside the existing protocol-impl→declaration item.
-- [ ] **Step 2:** `git commit -m "Roadmap: note defmethod -> defmulti navigation"`
+- [x] **Step 2:** `git commit -m "Roadmap: note defmethod -> defmulti navigation"`
 
 ---
 
@@ -126,3 +130,33 @@ pattern. No extractor change; no new dependencies.
 - **References/rename** on a multimethod name now target the multimethod
   (a bonus of the shared `resolve_fqn_at` path), consistent with the occurrence.
 - **Cache-version note:** none — no jar cache or extractor output changes.
+
+## Implementation summary
+
+Implemented exactly as designed, in three commits on `lg-core-navigation`:
+
+1. **`a497cda`** — `resolve_fqn_at` (`references.rs`) skips `Defmethod` symbols in
+   the definition-name loop, so a `defmethod` head resolves through its
+   alias-resolved occurrence to the `defmulti` (rather than the defmethod's own
+   self-symbol). ~6 lines + a `DefKind` import. No extractor change.
+2. **`140f450`** — e2e `test_e2e_definition_on_defmethod` (Clojure) and
+   `test_e2e_definition_on_defmethod_letgo` (let-go `.lg`, hermetic `LGX_HOME`),
+   mirroring the protocol-impl test: goto-def on `m/area` in a `(defmethod m/area
+   …)` navigates to the `(defmulti area …)` in another namespace.
+3. **`f5f0b33`** — ROADMAP note.
+
+**Works for let-go automatically** (the question that prompted the let-go e2e):
+`.lg` uses the same extractor and the same dialect-agnostic `resolve_fqn_at`, and
+let-go has multimethods (`defmulti`/`defmethod` macros in its `core.lg`). The
+let-go e2e passes unchanged, locking this against a future dialect-gating
+regression.
+
+**No deviations, no must-fix findings.** All three codex reviews came back clean
+(Task 1: "narrowly scoped… no discrete regression"; Task 2: clean). The
+`defmethod` Symbol is still extracted (document outline unchanged); only
+navigation resolution changed.
+
+**Verification.** `bb check` (fmt + clippy `-D warnings` + 145 lib + integration
+tests) and `bb e2e` (56 passed, 1 ignored — up from 54 with the two new tests)
+both green. References/rename on a multimethod name now target the multimethod
+too, a bonus of the shared `resolve_fqn_at` path.
