@@ -59,9 +59,11 @@ pub struct Symbol {
     pub name_range: Range,
 }
 
-/// A resolved usage of a symbol in a project file. `name_range` covers only
-/// the name part of a qualified usage (`core/add` → just `add`), so rename
-/// edits never touch the alias.
+/// A resolved usage of a symbol in a project file. For symbols, `name_range`
+/// covers only the name part of a qualified usage (`core/add` → just `add`), so
+/// rename edits never touch the alias. Keyword occurrences (fqn starts with
+/// `:`) instead span the whole keyword token — navigation-only in v1; keyword
+/// rename is rejected.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Occurrence {
     pub fqn: String,

@@ -77,6 +77,12 @@ pub fn rename(
 
     let fqn = resolve_fqn_at(index, documents, &uri, pos)
         .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?;
+    // Keyword fqns are colon-prefixed. Keyword occurrences span the whole
+    // token, so renaming through this path would rewrite the entire keyword;
+    // keyword rename isn't supported yet, so reject it rather than corrupt.
+    if fqn.starts_with(':') {
+        anyhow::bail!("renaming keywords is not yet supported");
+    }
     let sym = index
         .lookup(&fqn)
         .ok_or_else(|| anyhow::anyhow!("cannot rename: no definition found for {}", fqn))?;

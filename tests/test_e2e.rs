@@ -3019,3 +3019,75 @@ fn test_e2e_rename_rejected_from_library_file() {
         err
     );
 }
+
+#[test]
+fn test_e2e_integrant_goto_definition_from_config() {
+    // The headline feature: from a namespaced keyword in an Integrant
+    // `config.edn` system map, navigate to its `(defmethod ig/init-key ::db …)`.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let config = root.join("resources/config.edn");
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&config);
+
+    // Cursor on the `:readx.db/db` map key.
+    let (line, ch) = position_of(&config, ":readx.db/db");
+    let result = client.goto_definition(&config, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for :readx.db/db: {}", result));
+    assert!(uri.ends_with("/src/readx/db.clj"), "got {}", uri);
+
+    // Lands on the ig/init-key defmethod line — not assert-key or halt-key!.
+    let (init_line, _) = position_of(&db, "ig/init-key");
+    assert_eq!(result["range"]["start"]["line"], json!(init_line));
+}
+
+#[test]
+fn test_e2e_integrant_references_span_defmethods_and_config() {
+    // References on the component keyword reach every lifecycle defmethod plus
+    // the config-map key and the `#ig/ref`.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    // First `::db` in db.clj is the assert-key dispatch (an occurrence); it
+    // resolves to the same `:readx.db/db` as the init-key definition.
+    let (line, ch) = position_of(&db, "::db");
+    let result = client.references(&db, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", result));
+
+    // 3 in db.clj (init-key declaration + assert-key + halt-key! occurrences),
+    // 2 in resources/config.edn (the map key + the `#ig/ref` value).
+    assert_eq!(locs.len(), 5, "locs: {:?}", locs);
+    let uris: Vec<&str> = locs.iter().filter_map(|l| l["uri"].as_str()).collect();
+    assert_eq!(
+        uris.iter()
+            .filter(|u| u.ends_with("/src/readx/db.clj"))
+            .count(),
+        3,
+        "db.clj locations: {:?}",
+        locs
+    );
+    assert_eq!(
+        uris.iter()
+            .filter(|u| u.ends_with("/resources/config.edn"))
+            .count(),
+        2,
+        "config.edn locations: {:?}",
+        locs
+    );
+}

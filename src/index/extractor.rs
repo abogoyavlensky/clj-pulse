@@ -151,12 +151,10 @@ pub fn extract_edn(source: &str) -> Vec<Occurrence> {
 fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<Occurrence>) {
     if node.kind() == "kwd_lit" {
         if let Some(fqn) = keyword_fqn(node, ns_meta, source) {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                out.push(Occurrence {
-                    fqn,
-                    name_range: node_to_lsp_range(name_node, source),
-                });
-            }
+            out.push(Occurrence {
+                fqn,
+                name_range: node_to_lsp_range(node, source),
+            });
         }
         return;
     }
@@ -512,9 +510,6 @@ fn extract_integrant_key(
     let Some(fqn) = keyword_fqn(*dispatch, ns_meta, source) else {
         return;
     };
-    let Some(name_node) = dispatch.child_by_field_name("name") else {
-        return;
-    };
 
     // `fqn` is `:ns/name`; split off the colon to fill the ns/name fields.
     let (ns, name) = fqn[1..].rsplit_once('/').unwrap_or(("", &fqn[1..]));
@@ -528,7 +523,9 @@ fn extract_integrant_key(
         file: file.to_path_buf(),
         source: super::SymbolSource::Project,
         range: node_to_lsp_range(form_node, source),
-        name_range: node_to_lsp_range(name_node, source),
+        // Whole-keyword range so goto-definition lands on (and references list)
+        // the full `::name` dispatch token.
+        name_range: node_to_lsp_range(*dispatch, source),
     });
 }
 
@@ -1341,20 +1338,16 @@ fn record_occurrence(
     out.push(Occurrence { fqn, name_range });
 }
 
-/// Records a qualified keyword usage. The `name_range` covers only the keyword
-/// name part (the `db` of `::db` / `:ns/db`), mirroring the symbol-occurrence
-/// convention so a future rename never touches the `::`/namespace.
+/// Records a qualified keyword usage. The range spans the whole keyword token
+/// so navigation resolves from a click anywhere on `:ns/name` / `::name`
+/// (keyword rename is unsupported in v1, so a name-only range buys nothing).
 fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
-    let Some(fqn) = keyword_fqn(node, ctx.ns_meta, ctx.source) else {
-        return;
-    };
-    let Some(name_node) = node.child_by_field_name("name") else {
-        return;
-    };
-    out.push(Occurrence {
-        fqn,
-        name_range: node_to_lsp_range(name_node, ctx.source),
-    });
+    if let Some(fqn) = keyword_fqn(node, ctx.ns_meta, ctx.source) {
+        out.push(Occurrence {
+            fqn,
+            name_range: node_to_lsp_range(node, ctx.source),
+        });
+    }
 }
 
 fn str_to_defkind(s: &str) -> Option<DefKind> {
