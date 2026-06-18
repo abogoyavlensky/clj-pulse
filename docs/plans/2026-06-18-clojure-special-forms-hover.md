@@ -1,5 +1,9 @@
 # Clojure Special-Forms Hover & Completion
 
+> **Status: ✅ Completed (2026-06-18).** All four tasks implemented, codex-reviewed
+> per task, and verified with `bb check` + `bb e2e`. See the
+> [Implementation summary](#implementation-summary) at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give hover and completion for Clojure's **special forms** (`if`, `do`,
@@ -108,8 +112,8 @@ Pure refactor — let-go behavior must stay identical; Clojure not wired yet.
 **Files:** rename `letgo_builtins.rs` → `builtins.rs`; modify `mod.rs`, `hover.rs`,
 `completion.rs`.
 
-- [ ] **Step 1:** `git mv src/handlers/letgo_builtins.rs src/handlers/builtins.rs`.
-- [ ] **Step 2:** In `builtins.rs`, split the current `SPECIAL_FORMS` into
+- [x] **Step 1:** `git mv src/handlers/letgo_builtins.rs src/handlers/builtins.rs`.
+- [x] **Step 2:** In `builtins.rs`, split the current `SPECIAL_FORMS` into
   `COMMON_SPECIAL_FORMS` (the 14: `if do def set! fn* quote var let* loop* recur try
   catch finally throw`) + `LETGO_EXTRA` (`trace`) + `CLOJURE_EXTRA` (`.`, `new`,
   `monitor-enter`, `monitor-exit`). Reword the `throw` doc to be dialect-neutral
@@ -119,64 +123,64 @@ Pure refactor — let-go behavior must stay identical; Clojure not wired yet.
   `(Class. args*)`."; `monitor-enter` `(monitor-enter x)` "Acquires x's monitor
   lock (low-level; prefer `locking`)."; `monitor-exit` `(monitor-exit x)` "Releases
   x's monitor lock (low-level; prefer `locking`).".
-- [ ] **Step 3:** Replace `special_form(name)` with `special_form(name: &str,
+- [x] **Step 3:** Replace `special_form(name)` with `special_form(name: &str,
   letgo: bool)` (search `COMMON` then `if letgo { LETGO_EXTRA } else { CLOJURE_EXTRA
   }`), and add `special_forms(letgo: bool) -> impl Iterator<Item = &'static
   SpecialForm>` (`COMMON.iter().chain(extra.iter())`).
-- [ ] **Step 4:** Update references: `mod.rs` (`mod builtins`; enum variant
+- [x] **Step 4:** Update references: `mod.rs` (`mod builtins`; enum variant
   `builtins::SpecialForm`; let-go branch `builtins::special_form(word, true)`),
   `hover.rs` (`super::builtins::SpecialForm`), `completion.rs` (`builtins::`;
   let-go branch iterates `builtins::special_forms(true)` instead of the old static).
   Update existing tests' `special_form(...)` calls to pass `true`, and the module
   paths in `hover.rs`/`handlers` tests.
-- [ ] **Step 5: Unit tests** (in `builtins.rs`): `special_form("if", true)` and
+- [x] **Step 5: Unit tests** (in `builtins.rs`): `special_form("if", true)` and
   `special_form("if", false)` both `Some`; `special_form("trace", true)` `Some` but
   `("trace", false)` `None`; `special_form("new", false)` `Some` but `("new", true)`
   `None`; `special_forms(false)` contains `new` and not `trace`.
-- [ ] **Step 6:** `cargo test --lib handlers` → PASS (let-go tests unchanged);
+- [x] **Step 6:** `cargo test --lib handlers` → PASS (let-go tests unchanged);
   `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt --all`.
-- [ ] **Step 7:** `git commit -m "Make special-forms table dialect-aware (rename letgo_builtins -> builtins)"`
+- [x] **Step 7:** `git commit -m "Make special-forms table dialect-aware (rename letgo_builtins -> builtins)"`
 
 ### Task 2: resolve + complete special forms in Clojure projects
 
 **Files:** modify `src/handlers/mod.rs`, `src/handlers/completion.rs`.
 
-- [ ] **Step 1:** In `resolve_symbol`'s Clojure (non-`letgo_core`) bare-word path,
+- [x] **Step 1:** In `resolve_symbol`'s Clojure (non-`letgo_core`) bare-word path,
   after the current-ns / refer / factory lookups and before the `core_symbols`
   fallback: `if let Some(sf) = builtins::special_form(word, false) { return
   Some(ResolvedSymbol::SpecialForm(sf)); }`.
-- [ ] **Step 2:** In `completion.rs`, the `else` (Clojure) branch of the
+- [x] **Step 2:** In `completion.rs`, the `else` (Clojure) branch of the
   builtins pool: also push `builtins::special_forms(false)` whose `name` starts
   with the prefix, via the existing `special_form_to_completion`.
-- [ ] **Step 3: Unit tests** (`handlers` + `completion`): in a non-let-go `Index`
+- [x] **Step 3: Unit tests** (`handlers` + `completion`): in a non-let-go `Index`
   (no `mark_letgo_core`) with a `count` `CoreSymbol`, `resolve_symbol(index, "if",
   "app")` → `SpecialForm("if")`, while `resolve_symbol(index, "count", "app")` stays
   `Core`; a project var named `new` still resolves to `Project`, not the special
   form; completion for prefix `"i"` offers `if`.
-- [ ] **Step 4:** `cargo test --lib handlers` → PASS; clippy clean; `cargo fmt`.
-- [ ] **Step 5:** `git commit -m "resolve_symbol + completion: Clojure special forms"`
+- [x] **Step 4:** `cargo test --lib handlers` → PASS; clippy clean; `cargo fmt`.
+- [x] **Step 5:** `git commit -m "resolve_symbol + completion: Clojure special forms"`
 
 ### Task 3: e2e (Clojure hover)
 
 **Files:** modify a `tests/fixtures/simple_project` source file and `tests/test_e2e.rs`.
 
-- [ ] **Step 1:** Add a top-level `(if true 1 2)` form to an existing
+- [x] **Step 1:** Add a top-level `(if true 1 2)` form to an existing
   `simple_project` `.clj` source file (inspect the fixture for the right file).
-- [ ] **Step 2: e2e** (`test_e2e.rs`, e.g. `test_e2e_clojure_special_form_hover`):
+- [x] **Step 2: e2e** (`test_e2e.rs`, e.g. `test_e2e_clojure_special_form_hover`):
   open that file, hover on `if` → markdown contains `"special form"`; goto-def on
   `if` returns null (no navigation). (A clojure.core fn like `map`/`inc` continuing
   to hover as `clojure.core` may also be asserted.)
-- [ ] **Step 3:** `cargo test --test test_e2e` → PASS, then `bb check && bb e2e`
+- [x] **Step 3:** `cargo test --test test_e2e` → PASS, then `bb check && bb e2e`
   → PASS.
-- [ ] **Step 4:** `git commit -m "e2e: Clojure special-form hover"`
+- [x] **Step 4:** `git commit -m "e2e: Clojure special-form hover"`
 
 ### Task 4: ROADMAP note
 
 **Files:** modify `docs/ROADMAP.md`.
 
-- [ ] **Step 1:** Note that special-forms hover/completion now covers Clojure
+- [x] **Step 1:** Note that special-forms hover/completion now covers Clojure
   projects too (not just let-go) — the table is dialect-aware.
-- [ ] **Step 2:** `git commit -m "Roadmap: note Clojure special-forms hover/completion"`
+- [x] **Step 2:** `git commit -m "Roadmap: note Clojure special-forms hover/completion"`
 
 ---
 
@@ -189,3 +193,47 @@ Pure refactor — let-go behavior must stay identical; Clojure not wired yet.
 - **Macros are not special forms**: `let`/`fn`/`loop`/`when`/`cond`/… stay served
   by the `core_symbols()` clojure.core table (hover + navigate), not this table.
 - **Cache-version note:** none — no jar cache or extractor output changes.
+
+## Implementation summary
+
+Implemented as designed, in four commits on `lg-core-navigation`:
+
+1. **`42487dc`** — renamed `letgo_builtins.rs` → `builtins.rs` and made the
+   special-forms table dialect-aware: `COMMON_SPECIAL_FORMS` (14) + `LETGO_EXTRA`
+   (`trace`) + `CLOJURE_EXTRA` (`.`/`new`/`monitor-enter`/`monitor-exit`);
+   `special_form(name, letgo)` + `special_forms(letgo)`. Pure refactor — let-go
+   behavior unchanged.
+2. **`88f584a`** — `resolve_symbol`'s Clojure path resolves special forms (before
+   the `core_symbols` fallback, after project lookups so a project var named `new`
+   still wins); the Clojure completion branch offers them too.
+3. **`1f6fbfe`** — e2e: in a Clojure project, hover on `if` → "special form",
+   goto-def on `if` → no-op, and `map` still hovers as clojure.core.
+4. **`7e488cf`** — ROADMAP note.
+
+clojure.core fns/macros were already covered by the static `core_symbols()` table
++ the clojure JAR, so no "native fns" work was needed for Clojure — special forms
+were the whole gap.
+
+**Deviations / notes:**
+
+- *Removed an obsolete test* (`without_letgo_marker_special_form_is_not_resolved`)
+  whose premise — marker off ⇒ `if` unresolved — is exactly the behavior Task 2
+  intentionally changes; the new `clojure_special_form_resolves_for_hover` covers
+  the updated behavior.
+- *e2e fixture*: the plan said to add an `if` to a `simple_project` source file,
+  but `test_e2e_document_symbols_outline` asserts `core.clj`'s symbols *exactly*,
+  so instead the test writes its own scratch `.clj` at runtime (isolated; no
+  committed-fixture change). `core.clj` was reverted.
+- *Tooling*: the first review attempt mis-launched codex (an inner `&` inside a
+  backgrounded call); recovered with a file-waiter. The Task 1 commit initially
+  captured only the rename (a stale `git add` pathspec aborted staging) — amended
+  to include the content changes.
+
+**Codex reviews:** Task 1's two findings ("wire Clojure resolution/completion")
+were exactly Task 2's planned scope — independent confirmation, not defects.
+Tasks 2–3 came back clean. No must-fix items.
+
+**Verification.** `bb check` (fmt + clippy `-D warnings` + 145 lib + integration
+tests) and `bb e2e` (54 passed, 1 ignored) both green. Special forms now resolve
+for both dialects; Clojure projects gained hover + completion for `if`/`do`/`try`/
+`new`/… with goto-def a deliberate no-op.
