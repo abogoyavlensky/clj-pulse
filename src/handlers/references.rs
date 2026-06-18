@@ -5,7 +5,7 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::{extractor, Index, Occurrence, SymbolSource};
+use crate::index::{extractor, DefKind, Index, Occurrence, SymbolSource};
 
 pub fn references(
     index: &Index,
@@ -157,6 +157,13 @@ pub fn resolve_fqn_at(
     let text = documents.text(uri)?;
     if let Ok((_, syms, occs)) = extractor::extract_full(&text, &path) {
         for sym in &syms {
+            // A `defmethod` head names the multimethod it extends, not a new
+            // definition — its symbol points at itself. Skip it so the
+            // multimethod occurrence below (resolved to the `defmulti`) wins,
+            // letting goto-def/references/rename target the multimethod.
+            if sym.kind == DefKind::Defmethod {
+                continue;
+            }
             if range_contains(&sym.name_range, pos) {
                 return Some(sym.fqn.clone());
             }
