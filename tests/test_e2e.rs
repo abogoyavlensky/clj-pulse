@@ -678,6 +678,44 @@ fn test_e2e_letgo_builtins_hover() {
 }
 
 #[test]
+fn test_e2e_clojure_special_form_hover() {
+    // In a Clojure project, special forms (`if`) describe themselves on hover
+    // and never navigate; clojure.core fns (`map`) keep their existing behavior.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    // A scratch file (not a committed fixture, so shared-fixture assertions in
+    // other tests are untouched); did_open indexes it on the fly.
+    let f = root.join("src/special_forms_demo.clj");
+    std::fs::write(
+        &f,
+        "(ns special-forms-demo)\n\n(if true 1 2)\n(map inc [1 2])\n",
+    )
+    .unwrap();
+    client.did_open(&f);
+
+    // Special form `if`: hover labels it; goto-def is a no-op.
+    let (line, ch) = position_of(&f, "if ");
+    let h = client.hover(&f, line, ch);
+    let val = h["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for if: {}", h));
+    assert!(val.contains("special form"), "if hover: {}", val);
+    let def = client.goto_definition(&f, line, ch);
+    assert!(def.is_null(), "if must not navigate, got {}", def);
+
+    // A clojure.core fn still hovers as clojure.core (unchanged behavior).
+    let (line, ch) = position_of(&f, "map ");
+    let h = client.hover(&f, line, ch);
+    let val = h["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for map: {}", h));
+    assert!(val.contains("clojure.core"), "map hover: {}", val);
+}
+
+#[test]
 fn test_e2e_no_diagnostics_on_lgx_edn() {
     // Opening lgx.edn must not flag dependency coordinates (`my/loc`,
     // `ext/lib`) as unresolved namespaces — EDN config files are not source.
