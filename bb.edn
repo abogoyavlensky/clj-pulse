@@ -33,6 +33,9 @@
   outdated {:doc "Check for outdated dependencies"
             :task (shell "cargo outdated")}
 
+  gen-letgo-natives {:doc "Regenerate src/handlers/letgo_native_names.rs from the installed lg runtime (dev-only, offline; needs the lg binary)"
+                     :task (shell "bash scripts/gen_letgo_native_names.sh")}
+
   build {:doc "Build application binary"
          :task (shell "cargo build")}
   

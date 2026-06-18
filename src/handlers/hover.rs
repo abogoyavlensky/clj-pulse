@@ -43,6 +43,7 @@ pub fn resolve_and_format(index: &Index, word: &str, current_ns: &str) -> Option
         ResolvedSymbol::Project(sym) => Some(format_for_symbol(&sym)),
         ResolvedSymbol::Core(core) => Some(format_for_core(&core)),
         ResolvedSymbol::SpecialForm(sf) => Some(format_for_special_form(sf)),
+        ResolvedSymbol::LetgoNative(core) => Some(format_for_letgo_native(&core)),
     }
 }
 
@@ -54,6 +55,28 @@ pub fn format_for_special_form(sf: &super::letgo_builtins::SpecialForm) -> Strin
         md.push('\n');
         md.push_str(sf.doc);
     }
+    md
+}
+
+/// A let-go native core fn: rendered like a fn, but labelled native (its doc
+/// and arglists are borrowed from the clojure.core table).
+pub fn format_for_letgo_native(sym: &CoreSymbol) -> String {
+    let mut md = String::new();
+
+    let params = if sym.params.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", sym.params)
+    };
+
+    md.push_str(&format!("```clojure\n({}{})\n```\n", sym.name, params));
+    md.push_str("*let-go core (native)*\n");
+
+    if !sym.doc.is_empty() {
+        md.push('\n');
+        md.push_str(&sym.doc);
+    }
+
     md
 }
 
@@ -128,5 +151,21 @@ mod tests {
         let md = format_for_special_form(sf);
         assert!(md.contains("*special form*"), "missing label: {}", md);
         assert!(md.contains("(if test then else?)"), "missing usage: {}", md);
+    }
+
+    #[test]
+    fn letgo_native_hover_is_labelled() {
+        let core = CoreSymbol {
+            name: "count".to_string(),
+            params: "([coll])".to_string(),
+            doc: "Returns the number of items in the collection.".to_string(),
+        };
+        let md = format_for_letgo_native(&core);
+        assert!(
+            md.contains("*let-go core (native)*"),
+            "missing label: {}",
+            md
+        );
+        assert!(md.contains("([coll])"), "missing arglists: {}", md);
     }
 }

@@ -5,6 +5,8 @@
 //! `Index::letgo_core()` marker at the call sites, so Clojure projects are
 //! unaffected.
 
+use super::letgo_native_names::NATIVE_NAMES;
+
 /// A let-go special form (compiler intrinsic). Not a var — `resolve` cannot see
 /// it — so it carries its own hand-authored description.
 #[derive(Debug)]
@@ -15,8 +17,10 @@ pub struct SpecialForm {
 }
 
 /// let-go's special forms, from the compiler's `specialForms` dispatch map
-/// (`pkg/compiler/compiler.go`, let-go 1.10.0) plus `catch`/`finally`, which are
-/// parsed inside `try`. `throw` is intentionally absent — it is a native fn.
+/// (`pkg/compiler/compiler.go`, let-go 1.10.0) plus `catch`/`finally` (parsed
+/// inside `try`) and `throw`. `throw` is implemented as a native fn in let-go,
+/// but Clojure documents it as a special form and it has no clojure.core entry
+/// to borrow a doc from, so it is hand-authored here.
 pub static SPECIAL_FORMS: &[SpecialForm] = &[
     SpecialForm {
         name: "if",
@@ -88,11 +92,23 @@ pub static SPECIAL_FORMS: &[SpecialForm] = &[
         usage: "(finally body*)",
         doc: "Clause of `try`: its body always runs, whether or not the `try` body threw.",
     },
+    SpecialForm {
+        name: "throw",
+        usage: "(throw expr)",
+        doc: "Throws `expr` (e.g. a string or an `ex-info` map), unwinding to the nearest enclosing `try`/`catch`. (let-go implements `throw` as a native fn; Clojure documents it as a special form.)",
+    },
 ];
 
 /// The special form named `name`, if any.
 pub fn special_form(name: &str) -> Option<&'static SpecialForm> {
     SPECIAL_FORMS.iter().find(|f| f.name == name)
+}
+
+/// Whether `name` is a let-go native core function (implemented in Go, no `.lg`
+/// source). Callers borrow its doc/arglists from the clojure.core table.
+/// `NATIVE_NAMES` is sorted, so a binary search suffices.
+pub fn is_native(name: &str) -> bool {
+    NATIVE_NAMES.binary_search(&name).is_ok()
 }
 
 #[cfg(test)]
@@ -104,8 +120,9 @@ mod tests {
         assert!(special_form("if").is_some());
         assert!(special_form("try").is_some());
         assert!(special_form("catch").is_some());
-        // `throw` is a native fn, not a special form.
-        assert!(special_form("throw").is_none());
+        // `throw` is hand-authored here (native in let-go, but Clojure documents
+        // it as a special form and it has no clojure.core doc to borrow).
+        assert!(special_form("throw").is_some());
         assert!(special_form("nope").is_none());
     }
 
@@ -114,5 +131,15 @@ mod tests {
         let sf = special_form("if").unwrap();
         assert!(sf.usage.contains("test"));
         assert!(!sf.doc.is_empty());
+    }
+
+    #[test]
+    fn is_native_uses_generated_list() {
+        // Native (Go ns.Def) clojure.core fns.
+        assert!(is_native("count"));
+        assert!(is_native("subs"));
+        // `.lg`-defined fns are served by the live index, not this list.
+        assert!(!is_native("map"));
+        assert!(!is_native("definitely-not-a-builtin"));
     }
 }

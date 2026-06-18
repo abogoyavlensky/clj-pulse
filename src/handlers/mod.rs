@@ -3,6 +3,7 @@ pub mod completion;
 pub mod definition;
 pub mod hover;
 pub mod letgo_builtins;
+mod letgo_native_names;
 pub mod references;
 pub mod signature;
 pub mod symbols;
@@ -15,6 +16,9 @@ pub enum ResolvedSymbol {
     Core(CoreSymbol),
     /// A let-go special form (compiler intrinsic) — hover-only, never navigable.
     SpecialForm(&'static letgo_builtins::SpecialForm),
+    /// A let-go native core fn (Go `ns.Def`) — hover-only; doc/arglists borrowed
+    /// from the clojure.core table.
+    LetgoNative(CoreSymbol),
 }
 
 pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<ResolvedSymbol> {
@@ -76,6 +80,13 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
             // surface a description for hover but never navigate.
             if let Some(sf) = letgo_builtins::special_form(word) {
                 return Some(ResolvedSymbol::SpecialForm(sf));
+            }
+            // Native core fns (Go `ns.Def`, e.g. `count`/`str`) also have no
+            // `.lg` source; borrow the clojure.core entry for hover/completion.
+            if letgo_builtins::is_native(word) {
+                if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
+                    return Some(ResolvedSymbol::LetgoNative(core.clone()));
+                }
             }
             return None;
         }
@@ -312,5 +323,18 @@ mod tests {
         // stays unresolved (behavior unchanged for Clojure projects).
         let index = index_with(vec![]);
         assert!(resolve_symbol(&index, "if", "app").is_none());
+    }
+
+    #[test]
+    fn letgo_native_resolves_with_borrowed_core_entry() {
+        // `count` is a native (no `.lg` source); with the marker set it resolves
+        // to LetgoNative carrying the clojure.core entry for hover text.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("count")];
+        index.mark_letgo_core();
+        match resolve_symbol(&index, "count", "app") {
+            Some(ResolvedSymbol::LetgoNative(c)) => assert_eq!(c.name, "count"),
+            other => panic!("expected LetgoNative(count): {:?}", other),
+        }
     }
 }
