@@ -842,6 +842,71 @@ fn test_e2e_definition_on_protocol_method_impl() {
 }
 
 #[test]
+fn test_e2e_definition_on_defmethod() {
+    // goto-def on a `defmethod` head navigates to the `defmulti` declaration in
+    // another namespace — the multimethod analog of the protocol-impl case.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let def = root.join("src/multi_def.clj");
+    std::fs::write(&def, "(ns app.multi)\n(defmulti area :kind)\n").unwrap();
+    let impl_file = root.join("src/multi_impl.clj");
+    std::fs::write(
+        &impl_file,
+        "(ns app.impl\n  (:require [app.multi :as m]))\n(defmethod m/area :circle [x] (:r x))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&impl_file);
+
+    let (line, ch) = position_of(&impl_file, "m/area");
+    let result = client.goto_definition(&impl_file, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for m/area: {}", result));
+    assert!(uri.ends_with("/src/multi_def.clj"), "got {}", uri);
+
+    let (decl_line, _) = position_of(&def, "area");
+    assert_eq!(result["range"]["start"]["line"], json!(decl_line));
+}
+
+#[test]
+fn test_e2e_definition_on_defmethod_letgo() {
+    // Same as above for a let-go (`.lg`) project — the fix is dialect-agnostic.
+    let project = setup_named("letgo_core_project");
+    let root = project.path().canonicalize().unwrap();
+    // Hermetic: empty LGX_HOME so no real let-go core is indexed.
+    let lgx_home = root.join("lgxhome");
+
+    let def = root.join("src/mdef.lg");
+    std::fs::write(&def, "(ns mdef)\n(defmulti area :kind)\n").unwrap();
+    let impl_file = root.join("src/mimpl.lg");
+    std::fs::write(
+        &impl_file,
+        "(ns mimpl\n  (:require [mdef :as m]))\n(defmethod m/area :circle [x] (:r x))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&impl_file);
+
+    let (line, ch) = position_of(&impl_file, "m/area");
+    let result = client.goto_definition(&impl_file, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for m/area (lg): {}", result));
+    assert!(uri.ends_with("/src/mdef.lg"), "got {}", uri);
+
+    let (decl_line, _) = position_of(&def, "area");
+    assert_eq!(result["range"]["start"]["line"], json!(decl_line));
+}
+
+#[test]
 fn test_e2e_protocol_impl_wins_over_colliding_def() {
     // A same-namespace defn shares the impl method's name. Go-to-definition on
     // the *impl* must reach the protocol declaration (the position-specific
