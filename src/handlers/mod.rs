@@ -92,6 +92,14 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
             return None;
         }
 
+        // Clojure compiler special forms (`if`, `do`, `new`, …) have no
+        // clojure.core var and no source; surface a description for hover but
+        // never navigate. Checked after project lookups (a project var named
+        // `new` still wins) and before the static clojure.core list.
+        if let Some(sf) = builtins::special_form(word, false) {
+            return Some(ResolvedSymbol::SpecialForm(sf));
+        }
+
         if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
             return Some(ResolvedSymbol::Core(core.clone()));
         }
@@ -319,14 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn without_letgo_marker_special_form_is_not_resolved() {
-        // No marker → `if` is neither a project nor a static-core symbol, so it
-        // stays unresolved (behavior unchanged for Clojure projects).
-        let index = index_with(vec![]);
-        assert!(resolve_symbol(&index, "if", "app").is_none());
-    }
-
-    #[test]
     fn letgo_native_resolves_with_borrowed_core_entry() {
         // `count` is a native (no `.lg` source); with the marker set it resolves
         // to LetgoNative carrying the clojure.core entry for hover text.
@@ -336,6 +336,32 @@ mod tests {
         match resolve_symbol(&index, "count", "app") {
             Some(ResolvedSymbol::LetgoNative(c)) => assert_eq!(c.name, "count"),
             other => panic!("expected LetgoNative(count): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn clojure_special_form_resolves_for_hover() {
+        // Clojure project (no let-go marker): `if` resolves to a special form
+        // (hover-only), while a clojure.core fn still resolves to Core.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("count")];
+        match resolve_symbol(&index, "if", "app") {
+            Some(ResolvedSymbol::SpecialForm(sf)) => assert_eq!(sf.name, "if"),
+            other => panic!("expected SpecialForm(if): {:?}", other),
+        }
+        match resolve_symbol(&index, "count", "app") {
+            Some(ResolvedSymbol::Core(c)) => assert_eq!(c.name, "count"),
+            other => panic!("expected Core(count): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn project_var_shadows_clojure_special_form() {
+        // A project var named `new` wins over the `new` special form.
+        let index = index_with(vec![sym("new", "my.ns", DefKind::Defn)]);
+        match resolve_symbol(&index, "new", "my.ns") {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "new"),
+            other => panic!("project `new` should win: {:?}", other),
         }
     }
 }

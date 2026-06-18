@@ -105,6 +105,12 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     items.push(core_symbol_to_completion(core_sym));
                 }
             }
+            // Clojure special forms aren't clojure.core vars, so offer them too.
+            for sf in builtins::special_forms(false) {
+                if sf.name.starts_with(prefix) {
+                    items.push(special_form_to_completion(sf));
+                }
+            }
         }
 
         // Pools D and E only fire for non-empty prefixes: on an empty prefix
@@ -338,5 +344,16 @@ mod tests {
         index.insert_file(meta("app", "app.clj"), vec![], vec![]);
         index.core_symbols = vec![core_sym("zzz-clojure-only", "")];
         assert!(labels(&index, "zzz").contains(&"zzz-clojure-only".to_string()));
+    }
+
+    #[test]
+    fn clojure_completion_offers_special_forms_and_core() {
+        // Marker unset → Clojure path offers clojure.core fns AND special forms.
+        let mut index = Index::new();
+        index.insert_file(meta("app", "app.clj"), vec![], vec![]);
+        index.core_symbols = vec![core_sym("inc", "([x])")];
+        let l = labels(&index, "i");
+        assert!(l.contains(&"if".to_string()), "special form if");
+        assert!(l.contains(&"inc".to_string()), "clojure.core inc");
     }
 }
