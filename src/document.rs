@@ -106,6 +106,29 @@ impl DocumentStore {
         Some(chars[start..end].iter().collect())
     }
 
+    /// Whether the identifier token under `pos` is a Clojure keyword — i.e.
+    /// immediately preceded by `:` (covers `:kw`, `::kw`, `:ns/kw`, `::ns/kw`).
+    /// Used by goto-definition to avoid resolving a keyword to a same-named var.
+    pub fn is_keyword_at(&self, uri: &Url, pos: Position) -> bool {
+        let Some(rope) = self.docs.get(uri) else {
+            return false;
+        };
+        let line_idx = pos.line as usize;
+        if line_idx >= rope.len_lines() {
+            return false;
+        }
+        let chars: Vec<char> = rope.line(line_idx).chars().collect();
+        let col = utf16_col_to_char(&chars, pos.character as usize).min(chars.len());
+
+        // Walk to the start of the ident token (same boundary rule as word_at),
+        // then check the character just before it.
+        let mut start = col;
+        while start > 0 && is_clj_ident_char(chars[start - 1]) {
+            start -= 1;
+        }
+        start > 0 && chars[start - 1] == ':'
+    }
+
     /// Returns the full text of an open document.
     pub fn text(&self, uri: &Url) -> Option<String> {
         self.docs.get(uri).map(|rope| rope.to_string())

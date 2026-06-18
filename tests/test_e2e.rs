@@ -3121,3 +3121,33 @@ fn test_e2e_keyword_does_not_navigate_to_same_named_var() {
         result
     );
 }
+
+#[test]
+fn test_e2e_unqualified_keyword_does_not_navigate_to_var() {
+    // Same guard for an *unqualified* keyword: `:counter` must not goto-def to
+    // a same-named var. (resolve_fqn_at returns nothing for unqualified
+    // keywords, so this relies on the keyword-token check, not the fqn.)
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let f = root.join("src/unq.clj");
+    std::fs::write(
+        &f,
+        "(ns app.unq)\n(defn- counter [] 1)\n(def m {:counter (counter)})\n(:counter m)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&f);
+
+    // Cursor on an unqualified `:counter` keyword (the first is the map key).
+    let (line, ch) = position_of(&f, ":counter");
+    let result = client.goto_definition(&f, line, ch);
+    assert!(
+        result.is_null(),
+        "unqualified keyword must not navigate to the same-named var, got {}",
+        result
+    );
+}

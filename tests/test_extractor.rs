@@ -700,3 +700,16 @@ fn test_occurrence_spec_def_keyword_at_def_site_recorded() {
         occs
     );
 }
+
+#[test]
+fn test_occurrence_qualified_core_form_still_binds_locals() {
+    // A clojure.core-qualified special form must still be treated as that form,
+    // so its bindings stay local rather than leaking as namespace occurrences.
+    let src = "(ns my.ns)\n(defn f [] (clojure.core/let [x 1] x))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert!(
+        occurrences_of(&occs, "my.ns/x").is_empty(),
+        "clojure.core/let binding leaked as an occurrence: {:?}",
+        occs
+    );
+}

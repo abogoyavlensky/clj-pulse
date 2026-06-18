@@ -737,6 +737,25 @@ fn walk_occurrences(
     }
 }
 
+/// Whether a `sym_lit` list head names a core/special form: unqualified, or
+/// qualified to `clojure.core` (directly or via an `:as` alias). Keeps
+/// `clojure.core/let` binding locals while excluding `s/def` and friends.
+fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
+    match head.child_by_field_name("namespace") {
+        None => true,
+        Some(ns_node) => {
+            let alias = node_text(ns_node, ctx.source);
+            let resolved = ctx
+                .ns_meta
+                .aliases
+                .get(alias)
+                .map(String::as_str)
+                .unwrap_or(alias);
+            resolved == "clojure.core"
+        }
+    }
+}
+
 fn walk_list(
     node: Node,
     ctx: &OccurrenceCtx,
@@ -746,12 +765,14 @@ fn walk_list(
     let children = named_children(node);
     let Some(head) = children.first() else { return };
 
-    // Only an *unqualified* head names a core/special form. Matching on the
-    // name part alone would misread a qualified call like `s/def` as core `def`
-    // (skipping the keyword in its "name" slot) or `x/let` as a binding form.
-    // Qualified heads fall through to the generic walk, which records them and
-    // every argument (including keywords) as occurrences.
-    let head_text = if head.kind() == "sym_lit" && head.child_by_field_name("namespace").is_none() {
+    // A head names a core/special form only when it is unqualified or qualified
+    // to `clojure.core`. Matching on the name part alone would misread a
+    // qualified call like `s/def` as core `def` (skipping the keyword in its
+    // "name" slot); requiring clojure.core still handles a `clojure.core/let`
+    // (or an alias to it) as a real binding form. Other qualified heads fall
+    // through to the generic walk, which records them and every argument
+    // (including keywords) as occurrences.
+    let head_text = if head.kind() == "sym_lit" && head_is_core_form(*head, ctx) {
         Some(sym_text(*head, ctx.source))
     } else {
         None
