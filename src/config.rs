@@ -34,6 +34,22 @@ pub fn is_clojure_source(path: &Path) -> bool {
     )
 }
 
+/// Whether `path` has an `.edn` extension.
+pub fn is_edn(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("edn")
+}
+
+/// The reader tag that marks an EDN file as an Integrant system config. Build
+/// manifests (`deps.edn`, `bb.edn`, `shadow-cljs.edn`) lack it.
+const INTEGRANT_REF_TAG: &str = "#ig/ref";
+
+/// Whether `path` is an EDN file whose contents look like an Integrant system
+/// config — the gate for indexing keyword occurrences from EDN. Cheap substring
+/// check; keeps build manifests out of the keyword index.
+pub fn is_integrant_edn(path: &Path, source: &str) -> bool {
+    is_edn(path) && source.contains(INTEGRANT_REF_TAG)
+}
+
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_file() {
         start.parent()?.to_path_buf()

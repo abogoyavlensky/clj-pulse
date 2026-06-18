@@ -169,7 +169,7 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
 /// [`extract_edn`]; Clojure sources use the full extractor's occurrence pass.
 /// Used to re-extract open buffers in references/definition.
 pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
-    if path.extension().and_then(|e| e.to_str()) == Some("edn") {
+    if crate::config::is_edn(path) {
         extract_edn(source)
     } else {
         extract_full(source, path)

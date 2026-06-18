@@ -328,6 +328,12 @@ impl LanguageServer for Backend {
                         tracing::debug!("failed to index opened {}: {}", path.display(), e)
                     }
                 }
+            } else if config::is_integrant_edn(&path, &text) && self.index.file_ns(&path).is_none()
+            {
+                // Integrant config opened from outside the scanned paths.
+                tracing::info!("indexed opened EDN config {}", path.display());
+                self.index
+                    .insert_edn_file(path.clone(), extractor::extract_edn(&text));
             }
         }
 
@@ -361,6 +367,21 @@ impl LanguageServer for Backend {
                             tracing::info!("re-indexed {} ({} symbols)", path.display(), count);
                         }
                         Err(e) => tracing::warn!("failed to re-index {}: {}", path.display(), e),
+                    }
+                }
+                Err(e) => tracing::warn!("failed to read {}: {}", path.display(), e),
+            }
+        } else if config::is_edn(&path) {
+            // Re-index Integrant EDN configs. The file is always removed first
+            // (so an edit that drops `#ig/ref` de-indexes it) and re-inserted
+            // only when it still looks like an Integrant system.
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    self.index.remove_file(&path);
+                    if config::is_integrant_edn(&path, &source) {
+                        self.index
+                            .insert_edn_file(path.clone(), extractor::extract_edn(&source));
+                        tracing::info!("re-indexed EDN config {}", path.display());
                     }
                 }
                 Err(e) => tracing::warn!("failed to read {}: {}", path.display(), e),

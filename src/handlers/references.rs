@@ -158,7 +158,7 @@ pub fn resolve_fqn_at(
 
     // EDN config files (Integrant systems) have no symbols or aliases; match
     // the cursor against keyword occurrences only.
-    if path.extension().and_then(|e| e.to_str()) == Some("edn") {
+    if crate::config::is_edn(&path) {
         return extractor::extract_edn(&text)
             .into_iter()
             .find(|occ| range_contains(&occ.name_range, pos))
