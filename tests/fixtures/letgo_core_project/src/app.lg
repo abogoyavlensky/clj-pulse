@@ -3,3 +3,4 @@
 
 (map identity [])
 (str/join "," [])
+(if true (count []) 0)

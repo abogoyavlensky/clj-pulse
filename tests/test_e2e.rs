@@ -623,6 +623,61 @@ fn test_e2e_letgo_core_navigation() {
 }
 
 #[test]
+fn test_e2e_letgo_builtins_hover() {
+    // let-go built-ins with no `.lg` source — special forms (`if`) and native
+    // core fns (`count`) — describe themselves on hover but never navigate.
+    let project = setup_named("letgo_core_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+    let core = lgx_home.join("let-go/source/0.0.1/pkg/rt/core");
+    std::fs::create_dir_all(&core).unwrap();
+    std::fs::write(core.join("core.lg"), "(ns core)\n(defn map [f c] c)\n").unwrap();
+    std::fs::write(
+        core.join("string.lg"),
+        "(ns string)\n(defn join [sep c] sep)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let app = root.join("src/app.lg");
+    client.did_open(&app);
+
+    // Special form `if`: hover describes it; goto-def is a no-op.
+    let (line, ch) = position_of(&app, "if ");
+    let h = client.hover(&app, line, ch);
+    let val = h["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for if: {}", h));
+    assert!(val.contains("special form"), "if hover: {}", val);
+    let def = client.goto_definition(&app, line, ch);
+    assert!(def.is_null(), "if must not navigate, got {}", def);
+
+    // Native core fn `count`: hover labels it native, doc borrowed from clojure.core.
+    let (line, ch) = position_of(&app, "count");
+    let h = client.hover(&app, line, ch);
+    let val = h["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for count: {}", h));
+    assert!(val.contains("let-go core (native)"), "count hover: {}", val);
+
+    // Regression: goto-def on the `str` alias declaration still resolves to the
+    // stdlib namespace, even though `str` is also a native core fn name.
+    let (line, ch) = position_of(&app, "str]");
+    let d = client.goto_definition(&app, line, ch);
+    let uri = d["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for str alias: {}", d));
+    assert!(
+        uri.ends_with("/pkg/rt/core/string.lg"),
+        "str alias should navigate to string.lg, got {}",
+        uri
+    );
+}
+
+#[test]
 fn test_e2e_no_diagnostics_on_lgx_edn() {
     // Opening lgx.edn must not flag dependency coordinates (`my/loc`,
     // `ext/lib`) as unresolved namespaces — EDN config files are not source.
