@@ -155,6 +155,16 @@ pub fn resolve_fqn_at(
     // word_at succeeded, so the document is open: resolve against live
     // text — unsaved edits resolve against current ranges.
     let text = documents.text(uri)?;
+
+    // EDN config files (Integrant systems) have no symbols or aliases; match
+    // the cursor against keyword occurrences only.
+    if path.extension().and_then(|e| e.to_str()) == Some("edn") {
+        return extractor::extract_edn(&text)
+            .into_iter()
+            .find(|occ| range_contains(&occ.name_range, pos))
+            .map(|occ| occ.fqn);
+    }
+
     if let Ok((_, syms, occs)) = extractor::extract_full(&text, &path) {
         for sym in &syms {
             // A `defmethod` head names the multimethod it extends, not a new
@@ -214,9 +224,8 @@ pub fn occurrences_for(
         let Some(text) = documents.text(&uri) else {
             continue;
         };
-        if let Ok((_, _, occs)) = extractor::extract_full(&text, &path) {
-            live.insert(path, occs);
-        }
+        let occs = extractor::file_occurrences(&text, &path);
+        live.insert(path, occs);
     }
 
     let mut result = Vec::new();

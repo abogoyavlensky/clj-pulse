@@ -89,3 +89,41 @@ fn test_clear_libs_allows_dir_lib_reinsert() {
         "dir-lib namespace must be reinsertable after clear_libs"
     );
 }
+
+#[test]
+fn test_insert_edn_file_occurrences_and_sentinel_isolation() {
+    use clj_pulse::index::{Index, Occurrence};
+    use std::path::PathBuf;
+    use tower_lsp::lsp_types::Range;
+
+    let index = Index::new();
+
+    // A no-`ns` Clojure file has an empty-string namespace; its symbol must not
+    // be disturbed by EDN files (which use a NUL sentinel ns, not "").
+    let clj = PathBuf::from("/proj/src/nons.clj");
+    let (meta, syms) = extractor::extract("(def x 1)", &clj).unwrap();
+    assert_eq!(meta.name, "", "no-ns file should have empty namespace");
+    index.insert_file(meta, syms, vec![]);
+    assert!(index.lookup("x").is_some());
+
+    // Insert an EDN config file's occurrences.
+    let edn = PathBuf::from("/proj/resources/config.edn");
+    let occ = Occurrence {
+        fqn: ":readx.db/db".to_string(),
+        name_range: Range::default(),
+    };
+    index.insert_edn_file(edn.clone(), vec![occ]);
+    assert!(
+        index.is_project_path(&edn),
+        "EDN file should be an editable project path"
+    );
+
+    // Removing the EDN file clears it without panicking and without clobbering
+    // the empty-ns Clojure file's symbol.
+    index.remove_file(&edn);
+    assert!(!index.is_project_path(&edn));
+    assert!(
+        index.lookup("x").is_some(),
+        "removing an EDN file must not disturb a no-ns clj file's symbols"
+    );
+}

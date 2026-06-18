@@ -12,6 +12,12 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Range;
 
+/// Synthetic `file_to_ns` namespace for indexed EDN config files, which have no
+/// real namespace. NUL-prefixed so it can never collide with a real namespace
+/// or the empty-string ns of a no-`ns` `.clj` file. Lets `merge_project_from`'s
+/// stale-filter keep EDN files across re-scans (see [`Index::insert_edn_file`]).
+const EDN_NS_SENTINEL: &str = "\0edn";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SymbolSource {
     Project,
@@ -186,6 +192,17 @@ impl Index {
         self.occurrences.insert(file.clone(), occurrences);
         self.file_to_ns.insert(file, ns_name.clone());
         self.namespaces.insert(ns_name, meta);
+    }
+
+    /// Inserts an EDN config file's keyword occurrences. EDN files contribute
+    /// only occurrences — no namespace, no symbols — so this touches only
+    /// `occurrences` and registers the file under [`EDN_NS_SENTINEL`] in
+    /// `file_to_ns` (which keeps `merge_project_from` from dropping it). It
+    /// deliberately leaves `namespaces`/`ns_symbols` untouched; `remove_file`
+    /// no-ops cleanly on the absent sentinel ns.
+    pub fn insert_edn_file(&self, file: PathBuf, occurrences: Vec<Occurrence>) {
+        self.occurrences.insert(file.clone(), occurrences);
+        self.file_to_ns.insert(file, EDN_NS_SENTINEL.to_string());
     }
 
     pub fn file_ns(&self, path: &Path) -> Option<String> {
