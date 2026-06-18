@@ -292,7 +292,7 @@ fn test_ranges_are_utf16_columns() {
 
 // --- occurrence extraction (Phase 2) ---
 
-use clj_pulse::index::extractor::extract_full;
+use clj_pulse::index::extractor::{extract_edn, extract_full};
 
 fn occurrences_of<'a>(
     occs: &'a [clj_pulse::index::Occurrence],
@@ -639,6 +639,33 @@ fn test_non_integrant_defmethod_keyword_is_only_an_occurrence() {
         occurrences_of(&occs, ":shapes/circle").len(),
         1,
         "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_extract_edn_records_qualified_keywords_including_ig_ref() {
+    let src = "{:readx.db/db {:url \"x\"}\n \
+               :readx.server/server {:db #ig/ref :readx.db/db}}";
+    let occs = extract_edn(src);
+
+    // `:readx.db/db` appears twice: the map key + the `#ig/ref` value.
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":readx.server/server").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    // Unqualified config keys (`:url`, `:db`) are not indexed.
+    assert!(
+        occs.iter().all(|o| o.fqn.contains('/')),
+        "unqualified keyword leaked: {:?}",
         occs
     );
 }

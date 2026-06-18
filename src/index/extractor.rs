@@ -123,6 +123,48 @@ fn collect_qualified(node: Node, source: &str, out: &mut Vec<QualifiedUsage>) {
     }
 }
 
+/// Extracts qualified keyword occurrences from an EDN file (Integrant/Aero
+/// system configs). EDN has no `ns` form or `::` auto-resolution, so only
+/// literal `:ns/name` keywords qualify — an empty `NsMeta` makes `keyword_fqn`
+/// drop `::`/unqualified keywords. Keywords nested in tagged literals
+/// (`#ig/ref :ns/x`), maps, and vectors are all reached by the generic descent.
+pub fn extract_edn(source: &str) -> Vec<Occurrence> {
+    let mut parser = Parser::new();
+    if parser.set_language(language()).is_err() {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let empty = NsMeta {
+        name: String::new(),
+        file: std::path::PathBuf::new(),
+        aliases: HashMap::new(),
+        refers: HashMap::new(),
+        requires: Vec::new(),
+    };
+    let mut out = Vec::new();
+    collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
+    out
+}
+
+fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<Occurrence>) {
+    if node.kind() == "kwd_lit" {
+        if let Some(fqn) = keyword_fqn(node, ns_meta, source) {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                out.push(Occurrence {
+                    fqn,
+                    name_range: node_to_lsp_range(name_node, source),
+                });
+            }
+        }
+        return;
+    }
+    for child in named_children(node) {
+        collect_edn_keywords(child, source, ns_meta, out);
+    }
+}
+
 /// Like [`extract`] but also collects every resolved symbol usage
 /// (occurrences) in a second pass over the same parse tree.
 pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
