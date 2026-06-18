@@ -80,6 +80,10 @@ meantime and keeping the server dependency-free is worth more early on.
       `defrecord`/`deftype`/`extend-type`/`extend-protocol`/`reify` now navigate
       to the protocol's declaration too. The reverse ("find implementations")
       is not in scope.
+- [x] Multimethods: goto-def on a `defmethod` head navigates to its `defmulti`
+      declaration (the multimethod analog of protocol-impl navigation), for both
+      Clojure and let-go. A `defmethod` head resolves through its occurrence to
+      the multimethod, so references/rename target the multimethod too.
 - [ ] resolve and navigate to libs that required with common syntax:
       ```[flock.staff.spec
           [common :as c]
