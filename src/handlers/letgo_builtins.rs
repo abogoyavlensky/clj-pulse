@@ -111,6 +111,11 @@ pub fn is_native(name: &str) -> bool {
     NATIVE_NAMES.binary_search(&name).is_ok()
 }
 
+/// All native core fn names — for completion enumeration.
+pub fn native_names() -> &'static [&'static str] {
+    NATIVE_NAMES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
