@@ -33,6 +33,10 @@ pub enum DefKind {
     Defprotocol,
     Defrecord,
     Deftype,
+    /// An Integrant component key, defined by `(defmethod ig/init-key ::x …)`.
+    /// Its `fqn` is the canonical colon-prefixed keyword (`:my.ns/x`), keyed
+    /// disjointly from var fqns (which never start with `:`).
+    IntegrantKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

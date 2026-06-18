@@ -145,6 +145,7 @@ fn defkind_to_symbol_kind(kind: &DefKind) -> SymbolKind {
         DefKind::Defprotocol => SymbolKind::INTERFACE,
         DefKind::Defrecord | DefKind::Deftype => SymbolKind::CLASS,
         DefKind::Defmethod => SymbolKind::METHOD,
+        DefKind::IntegrantKey => SymbolKind::KEY,
     }
 }
 
