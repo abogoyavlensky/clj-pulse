@@ -96,22 +96,22 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 **Files:**
 - Modify: `src/index/mod.rs`, `src/handlers/hover.rs`, `src/handlers/symbols.rs`, `src/index/jar_cache.rs`
 
-- [ ] **Step 1: Add the variant**
+- [x] **Step 1: Add the variant**
   Add `IntegrantKey` to the `DefKind` enum in `src/index/mod.rs`.
 
-- [ ] **Step 2: Fix the two exhaustive matches**
+- [x] **Step 2: Fix the two exhaustive matches**
   `hover.rs::defkind_str`: add `DefKind::IntegrantKey => "defmethod"`.
   `symbols.rs::defkind_to_symbol_kind`: add `DefKind::IntegrantKey => SymbolKind::KEY`.
   (`completion.rs` has a `_` wildcard → no change.)
 
-- [ ] **Step 3: Bump cache format version**
+- [x] **Step 3: Bump cache format version**
   `src/index/jar_cache.rs`: `CACHE_FORMAT_VERSION` 8 → 9.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo build`
   Expected: builds clean (no non-exhaustive-match errors).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: add DefKind::IntegrantKey and bump jar cache version"`
 
 ## Task 2: Keyword fqn resolver
@@ -120,22 +120,22 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   Add tests calling a new `pub(crate)` helper (or test via a thin wrapper). Cases over a parsed `kwd_lit` with an `NsMeta { name: "readx.db", aliases: {"db2"->"other.db"} }`:
   `::db` → `Some(":readx.db/db")`; `::db2/x` → `Some(":other.db/x")`; `:lit.ns/x` → `Some(":lit.ns/x")`; `:plain` → `None`; `::x` with empty ns name → `None`.
 
-- [ ] **Step 2: Run to verify fail**
+- [x] **Step 2: Run to verify fail**
   Run: `cargo test --test test_extractor keyword_fqn`
   Expected: FAIL (unresolved name / assertion).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `keyword_fqn(node, ns_meta, source) -> Option<String>` reading `marker`/`namespace`/`name` fields per the Design. Add a small test-only constructor path if needed to parse a snippet and grab the first `kwd_lit`.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
   Run: `cargo test --test test_extractor keyword_fqn`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: resolve keywords to canonical colon-prefixed fqns"`
 
 ## Task 3: General qualified-keyword occurrences
@@ -144,25 +144,25 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
   `extract_full` on `(ns my.ns) (def x {:my.ns/a 1 :other/b ::a})` should yield occurrences containing `:my.ns/a`, `:other/b`, and `:my.ns/a` (from `::a`). Unqualified keys (none here) excluded. Assert by filtering occurrences whose `fqn` starts with `:`.
 
-- [ ] **Step 2: Run to verify fail**
+- [x] **Step 2: Run to verify fail**
   Run: `cargo test --test test_extractor keyword_occurrence`
   Expected: FAIL (no `:`-fqn occurrences yet).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add a `"kwd_lit" => …` arm to `walk_occurrences` that calls `keyword_fqn(node, ctx.ns_meta, ctx.source)` and, when `Some(fqn)`, pushes `Occurrence { fqn, name_range: <kwd_name node range> }`. Quoted data (`quoting_lit`) and ns-form keywords remain excluded (existing structure already skips them).
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
   Run: `cargo test --test test_extractor keyword_occurrence`
   Expected: PASS.
 
-- [ ] **Step 5: Run the full extractor suite (no regressions)**
+- [x] **Step 5: Run the full extractor suite (no regressions)**
   Run: `cargo test --test test_extractor`
   Expected: PASS (existing symbol-occurrence tests unaffected).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "feat: record qualified keyword occurrences"`
 
 ## Task 4: Integrant `ig/init-key` definition
@@ -171,22 +171,22 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   Source: `(ns readx.db (:require [integrant.core :as ig])) (defmethod ig/init-key ::db [_ o] o) (defmethod ig/halt-key! ::db [_ d] nil)`.
   Assert: `symbols` contains exactly one with `kind == DefKind::IntegrantKey`, `fqn == ":readx.db/db"`, `ns == "readx.db"`. `occurrences` contains a `:readx.db/db` for `halt-key!` but **not** a second one for `init-key` (count of `:readx.db/db` occurrences == 1). Also: a non-Integrant `(defmethod area ::circle …)` produces **no** `IntegrantKey` symbol (its keyword is only an occurrence).
 
-- [ ] **Step 2: Run to verify fail**
+- [x] **Step 2: Run to verify fail**
   Run: `cargo test --test test_extractor integrant`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add `defmethod_multifn_fqn(children, ns_meta, source)` (alias/refer resolution). In `process_top_level_list`/`extract_def`, when head is `defmethod` and the multifn resolves to `integrant.core/init-key` and dispatch (`children[2]`) is a qualified `kwd_lit`, push the `IntegrantKey` symbol. In `walk_def_form`'s `Defmethod` branch, **skip walking the dispatch** when it is that same init-key qualified keyword; otherwise walk it as today.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
   Run: `cargo test --test test_extractor integrant`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: index ig/init-key defmethod as Integrant component definition"`
 
 ## Task 5: EDN occurrence extraction
@@ -195,21 +195,21 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
   `extract_edn` on a config-map string `{:readx.db/db {:url "x"} :readx.server/server {:db #ig/ref :readx.db/db}}` returns occurrences whose fqns include `:readx.db/db` (twice — key + `#ig/ref`), `:readx.server/server` (once); unqualified keys (`:url`, `:db`) excluded.
 
-- [ ] **Step 2: Run to verify fail**
+- [x] **Step 2: Run to verify fail**
   Run: `cargo test --test test_extractor extract_edn`
   Expected: FAIL (unresolved name).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `pub fn extract_edn(source, file) -> Vec<Occurrence>`: parse, walk every node, on `kwd_lit` call `keyword_fqn(node, &<empty NsMeta>, source)` and push qualified ones. Keywords inside `tagged_or_ctor_lit` are reached by the generic descent.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
   Run: `cargo test --test test_extractor extract_edn`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: extract qualified keyword occurrences from EDN"`
 
 ## Task 6: Index + scanner + references glue
@@ -218,24 +218,24 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 - Modify: `src/index/mod.rs`, `src/index/scanner.rs`, `src/index/extractor.rs`, `src/handlers/references.rs`
 - Test: `tests/test_index.rs` (or `tests/test_extractor.rs` for the dispatcher)
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
   In `tests/test_index.rs`: build an `Index`, `insert_edn_file(path, occs)`, assert `occurrences_for`-style lookup finds them and `is_project_path(path)` is true; then `remove_file(path)` clears them without panicking. Also assert a no-`ns` `.clj` file inserted via `insert_file` (empty ns) and an EDN file can coexist and be removed independently (no shared-ns clobber).
 
-- [ ] **Step 2: Run to verify fail**
+- [x] **Step 2: Run to verify fail**
   Run: `cargo test --test test_index insert_edn`
   Expected: FAIL (unresolved `insert_edn_file`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   - `Index::insert_edn_file(file, occurrences)` + `EDN_NS_SENTINEL` per Design (occurrences + `file_to_ns` sentinel only).
   - `extractor::file_occurrences(source, path)` dispatcher (`.edn` → `extract_edn`, else `extract_full` occurrences).
   - `scanner::build_index`: collect `.edn` files under `source_paths`, gate on `contains("#ig/ref")`, insert via `insert_edn_file`.
   - `references.rs`: `resolve_fqn_at` `.edn` branch (occurrences from `extract_edn`, no symbols); `occurrences_for` uses `file_occurrences` for open files.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
   Run: `cargo test --test test_index insert_edn`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: index EDN config files and resolve keywords through references pipeline"`
 
 ## Task 7: Server wiring (didOpen / didSave)
@@ -243,16 +243,16 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 **Files:**
 - Modify: `src/server.rs`
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
   `did_open`: add an `else if` branch — when `path` ends in `.edn`, `text.contains("#ig/ref")`, and `file_ns(path).is_none()` → `insert_edn_file(path, extract_edn(&text, &path))`.
   `did_save`: add an `else if` branch for `.edn` — `remove_file(&path)`, then if the re-read source `contains("#ig/ref")`, `insert_edn_file(path, extract_edn(&source, &path))`.
   (Diagnostics already no-op for non-Clojure-source, so no `.edn` diagnostic noise.)
 
-- [ ] **Step 2: Verify build + existing e2e**
+- [x] **Step 2: Verify build + existing e2e**
   Run: `cargo build && bb e2e`
   Expected: builds clean; existing e2e tests still PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "feat: index Integrant EDN configs on open and save"`
 
 ## Task 8: E2E fixture + acceptance tests
@@ -261,21 +261,21 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 - Create: `tests/fixtures/integrant_project/deps.edn`, `tests/fixtures/integrant_project/src/readx/db.clj`, `tests/fixtures/integrant_project/resources/config.edn`
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Create the fixture**
+- [x] **Step 1: Create the fixture**
   `deps.edn`: `{:paths ["src" "resources"]}`.
   `src/readx/db.clj`: `(ns readx.db (:require [integrant.core :as ig]))` + three defmethods `ig/assert-key`, `ig/init-key`, `ig/halt-key!`, all dispatching `::db`.
   `resources/config.edn`: a map `{:readx.db/db {:jdbc-url "…"} :readx.server/server {:db #ig/ref :readx.db/db}}`.
 
-- [ ] **Step 2: Write the e2e tests**
+- [x] **Step 2: Write the e2e tests**
   Using `LspClient`/`setup_named("integrant_project")` + `wait_for_log("Indexed")`:
   - `test_e2e_integrant_goto_definition_from_config`: `did_open(config.edn)`, `goto_definition` at the `:readx.db/db` key → response uri ends `src/readx/db.clj`, range line == the `ig/init-key ::db` line (locate with `position_of`).
   - `test_e2e_integrant_references`: `did_open(db.clj)`, `references` at `::db` on the init-key line with `include_declaration=true` → 5 locations: db.clj init-key/assert-key/halt-key! + config.edn key + `#ig/ref`.
 
-- [ ] **Step 3: Run to verify fail-then-pass**
+- [x] **Step 3: Run to verify fail-then-pass**
   Run: `cargo test --test test_e2e integrant`
   Expected: PASS (both tests). If a test was written before Task 6/7 wiring it would FAIL; here all deps are in place, so confirm PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "test: e2e for Integrant config.edn keyword navigation"`
 
 ## Task 9: Full gate + docs
@@ -283,16 +283,78 @@ Rename-on-keyword (likely works via `resolve_fqn_at`, but untested/unverified he
 **Files:**
 - Modify: `ARCHITECTURE.md` and/or `CLAUDE.md` (brief note on keyword/EDN indexing)
 
-- [ ] **Step 1: Full check**
+- [x] **Step 1: Full check**
   Run: `bb check`
   Expected: fmt clean, clippy `-D warnings` clean, all tests PASS.
 
-- [ ] **Step 2: Full e2e**
+- [x] **Step 2: Full e2e**
   Run: `bb e2e`
   Expected: PASS.
 
-- [ ] **Step 3: Document**
+- [x] **Step 3: Document**
   Add a short note to `ARCHITECTURE.md` (keyword occurrences + Integrant key definitions; EDN config indexed when it contains `#ig/ref`) and, if relevant, the `bb e2e` coverage line in `CLAUDE.md`. Use /writing-clearly.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "docs: note keyword indexing and Integrant EDN navigation"`
+
+---
+
+## Status: COMPLETE (2026-06-18)
+
+All nine tasks implemented and committed on `feat/keyword-integrant-navigation`.
+Gate green: `bb check` (fmt + clippy `-D warnings` + all tests) and `bb e2e`
+(58 passed, 1 ignored).
+
+### What was built
+
+- `DefKind::IntegrantKey`; keyword fqns are colon-prefixed (`:ns/name`) and live
+  in the existing `symbols`/`occurrences`/`Index` maps with no collision against
+  var fqns. Jar cache `format_version` 8 → 9.
+- `keyword_fqn` resolves `::name`/`::alias/name`/`:lib/name`; unqualified
+  keywords are skipped. A general `kwd_lit` arm in `walk_occurrences` records
+  every qualified keyword usage.
+- `(defmethod ig/init-key ::x …)` is recorded as the component definition
+  (`extract_integrant_key` + `defmethod_multifn_fqn`, the single extensible hook
+  point); its dispatch keyword is suppressed from the occurrence pass so
+  references don't double-list the declaration.
+- `extract_edn` collects qualified keywords from Integrant/Aero configs (incl.
+  inside `#ig/ref`); `Index::insert_edn_file` stores them under a NUL-sentinel
+  `file_to_ns` entry. Gated via `config::is_integrant_edn` (`#ig/ref` present),
+  wired into `build_index`, `did_open`, `did_save`.
+- `resolve_fqn_at`/`occurrences_for` dispatch `.edn` → `extract_edn`; goto-def
+  and references then work through the existing pipeline.
+
+### Deviations from the plan (all intentional)
+
+- **`keyword_fqn` unit tests live in-crate** (`#[cfg(test)]` in `extractor.rs`)
+  rather than `tests/test_extractor.rs`, since it operates on crate-internal
+  tree-sitter `Node`s. Verified with `cargo test --lib keyword_fqn`.
+- **`extract_edn` dropped the unused `file` param** from the planned signature
+  (`Occurrence` carries no file; the index keys by path externally).
+- **Whole-keyword navigation range** (instead of name-part-only): occurrence and
+  definition ranges span the entire keyword token so goto-def/references resolve
+  from a click anywhere on `:ns/name`. This directly addressed a codex review
+  finding (namespace-part clicks previously missed). A guard in `rename()`
+  rejects keyword fqns so the (unsupported) keyword-rename path can't corrupt the
+  token. Future keyword rename will need to narrow these ranges to the name part.
+- **EDN gate centralized** into `config::is_edn` / `config::is_integrant_edn`
+  (one home for the `#ig/ref` magic string), used by scanner/extractor/server.
+
+### Review
+
+`review-with-codex` (base `master`) returned one P2 — the namespace-part
+navigation gap — which the whole-keyword range change resolves. No other
+findings.
+
+### Acceptance verified
+
+`tests/fixtures/integrant_project` + two e2e tests: goto-definition on
+`:readx.db/db` in `resources/config.edn` lands on the `ig/init-key ::db`
+defmethod in `src/readx/db.clj`; references returns 5 locations (init-key
+declaration + `assert-key`/`halt-key!` occurrences + config key + `#ig/ref`).
+
+### Out of scope (unchanged)
+
+Keyword rename, keyword completion, keyword hover/doc, re-frame `reg-*` & spec
+`s/def` definitions (the hook table accepts them), and file-watcher globs for
+arbitrary `config.edn` names.
