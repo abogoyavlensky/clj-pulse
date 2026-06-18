@@ -80,6 +80,8 @@ pub fn handle(
             }
             Ok(None)
         }
+        // Special forms (and native core fns, below) have no `.lg` source.
+        Some(ResolvedSymbol::SpecialForm(_)) => Ok(None),
         None => {
             // The word may be a require alias (`[ring.util.response :as
             // response]` with the cursor on `response`) or a namespace name

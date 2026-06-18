@@ -42,7 +42,19 @@ pub fn resolve_and_format(index: &Index, word: &str, current_ns: &str) -> Option
     match resolve_symbol(index, word, current_ns)? {
         ResolvedSymbol::Project(sym) => Some(format_for_symbol(&sym)),
         ResolvedSymbol::Core(core) => Some(format_for_core(&core)),
+        ResolvedSymbol::SpecialForm(sf) => Some(format_for_special_form(sf)),
     }
+}
+
+pub fn format_for_special_form(sf: &super::letgo_builtins::SpecialForm) -> String {
+    let mut md = String::new();
+    md.push_str(&format!("```clojure\n{}\n```\n", sf.usage));
+    md.push_str("*special form*\n");
+    if !sf.doc.is_empty() {
+        md.push('\n');
+        md.push_str(sf.doc);
+    }
+    md
 }
 
 pub fn format_for_symbol(sym: &Symbol) -> String {
@@ -103,5 +115,18 @@ fn defkind_str(kind: &DefKind) -> &'static str {
         DefKind::Defprotocol => "defprotocol",
         DefKind::Defrecord => "defrecord",
         DefKind::Deftype => "deftype",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn special_form_hover_is_labelled() {
+        let sf = crate::handlers::letgo_builtins::special_form("if").unwrap();
+        let md = format_for_special_form(sf);
+        assert!(md.contains("*special form*"), "missing label: {}", md);
+        assert!(md.contains("(if test then else?)"), "missing usage: {}", md);
     }
 }

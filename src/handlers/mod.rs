@@ -2,6 +2,7 @@ pub mod code_action;
 pub mod completion;
 pub mod definition;
 pub mod hover;
+pub mod letgo_builtins;
 pub mod references;
 pub mod signature;
 pub mod symbols;
@@ -12,6 +13,8 @@ use crate::index::{CoreSymbol, DefKind, Index, Symbol};
 pub enum ResolvedSymbol {
     Project(Symbol),
     Core(CoreSymbol),
+    /// A let-go special form (compiler intrinsic) — hover-only, never navigable.
+    SpecialForm(&'static letgo_builtins::SpecialForm),
 }
 
 pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<ResolvedSymbol> {
@@ -66,9 +69,15 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
         // from a let-go classpath. Resolve there and never fall through: a name
         // missing from `core` (a go-only primitive) simply doesn't navigate.
         if index.letgo_core() {
-            return index
-                .lookup_in_ns("core", word)
-                .map(ResolvedSymbol::Project);
+            if let Some(sym) = index.lookup_in_ns("core", word) {
+                return Some(ResolvedSymbol::Project(sym));
+            }
+            // Compiler special forms (`if`, `try`, …) have no `.lg` source;
+            // surface a description for hover but never navigate.
+            if let Some(sf) = letgo_builtins::special_form(word) {
+                return Some(ResolvedSymbol::SpecialForm(sf));
+            }
+            return None;
         }
 
         if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
@@ -285,5 +294,23 @@ mod tests {
         index.mark_letgo_core();
 
         assert!(resolve_symbol(&index, "map", "app").is_none());
+    }
+
+    #[test]
+    fn letgo_special_form_resolves_for_hover() {
+        let index = index_with(vec![]);
+        index.mark_letgo_core();
+        match resolve_symbol(&index, "if", "app") {
+            Some(ResolvedSymbol::SpecialForm(sf)) => assert_eq!(sf.name, "if"),
+            other => panic!("expected SpecialForm(if): {:?}", other),
+        }
+    }
+
+    #[test]
+    fn without_letgo_marker_special_form_is_not_resolved() {
+        // No marker → `if` is neither a project nor a static-core symbol, so it
+        // stays unresolved (behavior unchanged for Clojure projects).
+        let index = index_with(vec![]);
+        assert!(resolve_symbol(&index, "if", "app").is_none());
     }
 }

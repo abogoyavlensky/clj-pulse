@@ -42,6 +42,8 @@ pub fn handle(
             };
             (core.name.clone(), split_arity_list(&core.params), doc)
         }
+        // Special forms have no fn arglist contract — no signature help.
+        Some(ResolvedSymbol::SpecialForm(_)) => return Ok(None),
         None => return Ok(None),
     };
 
