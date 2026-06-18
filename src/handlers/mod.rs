@@ -1,8 +1,8 @@
+pub mod builtins;
 pub mod code_action;
 pub mod completion;
 pub mod definition;
 pub mod hover;
-pub mod letgo_builtins;
 mod letgo_native_names;
 pub mod references;
 pub mod signature;
@@ -14,8 +14,9 @@ use crate::index::{CoreSymbol, DefKind, Index, Symbol};
 pub enum ResolvedSymbol {
     Project(Symbol),
     Core(CoreSymbol),
-    /// A let-go special form (compiler intrinsic) — hover-only, never navigable.
-    SpecialForm(&'static letgo_builtins::SpecialForm),
+    /// A special form (compiler intrinsic, Clojure or let-go) — hover-only,
+    /// never navigable.
+    SpecialForm(&'static builtins::SpecialForm),
     /// A let-go native core fn (Go `ns.Def`) — hover-only; doc/arglists borrowed
     /// from the clojure.core table.
     LetgoNative(CoreSymbol),
@@ -78,12 +79,12 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
             }
             // Compiler special forms (`if`, `try`, …) have no `.lg` source;
             // surface a description for hover but never navigate.
-            if let Some(sf) = letgo_builtins::special_form(word) {
+            if let Some(sf) = builtins::special_form(word, true) {
                 return Some(ResolvedSymbol::SpecialForm(sf));
             }
             // Native core fns (Go `ns.Def`, e.g. `count`/`str`) also have no
             // `.lg` source; borrow the clojure.core entry for hover/completion.
-            if letgo_builtins::is_native(word) {
+            if builtins::is_native(word) {
                 if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
                     return Some(ResolvedSymbol::LetgoNative(core.clone()));
                 }

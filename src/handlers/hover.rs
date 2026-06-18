@@ -47,7 +47,7 @@ pub fn resolve_and_format(index: &Index, word: &str, current_ns: &str) -> Option
     }
 }
 
-pub fn format_for_special_form(sf: &super::letgo_builtins::SpecialForm) -> String {
+pub fn format_for_special_form(sf: &super::builtins::SpecialForm) -> String {
     let mut md = String::new();
     md.push_str(&format!("```clojure\n{}\n```\n", sf.usage));
     md.push_str("*special form*\n");
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn special_form_hover_is_labelled() {
-        let sf = crate::handlers::letgo_builtins::special_form("if").unwrap();
+        let sf = crate::handlers::builtins::special_form("if", true).unwrap();
         let md = format_for_special_form(sf);
         assert!(md.contains("*special form*"), "missing label: {}", md);
         assert!(md.contains("(if test then else?)"), "missing usage: {}", md);

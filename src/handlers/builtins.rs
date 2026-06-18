@@ -1,14 +1,13 @@
-//! let-go built-ins that have no `.lg` source: **special forms** (compiler
-//! intrinsics) and, once wired, **native core functions** (Go `ns.Def`). They
-//! are surfaced for hover and completion only — navigation is a deliberate
-//! no-op, since there is nothing to navigate to. All use is gated by the
-//! `Index::letgo_core()` marker at the call sites, so Clojure projects are
-//! unaffected.
+//! Language built-ins that have no source to navigate to: **special forms**
+//! (compiler intrinsics — dialect-aware across Clojure and let-go) and let-go's
+//! **native core functions** (Go `ns.Def`). Surfaced for hover and completion
+//! only; goto-def is a deliberate no-op, since there is nothing to navigate to.
+//! The active dialect is chosen by the caller via `Index::letgo_core()`.
 
 use super::letgo_native_names::NATIVE_NAMES;
 
-/// A let-go special form (compiler intrinsic). Not a var — `resolve` cannot see
-/// it — so it carries its own hand-authored description.
+/// A special form (compiler intrinsic). Not a var — `resolve` cannot see it —
+/// so it carries its own hand-authored description.
 #[derive(Debug)]
 pub struct SpecialForm {
     pub name: &'static str,
@@ -16,12 +15,10 @@ pub struct SpecialForm {
     pub doc: &'static str,
 }
 
-/// let-go's special forms, from the compiler's `specialForms` dispatch map
-/// (`pkg/compiler/compiler.go`, let-go 1.10.0) plus `catch`/`finally` (parsed
-/// inside `try`) and `throw`. `throw` is implemented as a native fn in let-go,
-/// but Clojure documents it as a special form and it has no clojure.core entry
-/// to borrow a doc from, so it is hand-authored here.
-pub static SPECIAL_FORMS: &[SpecialForm] = &[
+/// Special forms common to Clojure and let-go (identical usage/semantics).
+/// Macros (`let`/`fn`/`loop`/`when`/`cond`/…) are intentionally absent — they
+/// are real vars served by the clojure.core / `.lg` core tables, not here.
+pub static COMMON_SPECIAL_FORMS: &[SpecialForm] = &[
     SpecialForm {
         name: "if",
         usage: "(if test then else?)",
@@ -73,11 +70,6 @@ pub static SPECIAL_FORMS: &[SpecialForm] = &[
         doc: "Rebinds the bindings of the nearest enclosing `fn`/`loop` and jumps back to its start. Tail position only.",
     },
     SpecialForm {
-        name: "trace",
-        usage: "(trace exprs*)",
-        doc: "Evaluates the body with let-go VM instruction tracing enabled (a let-go extension).",
-    },
-    SpecialForm {
         name: "try",
         usage: "(try body* (catch sym handler*)? (finally cleanup*)?)",
         doc: "Evaluates `body`; if a value is thrown, binds it to `sym` and runs the matching `catch`. A `finally` clause always runs.",
@@ -95,13 +87,51 @@ pub static SPECIAL_FORMS: &[SpecialForm] = &[
     SpecialForm {
         name: "throw",
         usage: "(throw expr)",
-        doc: "Throws `expr` (e.g. a string or an `ex-info` map), unwinding to the nearest enclosing `try`/`catch`. (let-go implements `throw` as a native fn; Clojure documents it as a special form.)",
+        doc: "Throws `expr` (e.g. an exception or `ex-info` map), unwinding to the nearest enclosing `try`/`catch`.",
     },
 ];
 
-/// The special form named `name`, if any.
-pub fn special_form(name: &str) -> Option<&'static SpecialForm> {
-    SPECIAL_FORMS.iter().find(|f| f.name == name)
+/// let-go-only special forms (its compiler dispatch beyond the common set).
+pub static LETGO_EXTRA: &[SpecialForm] = &[SpecialForm {
+    name: "trace",
+    usage: "(trace exprs*)",
+    doc: "Evaluates the body with let-go VM instruction tracing enabled (a let-go extension).",
+}];
+
+/// Clojure-only special forms (Java interop / locking primitives).
+pub static CLOJURE_EXTRA: &[SpecialForm] = &[
+    SpecialForm {
+        name: ".",
+        usage: "(. instance-or-Class member args*)",
+        doc: "Java interop member access: calls a method or reads a field on an instance or class.",
+    },
+    SpecialForm {
+        name: "new",
+        usage: "(new Class args*)",
+        doc: "Constructs a new Java object. Reader form: `(Class. args*)`.",
+    },
+    SpecialForm {
+        name: "monitor-enter",
+        usage: "(monitor-enter x)",
+        doc: "Acquires the monitor lock on `x`. Low-level; prefer the `locking` macro.",
+    },
+    SpecialForm {
+        name: "monitor-exit",
+        usage: "(monitor-exit x)",
+        doc: "Releases the monitor lock on `x`. Low-level; prefer the `locking` macro.",
+    },
+];
+
+/// The special forms for a dialect: the common set plus the dialect's extras.
+/// `letgo` selects let-go (`trace`) vs Clojure (interop/locking) extras.
+pub fn special_forms(letgo: bool) -> impl Iterator<Item = &'static SpecialForm> {
+    let extra = if letgo { LETGO_EXTRA } else { CLOJURE_EXTRA };
+    COMMON_SPECIAL_FORMS.iter().chain(extra.iter())
+}
+
+/// The special form named `name` in the given dialect, if any.
+pub fn special_form(name: &str, letgo: bool) -> Option<&'static SpecialForm> {
+    special_forms(letgo).find(|f| f.name == name)
 }
 
 /// Whether `name` is a let-go native core function (implemented in Go, no `.lg`
@@ -121,19 +151,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn special_form_lookup() {
-        assert!(special_form("if").is_some());
-        assert!(special_form("try").is_some());
-        assert!(special_form("catch").is_some());
-        // `throw` is hand-authored here (native in let-go, but Clojure documents
-        // it as a special form and it has no clojure.core doc to borrow).
-        assert!(special_form("throw").is_some());
-        assert!(special_form("nope").is_none());
+    fn common_forms_resolve_in_both_dialects() {
+        for letgo in [true, false] {
+            assert!(special_form("if", letgo).is_some());
+            assert!(special_form("try", letgo).is_some());
+            assert!(special_form("catch", letgo).is_some());
+            // `throw` is a special form in Clojure; let-go implements it as a
+            // native fn but we present it the same way (no source either way).
+            assert!(special_form("throw", letgo).is_some());
+        }
+        assert!(special_form("nope", true).is_none());
+        assert!(special_form("nope", false).is_none());
+    }
+
+    #[test]
+    fn dialect_extras_are_scoped() {
+        // `trace` is let-go-only; the interop/locking forms are Clojure-only.
+        assert!(special_form("trace", true).is_some());
+        assert!(special_form("trace", false).is_none());
+        assert!(special_form("new", false).is_some());
+        assert!(special_form("new", true).is_none());
+
+        let clojure: Vec<&str> = special_forms(false).map(|f| f.name).collect();
+        assert!(clojure.contains(&"new"));
+        assert!(!clojure.contains(&"trace"));
     }
 
     #[test]
     fn special_form_carries_usage_and_doc() {
-        let sf = special_form("if").unwrap();
+        let sf = special_form("if", false).unwrap();
         assert!(sf.usage.contains("test"));
         assert!(!sf.doc.is_empty());
     }

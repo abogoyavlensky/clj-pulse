@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
-use super::letgo_builtins;
+use super::builtins;
 use crate::document::DocumentStore;
 use crate::index::{CoreSymbol, DefKind, Index};
 
@@ -78,12 +78,12 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
         // static clojure.core list, which would offer names let-go lacks and
         // mislabel the ones it has. Clojure projects keep the clojure.core list.
         if index.letgo_core() {
-            for sf in letgo_builtins::SPECIAL_FORMS {
+            for sf in builtins::special_forms(true) {
                 if sf.name.starts_with(prefix) {
                     items.push(special_form_to_completion(sf));
                 }
             }
-            for &name in letgo_builtins::native_names() {
+            for &name in builtins::native_names() {
                 if name.starts_with(prefix) {
                     if let Some(core) = index.core_symbols.iter().find(|c| c.name == name) {
                         items.push(letgo_native_to_completion(core));
@@ -189,7 +189,7 @@ fn core_symbol_to_completion(sym: &crate::index::CoreSymbol) -> CompletionItem {
     }
 }
 
-fn special_form_to_completion(sf: &letgo_builtins::SpecialForm) -> CompletionItem {
+fn special_form_to_completion(sf: &builtins::SpecialForm) -> CompletionItem {
     CompletionItem {
         label: sf.name.to_string(),
         detail: Some(format!("special form {}", sf.usage)),
