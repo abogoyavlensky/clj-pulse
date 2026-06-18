@@ -598,6 +598,10 @@ fn walk_occurrences(
 ) {
     match node.kind() {
         "sym_lit" => record_occurrence(node, ctx, scope, out),
+        // Every qualified keyword is a usage (`:lib/x`, `::x`, `::alias/x`);
+        // unqualified ones are skipped by `keyword_fqn`. This powers keyword
+        // references and feeds Integrant component navigation.
+        "kwd_lit" => record_keyword_occurrence(node, ctx, out),
         "list_lit" => walk_list(node, ctx, scope, out),
         // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
         // macros do reference real vars, so walk those.
@@ -1199,6 +1203,22 @@ fn record_occurrence(
     };
 
     out.push(Occurrence { fqn, name_range });
+}
+
+/// Records a qualified keyword usage. The `name_range` covers only the keyword
+/// name part (the `db` of `::db` / `:ns/db`), mirroring the symbol-occurrence
+/// convention so a future rename never touches the `::`/namespace.
+fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
+    let Some(fqn) = keyword_fqn(node, ctx.ns_meta, ctx.source) else {
+        return;
+    };
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    out.push(Occurrence {
+        fqn,
+        name_range: node_to_lsp_range(name_node, ctx.source),
+    });
 }
 
 fn str_to_defkind(s: &str) -> Option<DefKind> {

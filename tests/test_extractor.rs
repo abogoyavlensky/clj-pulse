@@ -573,3 +573,27 @@ fn test_occurrence_destructuring_or_defaults_are_usages() {
     );
     assert!(occurrences_of(&occs, "my.app/x").is_empty());
 }
+
+#[test]
+fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
+    // Qualified keywords (literal `:ns/name`, auto-resolved `::name`) are
+    // occurrences; unqualified ones are skipped as too ambiguous to index.
+    let src = "(ns my.ns)\n(def x {:my.ns/a 1 :other/b ::a :plain 2})";
+    let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
+
+    // `:my.ns/a` (literal key) + `::a` (resolves to :my.ns/a) = 2.
+    assert_eq!(
+        occurrences_of(&occs, ":my.ns/a").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(occurrences_of(&occs, ":other/b").len(), 1, "occs: {:?}", occs);
+    // Unqualified `:plain` produces no keyword occurrence.
+    assert!(
+        occs.iter()
+            .all(|o| o.fqn != ":plain" && o.fqn != ":my.ns/plain"),
+        "unqualified keyword leaked: {:?}",
+        occs
+    );
+}
