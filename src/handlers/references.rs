@@ -154,12 +154,12 @@ pub fn resolve_fqn_at(
     uri: &Url,
     pos: Position,
 ) -> Option<String> {
-    let word = documents.word_at(uri, pos)?;
     let path = crate::uri::to_index_path(uri)?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
-    // word_at succeeded, so the document is open: resolve against live
-    // text — unsaved edits resolve against current ranges.
+    // Resolve against live text so unsaved edits use current ranges. Position
+    // matching (below) runs without a word token, so a cursor on a keyword's
+    // `:`/`::` marker still resolves — the occurrence/definition range spans it.
     let text = documents.text(uri)?;
 
     // EDN config files (Integrant systems) have no symbols or aliases; match
@@ -196,6 +196,7 @@ pub fn resolve_fqn_at(
     // Not a definition or occurrence — the only legitimate remaining case
     // is the cursor on the alias half of a qualified usage. Bare words here
     // are locals or noise; resolving them would risk corrupting renames.
+    let word = documents.word_at(uri, pos)?;
     let (alias, name) = word.split_once('/')?;
     if alias.is_empty() || name.is_empty() {
         return None;

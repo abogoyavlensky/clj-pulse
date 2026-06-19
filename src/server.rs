@@ -279,11 +279,10 @@ impl LanguageServer for Backend {
                 kind: None,
             },
             FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/deps.edn".to_string()),
-                kind: None,
-            },
-            FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/lgx.edn".to_string()),
+                // All EDN files: manifests (deps.edn / lgx.edn → classpath) and
+                // Integrant system configs (→ keyword occurrences). The handler
+                // routes each by name/content.
+                glob_pattern: GlobPattern::String("**/*.edn".to_string()),
                 kind: None,
             },
             FileSystemWatcher {
@@ -413,6 +412,25 @@ impl LanguageServer for Backend {
             }
             if path.components().any(|c| c.as_os_str() == ".cpcache") {
                 classpath_changed = true;
+                continue;
+            }
+
+            // Integrant EDN configs: keep keyword occurrences fresh on external
+            // edits (git pull / branch switch). Remove first so dropping
+            // `#ig/ref` — or the file — de-indexes it; re-insert only when it
+            // still looks like an Integrant system. Manifests (deps.edn/lgx.edn)
+            // already `continue`d above as classpath changes.
+            if config::is_edn(&path) {
+                self.index.remove_file(&path);
+                if event.typ != FileChangeType::DELETED {
+                    if let Ok(source) = std::fs::read_to_string(&path) {
+                        if config::is_integrant_edn(&path, &source) {
+                            self.index
+                                .insert_edn_file(path.clone(), extractor::extract_edn(&source));
+                            tracing::info!("watched re-index EDN config: {}", path.display());
+                        }
+                    }
+                }
                 continue;
             }
 

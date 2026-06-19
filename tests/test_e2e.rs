@@ -3151,3 +3151,87 @@ fn test_e2e_unqualified_keyword_does_not_navigate_to_var() {
         result
     );
 }
+
+#[test]
+fn test_e2e_keyword_navigation_with_cursor_on_colon() {
+    // The whole-keyword nav must work even with the cursor on the leading `:`
+    // of the keyword, not just on the name part.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let config = root.join("resources/config.edn");
+    client.did_open(&config);
+
+    // Column of the leading ':' of `:readx.db/db` (its first appearance).
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (line, col) = text
+        .lines()
+        .enumerate()
+        .find_map(|(i, l)| l.find(":readx.db/db").map(|c| (i as u32, c as u32)))
+        .expect(":readx.db/db not found");
+
+    let result = client.goto_definition(&config, line, col);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("cursor on the ':' should still resolve, got {}", result));
+    assert!(uri.ends_with("/src/readx/db.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_watched_edn_config_keeps_references_fresh() {
+    // An Integrant config edited outside the editor (git pull / branch switch)
+    // is re-indexed via the file watcher, so references reflect the new keys.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    let config = root.join("resources/config.edn");
+    client.did_open(&db);
+
+    // Baseline: 5 references (3 in db.clj + 2 in config.edn).
+    let (line, ch) = position_of(&db, "::db");
+    assert_eq!(
+        client
+            .references(&db, line, ch, true)
+            .as_array()
+            .unwrap()
+            .len(),
+        5,
+        "baseline references"
+    );
+
+    // Rewrite config.edn (no editor save) to drop every :readx.db/db use.
+    std::fs::write(&config, "{:other/x {:v 1}\n :sys {:y #ig/ref :other/x}}\n").unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", config.display()), "type": 2 }] }),
+    );
+
+    // Poll until the stale config.edn occurrences are gone: only the 3 db.clj
+    // locations remain.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let n = client
+            .references(&db, line, ch, true)
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if n == 3 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "references did not refresh after watched EDN change (still {})",
+            n
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
