@@ -163,12 +163,20 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
     }
 }
 
-/// Occurrences for any indexed file, dispatching on extension: EDN configs use
-/// [`extract_edn`]; Clojure sources use the full extractor's occurrence pass.
-/// Used to re-extract open buffers in references/definition.
+/// Occurrences for any indexed file, dispatching on extension: Integrant EDN
+/// configs use [`extract_edn`]; Clojure sources use the full extractor's
+/// occurrence pass. Used to re-extract open buffers in references/definition.
+///
+/// EDN extraction applies the same `#ig/ref` gate as startup/open/save indexing,
+/// so an open build manifest (`deps.edn`, `bb.edn`) never leaks keyword
+/// occurrences into references.
 pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
     if crate::config::is_edn(path) {
-        extract_edn(source)
+        if crate::config::is_integrant_edn(path, source) {
+            extract_edn(source)
+        } else {
+            Vec::new()
+        }
     } else {
         extract_full(source, path)
             .map(|(_, _, occs)| occs)

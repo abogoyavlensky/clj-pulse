@@ -163,9 +163,11 @@ pub fn resolve_fqn_at(
     let text = documents.text(uri)?;
 
     // EDN config files (Integrant systems) have no symbols or aliases; match
-    // the cursor against keyword occurrences only.
+    // the cursor against keyword occurrences only. `file_occurrences` applies
+    // the `#ig/ref` gate, so a cursor in a non-Integrant manifest resolves to
+    // nothing.
     if crate::config::is_edn(&path) {
-        return extractor::extract_edn(&text)
+        return extractor::file_occurrences(&text, &path)
             .into_iter()
             .find(|occ| range_contains(&occ.name_range, pos))
             .map(|occ| occ.fqn);

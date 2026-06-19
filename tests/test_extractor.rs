@@ -713,3 +713,17 @@ fn test_occurrence_qualified_core_form_still_binds_locals() {
         occs
     );
 }
+
+#[test]
+fn test_file_occurrences_gates_non_integrant_edn() {
+    use clj_pulse::index::extractor::file_occurrences;
+    // A non-Integrant manifest (no #ig/ref) contributes no keyword occurrences,
+    // even though it has qualified keys like :mvn/version — so an open deps.edn
+    // never leaks into references.
+    let deps = r#"{:deps {org.clojure/clojure {:mvn/version "1.11.1"}}}"#;
+    assert!(file_occurrences(deps, Path::new("deps.edn")).is_empty());
+
+    // An Integrant config (has #ig/ref) still contributes occurrences.
+    let cfg = "{:my.app/db {} :sys {:db #ig/ref :my.app/db}}";
+    assert!(!file_occurrences(cfg, Path::new("config.edn")).is_empty());
+}
