@@ -715,6 +715,24 @@ fn test_occurrence_qualified_core_form_still_binds_locals() {
 }
 
 #[test]
+fn test_occurrence_qualified_keyword_in_destructuring_recorded() {
+    // A qualified keyword used as a destructuring key is a usage of that key,
+    // in both function-argument and let destructuring.
+    let src = "(ns my.ns)\n(defn f [{db :readx.db/db}] db)\n(let [{x :a/b} {}] x)";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(occurrences_of(&occs, ":a/b").len(), 1, "occs: {:?}", occs);
+    // The bound locals are not occurrences.
+    assert!(occurrences_of(&occs, "my.ns/db").is_empty());
+}
+
+#[test]
 fn test_file_occurrences_gates_non_integrant_edn() {
     use clj_pulse::index::extractor::file_occurrences;
     // A non-Integrant manifest (no #ig/ref) contributes no keyword occurrences,

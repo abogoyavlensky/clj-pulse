@@ -1290,8 +1290,12 @@ fn collect_binding_names(
                         collect_binding_names(*v, ctx, scope, out, names);
                     }
                 } else {
-                    // {pattern :key} — the pattern binds, the key doesn't
+                    // {pattern :key} — the pattern binds; the key is a keyword
+                    // usage (a reference to that key), so record it.
                     collect_binding_names(*k, ctx, scope, out, names);
+                    if v.kind() == "kwd_lit" {
+                        record_keyword_occurrence(*v, ctx, out);
+                    }
                 }
             }
         }
