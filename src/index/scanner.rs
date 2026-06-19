@@ -44,7 +44,7 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf]) -> Result<Index> {
         let Ok(source) = std::fs::read_to_string(&file) else {
             continue;
         };
-        if !crate::config::is_integrant_edn(&file, &source) {
+        if !extractor::is_integrant_edn(&file, &source) {
             continue;
         }
         let occurrences = extractor::extract_edn(&source);

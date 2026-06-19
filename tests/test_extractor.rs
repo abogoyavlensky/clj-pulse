@@ -727,3 +727,28 @@ fn test_file_occurrences_gates_non_integrant_edn() {
     let cfg = "{:my.app/db {} :sys {:db #ig/ref :my.app/db}}";
     assert!(!file_occurrences(cfg, Path::new("config.edn")).is_empty());
 }
+
+#[test]
+fn test_is_integrant_edn_detection() {
+    use clj_pulse::index::extractor::is_integrant_edn;
+
+    // Ref-less system map (no #ig/ref) — detected by namespaced top-level keys.
+    let refless = "{:my.app/db {:url \"x\"}\n :my.app/server {:port 8080}}";
+    assert!(is_integrant_edn(Path::new("resources/config.edn"), refless));
+
+    // System map with #ig/ref.
+    let with_ref = "{:my.app/db {} :sys {:db #ig/ref :my.app/db}}";
+    assert!(is_integrant_edn(Path::new("system.edn"), with_ref));
+
+    // Build manifests are excluded by name, even with namespaced top-level keys
+    // (deps.edn carries :mvn/repos).
+    let deps = "{:paths [\"src\"] :mvn/repos {\"central\" {}}}";
+    assert!(!is_integrant_edn(Path::new("deps.edn"), deps));
+    assert!(!is_integrant_edn(
+        Path::new("bb.edn"),
+        "{:tasks {} :deps {}}"
+    ));
+
+    // A plain EDN data file with only unqualified top-level keys is not a config.
+    assert!(!is_integrant_edn(Path::new("data.edn"), "{:a 1 :b 2}"));
+}

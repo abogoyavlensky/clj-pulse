@@ -327,7 +327,8 @@ impl LanguageServer for Backend {
                         tracing::debug!("failed to index opened {}: {}", path.display(), e)
                     }
                 }
-            } else if config::is_integrant_edn(&path, &text) && self.index.file_ns(&path).is_none()
+            } else if extractor::is_integrant_edn(&path, &text)
+                && self.index.file_ns(&path).is_none()
             {
                 // Integrant config opened from outside the scanned paths.
                 tracing::info!("indexed opened EDN config {}", path.display());
@@ -377,7 +378,7 @@ impl LanguageServer for Backend {
             match std::fs::read_to_string(&path) {
                 Ok(source) => {
                     self.index.remove_file(&path);
-                    if config::is_integrant_edn(&path, &source) {
+                    if extractor::is_integrant_edn(&path, &source) {
                         self.index
                             .insert_edn_file(path.clone(), extractor::extract_edn(&source));
                         tracing::info!("re-indexed EDN config {}", path.display());
@@ -424,7 +425,7 @@ impl LanguageServer for Backend {
                 self.index.remove_file(&path);
                 if event.typ != FileChangeType::DELETED {
                     if let Ok(source) = std::fs::read_to_string(&path) {
-                        if config::is_integrant_edn(&path, &source) {
+                        if extractor::is_integrant_edn(&path, &source) {
                             self.index
                                 .insert_edn_file(path.clone(), extractor::extract_edn(&source));
                             tracing::info!("watched re-index EDN config: {}", path.display());

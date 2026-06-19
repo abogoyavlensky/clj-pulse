@@ -123,6 +123,43 @@ fn collect_qualified(node: Node, source: &str, out: &mut Vec<QualifiedUsage>) {
     }
 }
 
+/// The reader tag that strongly marks an EDN file as an Integrant system.
+const INTEGRANT_REF_TAG: &str = "#ig/ref";
+
+/// Whether `path` is an EDN file that looks like an Integrant system config: not
+/// a build manifest, and either containing an `#ig/ref` tag or a top-level map
+/// keyed by namespaced keywords. The structural check catches ref-less systems
+/// (independent components with no `#ig/ref`); manifests are excluded by name.
+pub fn is_integrant_edn(path: &Path, source: &str) -> bool {
+    crate::config::is_edn(path)
+        && !crate::config::is_build_manifest(path)
+        && (source.contains(INTEGRANT_REF_TAG) || has_namespaced_top_level_key(source))
+}
+
+/// Whether the first top-level map in `source` has any namespaced-keyword key —
+/// the structural signature of an Integrant system map. (Manifests like
+/// `deps.edn`/`bb.edn` use unqualified top-level keys.)
+fn has_namespaced_top_level_key(source: &str) -> bool {
+    let mut parser = Parser::new();
+    if parser.set_language(language()).is_err() {
+        return false;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return false;
+    };
+    for top in named_children(tree.root_node()) {
+        if top.kind() != "map_lit" {
+            continue;
+        }
+        // map_lit children alternate key, value, …; keys are the even indices.
+        return named_children(top)
+            .iter()
+            .step_by(2)
+            .any(|key| key.kind() == "kwd_lit" && key.child_by_field_name("namespace").is_some());
+    }
+    false
+}
+
 /// Extracts qualified keyword occurrences from an EDN file (Integrant/Aero
 /// system configs). EDN has no `ns` form or `::` auto-resolution, so only
 /// literal `:ns/name` keywords qualify — an empty `NsMeta` makes `keyword_fqn`
@@ -172,7 +209,7 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
 /// occurrences into references.
 pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
     if crate::config::is_edn(path) {
-        if crate::config::is_integrant_edn(path, source) {
+        if is_integrant_edn(path, source) {
             extract_edn(source)
         } else {
             Vec::new()

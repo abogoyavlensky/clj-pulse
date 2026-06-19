@@ -39,15 +39,15 @@ pub fn is_edn(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("edn")
 }
 
-/// The reader tag that marks an EDN file as an Integrant system config. Build
-/// manifests (`deps.edn`, `bb.edn`, `shadow-cljs.edn`) lack it.
-const INTEGRANT_REF_TAG: &str = "#ig/ref";
-
-/// Whether `path` is an EDN file whose contents look like an Integrant system
-/// config — the gate for indexing keyword occurrences from EDN. Cheap substring
-/// check; keeps build manifests out of the keyword index.
-pub fn is_integrant_edn(path: &Path, source: &str) -> bool {
-    is_edn(path) && source.contains(INTEGRANT_REF_TAG)
+/// Whether `path` is a build manifest by filename. These are EDN but must never
+/// be indexed for keyword navigation — and some (`deps.edn` with `:mvn/repos`)
+/// even carry namespaced top-level keys, so a structural check alone can't tell
+/// them apart from an Integrant config. Excluded by name instead.
+pub fn is_build_manifest(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("deps.edn") | Some("bb.edn") | Some("shadow-cljs.edn") | Some("lgx.edn")
+    )
 }
 
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {

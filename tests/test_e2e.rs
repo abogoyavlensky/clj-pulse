@@ -3182,6 +3182,37 @@ fn test_e2e_keyword_navigation_with_cursor_on_colon() {
 }
 
 #[test]
+fn test_e2e_integrant_refless_config_navigates() {
+    // A ref-less Integrant config (no #ig/ref anywhere) must still navigate from
+    // a component key to its `ig/init-key` defmethod.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let db = root.join("src/sys/db.clj");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    std::fs::write(
+        &db,
+        "(ns sys.db\n  (:require [integrant.core :as ig]))\n(defmethod ig/init-key ::conn [_ o] o)\n",
+    )
+    .unwrap();
+    let cfg = root.join("resources/sys.edn");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    std::fs::write(&cfg, "{:sys.db/conn {:url \"x\"}}\n").unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&cfg);
+
+    let (line, ch) = position_of(&cfg, ":sys.db/conn");
+    let result = client.goto_definition(&cfg, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ref-less config should navigate, got {}", result));
+    assert!(uri.ends_with("/src/sys/db.clj"), "got {}", uri);
+}
+
+#[test]
 fn test_e2e_watched_edn_config_keeps_references_fresh() {
     // An Integrant config edited outside the editor (git pull / branch switch)
     // is re-indexed via the file watcher, so references reflect the new keys.
