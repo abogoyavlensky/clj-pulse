@@ -3266,3 +3266,36 @@ fn test_e2e_watched_edn_config_keeps_references_fresh() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn test_e2e_references_spec_keyword_def_and_usage() {
+    // find-references on a clojure.spec keyword spans its `s/def` site and every
+    // `:req-un`/usage — mirrors tickets/handlers.clj.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let f = root.join("src/handlers.clj");
+    std::fs::write(
+        &f,
+        "(ns app.handlers\n  (:require [clojure.spec.alpha :as s]))\n\
+         (s/def :ticket/id integer?)\n\
+         (s/def ::ticket-out\n  (s/keys :req-un [:ticket/id]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&f);
+
+    // From the `s/def` site, and again from the `:req-un` usage — both resolve
+    // to the same two locations.
+    for needle in [":ticket/id", "[:ticket/id]"] {
+        let (line, ch) = position_of(&f, needle);
+        let result = client.references(&f, line, ch, true);
+        let locs = result
+            .as_array()
+            .unwrap_or_else(|| panic!("references null from {:?}: {}", needle, result));
+        assert_eq!(locs.len(), 2, "from {:?}: {:?}", needle, locs);
+    }
+}
