@@ -196,6 +196,27 @@ impl LspClient {
         result
     }
 
+    /// Zed-shaped startup: only `workspaceFolders` (no deprecated `rootUri`),
+    /// offering UTF-8 then UTF-16 position encodings — what Zed's LSP client
+    /// sends. Exercises the same indexing path real Zed users hit.
+    fn initialize_zed(&mut self, root: &Path) -> Value {
+        let root_uri = format!("file://{}", root.display());
+        let result = self.request(
+            "initialize",
+            json!({
+                "processId": std::process::id(),
+                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
+                "capabilities": {
+                    "textDocument": { "definition": { "linkSupport": true } },
+                    "general": { "positionEncodings": ["utf-8", "utf-16"] }
+                }
+            }),
+        );
+        self.notify("initialized", json!({}));
+        self.wait_for_log("Indexed");
+        result
+    }
+
     fn did_open(&mut self, path: &Path) {
         let text = std::fs::read_to_string(path).unwrap();
         self.notify(
@@ -3298,4 +3319,81 @@ fn test_e2e_references_spec_keyword_def_and_usage() {
             .unwrap_or_else(|| panic!("references null from {:?}: {}", needle, result));
         assert_eq!(locs.len(), 2, "from {:?}: {:?}", needle, locs);
     }
+}
+
+#[test]
+fn test_e2e_zed_client_cross_file_definition() {
+    // Under a Zed-shaped init (workspaceFolders, no rootUri), cross-file
+    // goto-definition must resolve — the regression that broke Zed navigation.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize_zed(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let def = client.goto_definition(&utils, line, ch);
+    let uri = def["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("zed cross-file definition failed: {}", def));
+    assert!(uri.ends_with("/src/core.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_zed_client_hover_and_completion() {
+    // Hover and completion must work under a Zed-shaped client — both need the
+    // project (not just the open file) indexed.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize_zed(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+
+    // Cross-file docstring on hover.
+    let hov = client.hover(&utils, line, ch);
+    let val = hov["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("zed hover returned null: {}", hov));
+    assert!(val.contains("Adds two numbers."), "zed hover doc: {}", val);
+
+    // Alias-prefixed completion.
+    let comp = client.completion(&utils, line, ch);
+    let labels: Vec<&str> = comp
+        .as_array()
+        .unwrap_or_else(|| panic!("zed completion returned null: {}", comp))
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(labels.contains(&"core/add"), "zed completion: {:?}", labels);
+}
+
+#[test]
+fn test_e2e_zed_client_cross_file_references() {
+    // find-references across files must work under a Zed-shaped client.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize_zed(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+
+    // `add` is defined in core.clj and used as `core/add` in utils.clj.
+    let (line, ch) = position_of(&core, "add");
+    let refs = client.references(&core, line, ch, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("zed references returned null: {}", refs));
+    assert_eq!(locs.len(), 2, "decl + cross-file usage: {:?}", locs);
+    let uris: Vec<&str> = locs.iter().filter_map(|l| l["uri"].as_str()).collect();
+    assert!(uris.iter().any(|u| u.ends_with("/src/core.clj")));
+    assert!(uris.iter().any(|u| u.ends_with("/src/utils.clj")));
 }

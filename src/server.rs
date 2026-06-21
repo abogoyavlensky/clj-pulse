@@ -154,11 +154,30 @@ impl Backend {
 /// Idle time after the last edit before re-linting a changed document.
 const DIAGNOSTIC_DEBOUNCE_MS: u64 = 300;
 
+/// The project root from an `initialize` request. Prefers the modern
+/// `workspaceFolders` over the deprecated `rootUri`: newer clients (Zed and
+/// others) send only `workspaceFolders`, and reading just `rootUri` left the
+/// project unindexed — so same-file navigation worked but cross-file silently
+/// failed.
+fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
+    params
+        .workspace_folders
+        .as_ref()
+        .and_then(|folders| folders.first())
+        .and_then(|folder| folder.uri.to_file_path().ok())
+        .or_else(|| {
+            params
+                .root_uri
+                .as_ref()
+                .and_then(|uri| uri.to_file_path().ok())
+        })
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        if let Some(root_uri) = params.root_uri {
-            if let Ok(root_path) = root_uri.to_file_path() {
+        if let Some(root_path) = initialize_root(&params) {
+            {
                 *self.root.lock().unwrap() = Some(root_path.clone());
                 let index = self.index.clone();
                 let client = self.client.clone();
