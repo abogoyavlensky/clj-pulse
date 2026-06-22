@@ -16,13 +16,6 @@ pub fn handle(
     let uri = params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
 
-    let word = match documents.word_at(&uri, pos) {
-        Some(w) => w,
-        None => return Ok(None),
-    };
-
-    tracing::info!("goto_definition: word={}", word);
-
     // Works whether the open document is a project file, a directory-library
     // file (`file:` URIs), or a JAR entry (`jar:` URIs → virtual index path) —
     // the latter is what lets navigation continue into transitive deps.
@@ -37,20 +30,14 @@ pub fn handle(
         }
     };
     let current_ns = index.file_ns(&path).unwrap_or_default();
-    tracing::debug!(
-        "goto_definition: uri={} index_path={} current_ns={:?}",
-        uri.as_str(),
-        path.display(),
-        current_ns
-    );
 
-    // Prefer the definition/occurrence resolved at this exact position when it
-    // points at a known symbol. This is context-aware — a protocol method impl
-    // resolves to the protocol's declaration even when the bare name also names
-    // a core/current-ns var — and is computed from the live buffer (like
-    // references/rename), so unsaved edits resolve correctly. When it doesn't
-    // resolve to a known symbol, fall through to the bare-word resolver, which
-    // also handles aliases, namespaces, and the static core list.
+    // Position-aware resolution first. It is context-aware — a protocol method
+    // impl resolves to the protocol's declaration even when the bare name also
+    // names a core/current-ns var — computed from the live buffer (like
+    // references/rename) so unsaved edits resolve correctly, and it works even
+    // when the cursor sits on a keyword's `:`/`::` marker, where there is no
+    // word token. When it doesn't resolve to a known symbol, fall through to the
+    // bare-word resolver, which also handles aliases, namespaces, and core.
     let resolved = super::references::resolve_fqn_at(index, documents, &uri, pos);
     tracing::debug!("goto_definition: resolved={:?}", resolved);
     if let Some(fqn) = resolved {
@@ -58,7 +45,25 @@ pub fn handle(
             let location = location_for(&sym.file, sym.name_range)?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
+        // A resolved keyword (colon-prefixed fqn) has no var counterpart; never
+        // fall through to bare-word resolution, which would match a same-named
+        // var (`::counter` → `(defn counter …)`).
+        if fqn.starts_with(':') {
+            return Ok(None);
+        }
     }
+    // Unqualified keywords aren't recorded, so `resolve_fqn_at` returns None for
+    // them; the token check still stops `:counter` from resolving to a var.
+    if documents.is_keyword_at(&uri, pos) {
+        return Ok(None);
+    }
+
+    // Bare-word resolution (var / alias / namespace) needs a word token.
+    let word = match documents.word_at(&uri, pos) {
+        Some(w) => w,
+        None => return Ok(None),
+    };
+    tracing::info!("goto_definition: word={}", word);
 
     match resolve_symbol(index, &word, &current_ns) {
         Some(ResolvedSymbol::Project(sym)) => {

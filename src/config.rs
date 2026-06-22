@@ -34,6 +34,22 @@ pub fn is_clojure_source(path: &Path) -> bool {
     )
 }
 
+/// Whether `path` has an `.edn` extension.
+pub fn is_edn(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("edn")
+}
+
+/// Whether `path` is a build manifest by filename. These are EDN but must never
+/// be indexed for keyword navigation — and some (`deps.edn` with `:mvn/repos`)
+/// even carry namespaced top-level keys, so a structural check alone can't tell
+/// them apart from an Integrant config. Excluded by name instead.
+pub fn is_build_manifest(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("deps.edn") | Some("bb.edn") | Some("shadow-cljs.edn") | Some("lgx.edn")
+    )
+}
+
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_file() {
         start.parent()?.to_path_buf()

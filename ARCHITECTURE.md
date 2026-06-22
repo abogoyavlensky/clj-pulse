@@ -17,6 +17,18 @@ scanner.rs: rayon::par_iter → call extractor::extract(file_contents) per file
 extractor.rs: tree-sitter parse → return (NsMeta, Vec<Symbol>)
 scanner.rs: merge results into Arc<Index> via DashMap inserts
 
+## Keyword & Integrant Indexing
+
+extractor.rs: qualified keywords (`:ns/name`, `::name`, `::alias/name`) are
+  recorded as occurrences with colon-prefixed fqns (`:ns/name`), keyed disjointly
+  from var fqns. Only qualified keywords are indexed.
+extractor.rs: `(defmethod ig/init-key ::x …)` records `:ns/x` as an IntegrantKey
+  *definition* (`DefKind::IntegrantKey`); the other lifecycle defmethods and all
+  config uses are occurrences, so goto-definition lands on the constructor.
+scanner.rs: EDN files under `:paths` containing `#ig/ref` are scanned for keyword
+  occurrences (`extract_edn`) and inserted via `Index::insert_edn_file`
+  (occurrences only) — this links a `config.edn` component key to its defmethod.
+
 ## Index Re-population (on file save)
 
 server.rs didSave handler
@@ -43,3 +55,8 @@ word under cursor (from DocumentStore / ropey)
 - server.rs handlers are max ~15 lines each, all logic in handlers/
 - All LSP Position/Range values come from ropey, never manual byte arithmetic
 - On any parse failure: log warning, return Ok(empty) — never crash
+- Keyword fqns are colon-prefixed (`:ns/name`) so they never collide with var
+  fqns; keyword occurrences span the whole keyword token (navigation-only — the
+  rename path rejects keyword fqns).
+- EDN config files contribute occurrences only (no namespace, no symbols),
+  registered under a NUL sentinel ns in `file_to_ns` so re-scans keep them.

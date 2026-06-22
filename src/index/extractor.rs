@@ -123,6 +123,104 @@ fn collect_qualified(node: Node, source: &str, out: &mut Vec<QualifiedUsage>) {
     }
 }
 
+/// The reader tag that strongly marks an EDN file as an Integrant system.
+const INTEGRANT_REF_TAG: &str = "#ig/ref";
+
+/// Whether `path` is an EDN file that looks like an Integrant system config: not
+/// a build manifest, and either containing an `#ig/ref` tag or a top-level map
+/// keyed by namespaced keywords. The structural check catches ref-less systems
+/// (independent components with no `#ig/ref`); manifests are excluded by name.
+pub fn is_integrant_edn(path: &Path, source: &str) -> bool {
+    crate::config::is_edn(path)
+        && !crate::config::is_build_manifest(path)
+        && (source.contains(INTEGRANT_REF_TAG) || has_namespaced_top_level_key(source))
+}
+
+/// Whether the first top-level map in `source` has any namespaced-keyword key —
+/// the structural signature of an Integrant system map. (Manifests like
+/// `deps.edn`/`bb.edn` use unqualified top-level keys.)
+fn has_namespaced_top_level_key(source: &str) -> bool {
+    let mut parser = Parser::new();
+    if parser.set_language(language()).is_err() {
+        return false;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return false;
+    };
+    for top in named_children(tree.root_node()) {
+        if top.kind() != "map_lit" {
+            continue;
+        }
+        // map_lit children alternate key, value, …; keys are the even indices.
+        return named_children(top)
+            .iter()
+            .step_by(2)
+            .any(|key| key.kind() == "kwd_lit" && key.child_by_field_name("namespace").is_some());
+    }
+    false
+}
+
+/// Extracts qualified keyword occurrences from an EDN file (Integrant/Aero
+/// system configs). EDN has no `ns` form or `::` auto-resolution, so only
+/// literal `:ns/name` keywords qualify — an empty `NsMeta` makes `keyword_fqn`
+/// drop `::`/unqualified keywords. Keywords nested in tagged literals
+/// (`#ig/ref :ns/x`), maps, and vectors are all reached by the generic descent.
+pub fn extract_edn(source: &str) -> Vec<Occurrence> {
+    let mut parser = Parser::new();
+    if parser.set_language(language()).is_err() {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let empty = NsMeta {
+        name: String::new(),
+        file: std::path::PathBuf::new(),
+        aliases: HashMap::new(),
+        refers: HashMap::new(),
+        requires: Vec::new(),
+    };
+    let mut out = Vec::new();
+    collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
+    out
+}
+
+fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<Occurrence>) {
+    if node.kind() == "kwd_lit" {
+        if let Some(fqn) = keyword_fqn(node, ns_meta, source) {
+            out.push(Occurrence {
+                fqn,
+                name_range: node_to_lsp_range(node, source),
+            });
+        }
+        return;
+    }
+    for child in named_children(node) {
+        collect_edn_keywords(child, source, ns_meta, out);
+    }
+}
+
+/// Occurrences for any indexed file, dispatching on extension: Integrant EDN
+/// configs use [`extract_edn`]; Clojure sources use the full extractor's
+/// occurrence pass. Used to re-extract open buffers in references/definition.
+///
+/// EDN extraction applies the same `#ig/ref` gate as startup/open/save indexing,
+/// so an open build manifest (`deps.edn`, `bb.edn`) never leaks keyword
+/// occurrences into references.
+pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
+    if crate::config::is_edn(path) {
+        if is_integrant_edn(path, source) {
+            extract_edn(source)
+        } else {
+            Vec::new()
+        }
+    } else {
+        extract_full(source, path)
+            .map(|(_, _, occs)| occs)
+            .unwrap_or_default()
+    }
+}
+
 /// Like [`extract`] but also collects every resolved symbol usage
 /// (occurrences) in a second pass over the same parse tree.
 pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
@@ -214,7 +312,11 @@ fn process_top_level_list(
     if first_text == "ns" {
         extract_ns(&children, source, ns_meta);
     } else if let Some(kind) = str_to_defkind(first_text) {
+        let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
+        if is_defmethod {
+            extract_integrant_key(node, &children, source, file, ns_meta, symbols);
+        }
     }
 }
 
@@ -406,6 +508,72 @@ fn extract_def(
     }
 }
 
+/// The Integrant lifecycle multimethod whose `defmethod` we treat as the
+/// canonical *definition* of a component keyword. Other lifecycle methods
+/// (`halt-key!`, `assert-key`, …) dispatch on the same keyword but are recorded
+/// as occurrences, so go-to-definition lands on the constructor.
+const INTEGRANT_INIT_KEY: &str = "integrant.core/init-key";
+
+/// Resolves the multimethod a `defmethod` extends to its fqn (e.g.
+/// `integrant.core/init-key`) — the single hook point for keyword-defining
+/// macros (re-frame `reg-*`, spec `s/def` would slot in here). A qualified head
+/// resolves its `:as` alias; a bare head resolves a `:refer`. `None` when the
+/// head is missing or unresolvable.
+fn defmethod_multifn_fqn(children: &[Node], ns_meta: &NsMeta, source: &str) -> Option<String> {
+    let head = children.get(1).filter(|n| n.kind() == "sym_lit")?;
+    let name = node_text(sym_name_node(*head), source);
+    if let Some(ns_node) = head.child_by_field_name("namespace") {
+        let alias = node_text(ns_node, source);
+        let ns = ns_meta
+            .aliases
+            .get(alias)
+            .map(String::as_str)
+            .unwrap_or(alias);
+        Some(format!("{}/{}", ns, name))
+    } else {
+        ns_meta.refers.get(name).cloned()
+    }
+}
+
+/// Records `(defmethod ig/init-key ::x …)` as the definition of the Integrant
+/// component keyword `:ns/x`. No-op for any other multimethod or a non-qualified
+/// dispatch value.
+fn extract_integrant_key(
+    form_node: Node,
+    children: &[Node],
+    source: &str,
+    file: &Path,
+    ns_meta: &NsMeta,
+    symbols: &mut Vec<Symbol>,
+) {
+    if defmethod_multifn_fqn(children, ns_meta, source).as_deref() != Some(INTEGRANT_INIT_KEY) {
+        return;
+    }
+    let Some(dispatch) = children.get(2).filter(|n| n.kind() == "kwd_lit") else {
+        return;
+    };
+    let Some(fqn) = keyword_fqn(*dispatch, ns_meta, source) else {
+        return;
+    };
+
+    // `fqn` is `:ns/name`; split off the colon to fill the ns/name fields.
+    let (ns, name) = fqn[1..].rsplit_once('/').unwrap_or(("", &fqn[1..]));
+    symbols.push(Symbol {
+        name: name.to_string(),
+        fqn: fqn.clone(),
+        ns: ns.to_string(),
+        kind: DefKind::IntegrantKey,
+        params: Vec::new(),
+        doc: None,
+        file: file.to_path_buf(),
+        source: super::SymbolSource::Project,
+        range: node_to_lsp_range(form_node, source),
+        // Whole-keyword range so goto-definition lands on (and references list)
+        // the full `::name` dispatch token.
+        name_range: node_to_lsp_range(*dispatch, source),
+    });
+}
+
 /// Extracts each method signature of a `defprotocol` as a `Defn` symbol.
 /// `rest` is the protocol form's children after the name; method signatures are
 /// the `list_lit`s among them — a leading doc string and `:option value` pairs
@@ -514,6 +682,44 @@ pub(crate) fn point_to_position(
     }
 }
 
+// --- keyword resolution ----------------------------------------------------
+
+/// Resolves a `kwd_lit` node to its canonical colon-prefixed fqn (`:ns/name`),
+/// or `None` for an unqualified keyword (`:foo`, which is too ambiguous to
+/// index cross-file). The leading `:` keeps keyword fqns from ever colliding
+/// with var fqns (`ns/name`) in the index.
+///
+/// Auto-resolved keywords (`::`) resolve their namespace: bare `::foo` uses the
+/// current namespace, `::alias/foo` resolves the alias. A single-colon
+/// namespace (`:lib.ns/foo`) is literal and never alias-resolved.
+fn keyword_fqn(node: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
+    let name = node_text(node.child_by_field_name("name")?, source);
+    let auto_resolved = node
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, source) == "::")
+        .unwrap_or(false);
+
+    match node.child_by_field_name("namespace") {
+        Some(ns_node) => {
+            let ns = node_text(ns_node, source);
+            let ns = if auto_resolved {
+                ns_meta.aliases.get(ns).map(String::as_str).unwrap_or(ns)
+            } else {
+                ns
+            };
+            Some(format!(":{}/{}", ns, name))
+        }
+        None if auto_resolved => {
+            if ns_meta.name.is_empty() {
+                None
+            } else {
+                Some(format!(":{}/{}", ns_meta.name, name))
+            }
+        }
+        None => None,
+    }
+}
+
 // --- occurrence collection -------------------------------------------------
 
 struct OccurrenceCtx<'a> {
@@ -560,6 +766,10 @@ fn walk_occurrences(
 ) {
     match node.kind() {
         "sym_lit" => record_occurrence(node, ctx, scope, out),
+        // Every qualified keyword is a usage (`:lib/x`, `::x`, `::alias/x`);
+        // unqualified ones are skipped by `keyword_fqn`. This powers keyword
+        // references and feeds Integrant component navigation.
+        "kwd_lit" => record_keyword_occurrence(node, ctx, out),
         "list_lit" => walk_list(node, ctx, scope, out),
         // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
         // macros do reference real vars, so walk those.
@@ -568,6 +778,25 @@ fn walk_occurrences(
             for child in named_children(node) {
                 walk_occurrences(child, ctx, scope, out);
             }
+        }
+    }
+}
+
+/// Whether a `sym_lit` list head names a core/special form: unqualified, or
+/// qualified to `clojure.core` (directly or via an `:as` alias). Keeps
+/// `clojure.core/let` binding locals while excluding `s/def` and friends.
+fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
+    match head.child_by_field_name("namespace") {
+        None => true,
+        Some(ns_node) => {
+            let alias = node_text(ns_node, ctx.source);
+            let resolved = ctx
+                .ns_meta
+                .aliases
+                .get(alias)
+                .map(String::as_str)
+                .unwrap_or(alias);
+            resolved == "clojure.core"
         }
     }
 }
@@ -581,7 +810,14 @@ fn walk_list(
     let children = named_children(node);
     let Some(head) = children.first() else { return };
 
-    let head_text = if head.kind() == "sym_lit" {
+    // A head names a core/special form only when it is unqualified or qualified
+    // to `clojure.core`. Matching on the name part alone would misread a
+    // qualified call like `s/def` as core `def` (skipping the keyword in its
+    // "name" slot); requiring clojure.core still handles a `clojure.core/let`
+    // (or an alias to it) as a real binding form. Other qualified heads fall
+    // through to the generic walk, which records them and every argument
+    // (including keywords) as occurrences.
+    let head_text = if head.kind() == "sym_lit" && head_is_core_form(*head, ctx) {
         Some(sym_text(*head, ctx.source))
     } else {
         None
@@ -699,7 +935,17 @@ fn walk_def_form(
             record_occurrence(*name, ctx, scope, out);
         }
         if let Some(dispatch) = children.get(2) {
-            walk_occurrences(*dispatch, ctx, scope, out);
+            // The `ig/init-key` dispatch keyword is the component's *definition*
+            // (recorded as an IntegrantKey symbol in the symbol pass); skip it
+            // here so references doesn't list the declaration twice. Every other
+            // dispatch keyword falls through to the general keyword arm.
+            let is_init_key_def = dispatch.kind() == "kwd_lit"
+                && defmethod_multifn_fqn(children, ctx.ns_meta, ctx.source).as_deref()
+                    == Some(INTEGRANT_INIT_KEY)
+                && keyword_fqn(*dispatch, ctx.ns_meta, ctx.source).is_some();
+            if !is_init_key_def {
+                walk_occurrences(*dispatch, ctx, scope, out);
+            }
         }
         rest_start = 3;
     }
@@ -1044,8 +1290,12 @@ fn collect_binding_names(
                         collect_binding_names(*v, ctx, scope, out, names);
                     }
                 } else {
-                    // {pattern :key} — the pattern binds, the key doesn't
+                    // {pattern :key} — the pattern binds; the key is a keyword
+                    // usage (a reference to that key), so record it.
                     collect_binding_names(*k, ctx, scope, out, names);
+                    if v.kind() == "kwd_lit" {
+                        record_keyword_occurrence(*v, ctx, out);
+                    }
                 }
             }
         }
@@ -1163,6 +1413,18 @@ fn record_occurrence(
     out.push(Occurrence { fqn, name_range });
 }
 
+/// Records a qualified keyword usage. The range spans the whole keyword token
+/// so navigation resolves from a click anywhere on `:ns/name` / `::name`
+/// (keyword rename is unsupported in v1, so a name-only range buys nothing).
+fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
+    if let Some(fqn) = keyword_fqn(node, ctx.ns_meta, ctx.source) {
+        out.push(Occurrence {
+            fqn,
+            name_range: node_to_lsp_range(node, ctx.source),
+        });
+    }
+}
+
 fn str_to_defkind(s: &str) -> Option<DefKind> {
     match s {
         "def" => Some(DefKind::Def),
@@ -1176,5 +1438,82 @@ fn str_to_defkind(s: &str) -> Option<DefKind> {
         "defrecord" => Some(DefKind::Defrecord),
         "deftype" => Some(DefKind::Deftype),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(source: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    fn find_kwd(node: Node) -> Option<Node> {
+        if node.kind() == "kwd_lit" {
+            return Some(node);
+        }
+        for child in named_children(node) {
+            if let Some(found) = find_kwd(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Resolves the first keyword in `source` against a namespace `ns` with the
+    /// given `:as` aliases.
+    fn resolve_kwd(source: &str, ns: &str, aliases: &[(&str, &str)]) -> Option<String> {
+        let tree = parse(source);
+        let kwd = find_kwd(tree.root_node()).expect("no kwd_lit in source");
+        let meta = NsMeta {
+            name: ns.to_string(),
+            file: std::path::PathBuf::new(),
+            aliases: aliases
+                .iter()
+                .map(|(a, f)| (a.to_string(), f.to_string()))
+                .collect(),
+            refers: HashMap::new(),
+            requires: Vec::new(),
+        };
+        keyword_fqn(kwd, &meta, source)
+    }
+
+    #[test]
+    fn keyword_fqn_auto_resolves_bare_to_current_ns() {
+        assert_eq!(
+            resolve_kwd("::db", "readx.db", &[]),
+            Some(":readx.db/db".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_fqn_auto_resolves_alias() {
+        assert_eq!(
+            resolve_kwd("::db2/x", "readx.db", &[("db2", "other.db")]),
+            Some(":other.db/x".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_fqn_single_colon_namespace_is_literal() {
+        // No alias resolution for `:lib/x`; the namespace is taken verbatim
+        // even when an alias of the same name exists.
+        assert_eq!(
+            resolve_kwd(":lit.ns/x", "readx.db", &[("lit.ns", "should.not.win")]),
+            Some(":lit.ns/x".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_fqn_unqualified_is_none() {
+        assert_eq!(resolve_kwd(":plain", "readx.db", &[]), None);
+    }
+
+    #[test]
+    fn keyword_fqn_auto_without_ns_or_current_ns_is_none() {
+        assert_eq!(resolve_kwd("::x", "", &[]), None);
     }
 }

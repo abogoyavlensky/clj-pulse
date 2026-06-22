@@ -13,7 +13,8 @@ use super::{NsMeta, Symbol};
 ///
 /// 7: `.impl`/`.internal` namespaces are now indexed (previously skipped).
 /// 8: private (`defn-`) library symbols are now indexed (previously skipped).
-pub const CACHE_FORMAT_VERSION: u32 = 8;
+/// 9: `DefKind::IntegrantKey` added (Symbol layout change).
+pub const CACHE_FORMAT_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

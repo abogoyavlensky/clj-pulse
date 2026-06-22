@@ -154,11 +154,30 @@ impl Backend {
 /// Idle time after the last edit before re-linting a changed document.
 const DIAGNOSTIC_DEBOUNCE_MS: u64 = 300;
 
+/// The project root from an `initialize` request. Prefers the modern
+/// `workspaceFolders` over the deprecated `rootUri`: newer clients (Zed and
+/// others) send only `workspaceFolders`, and reading just `rootUri` left the
+/// project unindexed — so same-file navigation worked but cross-file silently
+/// failed.
+fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
+    params
+        .workspace_folders
+        .as_ref()
+        .and_then(|folders| folders.first())
+        .and_then(|folder| folder.uri.to_file_path().ok())
+        .or_else(|| {
+            params
+                .root_uri
+                .as_ref()
+                .and_then(|uri| uri.to_file_path().ok())
+        })
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        if let Some(root_uri) = params.root_uri {
-            if let Ok(root_path) = root_uri.to_file_path() {
+        if let Some(root_path) = initialize_root(&params) {
+            {
                 *self.root.lock().unwrap() = Some(root_path.clone());
                 let index = self.index.clone();
                 let client = self.client.clone();
@@ -279,11 +298,10 @@ impl LanguageServer for Backend {
                 kind: None,
             },
             FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/deps.edn".to_string()),
-                kind: None,
-            },
-            FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/lgx.edn".to_string()),
+                // All EDN files: manifests (deps.edn / lgx.edn → classpath) and
+                // Integrant system configs (→ keyword occurrences). The handler
+                // routes each by name/content.
+                glob_pattern: GlobPattern::String("**/*.edn".to_string()),
                 kind: None,
             },
             FileSystemWatcher {
@@ -328,6 +346,13 @@ impl LanguageServer for Backend {
                         tracing::debug!("failed to index opened {}: {}", path.display(), e)
                     }
                 }
+            } else if extractor::is_integrant_edn(&path, &text)
+                && self.index.file_ns(&path).is_none()
+            {
+                // Integrant config opened from outside the scanned paths.
+                tracing::info!("indexed opened EDN config {}", path.display());
+                self.index
+                    .insert_edn_file(path.clone(), extractor::extract_edn(&text));
             }
         }
 
@@ -365,6 +390,21 @@ impl LanguageServer for Backend {
                 }
                 Err(e) => tracing::warn!("failed to read {}: {}", path.display(), e),
             }
+        } else if config::is_edn(&path) {
+            // Re-index Integrant EDN configs. The file is always removed first
+            // (so an edit that drops `#ig/ref` de-indexes it) and re-inserted
+            // only when it still looks like an Integrant system.
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    self.index.remove_file(&path);
+                    if extractor::is_integrant_edn(&path, &source) {
+                        self.index
+                            .insert_edn_file(path.clone(), extractor::extract_edn(&source));
+                        tracing::info!("re-indexed EDN config {}", path.display());
+                    }
+                }
+                Err(e) => tracing::warn!("failed to read {}: {}", path.display(), e),
+            }
         }
 
         let version = self.documents.current_version(&uri).unwrap_or(0);
@@ -392,6 +432,25 @@ impl LanguageServer for Backend {
             }
             if path.components().any(|c| c.as_os_str() == ".cpcache") {
                 classpath_changed = true;
+                continue;
+            }
+
+            // Integrant EDN configs: keep keyword occurrences fresh on external
+            // edits (git pull / branch switch). Remove first so dropping
+            // `#ig/ref` — or the file — de-indexes it; re-insert only when it
+            // still looks like an Integrant system. Manifests (deps.edn/lgx.edn)
+            // already `continue`d above as classpath changes.
+            if config::is_edn(&path) {
+                self.index.remove_file(&path);
+                if event.typ != FileChangeType::DELETED {
+                    if let Ok(source) = std::fs::read_to_string(&path) {
+                        if extractor::is_integrant_edn(&path, &source) {
+                            self.index
+                                .insert_edn_file(path.clone(), extractor::extract_edn(&source));
+                            tracing::info!("watched re-index EDN config: {}", path.display());
+                        }
+                    }
+                }
                 continue;
             }
 

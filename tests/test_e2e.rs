@@ -196,6 +196,27 @@ impl LspClient {
         result
     }
 
+    /// Zed-shaped startup: only `workspaceFolders` (no deprecated `rootUri`),
+    /// offering UTF-8 then UTF-16 position encodings — what Zed's LSP client
+    /// sends. Exercises the same indexing path real Zed users hit.
+    fn initialize_zed(&mut self, root: &Path) -> Value {
+        let root_uri = format!("file://{}", root.display());
+        let result = self.request(
+            "initialize",
+            json!({
+                "processId": std::process::id(),
+                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
+                "capabilities": {
+                    "textDocument": { "definition": { "linkSupport": true } },
+                    "general": { "positionEncodings": ["utf-8", "utf-16"] }
+                }
+            }),
+        );
+        self.notify("initialized", json!({}));
+        self.wait_for_log("Indexed");
+        result
+    }
+
     fn did_open(&mut self, path: &Path) {
         let text = std::fs::read_to_string(path).unwrap();
         self.notify(
@@ -3018,4 +3039,361 @@ fn test_e2e_rename_rejected_from_library_file() {
         "expected a library-file rejection, got {}",
         err
     );
+}
+
+#[test]
+fn test_e2e_integrant_goto_definition_from_config() {
+    // The headline feature: from a namespaced keyword in an Integrant
+    // `config.edn` system map, navigate to its `(defmethod ig/init-key ::db …)`.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let config = root.join("resources/config.edn");
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&config);
+
+    // Cursor on the `:readx.db/db` map key.
+    let (line, ch) = position_of(&config, ":readx.db/db");
+    let result = client.goto_definition(&config, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no def for :readx.db/db: {}", result));
+    assert!(uri.ends_with("/src/readx/db.clj"), "got {}", uri);
+
+    // Lands on the ig/init-key defmethod line — not assert-key or halt-key!.
+    let (init_line, _) = position_of(&db, "ig/init-key");
+    assert_eq!(result["range"]["start"]["line"], json!(init_line));
+}
+
+#[test]
+fn test_e2e_integrant_references_span_defmethods_and_config() {
+    // References on the component keyword reach every lifecycle defmethod plus
+    // the config-map key and the `#ig/ref`.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    // First `::db` in db.clj is the assert-key dispatch (an occurrence); it
+    // resolves to the same `:readx.db/db` as the init-key definition.
+    let (line, ch) = position_of(&db, "::db");
+    let result = client.references(&db, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", result));
+
+    // 3 in db.clj (init-key declaration + assert-key + halt-key! occurrences),
+    // 2 in resources/config.edn (the map key + the `#ig/ref` value).
+    assert_eq!(locs.len(), 5, "locs: {:?}", locs);
+    let uris: Vec<&str> = locs.iter().filter_map(|l| l["uri"].as_str()).collect();
+    assert_eq!(
+        uris.iter()
+            .filter(|u| u.ends_with("/src/readx/db.clj"))
+            .count(),
+        3,
+        "db.clj locations: {:?}",
+        locs
+    );
+    assert_eq!(
+        uris.iter()
+            .filter(|u| u.ends_with("/resources/config.edn"))
+            .count(),
+        2,
+        "config.edn locations: {:?}",
+        locs
+    );
+}
+
+#[test]
+fn test_e2e_keyword_does_not_navigate_to_same_named_var() {
+    // A namespaced keyword must never goto-def to a same-named var. With no
+    // keyword definition, goto-def yields nothing rather than a wrong jump
+    // (regression: `::counter` used to land on `(defn- counter …)`).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let f = root.join("src/metrics.clj");
+    std::fs::write(
+        &f,
+        "(ns app.metrics)\n(defn- counter [] 1)\n(def m {::counter (counter)})\n(::counter m)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&f);
+
+    // Cursor on the `::counter` keyword (the map key on line 2).
+    let (line, ch) = position_of(&f, "::counter");
+    let result = client.goto_definition(&f, line, ch);
+    assert!(
+        result.is_null(),
+        "keyword must not navigate to the same-named var, got {}",
+        result
+    );
+}
+
+#[test]
+fn test_e2e_unqualified_keyword_does_not_navigate_to_var() {
+    // Same guard for an *unqualified* keyword: `:counter` must not goto-def to
+    // a same-named var. (resolve_fqn_at returns nothing for unqualified
+    // keywords, so this relies on the keyword-token check, not the fqn.)
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let f = root.join("src/unq.clj");
+    std::fs::write(
+        &f,
+        "(ns app.unq)\n(defn- counter [] 1)\n(def m {:counter (counter)})\n(:counter m)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&f);
+
+    // Cursor on an unqualified `:counter` keyword (the first is the map key).
+    let (line, ch) = position_of(&f, ":counter");
+    let result = client.goto_definition(&f, line, ch);
+    assert!(
+        result.is_null(),
+        "unqualified keyword must not navigate to the same-named var, got {}",
+        result
+    );
+}
+
+#[test]
+fn test_e2e_keyword_navigation_with_cursor_on_colon() {
+    // The whole-keyword nav must work even with the cursor on the leading `:`
+    // of the keyword, not just on the name part.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let config = root.join("resources/config.edn");
+    client.did_open(&config);
+
+    // Column of the leading ':' of `:readx.db/db` (its first appearance).
+    let text = std::fs::read_to_string(&config).unwrap();
+    let (line, col) = text
+        .lines()
+        .enumerate()
+        .find_map(|(i, l)| l.find(":readx.db/db").map(|c| (i as u32, c as u32)))
+        .expect(":readx.db/db not found");
+
+    let result = client.goto_definition(&config, line, col);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("cursor on the ':' should still resolve, got {}", result));
+    assert!(uri.ends_with("/src/readx/db.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_integrant_refless_config_navigates() {
+    // A ref-less Integrant config (no #ig/ref anywhere) must still navigate from
+    // a component key to its `ig/init-key` defmethod.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let db = root.join("src/sys/db.clj");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    std::fs::write(
+        &db,
+        "(ns sys.db\n  (:require [integrant.core :as ig]))\n(defmethod ig/init-key ::conn [_ o] o)\n",
+    )
+    .unwrap();
+    let cfg = root.join("resources/sys.edn");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    std::fs::write(&cfg, "{:sys.db/conn {:url \"x\"}}\n").unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&cfg);
+
+    let (line, ch) = position_of(&cfg, ":sys.db/conn");
+    let result = client.goto_definition(&cfg, line, ch);
+    let uri = result["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ref-less config should navigate, got {}", result));
+    assert!(uri.ends_with("/src/sys/db.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_watched_edn_config_keeps_references_fresh() {
+    // An Integrant config edited outside the editor (git pull / branch switch)
+    // is re-indexed via the file watcher, so references reflect the new keys.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    let config = root.join("resources/config.edn");
+    client.did_open(&db);
+
+    // Baseline: 5 references (3 in db.clj + 2 in config.edn).
+    let (line, ch) = position_of(&db, "::db");
+    assert_eq!(
+        client
+            .references(&db, line, ch, true)
+            .as_array()
+            .unwrap()
+            .len(),
+        5,
+        "baseline references"
+    );
+
+    // Rewrite config.edn (no editor save) to drop every :readx.db/db use.
+    std::fs::write(&config, "{:other/x {:v 1}\n :sys {:y #ig/ref :other/x}}\n").unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", config.display()), "type": 2 }] }),
+    );
+
+    // Poll until the stale config.edn occurrences are gone: only the 3 db.clj
+    // locations remain.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let n = client
+            .references(&db, line, ch, true)
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if n == 3 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "references did not refresh after watched EDN change (still {})",
+            n
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn test_e2e_references_spec_keyword_def_and_usage() {
+    // find-references on a clojure.spec keyword spans its `s/def` site and every
+    // `:req-un`/usage — mirrors tickets/handlers.clj.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let f = root.join("src/handlers.clj");
+    std::fs::write(
+        &f,
+        "(ns app.handlers\n  (:require [clojure.spec.alpha :as s]))\n\
+         (s/def :ticket/id integer?)\n\
+         (s/def ::ticket-out\n  (s/keys :req-un [:ticket/id]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&f);
+
+    // From the `s/def` site, and again from the `:req-un` usage — both resolve
+    // to the same two locations.
+    for needle in [":ticket/id", "[:ticket/id]"] {
+        let (line, ch) = position_of(&f, needle);
+        let result = client.references(&f, line, ch, true);
+        let locs = result
+            .as_array()
+            .unwrap_or_else(|| panic!("references null from {:?}: {}", needle, result));
+        assert_eq!(locs.len(), 2, "from {:?}: {:?}", needle, locs);
+    }
+}
+
+#[test]
+fn test_e2e_zed_client_cross_file_definition() {
+    // Under a Zed-shaped init (workspaceFolders, no rootUri), cross-file
+    // goto-definition must resolve — the regression that broke Zed navigation.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize_zed(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let def = client.goto_definition(&utils, line, ch);
+    let uri = def["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("zed cross-file definition failed: {}", def));
+    assert!(uri.ends_with("/src/core.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_zed_client_hover_and_completion() {
+    // Hover and completion must work under a Zed-shaped client — both need the
+    // project (not just the open file) indexed.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize_zed(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+
+    // Cross-file docstring on hover.
+    let hov = client.hover(&utils, line, ch);
+    let val = hov["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("zed hover returned null: {}", hov));
+    assert!(val.contains("Adds two numbers."), "zed hover doc: {}", val);
+
+    // Alias-prefixed completion.
+    let comp = client.completion(&utils, line, ch);
+    let labels: Vec<&str> = comp
+        .as_array()
+        .unwrap_or_else(|| panic!("zed completion returned null: {}", comp))
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(labels.contains(&"core/add"), "zed completion: {:?}", labels);
+}
+
+#[test]
+fn test_e2e_zed_client_cross_file_references() {
+    // find-references across files must work under a Zed-shaped client.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize_zed(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+
+    // `add` is defined in core.clj and used as `core/add` in utils.clj.
+    let (line, ch) = position_of(&core, "add");
+    let refs = client.references(&core, line, ch, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("zed references returned null: {}", refs));
+    assert_eq!(locs.len(), 2, "decl + cross-file usage: {:?}", locs);
+    let uris: Vec<&str> = locs.iter().filter_map(|l| l["uri"].as_str()).collect();
+    assert!(uris.iter().any(|u| u.ends_with("/src/core.clj")));
+    assert!(uris.iter().any(|u| u.ends_with("/src/utils.clj")));
 }

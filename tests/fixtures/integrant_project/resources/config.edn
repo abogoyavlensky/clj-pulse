@@ -1,0 +1,2 @@
+{:readx.db/db {:jdbc-url "jdbc:sqlite:db.sqlite"}
+ :readx.server/server {:db #ig/ref :readx.db/db}}

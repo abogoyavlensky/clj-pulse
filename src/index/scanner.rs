@@ -37,7 +37,44 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf]) -> Result<Index> {
         index.insert_file(meta, symbols, occurrences);
     }
 
+    // Index keyword occurrences from Integrant/Aero EDN config files. Gated on
+    // a `#ig/ref` tag so build manifests (deps.edn, bb.edn, shadow-cljs.edn)
+    // are never indexed. EDN files are few, so this stays sequential.
+    for file in collect_edn_files(source_paths) {
+        let Ok(source) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        if !extractor::is_integrant_edn(&file, &source) {
+            continue;
+        }
+        let occurrences = extractor::extract_edn(&source);
+        if !occurrences.is_empty() {
+            index.insert_edn_file(file, occurrences);
+        }
+    }
+
     Ok(index)
+}
+
+/// Collects `.edn` files under the given source paths (Integrant configs live
+/// in `:paths`/resources). Mirrors [`collect_clojure_files`].
+fn collect_edn_files(source_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for path in source_paths {
+        if !path.exists() {
+            continue;
+        }
+        for entry in ignore::WalkBuilder::new(path).build() {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("edn") {
+                files.push(path.to_path_buf());
+            }
+        }
+    }
+    files
 }
 
 /// Indexes library sources from a classpath: JAR files (with a per-JAR disk

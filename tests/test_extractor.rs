@@ -292,7 +292,7 @@ fn test_ranges_are_utf16_columns() {
 
 // --- occurrence extraction (Phase 2) ---
 
-use clj_pulse::index::extractor::extract_full;
+use clj_pulse::index::extractor::{extract_edn, extract_full};
 
 fn occurrences_of<'a>(
     occs: &'a [clj_pulse::index::Occurrence],
@@ -572,4 +572,201 @@ fn test_occurrence_destructuring_or_defaults_are_usages() {
         occs
     );
     assert!(occurrences_of(&occs, "my.app/x").is_empty());
+}
+
+#[test]
+fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
+    // Qualified keywords (literal `:ns/name`, auto-resolved `::name`) are
+    // occurrences; unqualified ones are skipped as too ambiguous to index.
+    let src = "(ns my.ns)\n(def x {:my.ns/a 1 :other/b ::a :plain 2})";
+    let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
+
+    // `:my.ns/a` (literal key) + `::a` (resolves to :my.ns/a) = 2.
+    assert_eq!(
+        occurrences_of(&occs, ":my.ns/a").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":other/b").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    // Unqualified `:plain` produces no keyword occurrence.
+    assert!(
+        occs.iter()
+            .all(|o| o.fqn != ":plain" && o.fqn != ":my.ns/plain"),
+        "unqualified keyword leaked: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_integrant_init_key_is_definition() {
+    // ig/init-key's dispatch keyword defines the component; ig/halt-key!'s
+    // dispatch on the same keyword is an occurrence (not a second definition).
+    let src = "(ns readx.db\n  (:require [integrant.core :as ig]))\n\
+               (defmethod ig/init-key ::db [_ o] o)\n\
+               (defmethod ig/halt-key! ::db [_ d] nil)";
+    let (_, syms, occs) = extract_full(src, Path::new("db.clj")).unwrap();
+
+    let defs: Vec<_> = syms
+        .iter()
+        .filter(|s| s.kind == DefKind::IntegrantKey)
+        .collect();
+    assert_eq!(defs.len(), 1, "syms: {:?}", syms);
+    assert_eq!(defs[0].fqn, ":readx.db/db");
+    assert_eq!(defs[0].ns, "readx.db");
+    assert_eq!(defs[0].name, "db");
+
+    // Only the halt-key! dispatch is an occurrence — init-key's is the def.
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_non_integrant_defmethod_keyword_is_only_an_occurrence() {
+    let src = "(ns shapes)\n(defmethod area ::circle [_] 3.14)";
+    let (_, syms, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    assert!(
+        syms.iter().all(|s| s.kind != DefKind::IntegrantKey),
+        "syms: {:?}",
+        syms
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":shapes/circle").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_extract_edn_records_qualified_keywords_including_ig_ref() {
+    let src = "{:readx.db/db {:url \"x\"}\n \
+               :readx.server/server {:db #ig/ref :readx.db/db}}";
+    let occs = extract_edn(src);
+
+    // `:readx.db/db` appears twice: the map key + the `#ig/ref` value.
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":readx.server/server").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    // Unqualified config keys (`:url`, `:db`) are not indexed.
+    assert!(
+        occs.iter().all(|o| o.fqn.contains('/')),
+        "unqualified keyword leaked: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_occurrence_spec_def_keyword_at_def_site_recorded() {
+    // `(s/def :kw …)` must record the keyword in the def-name slot — the
+    // occurrence walker must not mistake qualified `s/def` for core `def`
+    // (which would skip the keyword as if it were a def name).
+    let src = "(ns my.ns\n  (:require [clojure.spec.alpha :as s]))\n\
+               (s/def ::not-empty-string string?)\n\
+               (s/def :ticket/title ::not-empty-string)";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    // `::not-empty-string` at its own s/def site (line 2) + the use (line 3).
+    assert_eq!(
+        occurrences_of(&occs, ":my.ns/not-empty-string").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    // The `:ticket/title` keyword in the s/def def-name slot (line 3).
+    assert_eq!(
+        occurrences_of(&occs, ":ticket/title").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_occurrence_qualified_core_form_still_binds_locals() {
+    // A clojure.core-qualified special form must still be treated as that form,
+    // so its bindings stay local rather than leaking as namespace occurrences.
+    let src = "(ns my.ns)\n(defn f [] (clojure.core/let [x 1] x))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert!(
+        occurrences_of(&occs, "my.ns/x").is_empty(),
+        "clojure.core/let binding leaked as an occurrence: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_occurrence_qualified_keyword_in_destructuring_recorded() {
+    // A qualified keyword used as a destructuring key is a usage of that key,
+    // in both function-argument and let destructuring.
+    let src = "(ns my.ns)\n(defn f [{db :readx.db/db}] db)\n(let [{x :a/b} {}] x)";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(occurrences_of(&occs, ":a/b").len(), 1, "occs: {:?}", occs);
+    // The bound locals are not occurrences.
+    assert!(occurrences_of(&occs, "my.ns/db").is_empty());
+}
+
+#[test]
+fn test_file_occurrences_gates_non_integrant_edn() {
+    use clj_pulse::index::extractor::file_occurrences;
+    // A non-Integrant manifest (no #ig/ref) contributes no keyword occurrences,
+    // even though it has qualified keys like :mvn/version — so an open deps.edn
+    // never leaks into references.
+    let deps = r#"{:deps {org.clojure/clojure {:mvn/version "1.11.1"}}}"#;
+    assert!(file_occurrences(deps, Path::new("deps.edn")).is_empty());
+
+    // An Integrant config (has #ig/ref) still contributes occurrences.
+    let cfg = "{:my.app/db {} :sys {:db #ig/ref :my.app/db}}";
+    assert!(!file_occurrences(cfg, Path::new("config.edn")).is_empty());
+}
+
+#[test]
+fn test_is_integrant_edn_detection() {
+    use clj_pulse::index::extractor::is_integrant_edn;
+
+    // Ref-less system map (no #ig/ref) — detected by namespaced top-level keys.
+    let refless = "{:my.app/db {:url \"x\"}\n :my.app/server {:port 8080}}";
+    assert!(is_integrant_edn(Path::new("resources/config.edn"), refless));
+
+    // System map with #ig/ref.
+    let with_ref = "{:my.app/db {} :sys {:db #ig/ref :my.app/db}}";
+    assert!(is_integrant_edn(Path::new("system.edn"), with_ref));
+
+    // Build manifests are excluded by name, even with namespaced top-level keys
+    // (deps.edn carries :mvn/repos).
+    let deps = "{:paths [\"src\"] :mvn/repos {\"central\" {}}}";
+    assert!(!is_integrant_edn(Path::new("deps.edn"), deps));
+    assert!(!is_integrant_edn(
+        Path::new("bb.edn"),
+        "{:tasks {} :deps {}}"
+    ));
+
+    // A plain EDN data file with only unqualified top-level keys is not a config.
+    assert!(!is_integrant_edn(Path::new("data.edn"), "{:a 1 :b 2}"));
 }

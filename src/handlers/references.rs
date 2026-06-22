@@ -77,6 +77,12 @@ pub fn rename(
 
     let fqn = resolve_fqn_at(index, documents, &uri, pos)
         .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?;
+    // Keyword fqns are colon-prefixed. Keyword occurrences span the whole
+    // token, so renaming through this path would rewrite the entire keyword;
+    // keyword rename isn't supported yet, so reject it rather than corrupt.
+    if fqn.starts_with(':') {
+        anyhow::bail!("renaming keywords is not yet supported");
+    }
     let sym = index
         .lookup(&fqn)
         .ok_or_else(|| anyhow::anyhow!("cannot rename: no definition found for {}", fqn))?;
@@ -148,13 +154,25 @@ pub fn resolve_fqn_at(
     uri: &Url,
     pos: Position,
 ) -> Option<String> {
-    let word = documents.word_at(uri, pos)?;
     let path = crate::uri::to_index_path(uri)?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
-    // word_at succeeded, so the document is open: resolve against live
-    // text — unsaved edits resolve against current ranges.
+    // Resolve against live text so unsaved edits use current ranges. Position
+    // matching (below) runs without a word token, so a cursor on a keyword's
+    // `:`/`::` marker still resolves — the occurrence/definition range spans it.
     let text = documents.text(uri)?;
+
+    // EDN config files (Integrant systems) have no symbols or aliases; match
+    // the cursor against keyword occurrences only. `file_occurrences` applies
+    // the `#ig/ref` gate, so a cursor in a non-Integrant manifest resolves to
+    // nothing.
+    if crate::config::is_edn(&path) {
+        return extractor::file_occurrences(&text, &path)
+            .into_iter()
+            .find(|occ| range_contains(&occ.name_range, pos))
+            .map(|occ| occ.fqn);
+    }
+
     if let Ok((_, syms, occs)) = extractor::extract_full(&text, &path) {
         for sym in &syms {
             // A `defmethod` head names the multimethod it extends, not a new
@@ -178,6 +196,7 @@ pub fn resolve_fqn_at(
     // Not a definition or occurrence — the only legitimate remaining case
     // is the cursor on the alias half of a qualified usage. Bare words here
     // are locals or noise; resolving them would risk corrupting renames.
+    let word = documents.word_at(uri, pos)?;
     let (alias, name) = word.split_once('/')?;
     if alias.is_empty() || name.is_empty() {
         return None;
@@ -214,9 +233,8 @@ pub fn occurrences_for(
         let Some(text) = documents.text(&uri) else {
             continue;
         };
-        if let Ok((_, _, occs)) = extractor::extract_full(&text, &path) {
-            live.insert(path, occs);
-        }
+        let occs = extractor::file_occurrences(&text, &path);
+        live.insert(path, occs);
     }
 
     let mut result = Vec::new();
