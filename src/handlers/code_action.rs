@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
@@ -7,28 +8,84 @@ use tree_sitter::{Node, Parser};
 use crate::document::DocumentStore;
 use crate::index::{extractor, Index, NsMeta};
 
-/// Offers an "Add require …" quickfix when the cursor sits on a qualified
-/// symbol (`alias/name` or `some.ns/name`) whose namespace is not yet required.
+/// Aggregates the file's code actions: an "Add require …" quickfix when the
+/// cursor sits on a qualified symbol whose namespace is not yet required, and a
+/// "Clean namespace" source action that removes unused requires. Each action is
+/// only built when the request's `context.only` permits its kind.
 pub fn handle(
     index: &Index,
     documents: &DocumentStore,
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
-    let uri = params.text_document.uri;
-    let pos = params.range.start;
-
-    let Some(token) = documents.word_at(&uri, pos) else {
-        return Ok(None);
-    };
+    let uri = params.text_document.uri.clone();
     let Some(text) = documents.text(&uri) else {
         return Ok(None);
     };
     let Ok(path) = uri.to_file_path() else {
         return Ok(None);
     };
+    let only = params.context.only.as_deref();
+
+    let mut actions: Vec<CodeActionOrCommand> = Vec::new();
+
+    if kind_allowed(only, &CodeActionKind::QUICKFIX) {
+        actions.extend(add_require_actions(
+            index, documents, &uri, &text, &path, &params,
+        ));
+    }
+
+    if kind_allowed(only, &CodeActionKind::SOURCE_ORGANIZE_IMPORTS) {
+        if let Some(edits) = clean_ns_edits(&text) {
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), edits);
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: "Clean namespace".to_string(),
+                kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }));
+        }
+    }
+
+    if actions.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(actions))
+    }
+}
+
+/// Whether a `context.only` filter permits offering an action of `kind`. LSP
+/// matching is hierarchical: a requested `source` matches `source.organizeImports`.
+/// `None`/empty means the client wants everything.
+fn kind_allowed(only: Option<&[CodeActionKind]>, kind: &CodeActionKind) -> bool {
+    match only {
+        None | Some([]) => true,
+        Some(kinds) => kinds.iter().any(|req| {
+            let req = req.as_str();
+            let k = kind.as_str();
+            k == req || k.starts_with(&format!("{}.", req))
+        }),
+    }
+}
+
+/// The "Add require …" quickfixes for the qualified symbol under the cursor.
+fn add_require_actions(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    text: &str,
+    path: &Path,
+    params: &CodeActionParams,
+) -> Vec<CodeActionOrCommand> {
+    let Some(token) = documents.word_at(uri, params.range.start) else {
+        return vec![];
+    };
     // Resolve against the live buffer: its requires may differ from the index.
-    let Ok((ns_meta, _)) = extractor::extract(&text, &path) else {
-        return Ok(None);
+    let Ok((ns_meta, _)) = extractor::extract(text, path) else {
+        return vec![];
     };
 
     // The unresolved-namespace diagnostics at this position, so VS Code binds
@@ -41,11 +98,11 @@ pub fn handle(
         .cloned()
         .collect();
 
-    let actions: Vec<CodeActionOrCommand> = candidates(index, &ns_meta, &token)
+    candidates(index, &ns_meta, &token)
         .into_iter()
         .filter_map(|candidate| {
             let spec = candidate.spec();
-            let edit = require_edit(&text, &spec)?;
+            let edit = require_edit(text, &spec)?;
             let mut changes = HashMap::new();
             changes.insert(uri.clone(), vec![edit]);
             Some(CodeActionOrCommand::CodeAction(CodeAction {
@@ -63,13 +120,7 @@ pub fn handle(
                 ..Default::default()
             }))
         })
-        .collect();
-
-    if actions.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(actions))
-    }
+        .collect()
 }
 
 /// Conventional aliases whose namespace is not simply the last dot-segment.
@@ -213,6 +264,356 @@ pub fn require_edit(source: &str, spec: &str) -> Option<TextEdit> {
             new_text,
         })
     }
+}
+
+/// What to do with one `:require` spec when cleaning the namespace.
+enum Plan {
+    /// Drop the whole spec (unused, or an exact duplicate of an earlier one).
+    Remove,
+    /// Keep the spec, emitting this text (verbatim, or rebuilt with unused
+    /// `:refer` names pruned).
+    Keep(String),
+}
+
+/// Builds the edits for the "Clean namespace" source action: removes `:require`
+/// libspecs the file never uses (unused `:as` alias and no fully-qualified use),
+/// prunes unused `:refer` names, and drops exact-duplicate specs. Plain
+/// side-effecting requires (`[some.ns]` / bare `some.ns`, with no `:as`/`:refer`)
+/// and reader-conditional specs are left untouched, and surviving specs keep
+/// their original order and formatting. Returns `None` when nothing changes.
+pub fn clean_ns_edits(source: &str) -> Option<Vec<TextEdit>> {
+    let mut parser = Parser::new();
+    parser.set_language(extractor::language()).ok()?;
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+
+    let ns_form = ns_form(root, source)?;
+    let ns_children = named_children(ns_form);
+    // An ns form may carry more than one `(:require …)` clause; clean them all.
+    let requires: Vec<Node> = ns_children
+        .iter()
+        .copied()
+        .filter(|c| c.kind() == "list_lit" && first_token_is(*c, "kwd_lit", ":require", source))
+        .collect();
+    if requires.is_empty() {
+        return None;
+    }
+
+    let mut used_prefixes = used_prefixes(source);
+    collect_keyword_prefixes(root, source, &mut used_prefixes);
+    let used_bare = used_bare_symbols(root, ns_form, source);
+
+    // `seen` is shared so a duplicate spec is dropped even across clauses.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut edits = Vec::new();
+    for require in &requires {
+        if let Some(edit) = clean_one_clause(
+            *require,
+            &ns_children,
+            source,
+            &used_prefixes,
+            &used_bare,
+            &mut seen,
+        ) {
+            edits.push(edit);
+        }
+    }
+
+    if edits.is_empty() {
+        None
+    } else {
+        Some(edits)
+    }
+}
+
+/// Builds the edit for a single `(:require …)` clause, or `None` if it needs no
+/// change. `ns_children` is the enclosing ns form's children (used to delete a
+/// fully-emptied clause); `seen` accumulates spec texts across clauses for
+/// duplicate detection.
+fn clean_one_clause(
+    require: Node,
+    ns_children: &[Node],
+    source: &str,
+    used_prefixes: &HashSet<String>,
+    used_bare: &HashSet<String>,
+    seen: &mut HashSet<String>,
+) -> Option<TextEdit> {
+    let clause_children = named_children(require);
+    // children[0] is the `:require` keyword; the rest are specs.
+    if clause_children.len() < 2 {
+        return None;
+    }
+    let specs = &clause_children[1..];
+
+    let mut plans: Vec<Plan> = Vec::with_capacity(specs.len());
+    let mut changed = false;
+    for spec in specs {
+        let plan = plan_spec(*spec, source, used_prefixes, used_bare, seen);
+        match &plan {
+            Plan::Remove => changed = true,
+            Plan::Keep(t) if t.as_str() != node_text(*spec, source) => changed = true,
+            Plan::Keep(_) => {}
+        }
+        plans.push(plan);
+    }
+    if !changed {
+        return None;
+    }
+
+    // Every spec removed: drop the whole `(:require …)` clause (and the
+    // whitespace before it) rather than leaving an empty `(:require)`.
+    if !plans.iter().any(|p| matches!(p, Plan::Keep(_))) {
+        let idx = ns_children.iter().position(|n| n.id() == require.id())?;
+        let prev = ns_children.get(idx.checked_sub(1)?)?;
+        return Some(TextEdit {
+            range: tower_lsp::lsp_types::Range {
+                start: end_position(*prev, source),
+                end: end_position(require, source),
+            },
+            new_text: String::new(),
+        });
+    }
+
+    // Rebuild the span from the end of `:require` to the end of the last spec,
+    // re-emitting each survivor with its original leading separator so untouched
+    // specs keep their indentation.
+    let mut replacement = String::new();
+    for (j, spec) in specs.iter().enumerate() {
+        if let Plan::Keep(text) = &plans[j] {
+            let prev = clause_children[j]; // the `:require` keyword when j == 0
+            replacement.push_str(&source[prev.end_byte()..spec.start_byte()]);
+            replacement.push_str(text);
+        }
+    }
+    Some(TextEdit {
+        range: tower_lsp::lsp_types::Range {
+            start: end_position(clause_children[0], source),
+            end: end_position(*specs.last().unwrap(), source),
+        },
+        new_text: replacement,
+    })
+}
+
+/// Namespace prefixes used in qualified symbols (`str/join` → `str`), covering
+/// both `:as` aliases and fully-qualified `some.ns/foo` uses.
+fn used_prefixes(source: &str) -> HashSet<String> {
+    extractor::qualified_usages(source)
+        .into_iter()
+        .map(|u| u.prefix)
+        .collect()
+}
+
+/// Adds namespace prefixes referenced by namespaced keywords (`::alias/x`) and
+/// namespaced map literals (`#::alias{…}`). Auto-resolved forms reference an
+/// `:as` alias that `qualified_usages` (symbols only) never sees, so a require
+/// used *solely* through such a keyword would otherwise be removed and break the
+/// file. Literal single-colon namespaces are recorded too — harmlessly
+/// conservative, since over-keeping a require is always safe.
+fn collect_keyword_prefixes(node: Node, source: &str, out: &mut HashSet<String>) {
+    match node.kind() {
+        "kwd_lit" => {
+            if let Some(ns) = node.child_by_field_name("namespace") {
+                out.insert(node_text(ns, source).to_string());
+            }
+        }
+        "ns_map_lit" => {
+            if let Some(prefix) = node.child_by_field_name("prefix") {
+                if prefix.kind() == "kwd_lit" {
+                    if let Some(name) = prefix.child_by_field_name("name") {
+                        out.insert(node_text(name, source).to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    for child in named_children(node) {
+        collect_keyword_prefixes(child, source, out);
+    }
+}
+
+/// Every bare (unqualified) symbol name used outside the `ns` form — the basis
+/// for deciding whether a `:refer`'d name is used. Deliberately broad (locals,
+/// def names, quoted symbols all count): keeping a still-referenced require is
+/// always safe, removing a used one is not.
+fn used_bare_symbols(root: Node, ns_form: Node, source: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_bare(root, ns_form.id(), source, &mut out);
+    out
+}
+
+fn collect_bare(node: Node, ns_id: usize, source: &str, out: &mut HashSet<String>) {
+    if node.id() == ns_id {
+        return;
+    }
+    if node.kind() == "sym_lit" && node.child_by_field_name("namespace").is_none() {
+        let name = node
+            .child_by_field_name("name")
+            .map(|n| node_text(n, source))
+            .unwrap_or_else(|| node_text(node, source));
+        if !name.is_empty() {
+            out.insert(name.to_string());
+        }
+    }
+    for child in named_children(node) {
+        collect_bare(child, ns_id, source, out);
+    }
+}
+
+/// Plans a single `:require` spec. Exact-duplicate libspecs are dropped; bare
+/// side-effecting requires and reader conditionals are kept verbatim; libspecs
+/// are analysed for usage.
+fn plan_spec(
+    spec: Node,
+    source: &str,
+    used_prefixes: &HashSet<String>,
+    used_bare: &HashSet<String>,
+    seen: &mut HashSet<String>,
+) -> Plan {
+    let plan = match spec.kind() {
+        "vec_lit" => plan_libspec(spec, source, used_prefixes, used_bare),
+        // Bare `some.ns` side-effecting requires, reader conditionals, comments
+        // and anything unrecognised are preserved untouched.
+        _ => Plan::Keep(node_text(spec, source).to_string()),
+    };
+
+    // Deduplicate on the *final* emitted text, so two specs that become
+    // identical only after refer-pruning still collapse in a single pass.
+    // Reader conditionals / comments (non-spec nodes) are never deduplicated.
+    if let Plan::Keep(text) = &plan {
+        if matches!(spec.kind(), "vec_lit" | "sym_lit") && !seen.insert(normalize_ws(text)) {
+            return Plan::Remove;
+        }
+    }
+    plan
+}
+
+/// Plans a `[ns …]` libspec given the file's usage sets.
+fn plan_libspec(
+    spec: Node,
+    source: &str,
+    used_prefixes: &HashSet<String>,
+    used_bare: &HashSet<String>,
+) -> Plan {
+    let verbatim = || Plan::Keep(node_text(spec, source).to_string());
+    let items = named_children(spec);
+    let Some(first) = items.first() else {
+        return verbatim();
+    };
+    if first.kind() != "sym_lit" {
+        // e.g. a `[[a] [b]]` splice vector — not a shape we model; keep it.
+        return verbatim();
+    }
+    let ns_name = node_text(*first, source).to_string();
+
+    let mut alias: Option<String> = None;
+    let mut refer_kwd: Option<Node> = None;
+    let mut refer_vec: Option<Node> = None;
+    let mut refer_all = false;
+
+    let mut i = 1;
+    while i < items.len() {
+        let item = items[i];
+        if item.kind() == "kwd_lit" {
+            match node_text(item, source) {
+                ":as" if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" => {
+                    alias = Some(node_text(items[i + 1], source).to_string());
+                    i += 2;
+                    continue;
+                }
+                ":refer" if i + 1 < items.len() => {
+                    let next = items[i + 1];
+                    if next.kind() == "vec_lit" {
+                        refer_kwd = Some(item);
+                        refer_vec = Some(next);
+                    } else if next.kind() == "kwd_lit" && node_text(next, source) == ":all" {
+                        refer_all = true;
+                    }
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    // Libspec options we don't model (`:rename {old new}`, `:reload`, …) can
+    // introduce usable names we never see, so removing or pruning such a spec
+    // could drop a used require or leave a dangling option. Keep it untouched.
+    let has_unknown_opt = items.iter().any(|n| {
+        n.kind() == "kwd_lit" && !matches!(node_text(*n, source), ":as" | ":refer" | ":all")
+    });
+    if has_unknown_opt {
+        return verbatim();
+    }
+
+    // Plain side-effecting require (`[some.ns]`): never removed (it may load a
+    // namespace for its `defmethod`/protocol-extension side effects).
+    if alias.is_none() && refer_vec.is_none() && !refer_all {
+        return verbatim();
+    }
+
+    let full_ns_used = used_prefixes.contains(&ns_name);
+    let alias_used = alias
+        .as_deref()
+        .map(|a| used_prefixes.contains(a))
+        .unwrap_or(false);
+
+    let original_refers: Vec<String> = refer_vec
+        .map(|v| {
+            named_children(v)
+                .into_iter()
+                .filter(|r| r.kind() == "sym_lit")
+                .map(|r| node_text(r, source).to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let surviving: Vec<String> = original_refers
+        .iter()
+        .filter(|r| used_bare.contains(*r))
+        .cloned()
+        .collect();
+    let refer_has_use = refer_all || !surviving.is_empty();
+
+    // Nothing the spec provides is used → drop the whole spec.
+    if !full_ns_used && !alias_used && !refer_has_use {
+        return Plan::Remove;
+    }
+
+    // Survives. Prune unused `:refer` names when an explicit vector shrank.
+    if let (Some(kwd), Some(vec)) = (refer_kwd, refer_vec) {
+        if surviving.len() != original_refers.len() {
+            let spec_text = node_text(spec, source);
+            let base = spec.start_byte();
+            if surviving.is_empty() {
+                // Drop the whole `:refer [...]` segment and the space before it.
+                let mut cut = kwd.start_byte() - base;
+                let bytes = spec_text.as_bytes();
+                while cut > 0 && bytes[cut - 1].is_ascii_whitespace() {
+                    cut -= 1;
+                }
+                let after = vec.end_byte() - base;
+                return Plan::Keep(format!("{}{}", &spec_text[..cut], &spec_text[after..]));
+            }
+            let vec_start = vec.start_byte() - base;
+            let vec_end = vec.end_byte() - base;
+            return Plan::Keep(format!(
+                "{}[{}]{}",
+                &spec_text[..vec_start],
+                surviving.join(" "),
+                &spec_text[vec_end..]
+            ));
+        }
+    }
+
+    verbatim()
+}
+
+/// Collapses runs of whitespace to single spaces so trivially re-spaced
+/// duplicate specs still compare equal.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The top-level `(ns …)` list, if present.
@@ -506,5 +907,188 @@ mod tests {
     #[test]
     fn edit_none_without_ns_form() {
         assert!(require_edit("(defn foo [] 1)\n", "[x]").is_none());
+    }
+
+    /// Applies the clean-ns edits (highest position first, so earlier offsets
+    /// stay valid) and returns the result, or `None` when nothing would change.
+    fn clean(source: &str) -> Option<String> {
+        let mut edits = clean_ns_edits(source)?;
+        edits.sort_by_key(|e| std::cmp::Reverse((e.range.start.line, e.range.start.character)));
+        let mut out = source.to_string();
+        for edit in &edits {
+            out = apply(&out, edit);
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn clean_removes_unused_alias_require() {
+        let source = "(ns app\n  (:require [a.b :as b]\n            [c.d :as d]))\n\n(d/run)\n";
+        let out = clean(source).expect("expected a clean edit");
+        assert!(!out.contains("a.b"), "unused require kept:\n{}", out);
+        assert!(
+            out.contains("[c.d :as d]"),
+            "used require dropped:\n{}",
+            out
+        );
+        assert!(out.contains("(d/run)"), "body changed:\n{}", out);
+    }
+
+    #[test]
+    fn clean_is_noop_when_alias_used() {
+        // `b` is used, so there is nothing to clean → no action.
+        let source = "(ns app\n  (:require [a.b :as b]))\n\n(b/run)\n";
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn clean_prunes_unused_refer_keeping_sibling() {
+        let source = "(ns app\n  (:require [c.d :refer [used gone]]))\n\n(used)\n";
+        assert_eq!(
+            clean(source).as_deref(),
+            Some("(ns app\n  (:require [c.d :refer [used]]))\n\n(used)\n")
+        );
+    }
+
+    #[test]
+    fn clean_drops_empty_refer_but_keeps_used_alias() {
+        let source = "(ns app\n  (:require [c.d :as d :refer [gone]]))\n\n(d/run)\n";
+        assert_eq!(
+            clean(source).as_deref(),
+            Some("(ns app\n  (:require [c.d :as d]))\n\n(d/run)\n")
+        );
+    }
+
+    #[test]
+    fn clean_removes_spec_whose_only_refer_is_unused() {
+        let source =
+            "(ns app\n  (:require [c.d :refer [gone]]\n            [e.f :as f]))\n\n(f/go)\n";
+        let out = clean(source).expect("expected a clean edit");
+        assert!(
+            !out.contains("c.d"),
+            "unused refer-only spec kept:\n{}",
+            out
+        );
+        assert!(out.contains("[e.f :as f]"), "used spec dropped:\n{}", out);
+    }
+
+    #[test]
+    fn clean_drops_exact_duplicate_require() {
+        let source = "(ns app\n  (:require [c.d :as d]\n            [c.d :as d]))\n\n(d/go)\n";
+        assert_eq!(
+            clean(source).as_deref(),
+            Some("(ns app\n  (:require [c.d :as d]))\n\n(d/go)\n")
+        );
+    }
+
+    #[test]
+    fn clean_keeps_plain_side_effecting_require() {
+        // `[c.d]` and bare `some.side` have no alias/refer — possibly loaded for
+        // side effects, so they are never removed (and nothing else changes).
+        let source = "(ns app\n  (:require [c.d]\n            some.side))\n\n(println 1)\n";
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn clean_keeps_spec_used_fully_qualified() {
+        // The alias `s` is unused, but `clojure.set/union` is — so the spec
+        // stays (we don't strip an unused `:as` from an otherwise-used entry).
+        let source = "(ns app\n  (:require [clojure.set :as s]))\n\n(clojure.set/union #{} #{})\n";
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn clean_leaves_reader_conditional_requires_untouched() {
+        let source =
+            "(ns app\n  (:require #?(:clj [a :as a])\n            [c.d :as d]))\n\n#?(:clj (a/x))\n";
+        let out = clean(source).expect("expected a clean edit");
+        assert!(
+            out.contains("#?(:clj [a :as a])"),
+            "reader-conditional require corrupted:\n{}",
+            out
+        );
+        assert!(!out.contains("c.d"), "unused spec kept:\n{}", out);
+    }
+
+    #[test]
+    fn clean_keeps_alias_used_only_in_keyword() {
+        // `s` appears only in the auto-resolved keyword `::s/problem`, which
+        // `qualified_usages` (symbols only) never sees. The require must stay.
+        let source =
+            "(ns app\n  (:require [clojure.spec.alpha :as s]))\n\n(defn f [x] (::s/problem x))\n";
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn clean_keeps_alias_used_only_in_namespaced_map() {
+        // `s` is used only via the namespaced map literal `#::s{…}`.
+        let source = "(ns app\n  (:require [my.spec :as s]))\n\n(def x #::s{:a 1})\n";
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn clean_keeps_libspec_with_unmodeled_option() {
+        // `:rename` introduces `j` as a usable name we don't track; the spec
+        // must be left untouched rather than wrongly removed/pruned.
+        let source =
+            "(ns app\n  (:require [clojure.string :refer [join] :rename {join j}]))\n\n(j)\n";
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn clean_handles_multiple_require_clauses() {
+        // First clause is already clean; the second has an unused alias. Both
+        // clauses must be considered — the action is offered and only the stale
+        // entry is dropped.
+        let source = "(ns app\n  (:require [a.b :as b])\n  (:require [c.d :as d]))\n\n(b/x)\n";
+        let out = clean(source).expect("expected a clean edit across clauses");
+        assert!(
+            out.contains("[a.b :as b]"),
+            "used require dropped:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("c.d"),
+            "unused require in 2nd clause kept:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn clean_dedupes_specs_made_identical_by_refer_pruning() {
+        // After dropping the unused `gone`, both specs become `[c.d :refer
+        // [used]]`; the duplicate must collapse in this single pass (idempotent).
+        let source = "(ns app\n  (:require [c.d :refer [used gone]]\n            \
+                      [c.d :refer [used]]))\n\n(used)\n";
+        let out = clean(source).expect("expected a clean edit");
+        assert_eq!(
+            out.matches("c.d").count(),
+            1,
+            "duplicate after pruning not collapsed:\n{}",
+            out
+        );
+        // And it is genuinely idempotent: a second pass changes nothing.
+        assert!(clean(&out).is_none(), "second pass still edits:\n{}", out);
+    }
+
+    #[test]
+    fn clean_dedupes_across_require_clauses() {
+        // The same spec in two clauses: the later one is a duplicate.
+        let source = "(ns app\n  (:require [c.d :as d])\n  (:require [c.d :as d]))\n\n(d/go)\n";
+        let out = clean(source).expect("expected a clean edit");
+        assert_eq!(
+            out.matches("[c.d :as d]").count(),
+            1,
+            "duplicate not dropped:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn clean_drops_emptied_require_clause_keeping_ns() {
+        // Every require is unused → the whole `(:require …)` clause goes, but the
+        // `(ns app)` declaration itself is preserved.
+        let source = "(ns app\n  (:require [c.d :as d]))\n\n(println 1)\n";
+        assert_eq!(clean(source).as_deref(), Some("(ns app)\n\n(println 1)\n"));
     }
 }

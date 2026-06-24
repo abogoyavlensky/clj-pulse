@@ -324,6 +324,22 @@ impl LspClient {
         )
     }
 
+    /// Code action request restricted to specific kinds, as VS Code sends for
+    /// "Organize Imports" / code-actions-on-save (`context.only`).
+    fn code_action_only(&mut self, path: &Path, only: &[&str]) -> Value {
+        self.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 0 }
+                },
+                "context": { "diagnostics": [], "only": only }
+            }),
+        )
+    }
+
     /// Code action request carrying a diagnostic in context, as VS Code sends
     /// when the cursor is on a squiggle.
     fn code_action_for_diagnostic(&mut self, path: &Path, diagnostic: &Value) -> Value {
@@ -514,6 +530,47 @@ fn position_in_text(text: &str, needle: &str) -> (u32, u32) {
         }
     }
     panic!("{:?} not found in text", needle);
+}
+
+/// Applies LSP `TextEdit` JSON values to `source` (highest position first, so
+/// earlier offsets stay valid) and returns the result.
+fn apply_edits(source: &str, edits: &[Value]) -> String {
+    let pos = |e: &Value| {
+        (
+            e["range"]["start"]["line"].as_u64().unwrap(),
+            e["range"]["start"]["character"].as_u64().unwrap(),
+        )
+    };
+    let mut ordered: Vec<&Value> = edits.iter().collect();
+    ordered.sort_by_key(|e| std::cmp::Reverse(pos(e)));
+
+    let mut text = source.to_string();
+    for e in ordered {
+        let start = offset_of(&text, &e["range"]["start"]);
+        let end = offset_of(&text, &e["range"]["end"]);
+        let new_text = e["newText"].as_str().unwrap();
+        text = format!("{}{}{}", &text[..start], new_text, &text[end..]);
+    }
+    text
+}
+
+/// Byte offset of an LSP position (`{line, character}`) in `source`.
+fn offset_of(source: &str, pos: &Value) -> usize {
+    let line = pos["line"].as_u64().unwrap() as u32;
+    let character = pos["character"].as_u64().unwrap() as u32;
+    let (mut l, mut c) = (0u32, 0u32);
+    for (i, ch) in source.char_indices() {
+        if l == line && c == character {
+            return i;
+        }
+        if ch == '\n' {
+            l += 1;
+            c = 0;
+        } else {
+            c += ch.len_utf16() as u32;
+        }
+    }
+    source.len()
 }
 
 /// A deps.edn project whose classpath holds a JAR with two namespaces where
@@ -1820,6 +1877,64 @@ fn test_e2e_unresolved_namespace_diagnostic() {
         action["diagnostics"][0]["code"],
         json!("unresolved-namespace"),
         "fix should carry the diagnostic it resolves"
+    );
+}
+
+#[test]
+fn test_e2e_clean_ns_removes_unused_require() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    // scratch.clj requires clojure.string (unused) and simple.helpers (used).
+    let scratch = root.join("src/scratch.clj");
+    let source = "(ns simple.scratch\n  (:require [clojure.string :as str]\n            \
+                  [simple.helpers :as helpers]))\n\n(defn run []\n  (helpers/greet \"hi\"))\n";
+    std::fs::write(&scratch, source).unwrap();
+    client.did_open(&scratch);
+
+    // VS Code's "Organize Imports" path: a code-action request restricted to
+    // the source.organizeImports kind.
+    let result = client.code_action_only(&scratch, &["source.organizeImports"]);
+    let actions = result.as_array().expect("expected code action array");
+    let action = actions
+        .iter()
+        .find(|a| a["kind"] == json!("source.organizeImports"))
+        .expect("expected a clean-namespace source action");
+    assert!(
+        action["title"]
+            .as_str()
+            .map(|t| t.contains("Clean"))
+            .unwrap_or(false),
+        "unexpected title: {}",
+        action["title"]
+    );
+
+    let edits = action["edit"]["changes"]
+        .as_object()
+        .expect("expected WorkspaceEdit.changes")
+        .values()
+        .next()
+        .expect("expected edits for the file")
+        .as_array()
+        .unwrap();
+    let cleaned = apply_edits(source, edits);
+    assert!(
+        !cleaned.contains("clojure.string"),
+        "unused require not removed:\n{}",
+        cleaned
+    );
+    assert!(
+        cleaned.contains("[simple.helpers :as helpers]"),
+        "used require dropped:\n{}",
+        cleaned
+    );
+    assert!(
+        cleaned.contains("(helpers/greet \"hi\")"),
+        "body changed:\n{}",
+        cleaned
     );
 }
 
