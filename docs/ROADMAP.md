@@ -49,7 +49,7 @@ most of what follows.
 
 - [x] Add-missing-require code action — the most-used clojure-lsp
       refactoring; the namespace index needed to power it already exists.
-- [ ] Clean ns.
+- [x] Clean ns.
 - [ ] Sort requires.
 - [ ] Completion: auto-require on accept (`additionalTextEdits`), locals
       (params, `let` bindings), keywords, fuzzy matching.
