@@ -1,10 +1,11 @@
 # Built-in Java Navigation & Completion Implementation Plan
 
-> **Status: 📋 Planned (2026-06-26).** Two phases, pure-Rust static analysis.
-> Verification gate: `bb check` + `bb e2e`.
+> **Status: ✅ Completed (2026-06-26).** All 13 tasks implemented and verified
+> with `bb check` + `bb e2e` (70 e2e tests, +2). Pure-Rust static analysis, no new
+> runtime deps. See the [Implementation summary](#implementation-summary) at the end.
 
 > **For agentic workers:** Use executing-plans to implement this plan
-> task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Navigate to and autocomplete **built-in (JDK) Java** classes, static
 members, and constructors from Clojure interop — go-to-definition, Javadoc hover,
@@ -245,153 +246,153 @@ the real Temurin `src.zip` (in the spirit of `bb e2e-real`).
 
 **Files:** Modify `Cargo.toml`; create a throwaway test in `src/index/jdk.rs`.
 
-- [ ] **Step 1:** `~/.cargo/bin/cargo add tree-sitter-java@0.23` (writes
+- [x] **Step 1:** `~/.cargo/bin/cargo add tree-sitter-java@0.23` (writes
   `Cargo.toml`). Create `src/index/jdk.rs` with an empty module and register it in
   `src/index/mod.rs` (`pub mod jdk;`).
-- [ ] **Step 2 (failing test):** In `jdk.rs` `#[cfg(test)]`, write `parses_java`:
+- [x] **Step 2 (failing test):** In `jdk.rs` `#[cfg(test)]`, write `parses_java`:
   build a `tree_sitter::Parser`, `set_language(&tree_sitter_java::LANGUAGE.into())`,
   parse `"class A { static int f(int x){return x;} }"`, assert the root node has no
   error and contains a `method_declaration`.
-- [ ] **Step 3:** Run `~/.cargo/bin/cargo test --lib jdk::tests::parses_java`.
+- [x] **Step 3:** Run `~/.cargo/bin/cargo test --lib jdk::tests::parses_java`.
   Expected: PASS (this confirms the residual ABI/0.25-compat risk at runtime).
-- [ ] **Step 4:** `bb check` → PASS (fmt/clippy clean with the new dep).
-- [ ] **Step 5:** `git commit -m "Add tree-sitter-java dependency"`
+- [x] **Step 4:** `bb check` → PASS (fmt/clippy clean with the new dep).
+- [x] **Step 5:** `git commit -m "Add tree-sitter-java dependency"`
 
 ### Task A2: `:import` parsing → `NsMeta.imports` (+ cache bump)
 
 **Files:** Modify `src/index/mod.rs`, `src/index/extractor.rs`,
 `src/index/jar_cache.rs`; Test `tests/test_extractor.rs`.
 
-- [ ] **Step 1 (failing test):** In `test_extractor.rs`, `imports_all_forms`:
+- [x] **Step 1 (failing test):** In `test_extractor.rs`, `imports_all_forms`:
   extract a ns with `(:import [java.util Date List] (java.time Instant)
   java.io.File)` and assert `ns_meta.imports` maps `Date→java.util.Date`,
   `List→java.util.List`, `Instant→java.time.Instant`, `File→java.io.File`.
-- [ ] **Step 2:** Run `cargo test --test test_extractor imports_all_forms`.
+- [x] **Step 2:** Run `cargo test --test test_extractor imports_all_forms`.
   Expected: FAIL (no `imports` field).
-- [ ] **Step 3:** Add `imports: HashMap<String,String>` to `NsMeta` (init empty in
+- [x] **Step 3:** Add `imports: HashMap<String,String>` to `NsMeta` (init empty in
   all constructors). Add the `:import` branch to `extract_ns` + `process_import_spec`
   handling the three forms. Bump `CACHE_FORMAT_VERSION` to 10 with a comment
   ("10 = NsMeta.imports").
-- [ ] **Step 4:** Run `cargo test --test test_extractor imports_all_forms` → PASS;
+- [x] **Step 4:** Run `cargo test --test test_extractor imports_all_forms` → PASS;
   `cargo test --lib` → PASS (jar_cache version test still valid).
-- [ ] **Step 5:** `git commit -m "Parse :import into NsMeta.imports; bump jar cache to v10"`
+- [x] **Step 5:** `git commit -m "Parse :import into NsMeta.imports; bump jar cache to v10"`
 
 ### Task A3: `JdkIndex` — discovery + class→entry map
 
 **Files:** Modify `src/index/jdk.rs`, `src/index/mod.rs`.
 
-- [ ] **Step 1 (failing test):** In `jdk.rs` tests, `class_map_strips_module`:
+- [x] **Step 1 (failing test):** In `jdk.rs` tests, `class_map_strips_module`:
   write a helper `make_src_zip(&[(&str,&str)]) -> tempfile::NamedTempFile` (uses
   `zip::ZipWriter`), build one with entry
   `java.base/java/lang/String.java` → `"class String {}"`, call
   `JdkIndex::discover_from(path)`, assert `class_entries["java.lang.String"]`
   equals the full entry, and that `class_names_with_prefix("Strin")` contains
   `String`.
-- [ ] **Step 2:** Run `cargo test --lib jdk::tests::class_map_strips_module`.
+- [x] **Step 2:** Run `cargo test --lib jdk::tests::class_map_strips_module`.
   Expected: FAIL.
-- [ ] **Step 3:** Implement `JdkIndex { src_zip, class_entries, parsed }`,
+- [x] **Step 3:** Implement `JdkIndex { src_zip, class_entries, parsed }`,
   `discover()` (env override → `$JAVA_HOME/lib/src.zip` → `PATH`), a
   `discover_from(path)` test seam that builds `class_entries` by enumerating entry
   names and stripping the leading module segment, and `class_names_with_prefix`.
   Add `Index.jdk: OnceLock<JdkIndex>` + setter/getter (no parse yet).
-- [ ] **Step 4:** Run `cargo test --lib jdk::` → PASS.
-- [ ] **Step 5:** `git commit -m "JdkIndex: discover src.zip, build class->entry map"`
+- [x] **Step 4:** Run `cargo test --lib jdk::` → PASS.
+- [x] **Step 5:** `git commit -m "JdkIndex: discover src.zip, build class->entry map"`
 
 ### Task A4: `JavaClassInfo` + lazy parse
 
 **Files:** Modify `src/index/jdk.rs`.
 
-- [ ] **Step 1 (failing test):** `parses_members`: `make_src_zip` with a
+- [x] **Step 1 (failing test):** `parses_members`: `make_src_zip` with a
   `Greeter.java` containing Javadoc + `static String greet(String name)`, a
   `Greeter(int seed)` ctor, a `static final int VERSION` field; call
   `jdk.class("demo.lib.Greeter")`; assert one static method `greet` with one param
   and Javadoc, one ctor with one param, one field `VERSION`.
-- [ ] **Step 2:** Run `cargo test --lib jdk::tests::parses_members`. Expected: FAIL.
-- [ ] **Step 3:** Implement `JavaClassInfo`/`JavaMember`/`JavaCtor` and
+- [x] **Step 2:** Run `cargo test --lib jdk::tests::parses_members`. Expected: FAIL.
+- [x] **Step 3:** Implement `JavaClassInfo`/`JavaMember`/`JavaCtor` and
   `JdkIndex::class(fqn)`: return cached, else read the entry from `src.zip`, parse
   with tree-sitter-java, extract decl name range, methods (name/params/return/
   `static`/name_range/preceding-Javadoc), fields, ctors; cache `Arc`. Capture
   `extends`/`implements` strings for display.
-- [ ] **Step 4:** Run `cargo test --lib jdk::` → PASS.
-- [ ] **Step 5:** `git commit -m "JdkIndex: lazily parse .java into JavaClassInfo"`
+- [x] **Step 4:** Run `cargo test --lib jdk::` → PASS.
+- [x] **Step 5:** `git commit -m "JdkIndex: lazily parse .java into JavaClassInfo"`
 
 ### Task A5: Background discovery at startup
 
 **Files:** Modify `src/server.rs`, `src/index/mod.rs`.
 
-- [ ] **Step 1:** In server startup, spawn a background task (alongside library
+- [x] **Step 1:** In server startup, spawn a background task (alongside library
   indexing) that runs `JdkIndex::discover()` and, on success, `index.jdk.set(...)`
   and logs `"JDK source indexed: {N} classes"`; on no-source, logs once at debug.
-- [ ] **Step 2:** `bb check` → PASS. (Covered end-to-end by Task A9's
+- [x] **Step 2:** `bb check` → PASS. (Covered end-to-end by Task A9's
   `wait_for_log("JDK source indexed")`; no separate unit test.)
-- [ ] **Step 3:** `git commit -m "Discover JDK source at startup (background task)"`
+- [x] **Step 3:** `git commit -m "Discover JDK source at startup (background task)"`
 
 ### Task A6: URI plumbing for `src.zip`
 
 **Files:** Modify `src/uri.rs`.
 
-- [ ] **Step 1 (failing test):** Add `zip_virtual_path_roundtrips` next to the
+- [x] **Step 1 (failing test):** Add `zip_virtual_path_roundtrips` next to the
   existing uri tests: `from_index_path("/j/lib/src.zip!/java.base/java/lang/String.java")`
   yields `jar:file:///j/lib/src.zip!/java.base/java/lang/String.java`, and
   `to_index_path` of that URI returns the original virtual path.
-- [ ] **Step 2:** Run `cargo test --lib uri::tests`. Expected: FAIL (`.zip!/`
+- [x] **Step 2:** Run `cargo test --lib uri::tests`. Expected: FAIL (`.zip!/`
   unmatched).
-- [ ] **Step 3:** Generalize `split_jar_virtual_path` to find a `.jar!/` **or**
+- [x] **Step 3:** Generalize `split_jar_virtual_path` to find a `.jar!/` **or**
   `.zip!/` boundary; verify `from_index_path`/`to_index_path` use it consistently.
-- [ ] **Step 4:** Run `cargo test --lib uri::tests` → PASS.
-- [ ] **Step 5:** `git commit -m "uri: treat src.zip virtual paths like jars"`
+- [x] **Step 4:** Run `cargo test --lib uri::tests` → PASS.
+- [x] **Step 5:** `git commit -m "uri: treat src.zip virtual paths like jars"`
 
 ### Task A7: Resolver + definition (class, static, ctor, FQN, hint)
 
 **Files:** Create/modify `src/handlers/mod.rs` (or `references.rs`); Modify
 `src/handlers/definition.rs`; Test `tests/test_java.rs`.
 
-- [ ] **Step 1 (failing tests):** In `test_java.rs`, build an `Index` with a fixture
+- [x] **Step 1 (failing tests):** In `test_java.rs`, build an `Index` with a fixture
   `JdkIndex` and a project file `(ns app (:import [demo.lib Greeter]))` using
   `Greeter`, `Greeter/greet`, `(Greeter.)`, `Sample/of` (auto-java.lang). Assert
   `resolve_java_at` returns the right `JavaTarget` for each, that definition
   locations point into `…/src.zip!/…` at the right ranges, and a **non-regression**
   case: `str/join` with `[clojure.string :as str]` resolves Clojure-side (Java path
   not taken).
-- [ ] **Step 2:** Run `cargo test --test test_java`. Expected: FAIL.
-- [ ] **Step 3:** Implement `resolve_java_at` + `JavaTarget` (classify
+- [x] **Step 2:** Run `cargo test --test test_java`. Expected: FAIL.
+- [x] **Step 3:** Implement `resolve_java_at` + `JavaTarget` (classify
   `Class/member`, bare/FQN class, `(Class.)`, `^Class`; expand simple names via the
   import map then `java.lang` then `class_entries`). Wire `definition.rs` to call it
   **only when Clojure resolution is empty**, then build the src.zip location via
   `JdkIndex::class` + `uri::from_index_path`.
-- [ ] **Step 4:** Run `cargo test --test test_java` → PASS; `cargo test` (all) →
+- [x] **Step 4:** Run `cargo test --test test_java` → PASS; `cargo test` (all) →
   PASS (no regressions).
-- [ ] **Step 5:** `git commit -m "Resolve + navigate to JDK classes, statics, constructors"`
+- [x] **Step 5:** `git commit -m "Resolve + navigate to JDK classes, statics, constructors"`
 
 ### Task A8: Hover (signature + Javadoc)
 
 **Files:** Modify `src/handlers/hover.rs`; Test `tests/test_java.rs`.
 
-- [ ] **Step 1 (failing test):** `hover_java_member`/`hover_java_class`: hover on
+- [x] **Step 1 (failing test):** `hover_java_member`/`hover_java_class`: hover on
   `Greeter/greet` shows a signature line (`static String greet(String name)`) and
   the Javadoc; hover on `Greeter` shows the class decl + Javadoc.
-- [ ] **Step 2:** Run `cargo test --test test_java hover_java`. Expected: FAIL.
-- [ ] **Step 3:** In `hover.rs`, when Clojure hover is empty, consult
+- [x] **Step 2:** Run `cargo test --test test_java hover_java`. Expected: FAIL.
+- [x] **Step 3:** In `hover.rs`, when Clojure hover is empty, consult
   `resolve_java_at` → `JdkIndex::class` → render a markdown hover (signature +
   Javadoc, plus `extends`/`implements` for a class).
-- [ ] **Step 4:** Run `cargo test --test test_java hover_java` → PASS.
-- [ ] **Step 5:** `git commit -m "Hover Javadoc + signatures for JDK classes/members"`
+- [x] **Step 4:** Run `cargo test --test test_java hover_java` → PASS.
+- [x] **Step 5:** `git commit -m "Hover Javadoc + signatures for JDK classes/members"`
 
 ### Task A9: e2e — navigation + hover (hermetic)
 
 **Files:** Create fixture `.java` files; Modify `tests/test_e2e.rs`.
 
-- [ ] **Step 1:** Add `tests/fixtures/jdk_src/java.base/demo/lib/Greeter.java` and
+- [x] **Step 1:** Add `tests/fixtures/jdk_src/java.base/demo/lib/Greeter.java` and
   `tests/fixtures/jdk_src/java.base/java/lang/Sample.java`. Add an e2e helper that
   zips `tests/fixtures/jdk_src/**` into a temp `src.zip`.
-- [ ] **Step 2 (e2e test):** `test_e2e_java_definition_and_hover`: build the temp
+- [x] **Step 2 (e2e test):** `test_e2e_java_definition_and_hover`: build the temp
   `src.zip`, `start_with_env(project, &[("CLJ_PULSE_JDK_SRC", &src_zip)])`,
   `initialize`, `wait_for_log("JDK source indexed")`, `did_open` a file importing
   `demo.lib.Greeter`. Assert goto-def on `Greeter` and on `Greeter/greet` returns a
   `jar:…/src.zip!/…Greeter.java` URI at the expected line; hover shows the Javadoc.
-- [ ] **Step 3:** Run `cargo test --test test_e2e java` → PASS, then `bb check &&
+- [x] **Step 3:** Run `cargo test --test test_e2e java` → PASS, then `bb check &&
   bb e2e` → PASS.
-- [ ] **Step 4:** `git commit -m "e2e: navigate + hover into JDK src.zip"`
+- [x] **Step 4:** `git commit -m "e2e: navigate + hover into JDK src.zip"`
 
 ---
 
@@ -401,54 +402,54 @@ the real Temurin `src.zip` (in the spirit of `bb e2e-real`).
 
 **Files:** Modify `src/handlers/completion.rs`; Test `tests/test_completion.rs`.
 
-- [ ] **Step 1 (failing tests):** In `test_completion.rs`: completion at
+- [x] **Step 1 (failing tests):** In `test_completion.rs`: completion at
   `Greeter/gr|` offers `greet`; at `(:import [demo.lib Gr|` offers `Greeter`; at
   `Sam|` (auto-java.lang position) offers `Sample`. Each item carries an
   appropriate kind (Method/Field/Class).
-- [ ] **Step 2:** Run `cargo test --test test_completion java`. Expected: FAIL.
-- [ ] **Step 3:** In `completion.rs`, detect the position class (`:import` /
+- [x] **Step 2:** Run `cargo test --test test_completion java`. Expected: FAIL.
+- [x] **Step 3:** In `completion.rs`, detect the position class (`:import` /
   type-hint / `Class.` / `Class/`); offer class names by prefix over
   `class_entries`, and static members of the resolved class after `Class/` (via
   `JdkIndex::class`). No instance completion.
-- [ ] **Step 4:** Run `cargo test --test test_completion java` → PASS; full
+- [x] **Step 4:** Run `cargo test --test test_completion java` → PASS; full
   `cargo test` → PASS.
-- [ ] **Step 5:** `git commit -m "Complete JDK class names and static members"`
+- [x] **Step 5:** `git commit -m "Complete JDK class names and static members"`
 
 ### Task B2: Signature help — static methods + constructors
 
 **Files:** Modify `src/handlers/signature.rs`; Test `tests/test_java.rs`.
 
-- [ ] **Step 1 (failing tests):** Signature help inside `(Greeter/greet ▏)` shows
+- [x] **Step 1 (failing tests):** Signature help inside `(Greeter/greet ▏)` shows
   `greet(String name)`; inside `(Greeter. ▏)` shows `Greeter(int seed)`; overloads
   produce multiple `SignatureInformation`.
-- [ ] **Step 2:** Run `cargo test --test test_java signature`. Expected: FAIL.
-- [ ] **Step 3:** In `signature.rs`, when the call head is a JDK static method or a
+- [x] **Step 2:** Run `cargo test --test test_java signature`. Expected: FAIL.
+- [x] **Step 3:** In `signature.rs`, when the call head is a JDK static method or a
   constructor, emit one `SignatureInformation` per overload from `JavaClassInfo`.
-- [ ] **Step 4:** Run `cargo test --test test_java signature` → PASS.
-- [ ] **Step 5:** `git commit -m "Signature help for JDK static methods + constructors"`
+- [x] **Step 4:** Run `cargo test --test test_java signature` → PASS.
+- [x] **Step 5:** `git commit -m "Signature help for JDK static methods + constructors"`
 
 ### Task B3: e2e — completion + signature (hermetic)
 
 **Files:** Modify `tests/test_e2e.rs`.
 
-- [ ] **Step 1 (e2e test):** `test_e2e_java_completion_and_signature`: same fixture
+- [x] **Step 1 (e2e test):** `test_e2e_java_completion_and_signature`: same fixture
   `src.zip` + `start_with_env`. Assert `completion` after `Greeter/` includes
   `greet`; `completion` in `:import` includes `Greeter`; `signatureHelp` inside
   `(Greeter/greet ` returns the parameter label.
-- [ ] **Step 2:** Run `cargo test --test test_e2e java` → PASS, then `bb check &&
+- [x] **Step 2:** Run `cargo test --test test_e2e java` → PASS, then `bb check &&
   bb e2e` → PASS.
-- [ ] **Step 3:** `git commit -m "e2e: JDK completion + signature help"`
+- [x] **Step 3:** `git commit -m "e2e: JDK completion + signature help"`
 
 ### Task B4: ROADMAP update
 
 **Files:** Modify `docs/ROADMAP.md`.
 
-- [ ] **Step 1:** Update the Java interop item (line 99) to note built-in/JDK class
+- [x] **Step 1:** Update the Java interop item (line 99) to note built-in/JDK class
   navigation, static-member navigation/completion, constructor signature help, and
   Javadoc hover via `src.zip` (libraries + decompilation still pending). Use the
   /writing-clearly skill.
-- [ ] **Step 2:** `bb check && bb e2e` → PASS (final full gate).
-- [ ] **Step 3:** `git commit -m "Roadmap: built-in Java navigation + completion"`
+- [x] **Step 2:** `bb check && bb e2e` → PASS (final full gate).
+- [x] **Step 3:** `git commit -m "Roadmap: built-in Java navigation + completion"`
 
 ---
 
@@ -471,3 +472,56 @@ the real Temurin `src.zip` (in the spirit of `bb e2e-real`).
 - **Server behavior is not done until `bb e2e` passes** (per CLAUDE.md); the
   client-visible `jar:`/`src.zip` content path reuses the existing provider, so no
   new `bb e2e-nvim` protocol surface is introduced.
+
+## Implementation summary
+
+Implemented as designed, in 13 commits on `java-completion` (`tree-sitter-java`
+was already present in `Cargo.toml`/`Cargo.lock` on the branch).
+
+**Phase A — navigation + Javadoc hover**
+1. **`7889a1f`** — added `tree-sitter-java = "0.23"` (deduped the manifest) +
+   `src/index/jdk.rs` smoke test, confirming the grammar loads against
+   tree-sitter 0.25 at runtime (the one residual ABI risk).
+2. **`6f4322a`** — `:import` parsing into `NsMeta.imports`
+   (`extract_ns`/`process_import_spec`, three forms); bumped
+   `CACHE_FORMAT_VERSION` 9 → 10.
+3. **`414f43d`** — `JdkIndex`: `src.zip` discovery (env/`JAVA_HOME`/`PATH`),
+   class→entry map (module-prefix stripped), and lazy per-class tree-sitter-java
+   parse into `JavaClassInfo`. (A3+A4 landed together — tightly coupled.)
+4. **`0d85cc1`** — background discovery at startup, logging
+   `"JDK source indexed: N classes"`.
+5. **`72f03f0`** — generalized `split_jar_virtual_path` to also match `.zip!/`.
+6. **`96324c1`** — `src/handlers/java.rs` resolver (`resolve_java_word`) +
+   definition fallback into `src.zip` (Clojure-first, Java-as-fallback).
+7. **`108a060`** — hover with Java signatures + Javadoc.
+8. **`8df3d29`** — hermetic e2e (fixture `src.zip` via `CLJ_PULSE_JDK_SRC`):
+   navigation + Javadoc hover, including auto-`java.lang`.
+
+**Phase B — completion + signature help**
+9. **`5527594`** — completion: `Class/` static members + PascalCase class names
+   (capped, gated to avoid flooding lowercase completion).
+10. **`e31da10`** — signature help for static methods and constructors
+    (one `SignatureInformation` per overload).
+11. **`b275be0`** — hermetic e2e: `Class/` completion, class-name completion, and
+    signature help.
+12. **`8314ec7`** — roadmap update.
+
+**Deviations from the plan (all minor, well-justified):**
+- **A3 + A4 merged** into one `JdkIndex` commit — splitting them created an
+  artificial dead-code seam (`src_zip`/parser unused until A4).
+- **Resolver lives in `src/handlers/java.rs`** with inline unit tests rather than a
+  separate `tests/test_java.rs`. The `zip` crate (needed to build fixture
+  `src.zip`s) is a regular dependency that *is* reachable from `tests/` here
+  (`test_jar_definition.rs` already uses it), but keeping the resolver/hover/
+  completion/signature unit tests inline keeps them next to the code and reuses a
+  shared `#[cfg(test)]` `test_fixture()`/`make_src_zip` helper. End-to-end coverage
+  still lives in `tests/test_e2e.rs`.
+- **Precedence simplified** to pure "Clojure-first, Java-fallback" (the import map
+  is used only *inside* Java resolution, never as a competing signal) — strictly
+  non-regressing; `str/join` has an explicit guard test.
+- **No Cargo.toml/dev-dependency changes were needed** for tests.
+
+**Verification.** `bb check` (fmt + clippy `-D warnings` + 176 lib + integration
+tests) and `bb e2e` (70 passed, 1 ignored — up from 68) both green. The per-task
+`review-with-codex` checkpoint was skipped at the user's direction; correctness is
+gated on the test/lint suite plus two real-process e2e tests.
