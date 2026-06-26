@@ -2,6 +2,7 @@ pub mod core;
 pub mod extractor;
 pub mod jar;
 pub mod jar_cache;
+pub mod jdk;
 pub mod scanner;
 
 use std::collections::HashMap;
