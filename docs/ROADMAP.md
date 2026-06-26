@@ -96,7 +96,15 @@ meantime and keeping the server dependency-free is worth more early on.
 - [x] Keyword indexing — navigation/rename for namespaced keywords. + Navigation on Integrant keys from integratn system edn file to components
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
 - [ ] Custom macros definitions (example `defcomponent` from flockman)
-- [ ] Java interop (class navigation/completion, decompilation, stubs). (if possible)
+- [x] Built-in (JDK) Java interop — go-to-definition, Javadoc hover, completion,
+      and signature help for JDK classes, static members, and constructors. Reads
+      the JDK's bundled `src.zip` (located via `JAVA_HOME`/`PATH`, or the
+      `CLJ_PULSE_JDK_SRC` override) and parses `.java` with tree-sitter-java;
+      `:import` is parsed into `NsMeta`, and Java resolution runs only as a
+      fallback after Clojure resolution (so `str/join` and friends are
+      unaffected). Instance-method interop (`(.m obj)`), library `.class`
+      bytecode, and decompilation are deliberately out of scope (later phases).
+      See [the plan](plans/2026-06-26-java-builtin-navigation-completion.md).
 - [x] let-go core navigation — when `:lg-version` is pinned in `lgx.edn` and
       lgx has fetched the source, indexes let-go's built-in `core`/stdlib from
       `$LGX_HOME/let-go/source/<version>/pkg/rt/core/*.lg` and navigates into the
