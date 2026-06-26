@@ -125,6 +125,11 @@ impl JdkIndex {
         self.class_entries.get(fqn).map(String::as_str)
     }
 
+    /// The discovered `src.zip` path, for building `jar:` navigation URIs.
+    pub fn src_zip(&self) -> &Path {
+        &self.src_zip
+    }
+
     /// Whether a fully-qualified class is known (entry-name lookup, no parse).
     pub fn has_class(&self, fqn: &str) -> bool {
         self.class_entries.contains_key(fqn)
@@ -405,23 +410,26 @@ fn node_to_lsp_range(node: Node, source: &str) -> Range {
     }
 }
 
+/// Builds a temporary `src.zip` from `(entry, contents)` pairs. Test-only and
+/// shared across the lib's unit tests (jdk, handlers::java, hover, …).
+#[cfg(test)]
+pub(crate) fn make_src_zip(entries: &[(&str, &str)]) -> tempfile::NamedTempFile {
+    use std::io::Write;
+    let tmp = tempfile::Builder::new().suffix(".zip").tempfile().unwrap();
+    let file = std::fs::File::create(tmp.path()).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, content) in entries {
+        zip.start_file(*name, opts).unwrap();
+        zip.write_all(content.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    tmp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    fn make_src_zip(entries: &[(&str, &str)]) -> tempfile::NamedTempFile {
-        let tmp = tempfile::Builder::new().suffix(".zip").tempfile().unwrap();
-        let file = std::fs::File::create(tmp.path()).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let opts = zip::write::SimpleFileOptions::default();
-        for (name, content) in entries {
-            zip.start_file(*name, opts).unwrap();
-            zip.write_all(content.as_bytes()).unwrap();
-        }
-        zip.finish().unwrap();
-        tmp
-    }
 
     /// Confirms the tree-sitter-java grammar loads and parses against the
     /// pinned tree-sitter 0.25 — the one residual ABI risk from the dependency.
