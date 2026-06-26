@@ -1189,6 +1189,66 @@ fn test_e2e_java_definition_and_hover() {
 }
 
 #[test]
+fn test_e2e_java_completion_and_signature() {
+    let src_zip = make_jdk_src_zip(&[(
+        "java.base/demo/lib/Greeter.java",
+        "package demo.lib;\npublic class Greeter {\n  public Greeter(int seed) {}\n  \
+         public static String greet(String name) { return name; }\n}\n",
+    )]);
+
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/jcomp.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.jcomp\n  (:import [demo.lib Greeter]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("CLJ_PULSE_JDK_SRC", src_zip.path())]);
+    client.initialize(&root);
+    client.wait_for_log("JDK source indexed");
+    client.did_open(&probe);
+
+    let base = std::fs::read_to_string(&probe).unwrap().lines().count() as u32;
+
+    // Static-member completion: `Greeter/g` → greet (no paren needed).
+    client.did_change_insert(&probe, base, 0, "Greeter/g\n");
+    let comp = client.completion(&probe, base, 9);
+    let labels: Vec<&str> = comp
+        .as_array()
+        .expect("completion array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"greet"),
+        "static-member completion: {labels:?}"
+    );
+
+    // Class-name completion: PascalCase `Gr` → Greeter.
+    client.did_change_insert(&probe, base + 1, 0, "Gr\n");
+    let comp2 = client.completion(&probe, base + 1, 2);
+    let labels2: Vec<&str> = comp2
+        .as_array()
+        .expect("completion array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels2.contains(&"Greeter"),
+        "class-name completion: {labels2:?}"
+    );
+
+    // Signature help: `(Greeter/greet ` → greet(String name).
+    client.did_change_insert(&probe, base + 2, 0, "(Greeter/greet \n");
+    let sig = client.signature_help(&probe, base + 2, 15);
+    assert!(!sig.is_null(), "no signature help");
+    let label = sig["signatures"][0]["label"].as_str().unwrap_or("");
+    assert!(label.contains("greet(String name)"), "signature: {label}");
+}
+
+#[test]
 fn test_e2e_completion_with_alias_prefix() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
