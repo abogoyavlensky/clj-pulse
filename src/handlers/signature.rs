@@ -46,7 +46,15 @@ pub fn handle(
         Some(ResolvedSymbol::SpecialForm(_)) | Some(ResolvedSymbol::LetgoNative(_)) => {
             return Ok(None)
         }
-        None => return Ok(None),
+        // Built-in Java interop: static method or constructor signature.
+        None => {
+            return Ok(java_signature_help(
+                index,
+                &fn_word,
+                &current_ns,
+                active_arg,
+            ))
+        }
     };
 
     if arities.is_empty() {
@@ -91,6 +99,81 @@ pub fn handle(
         active_signature: Some(active_signature),
         active_parameter: Some(active_parameter),
     }))
+}
+
+/// Signature help for a Java static method (`Class/method`) or constructor
+/// (`Class.`): one `SignatureInformation` per overload, with parameter labels.
+fn java_signature_help(
+    index: &Index,
+    fn_word: &str,
+    current_ns: &str,
+    active_arg: u32,
+) -> Option<SignatureHelp> {
+    let (class_name, member) = if let Some(class) = fn_word.strip_suffix('.') {
+        (class, None)
+    } else if let Some((class, method)) = fn_word.split_once('/') {
+        (class, Some(method))
+    } else {
+        return None;
+    };
+
+    let class_fqn = super::java::resolve_class(index, class_name, current_ns)?;
+    let info = index.jdk()?.class(&class_fqn)?;
+    let simple = class_fqn
+        .rsplit('.')
+        .next()
+        .unwrap_or(&class_fqn)
+        .to_string();
+
+    // Overloads: constructors for `Class.`, matching static methods otherwise.
+    let overloads: Vec<(String, Vec<String>)> = match member {
+        None => info
+            .ctors
+            .iter()
+            .map(|c| (simple.clone(), c.params.clone()))
+            .collect(),
+        Some(m) => info
+            .methods
+            .iter()
+            .filter(|x| x.is_static && x.name == m)
+            .map(|x| (x.name.clone(), x.params.clone()))
+            .collect(),
+    };
+    if overloads.is_empty() {
+        return None;
+    }
+
+    let signatures: Vec<SignatureInformation> = overloads
+        .iter()
+        .map(|(name, params)| SignatureInformation {
+            label: format!("{}({})", name, params.join(", ")),
+            documentation: None,
+            parameters: Some(
+                params
+                    .iter()
+                    .map(|p| ParameterInformation {
+                        label: ParameterLabel::Simple(p.clone()),
+                        documentation: None,
+                    })
+                    .collect(),
+            ),
+            active_parameter: None,
+        })
+        .collect();
+
+    // Prefer an overload whose arity covers the active argument.
+    let active_sig = overloads
+        .iter()
+        .position(|(_, p)| (active_arg as usize) < p.len())
+        .unwrap_or(0);
+    let active_param =
+        (active_arg as usize).min(overloads[active_sig].1.len().saturating_sub(1)) as u32;
+
+    Some(SignatureHelp {
+        signatures,
+        active_signature: Some(active_sig as u32),
+        active_parameter: Some(active_param),
+    })
 }
 
 /// Picks the arity that fits `active_arg` (first one with enough positional
@@ -449,5 +532,25 @@ mod tests {
     fn test_pick_active_rest_param() {
         let arities = vec!["[x & more]".to_string()];
         assert_eq!(pick_active(&arities, 4), (0, 1));
+    }
+
+    #[test]
+    fn java_signature_for_static_method_and_ctor() {
+        let (index, _zip) = crate::handlers::java::test_fixture();
+
+        let method = java_signature_help(&index, "Greeter/greet", "app.core", 0).unwrap();
+        assert_eq!(method.signatures.len(), 1);
+        assert!(
+            method.signatures[0].label.contains("greet(String name)"),
+            "{}",
+            method.signatures[0].label
+        );
+
+        let ctor = java_signature_help(&index, "Greeter.", "app.core", 0).unwrap();
+        assert!(
+            ctor.signatures[0].label.contains("Greeter(int seed)"),
+            "{}",
+            ctor.signatures[0].label
+        );
     }
 }
