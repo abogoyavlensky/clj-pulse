@@ -81,6 +81,10 @@ pub struct NsMeta {
     /// (a plain `[clojure.set]` lands here too). Used to tell whether a
     /// qualified usage's namespace is already required.
     pub requires: Vec<String>,
+    /// Java class simple name → fully-qualified name, from `(:import …)`.
+    /// Resolves interop class references (`Date`, `Instant/now`, `(File. …)`)
+    /// to JDK source. Empty for files with no `:import`.
+    pub imports: HashMap<String, String>,
 }
 
 impl NsMeta {

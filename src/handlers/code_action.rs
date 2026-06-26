@@ -692,6 +692,7 @@ mod tests {
             aliases: HashMap::new(),
             refers: HashMap::new(),
             requires: vec![],
+            imports: HashMap::new(),
         }
     }
 
@@ -715,6 +716,7 @@ mod tests {
             aliases: HashMap::new(),
             refers: HashMap::new(),
             requires: vec![],
+            imports: HashMap::new(),
         };
         let greet = Symbol {
             name: "greet".to_string(),
@@ -739,6 +741,7 @@ mod tests {
             aliases: HashMap::new(),
             refers: HashMap::new(),
             requires: vec![],
+            imports: HashMap::new(),
         }
     }
 

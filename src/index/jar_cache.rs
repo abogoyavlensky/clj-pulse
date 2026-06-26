@@ -14,7 +14,8 @@ use super::{NsMeta, Symbol};
 /// 7: `.impl`/`.internal` namespaces are now indexed (previously skipped).
 /// 8: private (`defn-`) library symbols are now indexed (previously skipped).
 /// 9: `DefKind::IntegrantKey` added (Symbol layout change).
-pub const CACHE_FORMAT_VERSION: u32 = 9;
+/// 10: `NsMeta.imports` added (`:import` parsing).
+pub const CACHE_FORMAT_VERSION: u32 = 10;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {
@@ -99,6 +100,7 @@ mod tests {
             aliases: HashMap::new(),
             refers: HashMap::new(),
             requires: Vec::new(),
+            imports: HashMap::new(),
         };
         let symbol = Symbol {
             name: "my-fn".to_string(),

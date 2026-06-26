@@ -283,6 +283,7 @@ mod tests {
             aliases: HashMap::new(),
             refers: HashMap::new(),
             requires: vec![],
+            imports: HashMap::new(),
         }
     }
 
