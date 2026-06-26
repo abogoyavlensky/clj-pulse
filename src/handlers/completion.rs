@@ -49,6 +49,21 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     }
                 }
             }
+        } else if let Some(class_fqn) = super::java::resolve_class(index, alias, current_ns) {
+            // Java static members: `Class/prefix` (the alias resolves to a JDK
+            // class, not a Clojure require alias).
+            if let Some(info) = index.jdk().and_then(|j| j.class(&class_fqn)) {
+                for m in &info.methods {
+                    if m.is_static && m.name.starts_with(name_prefix) {
+                        items.push(java_member_completion(&m.name, &class_fqn, true));
+                    }
+                }
+                for f in &info.fields {
+                    if f.is_static && f.name.starts_with(name_prefix) {
+                        items.push(java_member_completion(&f.name, &class_fqn, false));
+                    }
+                }
+            }
         }
     } else {
         // Pool A: current namespace symbols
@@ -146,10 +161,56 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     });
                 }
             }
+
+            // Pool F: built-in Java class names. Gated on a PascalCase prefix so
+            // ordinary (lowercase) completion isn't flooded with JDK classes, and
+            // capped for short prefixes.
+            if prefix.chars().next().is_some_and(|c| c.is_uppercase()) {
+                if let Some(jdk) = index.jdk() {
+                    for fqn in jdk
+                        .class_names_with_prefix(prefix)
+                        .into_iter()
+                        .take(JAVA_CLASS_LIMIT)
+                    {
+                        items.push(java_class_completion(fqn));
+                    }
+                }
+            }
         }
     }
 
     items
+}
+
+/// Cap on Java class-name completions, so a short PascalCase prefix doesn't dump
+/// hundreds of JDK classes into the list.
+const JAVA_CLASS_LIMIT: usize = 50;
+
+fn java_member_completion(name: &str, class_fqn: &str, is_method: bool) -> CompletionItem {
+    CompletionItem {
+        label: name.to_string(),
+        detail: Some(format!(
+            "{} (static {})",
+            class_fqn,
+            if is_method { "method" } else { "field" }
+        )),
+        kind: Some(if is_method {
+            CompletionItemKind::METHOD
+        } else {
+            CompletionItemKind::FIELD
+        }),
+        ..Default::default()
+    }
+}
+
+fn java_class_completion(fqn: &str) -> CompletionItem {
+    let simple = fqn.rsplit('.').next().unwrap_or(fqn);
+    CompletionItem {
+        label: simple.to_string(),
+        detail: Some(fqn.to_string()),
+        kind: Some(CompletionItemKind::CLASS),
+        ..Default::default()
+    }
 }
 
 /// Library-internal namespaces (`*.impl` / `*.internal`) are indexed for
@@ -292,6 +353,26 @@ mod tests {
             .into_iter()
             .map(|i| i.label)
             .collect()
+    }
+
+    #[test]
+    fn completes_java_static_members_and_class_names() {
+        let (index, _zip) = crate::handlers::java::test_fixture();
+        let java_labels = |prefix: &str| -> Vec<String> {
+            complete_symbols(&index, prefix, "app.core")
+                .into_iter()
+                .map(|i| i.label)
+                .collect()
+        };
+        // `Class/prefix` → static members.
+        assert!(
+            java_labels("Greeter/gr").contains(&"greet".to_string()),
+            "{:?}",
+            java_labels("Greeter/gr")
+        );
+        // PascalCase prefix → class names (imported, then auto-`java.lang`).
+        assert!(java_labels("Gr").contains(&"Greeter".to_string()));
+        assert!(java_labels("Sam").contains(&"Sample".to_string()));
     }
 
     fn letgo_index() -> Index {

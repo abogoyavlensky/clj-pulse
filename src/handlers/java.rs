@@ -77,6 +77,18 @@ pub fn resolve_java_word(index: &Index, word: &str, current_ns: &str) -> Option<
     })
 }
 
+/// Resolves a class name (simple or fully-qualified) to a known JDK class FQN,
+/// using the file's `:import`s + `java.lang`. For completion and signature help,
+/// where only the class part of an interop form is in hand.
+pub fn resolve_class(index: &Index, name: &str, current_ns: &str) -> Option<String> {
+    let jdk = index.jdk()?;
+    let imports = index
+        .ns_meta(current_ns)
+        .map(|m| m.imports)
+        .unwrap_or_default();
+    resolve_class_fqn(name, &imports, jdk)
+}
+
 /// Resolves a class name (simple or fully-qualified) to a known JDK class FQN:
 /// an explicit `:import`, then a fully-qualified name used directly, then the
 /// auto-imported `java.lang` package.
