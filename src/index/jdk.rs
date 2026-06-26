@@ -62,6 +62,7 @@ pub struct JavaClassInfo {
     pub entry: String,
     /// Range of the class declaration's name token.
     pub decl_name_range: Range,
+    pub javadoc: Option<String>,
     pub extends: Option<String>,
     pub implements: Vec<String>,
     pub methods: Vec<JavaMember>,
@@ -276,6 +277,7 @@ fn parse_class(fqn: &str, entry: &str, source: &str) -> Option<JavaClassInfo> {
         fqn: fqn.to_string(),
         entry: entry.to_string(),
         decl_name_range: node_to_lsp_range(name_node, source),
+        javadoc: preceding_javadoc(decl, source),
         extends,
         implements,
         methods,

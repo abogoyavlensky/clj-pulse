@@ -100,41 +100,52 @@ fn resolve_class_fqn(
     None
 }
 
+/// Shared test fixture: an [`Index`] with JDK source (`demo.lib.Greeter` — a
+/// static method, constructor, and field, each with Javadoc — and
+/// `java.lang.Sample`) plus a project ns importing `demo.lib.Greeter`. The
+/// returned tempfile must be kept alive while `jdk.class(..)` may be called.
+#[cfg(test)]
+pub(crate) fn test_fixture() -> (Index, tempfile::NamedTempFile) {
+    use crate::index::extractor::extract;
+    use crate::index::jdk::{make_src_zip, JdkIndex};
+
+    const GREETER: &str = "package demo.lib;\n\
+/** A greeter. */\n\
+public class Greeter {\n\
+    /** The version. */\n\
+    public static final int VERSION = 1;\n\
+    /** Make a greeter. */\n\
+    public Greeter(int seed) {}\n\
+    /** Greet by name. */\n\
+    public static String greet(String name) { return name; }\n\
+}\n";
+    const SAMPLE: &str = "package java.lang;\n\
+public class Sample {\n\
+    public static Sample of(long n) { return null; }\n\
+}\n";
+
+    let zip = make_src_zip(&[
+        ("java.base/demo/lib/Greeter.java", GREETER),
+        ("java.base/java/lang/Sample.java", SAMPLE),
+    ]);
+    let index = Index::new();
+    index.set_jdk(JdkIndex::discover_from(zip.path().to_path_buf()).unwrap());
+    let (meta, syms) = extract(
+        "(ns app.core (:import [demo.lib Greeter]))",
+        std::path::Path::new("app/core.clj"),
+    )
+    .unwrap();
+    index.insert_file(meta, syms, vec![]);
+    (index, zip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::extractor::extract;
-    use crate::index::jdk::{make_src_zip, JdkIndex};
-    use std::path::Path;
-
-    fn fixture_index() -> (Index, tempfile::NamedTempFile) {
-        let zip = make_src_zip(&[
-            (
-                "java.base/demo/lib/Greeter.java",
-                "package demo.lib; public class Greeter { \
-                 public Greeter(int seed) {} \
-                 public static String greet(String name) { return name; } }",
-            ),
-            (
-                "java.base/java/lang/Sample.java",
-                "package java.lang; public class Sample { \
-                 public static Sample of(long n) { return null; } }",
-            ),
-        ]);
-        let index = Index::new();
-        index.set_jdk(JdkIndex::discover_from(zip.path().to_path_buf()).unwrap());
-        let (meta, syms) = extract(
-            "(ns app.core (:import [demo.lib Greeter]))",
-            Path::new("app/core.clj"),
-        )
-        .unwrap();
-        index.insert_file(meta, syms, vec![]);
-        (index, zip)
-    }
 
     #[test]
     fn resolves_imported_class() {
-        let (index, _zip) = fixture_index();
+        let (index, _zip) = test_fixture();
         assert_eq!(
             resolve_java_word(&index, "Greeter", "app.core"),
             Some(JavaTarget {
@@ -147,7 +158,7 @@ mod tests {
 
     #[test]
     fn resolves_static_member_and_ctor() {
-        let (index, _zip) = fixture_index();
+        let (index, _zip) = test_fixture();
         let stat = resolve_java_word(&index, "Greeter/greet", "app.core").unwrap();
         assert_eq!(stat.class_fqn, "demo.lib.Greeter");
         assert_eq!(stat.member.as_deref(), Some("greet"));
@@ -160,7 +171,7 @@ mod tests {
 
     #[test]
     fn resolves_auto_java_lang_without_import() {
-        let (index, _zip) = fixture_index();
+        let (index, _zip) = test_fixture();
         assert_eq!(
             resolve_java_word(&index, "Sample/of", "app.core").map(|t| t.class_fqn),
             Some("java.lang.Sample".to_string())
@@ -170,7 +181,7 @@ mod tests {
     #[test]
     fn does_not_resolve_clojure_alias() {
         // Non-regression: `str/join` must not be mistaken for a Java class.
-        let (index, _zip) = fixture_index();
+        let (index, _zip) = test_fixture();
         assert!(resolve_java_word(&index, "str/join", "app.core").is_none());
         assert!(resolve_java_word(&index, "Nope", "app.core").is_none());
     }
