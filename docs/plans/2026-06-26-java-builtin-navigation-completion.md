@@ -521,7 +521,17 @@ was already present in `Cargo.toml`/`Cargo.lock` on the branch).
   non-regressing; `str/join` has an explicit guard test.
 - **No Cargo.toml/dev-dependency changes were needed** for tests.
 
-**Verification.** `bb check` (fmt + clippy `-D warnings` + 176 lib + integration
-tests) and `bb e2e` (70 passed, 1 ignored — up from 68) both green. The per-task
-`review-with-codex` checkpoint was skipped at the user's direction; correctness is
-gated on the test/lint suite plus two real-process e2e tests.
+**Verification.** `bb check` (fmt + clippy `-D warnings` + lib + integration
+tests) and `bb e2e` both green.
+
+**Post-merge fix — real JDK discovery.** The initial discovery (env `JAVA_HOME`
++ PATH-`readlink`, deliberately "no process spawn") silently failed under version
+managers (mise/asdf/sdkman): `JAVA_HOME` is unset and `java` on `PATH` is a shim
+that `readlink`s to the manager binary, not the JDK home — so `Index.jdk` was
+never set and the feature was off in real use. (The original e2e missed this
+because it injected `CLJ_PULSE_JDK_SRC`, bypassing discovery.) Fixed by adding a
+`java -XshowSettings:properties -version` probe that reads `java.home` — the
+reliable cross-manager signal — tried after the cheap path-only steps. Verified
+against the reported cases (`Thread/sleep`, imported `java.security.MessageDigest`)
+and locked in by `test_e2e_java_real_jdk_discovery` (an `#[ignore]`d real-JDK
+e2e).

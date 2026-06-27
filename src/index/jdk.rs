@@ -168,8 +168,12 @@ impl JdkIndex {
     }
 }
 
-/// Locates the JDK `src.zip`, without spawning any process:
-/// `CLJ_PULSE_JDK_SRC` override → `$JAVA_HOME/lib/src.zip` → `java` on `PATH`.
+/// Locates the JDK `src.zip`: `CLJ_PULSE_JDK_SRC` override → `$JAVA_HOME/lib` →
+/// `java` resolved on `PATH` by path → `java -XshowSettings` for its `java.home`.
+/// The cheap path-only steps are tried first; the final step spawns `java` once,
+/// which is what makes discovery work under version managers (mise/asdf/sdkman),
+/// where `JAVA_HOME` is unset and `java` on `PATH` is a shim that does not resolve
+/// to the JDK home by path alone.
 fn find_src_zip() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CLJ_PULSE_JDK_SRC") {
         let p = PathBuf::from(p);
@@ -178,12 +182,36 @@ fn find_src_zip() -> Option<PathBuf> {
         }
     }
     if let Some(home) = std::env::var_os("JAVA_HOME") {
-        let p = Path::new(&home).join("lib").join("src.zip");
-        if p.is_file() {
+        if let Some(p) = src_zip_in_home(Path::new(&home)) {
             return Some(p);
         }
     }
-    src_zip_from_path_java()
+    if let Some(p) = src_zip_from_path_java() {
+        return Some(p);
+    }
+    // Last resort: ask `java` itself for its home (the reliable cross-manager
+    // signal). Only reached when the cheaper path-only steps miss.
+    src_zip_in_home(&jdk_home_from_java_cmd()?)
+}
+
+/// `<home>/lib/src.zip` if it exists.
+fn src_zip_in_home(home: &Path) -> Option<PathBuf> {
+    let candidate = home.join("lib").join("src.zip");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Reads the JDK home from `java -XshowSettings:properties -version`, which
+/// prints `java.home = <path>` among the properties on stderr. Returns `None`
+/// if `java` cannot be run or the line is absent.
+fn jdk_home_from_java_cmd() -> Option<PathBuf> {
+    let output = std::process::Command::new("java")
+        .args(["-XshowSettings:properties", "-version"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("java.home = "))
+        .map(|home| PathBuf::from(home.trim()))
 }
 
 /// Resolves `java` on `PATH` to its JDK home and checks for `lib/src.zip`.

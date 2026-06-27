@@ -1249,6 +1249,48 @@ fn test_e2e_java_completion_and_signature() {
 }
 
 #[test]
+#[ignore = "needs a real JDK with lib/src.zip discoverable on the machine"]
+fn test_e2e_java_real_jdk_discovery() {
+    // No CLJ_PULSE_JDK_SRC override: exercises *real* discovery (JAVA_HOME, then a
+    // `java -XshowSettings` probe) against the machine's JDK. Covers the reported
+    // cases: `Thread/sleep` (auto-`java.lang`) and an imported `java.security` class.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/jreal.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.jreal\n  (:import (java.security MessageDigest)))\n\n\
+         (defn nap [] (Thread/sleep 10))\n\n(defn dig [] (MessageDigest/getInstance \"MD5\"))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root); // inherits env (JAVA_HOME/PATH)
+    client.initialize(&root);
+    client.wait_for_log("JDK source indexed");
+    client.did_open(&probe);
+
+    let (tl, tc) = position_of(&probe, "Thread/sleep");
+    let tdef = client.goto_definition(&probe, tl, tc);
+    let turi = tdef["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("Thread/sleep: expected Location, got {tdef}"));
+    assert!(
+        turi.contains(".zip!/") && turi.ends_with("Thread.java"),
+        "expected JDK src.zip Thread.java, got {turi}"
+    );
+
+    let (ml, mc) = position_of(&probe, "MessageDigest/getInstance");
+    let mdef = client.goto_definition(&probe, ml, mc);
+    let muri = mdef["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("MessageDigest: expected Location, got {mdef}"));
+    assert!(
+        muri.ends_with("MessageDigest.java"),
+        "expected MessageDigest.java, got {muri}"
+    );
+}
+
+#[test]
 fn test_e2e_completion_with_alias_prefix() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();

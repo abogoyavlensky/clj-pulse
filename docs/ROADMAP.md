@@ -98,8 +98,9 @@ meantime and keeping the server dependency-free is worth more early on.
 - [ ] Custom macros definitions (example `defcomponent` from flockman)
 - [x] Built-in (JDK) Java interop — go-to-definition, Javadoc hover, completion,
       and signature help for JDK classes, static members, and constructors. Reads
-      the JDK's bundled `src.zip` (located via `JAVA_HOME`/`PATH`, or the
-      `CLJ_PULSE_JDK_SRC` override) and parses `.java` with tree-sitter-java;
+      the JDK's bundled `src.zip` (found via `JAVA_HOME`, a `java -XshowSettings`
+      probe for `java.home` — so version managers like mise/asdf/sdkman work — or
+      the `CLJ_PULSE_JDK_SRC` override) and parses `.java` with tree-sitter-java;
       `:import` is parsed into `NsMeta`, and Java resolution runs only as a
       fallback after Clojure resolution (so `str/join` and friends are
       unaffected). Instance-method interop (`(.m obj)`), library `.class`
