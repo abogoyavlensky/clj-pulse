@@ -43,6 +43,7 @@ cat <<EOF
 class CljPulse < Formula
   desc "Language server for Clojure"
   homepage "https://github.com/abogoyavlensky/clj-pulse"
+  version "${version}"
   license "MIT"
 
   livecheck do
