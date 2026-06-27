@@ -168,12 +168,15 @@ impl JdkIndex {
     }
 }
 
-/// Locates the JDK `src.zip`: `CLJ_PULSE_JDK_SRC` override → `$JAVA_HOME/lib` →
-/// `java` resolved on `PATH` by path → `java -XshowSettings` for its `java.home`.
-/// The cheap path-only steps are tried first; the final step spawns `java` once,
-/// which is what makes discovery work under version managers (mise/asdf/sdkman),
-/// where `JAVA_HOME` is unset and `java` on `PATH` is a shim that does not resolve
-/// to the JDK home by path alone.
+/// Locates the JDK `src.zip`, tried in order:
+/// 1. `CLJ_PULSE_JDK_SRC` override,
+/// 2. `$JAVA_HOME/lib/src.zip`,
+/// 3. `java` resolved on `PATH` by path (no spawn),
+/// 4. `java -XshowSettings` for its `java.home` (one spawn; handles version
+///    managers — mise/asdf/sdkman — where `JAVA_HOME` is unset and `java` is a
+///    shim that doesn't resolve to the JDK home by path),
+/// 5. a scan of well-known install dirs (for editors launched without a shell
+///    `PATH`, e.g. macOS GUI launch, where `java` isn't even runnable).
 fn find_src_zip() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CLJ_PULSE_JDK_SRC") {
         let p = PathBuf::from(p);
@@ -189,9 +192,48 @@ fn find_src_zip() -> Option<PathBuf> {
     if let Some(p) = src_zip_from_path_java() {
         return Some(p);
     }
-    // Last resort: ask `java` itself for its home (the reliable cross-manager
-    // signal). Only reached when the cheaper path-only steps miss.
-    src_zip_in_home(&jdk_home_from_java_cmd()?)
+    if let Some(home) = jdk_home_from_java_cmd() {
+        if let Some(p) = src_zip_in_home(&home) {
+            return Some(p);
+        }
+    }
+    scan_known_jdk_locations()
+}
+
+/// `src.zip` under a JDK directory, in either the plain layout
+/// (`<dir>/lib/src.zip`) or the macOS bundle layout
+/// (`<dir>/Contents/Home/lib/src.zip`).
+fn src_zip_in_jdk_dir(dir: &Path) -> Option<PathBuf> {
+    src_zip_in_home(dir).or_else(|| src_zip_in_home(&dir.join("Contents").join("Home")))
+}
+
+/// Scans well-known JDK install roots for a `src.zip` — the last-resort fallback
+/// when `java` is not on the PATH the editor launched the server with. Returns
+/// the first JDK found that ships sources.
+fn scan_known_jdk_locations() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local").join("share"));
+        roots.push(data.join("mise").join("installs").join("java")); // mise
+        roots.push(home.join(".asdf").join("installs").join("java")); // asdf
+        roots.push(home.join(".sdkman").join("candidates").join("java")); // sdkman
+    }
+    roots.push(PathBuf::from("/usr/lib/jvm")); // Linux system
+    roots.push(PathBuf::from("/Library/Java/JavaVirtualMachines")); // macOS system
+
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if let Some(p) = src_zip_in_jdk_dir(&entry.path()) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// `<home>/lib/src.zip` if it exists.
@@ -533,5 +575,26 @@ public class Greeter {
             .find(|f| f.name == "VERSION")
             .expect("VERSION");
         assert!(version.is_static);
+    }
+
+    #[test]
+    fn finds_src_zip_in_both_layouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Plain layout: <dir>/lib/src.zip
+        let plain = tmp.path().join("jdk-plain");
+        std::fs::create_dir_all(plain.join("lib")).unwrap();
+        std::fs::write(plain.join("lib").join("src.zip"), b"").unwrap();
+        assert_eq!(
+            src_zip_in_jdk_dir(&plain),
+            Some(plain.join("lib").join("src.zip"))
+        );
+        // macOS bundle layout: <dir>/Contents/Home/lib/src.zip
+        let bundle = tmp.path().join("jdk-bundle");
+        let lib = bundle.join("Contents").join("Home").join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("src.zip"), b"").unwrap();
+        assert_eq!(src_zip_in_jdk_dir(&bundle), Some(lib.join("src.zip")));
+        // No src.zip anywhere → None.
+        assert_eq!(src_zip_in_jdk_dir(tmp.path()), None);
     }
 }
