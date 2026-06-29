@@ -756,6 +756,55 @@ fn test_e2e_letgo_builtins_hover() {
 }
 
 #[test]
+fn test_e2e_letgo_completion_harvests_native_vars_from_lang_go() {
+    // A pinned let-go project: completion offers the native vars/fns this
+    // version actually defines in Go, harvested from `lang.go`'s `ns.Def(...)`
+    // calls — including a var like `*command-line-args*` that has no `.lg`
+    // source and isn't in the static native list.
+    let project = setup_named("letgo_core_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+    let rt = lgx_home.join("let-go/source/0.0.1/pkg/rt");
+    let core = rt.join("core");
+    std::fs::create_dir_all(&core).unwrap();
+    std::fs::write(core.join("core.lg"), "(ns core)\n(defn map [f c] c)\n").unwrap();
+    // Stand in for `pkg/rt/lang.go`: the Go runtime's native defs.
+    std::fs::write(
+        rt.join("lang.go"),
+        "func registerCore(ns *vm.Namespace) {\n\
+         \tns.Def(\"count\", count)\n\
+         \tns.Def(\"*command-line-args*\", vm.NIL)\n\
+         }\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let app = root.join("src/app.lg");
+    client.did_open(&app);
+
+    let last_line = std::fs::read_to_string(&app).unwrap().lines().count() as u32;
+    client.did_change_insert(&app, last_line, 0, "(*comm");
+    let result = client.completion(&app, last_line, 6);
+
+    let items = result.as_array().expect("expected CompletionItem array");
+    let item = items
+        .iter()
+        .find(|i| i["label"] == "*command-line-args*")
+        .unwrap_or_else(|| {
+            let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+            panic!("expected *command-line-args* in completions, got {labels:?}")
+        });
+    let detail = item["detail"].as_str().unwrap_or("");
+    assert!(
+        detail.contains("let-go core (native)"),
+        "expected native detail, got {detail}"
+    );
+}
+
+#[test]
 fn test_e2e_clojure_special_form_hover() {
     // In a Clojure project, special forms (`if`) describe themselves on hover
     // and never navigate; clojure.core fns (`map`) keep their existing behavior.

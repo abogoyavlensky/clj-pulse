@@ -145,8 +145,62 @@ fn index_core_dir(core_dir: &Path, index: &Index) -> usize {
         register_alias_copy(index, &core_dir, clojure_ns, letgo_ns);
     }
 
+    // Harvest let-go's Go-native var/fn names from `lang.go` (sibling of the
+    // core dir, `pkg/rt/lang.go`) so completion/hover track this version's
+    // actual vars — including ones with no `.lg` source like
+    // `*command-line-args*` — instead of a hardcoded list. Falls back to the
+    // static `NATIVE_NAMES` when `lang.go` isn't present.
+    if let Some(lang_go) = core_dir.parent().map(|rt| rt.join("lang.go")) {
+        index.set_letgo_native(parse_native_defs(&lang_go));
+    }
+
     index.mark_letgo_core();
     indexed
+}
+
+/// Harvests the names let-go defines natively in Go from `lang.go`'s
+/// `ns.Def("name", …)` calls — both native fns (`+`, `count`) and plain vars
+/// (`*command-line-args*`, `*ns*`). They live in the `core` namespace but have
+/// no `.lg` source, so callers surface them for hover/completion only.
+/// Commented (`// ns.Def(...)`) and computed (`ns.Def(name, …)`, no string
+/// literal) calls are skipped. Returns the names in source order (the caller
+/// sorts); empty when the file is absent or unreadable.
+fn parse_native_defs(lang_go: &Path) -> Vec<String> {
+    let Ok(src) = std::fs::read_to_string(lang_go) else {
+        return Vec::new();
+    };
+    const MARKER: &str = "ns.Def(\"";
+    let mut names = Vec::new();
+    for line in src.lines() {
+        let Some(idx) = line.find(MARKER) else {
+            continue;
+        };
+        // Skip the call when it sits inside a line comment (`// ns.Def(...)`
+        // or trailing `… // ns.Def(...)`).
+        if line.find("//").is_some_and(|c| c < idx) {
+            continue;
+        }
+        if let Some(name) = read_go_string(&line[idx + MARKER.len()..]) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Reads a Go double-quoted string body from `s`, which is positioned just
+/// after the opening quote, decoding `\"` and `\\`. Returns the body up to the
+/// closing quote, or `None` if unterminated.
+fn read_go_string(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => out.push(chars.next()?),
+            other => out.push(other),
+        }
+    }
+    None
 }
 
 /// Registers `clojure_ns` as a duplicate of the let-go `letgo_ns`: same source
@@ -439,6 +493,56 @@ mod tests {
         );
         // The project's own `data` ns stays intact.
         assert!(index.lookup_in_ns("data", "parse").is_some());
+    }
+
+    #[test]
+    fn index_core_dir_harvests_native_names_from_lang_go() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let core_dir = tmp.path().join("pkg/rt/core");
+        write(&core_dir.join("core.lg"), "(ns core)\n(defn map [f c] c)\n");
+        // A minimal `lang.go` sibling covering every shape we must handle: a
+        // native fn, a plain var, the assignment form, a commented def
+        // (skipped), and a computed def with no string literal (skipped).
+        write(
+            &core_dir.parent().unwrap().join("lang.go"),
+            concat!(
+                "func registerCore(ns *vm.Namespace) {\n",
+                "\tns.Def(\"count\", count)\n",
+                "\tns.Def(\"*command-line-args*\", vm.NIL)\n",
+                "\tCurrentNS = ns.Def(\"*ns*\", ns)\n",
+                "\t// ns.Def(\"and\", and)\n",
+                "\tns.Def(name, vm.Symbol(name))\n",
+                "}\n",
+            ),
+        );
+
+        let index = Index::new();
+        index_core_dir(&core_dir, &index);
+
+        assert_eq!(index.letgo_native_contains("count"), Some(true));
+        assert_eq!(
+            index.letgo_native_contains("*command-line-args*"),
+            Some(true),
+            "the new var is harvested from lang.go"
+        );
+        assert_eq!(index.letgo_native_contains("*ns*"), Some(true));
+        // Commented-out and computed (non-literal) defs are not harvested.
+        assert_eq!(index.letgo_native_contains("and"), Some(false));
+        assert_eq!(index.letgo_native_contains("name"), Some(false));
+    }
+
+    #[test]
+    fn index_core_dir_without_lang_go_falls_back_to_static() {
+        // No `lang.go` sibling → nothing harvested → callers use the static
+        // NATIVE_NAMES list (signalled by `None`).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let core_dir = tmp.path().join("pkg/rt/core");
+        write(&core_dir.join("core.lg"), "(ns core)\n(defn map [f c] c)\n");
+
+        let index = Index::new();
+        index_core_dir(&core_dir, &index);
+        assert_eq!(index.letgo_native_contains("count"), None);
+        assert!(index.letgo_native_names().is_none());
     }
 
     #[test]

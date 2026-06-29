@@ -98,11 +98,19 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     items.push(special_form_to_completion(sf));
                 }
             }
-            for &name in builtins::native_names() {
-                if name.starts_with(prefix) {
-                    if let Some(core) = index.core_symbols.iter().find(|c| c.name == name) {
-                        items.push(letgo_native_to_completion(core));
-                    }
+            // Native (Go `ns.Def`) names: the set harvested from this let-go
+            // version's `lang.go` when available, else the static fallback.
+            // Names the live `.lg` `core` index already provides are skipped so
+            // they aren't offered twice (the `.lg` entry below has real source).
+            let harvested = index.letgo_native_names();
+            let native_names: Vec<&str> = match &harvested {
+                Some(names) => names.iter().map(String::as_str).collect(),
+                None => builtins::native_names().to_vec(),
+            };
+            for &name in &native_names {
+                if name.starts_with(prefix) && index.lookup_in_ns("core", name).is_none() {
+                    let core = index.core_symbols.iter().find(|c| c.name == name);
+                    items.push(letgo_native_to_completion(name, core));
                 }
             }
             if let Some(fqns) = index.ns_symbols.get("core") {
@@ -277,20 +285,25 @@ fn special_form_to_completion(sf: &builtins::SpecialForm) -> CompletionItem {
     }
 }
 
-/// A let-go native core fn in completion — doc/arglists borrowed from the
-/// clojure.core table, labelled native.
-fn letgo_native_to_completion(sym: &CoreSymbol) -> CompletionItem {
+/// A let-go native core fn/var in completion, labelled native. Doc/arglists are
+/// borrowed from the clojure.core table (`core`) when present; names let-go has
+/// but clojure.core lacks are offered bare (name only).
+fn letgo_native_to_completion(name: &str, core: Option<&CoreSymbol>) -> CompletionItem {
+    let params = core.map(|c| c.params.as_str()).unwrap_or("");
+    let detail = if params.is_empty() {
+        "let-go core (native)".to_string()
+    } else {
+        format!("let-go core (native) ({})", params)
+    };
     CompletionItem {
-        label: sym.name.clone(),
-        detail: Some(format!("let-go core (native) ({})", sym.params)),
-        documentation: if sym.doc.is_empty() {
-            None
-        } else {
-            Some(Documentation::MarkupContent(MarkupContent {
+        label: name.to_string(),
+        detail: Some(detail),
+        documentation: core.filter(|c| !c.doc.is_empty()).map(|c| {
+            Documentation::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: sym.doc.clone(),
-            }))
-        },
+                value: c.doc.clone(),
+            })
+        }),
         kind: Some(CompletionItemKind::FUNCTION),
         ..Default::default()
     }
@@ -432,6 +445,40 @@ mod tests {
             .find(|i| i.label == "count")
             .expect("count offered");
         assert!(item.detail.unwrap().contains("native"));
+    }
+
+    #[test]
+    fn letgo_harvested_natives_offer_version_vars() {
+        // A pinned let-go version whose lang.go was harvested: completion offers
+        // the harvested names (e.g. the new `*command-line-args*` var) directly,
+        // not just the static NATIVE_NAMES list.
+        let mut index = Index::new();
+        index.insert_file(meta("app", "app.lg"), vec![], vec![]);
+        index.insert_lib_file(meta("core", "core.lg"), vec![lib_sym("map", "core")]);
+        index.core_symbols = vec![core_sym("*command-line-args*", "")];
+        index.mark_letgo_core();
+        index.set_letgo_native(vec![
+            "*command-line-args*".to_string(),
+            "count".to_string(), // harvested native with no clojure.core entry here
+            "map".to_string(),   // also a live `.lg` core fn → must not double up
+        ]);
+
+        assert!(
+            labels(&index, "*com").contains(&"*command-line-args*".to_string()),
+            "harvested var offered: {:?}",
+            labels(&index, "*com")
+        );
+        // A harvested native with no clojure.core doc entry is still offered.
+        assert!(labels(&index, "cou").contains(&"count".to_string()));
+        // `map` is served by the live `.lg` core; the harvested duplicate is
+        // skipped so it appears exactly once.
+        let maps = labels(&index, "map");
+        assert_eq!(
+            maps.iter().filter(|s| *s == "map").count(),
+            1,
+            "map offered once: {:?}",
+            maps
+        );
     }
 
     #[test]

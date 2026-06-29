@@ -83,12 +83,26 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
             if let Some(sf) = builtins::special_form(word, true) {
                 return Some(ResolvedSymbol::SpecialForm(sf));
             }
-            // Native core fns (Go `ns.Def`, e.g. `count`/`str`) also have no
-            // `.lg` source; borrow the clojure.core entry for hover/completion.
-            if builtins::is_native(word) {
-                if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
-                    return Some(ResolvedSymbol::LetgoNative(core.clone()));
-                }
+            // Native core vars/fns (Go `ns.Def`, e.g. `count`,
+            // `*command-line-args*`) also have no `.lg` source. Use the
+            // version's harvested set when available, else the static list;
+            // borrow the clojure.core entry for hover when present, otherwise
+            // show a bare native.
+            let native = index
+                .letgo_native_contains(word)
+                .unwrap_or_else(|| builtins::is_native(word));
+            if native {
+                let core = index
+                    .core_symbols
+                    .iter()
+                    .find(|c| c.name == word)
+                    .cloned()
+                    .unwrap_or_else(|| CoreSymbol {
+                        name: word.to_string(),
+                        params: String::new(),
+                        doc: String::new(),
+                    });
+                return Some(ResolvedSymbol::LetgoNative(core));
             }
             return None;
         }
