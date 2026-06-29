@@ -248,6 +248,27 @@ impl LanguageServer for Backend {
                     tracing::info!("{}", msg);
                     client_jars.log_message(MessageType::INFO, msg).await;
                 });
+
+                // Background task: discover and index the JDK's bundled Java
+                // source (`src.zip`) for built-in Java navigation/completion.
+                let index_jdk = self.index.clone();
+                let client_jdk = self.client.clone();
+                tokio::spawn(async move {
+                    match crate::index::jdk::JdkIndex::discover() {
+                        Some(jdk) => {
+                            let count = jdk.class_count();
+                            index_jdk.set_jdk(jdk);
+                            let msg = format!("JDK source indexed: {} classes", count);
+                            tracing::info!("{}", msg);
+                            client_jdk.log_message(MessageType::INFO, msg).await;
+                        }
+                        None => {
+                            tracing::debug!(
+                                "no JDK source (src.zip) found — built-in Java navigation disabled"
+                            );
+                        }
+                    }
+                });
             }
         }
 

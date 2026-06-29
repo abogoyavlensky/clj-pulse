@@ -1107,6 +1107,190 @@ fn test_e2e_hover_shows_doc() {
     assert!(value.contains("Adds two numbers."), "no doc: {}", value);
 }
 
+/// Builds a hermetic JDK `src.zip` from `(entry, java-source)` pairs.
+fn make_jdk_src_zip(entries: &[(&str, &str)]) -> tempfile::NamedTempFile {
+    let tmp = tempfile::Builder::new().suffix(".zip").tempfile().unwrap();
+    let file = std::fs::File::create(tmp.path()).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, content) in entries {
+        zip.start_file(*name, opts).unwrap();
+        zip.write_all(content.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    tmp
+}
+
+#[test]
+fn test_e2e_java_definition_and_hover() {
+    // Hermetic JDK source pointed at by CLJ_PULSE_JDK_SRC, so the test never
+    // depends on the box's JDK. `demo.lib.Greeter` is imported; `java.lang.Sample`
+    // resolves without an import (auto-`java.lang`).
+    let src_zip = make_jdk_src_zip(&[
+        (
+            "java.base/demo/lib/Greeter.java",
+            "package demo.lib;\n/** A greeter. */\npublic class Greeter {\n  \
+             /** Greet by name. */\n  public static String greet(String name) { return name; }\n}\n",
+        ),
+        (
+            "java.base/java/lang/Sample.java",
+            "package java.lang;\npublic class Sample {\n  \
+             public static Sample of(long n) { return null; }\n}\n",
+        ),
+    ]);
+
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/javaprobe.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.javaprobe\n  (:import [demo.lib Greeter]))\n\n\
+         (defn g [n] (Greeter/greet n))\n\n(defn s [] (Sample/of 1))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("CLJ_PULSE_JDK_SRC", src_zip.path())]);
+    client.initialize(&root);
+    client.wait_for_log("JDK source indexed");
+    client.did_open(&probe);
+
+    // Static-member navigation lands in the src.zip Greeter.java.
+    let (line, ch) = position_of(&probe, "Greeter/greet");
+    let def = client.goto_definition(&probe, line, ch);
+    let uri = def["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected Location, got {def}"));
+    assert!(
+        uri.contains(".zip!/") && uri.ends_with("Greeter.java"),
+        "expected src.zip Greeter.java, got {uri}"
+    );
+
+    // Hover shows the Java signature and Javadoc.
+    let hov = client.hover(&probe, line, ch);
+    let value = hov["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hover null: {hov}"));
+    assert!(
+        value.contains("greet(String name)"),
+        "signature missing: {value}"
+    );
+    assert!(value.contains("Greet by name"), "javadoc missing: {value}");
+
+    // Auto-imported java.lang resolves without an explicit :import.
+    let (sline, sch) = position_of(&probe, "Sample/of");
+    let sdef = client.goto_definition(&probe, sline, sch);
+    let suri = sdef["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected Location, got {sdef}"));
+    assert!(
+        suri.ends_with("Sample.java"),
+        "expected Sample.java, got {suri}"
+    );
+}
+
+#[test]
+fn test_e2e_java_completion_and_signature() {
+    let src_zip = make_jdk_src_zip(&[(
+        "java.base/demo/lib/Greeter.java",
+        "package demo.lib;\npublic class Greeter {\n  public Greeter(int seed) {}\n  \
+         public static String greet(String name) { return name; }\n}\n",
+    )]);
+
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/jcomp.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.jcomp\n  (:import [demo.lib Greeter]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("CLJ_PULSE_JDK_SRC", src_zip.path())]);
+    client.initialize(&root);
+    client.wait_for_log("JDK source indexed");
+    client.did_open(&probe);
+
+    let base = std::fs::read_to_string(&probe).unwrap().lines().count() as u32;
+
+    // Static-member completion: `Greeter/g` → `Greeter/greet` (labelled with the
+    // class prefix so the editor's `Class/...` filter keeps it).
+    client.did_change_insert(&probe, base, 0, "Greeter/g\n");
+    let comp = client.completion(&probe, base, 9);
+    let labels: Vec<&str> = comp
+        .as_array()
+        .expect("completion array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"Greeter/greet"),
+        "static-member completion: {labels:?}"
+    );
+
+    // Class-name completion: PascalCase `Gr` → Greeter.
+    client.did_change_insert(&probe, base + 1, 0, "Gr\n");
+    let comp2 = client.completion(&probe, base + 1, 2);
+    let labels2: Vec<&str> = comp2
+        .as_array()
+        .expect("completion array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels2.contains(&"Greeter"),
+        "class-name completion: {labels2:?}"
+    );
+
+    // Signature help: `(Greeter/greet ` → greet(String name).
+    client.did_change_insert(&probe, base + 2, 0, "(Greeter/greet \n");
+    let sig = client.signature_help(&probe, base + 2, 15);
+    assert!(!sig.is_null(), "no signature help");
+    let label = sig["signatures"][0]["label"].as_str().unwrap_or("");
+    assert!(label.contains("greet(String name)"), "signature: {label}");
+}
+
+#[test]
+#[ignore = "needs a real JDK with lib/src.zip discoverable on the machine"]
+fn test_e2e_java_real_jdk_discovery() {
+    // No CLJ_PULSE_JDK_SRC override: exercises *real* discovery (JAVA_HOME, then a
+    // `java -XshowSettings` probe) against the machine's JDK. Covers the reported
+    // cases: `Thread/sleep` (auto-`java.lang`) and an imported `java.security` class.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/jreal.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.jreal\n  (:import (java.security MessageDigest)))\n\n\
+         (defn nap [] (Thread/sleep 10))\n\n(defn dig [] (MessageDigest/getInstance \"MD5\"))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root); // inherits env (JAVA_HOME/PATH)
+    client.initialize(&root);
+    client.wait_for_log("JDK source indexed");
+    client.did_open(&probe);
+
+    let (tl, tc) = position_of(&probe, "Thread/sleep");
+    let tdef = client.goto_definition(&probe, tl, tc);
+    let turi = tdef["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("Thread/sleep: expected Location, got {tdef}"));
+    assert!(
+        turi.contains(".zip!/") && turi.ends_with("Thread.java"),
+        "expected JDK src.zip Thread.java, got {turi}"
+    );
+
+    let (ml, mc) = position_of(&probe, "MessageDigest/getInstance");
+    let mdef = client.goto_definition(&probe, ml, mc);
+    let muri = mdef["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("MessageDigest: expected Location, got {mdef}"));
+    assert!(
+        muri.ends_with("MessageDigest.java"),
+        "expected MessageDigest.java, got {muri}"
+    );
+}
+
 #[test]
 fn test_e2e_completion_with_alias_prefix() {
     let project = setup_project();

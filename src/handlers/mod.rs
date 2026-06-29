@@ -3,6 +3,7 @@ pub mod code_action;
 pub mod completion;
 pub mod definition;
 pub mod hover;
+pub mod java;
 mod letgo_native_names;
 pub mod references;
 pub mod signature;
@@ -177,6 +178,7 @@ mod tests {
                 aliases: HashMap::new(),
                 refers: HashMap::new(),
                 requires: vec![],
+                imports: HashMap::new(),
             },
             symbols,
             vec![],
@@ -240,6 +242,7 @@ mod tests {
                 aliases: HashMap::new(),
                 refers: HashMap::new(),
                 requires: vec![],
+                imports: HashMap::new(),
             },
             vec![sym("DB", "recs", DefKind::Defrecord)],
             vec![],
@@ -255,6 +258,7 @@ mod tests {
                 aliases: HashMap::new(),
                 refers,
                 requires: vec![],
+                imports: HashMap::new(),
             },
             vec![],
             vec![],

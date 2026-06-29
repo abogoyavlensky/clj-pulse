@@ -39,19 +39,24 @@ pub fn from_index_path(path: &Path) -> Result<Url> {
     }
 }
 
-/// Splits a JAR virtual path `<archive>.jar!/<entry>` into its archive and entry
-/// parts. JAR virtual paths are built as `format!("{}!/{}", jar.display(), entry)`
-/// for a `.jar` archive (see `jar::index_jar`), so the boundary is matched on
-/// `.jar!/` — a real filesystem path that merely contains `!/` (e.g. a directory
-/// named `work!`) has no `.jar!/` and stays a plain file path.
+/// Splits an archive virtual path `<archive>.{jar,zip}!/<entry>` into its archive
+/// and entry parts. These are built as `format!("{}!/{}", archive, entry)` (see
+/// `jar::index_jar` for JARs and `jdk` for the JDK `src.zip`), so the boundary is
+/// matched on `.jar!/` or `.zip!/`, whichever comes first. A real filesystem path
+/// that merely contains `!/` (e.g. a directory named `work!`) has no such boundary
+/// and stays a plain file path.
 ///
-/// Limitation: a real path under a directory named literally `<name>.jar!` is
-/// indistinguishable by string alone from a JAR entry and is treated as one.
-/// This is inherent to the `path!/entry` representation; resolving it would
-/// require filesystem probing (which would break round-tripping for archives not
-/// currently on disk) and is not worth it for so pathological a directory name.
+/// Limitation: a real path under a directory named literally `<name>.jar!` /
+/// `<name>.zip!` is indistinguishable by string alone from an archive entry and is
+/// treated as one. This is inherent to the `path!/entry` representation; resolving
+/// it would require filesystem probing (which would break round-tripping for
+/// archives not currently on disk) and is not worth it for so pathological a name.
 fn split_jar_virtual_path(path: &str) -> Option<(&str, &str)> {
-    let boundary = path.find(".jar!/")?;
+    // `.jar` and `.zip` are both 4 bytes, so one split offset serves both.
+    let boundary = [".jar!/", ".zip!/"]
+        .iter()
+        .filter_map(|sep| path.find(sep))
+        .min()?;
     let split = boundary + ".jar".len();
     Some((&path[..split], &path[split + "!/".len()..]))
 }
@@ -103,8 +108,25 @@ mod tests {
     }
 
     #[test]
+    fn src_zip_virtual_path_round_trips() {
+        // The JDK `src.zip` uses the same `<archive>!/<entry>` representation as
+        // JARs; the `.zip!/` boundary must split (and round-trip) the same way.
+        let virtual_path = "/j/lib/src.zip!/java.base/java/lang/String.java";
+        let url = from_index_path(Path::new(virtual_path)).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "jar:file:///j/lib/src.zip!/java.base/java/lang/String.java"
+        );
+        assert_eq!(to_index_path(&url), Some(PathBuf::from(virtual_path)));
+    }
+
+    #[test]
     fn round_trips_both_shapes() {
-        for p in ["/a/b.clj", "/x.jar!/mylib/util.clj"] {
+        for p in [
+            "/a/b.clj",
+            "/x.jar!/mylib/util.clj",
+            "/j/lib/src.zip!/java.base/java/lang/String.java",
+        ] {
             let path = PathBuf::from(p);
             let back = to_index_path(&from_index_path(&path).unwrap()).unwrap();
             assert_eq!(back, path);

@@ -99,9 +99,57 @@ pub fn handle(
             // The word may be a require alias (`[ring.util.response :as
             // response]` with the cursor on `response`) or a namespace name
             // itself — navigate to the top of that namespace's file.
-            namespace_location(index, &current_ns, &word)
+            if let Some(resp) = namespace_location(index, &current_ns, &word)? {
+                return Ok(Some(resp));
+            }
+            // Last resort: built-in Java interop (class, static member, ctor).
+            java_definition(index, &word, &current_ns)
         }
     }
+}
+
+/// Built-in Java interop fallback: navigate to a JDK class, static member, or
+/// constructor in the indexed `src.zip`. Reached only after Clojure resolution
+/// yields nothing, so ordinary aliases (`str/join`) never get here.
+fn java_definition(
+    index: &Index,
+    word: &str,
+    current_ns: &str,
+) -> Result<Option<GotoDefinitionResponse>> {
+    use super::java::JavaTargetKind;
+
+    let Some(target) = super::java::resolve_java_word(index, word, current_ns) else {
+        return Ok(None);
+    };
+    let Some(jdk) = index.jdk() else {
+        return Ok(None);
+    };
+    let Some(info) = jdk.class(&target.class_fqn) else {
+        return Ok(None);
+    };
+
+    let range = match target.kind {
+        JavaTargetKind::Class => info.decl_name_range,
+        JavaTargetKind::Ctor => info
+            .ctors
+            .first()
+            .map(|c| c.name_range)
+            .unwrap_or(info.decl_name_range),
+        JavaTargetKind::StaticMember => {
+            let member = target.member.as_deref().unwrap_or_default();
+            info.methods
+                .iter()
+                .chain(info.fields.iter())
+                .find(|m| m.name == member)
+                .map(|m| m.name_range)
+                .unwrap_or(info.decl_name_range)
+        }
+    };
+
+    // Virtual `<src.zip>!/<entry>` path → `jar:` URI via `location_for`.
+    let virtual_path = format!("{}!/{}", jdk.src_zip().display(), info.entry);
+    let location = location_for(Path::new(&virtual_path), range)?;
+    Ok(Some(GotoDefinitionResponse::Scalar(location)))
 }
 
 /// True when `word` on this line is the alias being declared in a require

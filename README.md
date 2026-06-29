@@ -21,6 +21,11 @@ Language features:
 - **Autocomplete** - project symbols and `clojure.core` builtins.
 - **Hover** - docstrings and signatures for the symbol under the cursor.
 - **Signature help** - argument hints while typing a call (after `(` and spaces).
+- **Java interop (built-in/JDK)** - go to definition, Javadoc hover, completion,
+  and signature help for JDK classes, static members, and constructors
+  (`Thread/sleep`, `Instant/now`, `(StringBuilder.)`, imported classes). Reads the
+  JDK's bundled `src.zip`, so a full JDK (not a JRE) is required. Instance methods
+  (`(.foo obj)`), library classes, and decompilation aren't supported yet.
 - **Find references** - locate every usage of a symbol across the project.
 - **Rename** - rename a project symbol and all of its references.
 - **Keyword navigation** - go to definition and find references on namespaced

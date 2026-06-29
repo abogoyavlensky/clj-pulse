@@ -179,6 +179,7 @@ pub fn extract_edn(source: &str) -> Vec<Occurrence> {
         aliases: HashMap::new(),
         refers: HashMap::new(),
         requires: Vec::new(),
+        imports: HashMap::new(),
     };
     let mut out = Vec::new();
     collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
@@ -240,6 +241,7 @@ pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, V
         aliases: HashMap::new(),
         refers: HashMap::new(),
         requires: Vec::new(),
+        imports: HashMap::new(),
     };
     let mut symbols = Vec::new();
 
@@ -330,7 +332,7 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
         ns_meta.name = sym_text(name_node, source).to_string();
     }
 
-    // Look for (:require ...) forms
+    // Look for (:require …) and (:import …) forms
     for child in &children[2..] {
         if child.kind() == "list_lit" {
             let inner = named_children(*child);
@@ -338,10 +340,21 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                 continue;
             }
             let kw = inner[0];
-            if kw.kind() == "kwd_lit" && node_text(kw, source) == ":require" {
-                for require_spec in &inner[1..] {
-                    process_require_spec(*require_spec, source, ns_meta);
+            if kw.kind() != "kwd_lit" {
+                continue;
+            }
+            match node_text(kw, source) {
+                ":require" => {
+                    for require_spec in &inner[1..] {
+                        process_require_spec(*require_spec, source, ns_meta);
+                    }
                 }
+                ":import" => {
+                    for import_spec in &inner[1..] {
+                        process_import_spec(*import_spec, source, ns_meta);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -378,6 +391,38 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
                 if child.kind() != "kwd_lit" {
                     process_require_spec(child, source, ns_meta);
                 }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Records one `:import` spec into `ns_meta.imports` (class simple name → fully
+/// qualified name). Handles the package-grouped forms `[java.util Date List]`
+/// and `(java.util Date List)`, and a bare fully-qualified class `java.io.File`.
+fn process_import_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
+    match spec.kind() {
+        "vec_lit" | "list_lit" => {
+            let items = named_children(spec);
+            let Some(pkg) = items.first() else {
+                return;
+            };
+            if pkg.kind() != "sym_lit" {
+                return;
+            }
+            let package = sym_text(*pkg, source);
+            for class in &items[1..] {
+                if class.kind() == "sym_lit" {
+                    let simple = sym_text(*class, source).to_string();
+                    let fqn = format!("{}.{}", package, simple);
+                    ns_meta.imports.insert(simple, fqn);
+                }
+            }
+        }
+        "sym_lit" => {
+            let fqn = sym_text(spec, source);
+            if let Some((_, simple)) = fqn.rsplit_once('.') {
+                ns_meta.imports.insert(simple.to_string(), fqn.to_string());
             }
         }
         _ => {}
@@ -1477,6 +1522,7 @@ mod tests {
                 .collect(),
             refers: HashMap::new(),
             requires: Vec::new(),
+            imports: HashMap::new(),
         };
         keyword_fqn(kwd, &meta, source)
     }

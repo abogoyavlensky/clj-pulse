@@ -2,11 +2,13 @@ pub mod core;
 pub mod extractor;
 pub mod jar;
 pub mod jar_cache;
+pub mod jdk;
 pub mod scanner;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -80,6 +82,10 @@ pub struct NsMeta {
     /// (a plain `[clojure.set]` lands here too). Used to tell whether a
     /// qualified usage's namespace is already required.
     pub requires: Vec<String>,
+    /// Java class simple name → fully-qualified name, from `(:import …)`.
+    /// Resolves interop class references (`Date`, `Instant/now`, `(File. …)`)
+    /// to JDK source. Empty for files with no `:import`.
+    pub imports: HashMap<String, String>,
 }
 
 impl NsMeta {
@@ -111,6 +117,10 @@ pub struct Index {
     /// fetched let-go source. Interior mutability because the `Arc<Index>` is
     /// already shared with handlers when background library indexing runs.
     letgo_core: AtomicBool,
+    /// JDK source index for built-in Java navigation/completion. Set once by the
+    /// background discovery task; `None` until then, or when no JDK source is
+    /// found. Interior mutability because the `Arc<Index>` is already shared.
+    jdk: OnceLock<jdk::JdkIndex>,
 }
 
 impl Default for Index {
@@ -123,6 +133,7 @@ impl Default for Index {
             occurrences: DashMap::new(),
             core_symbols: Vec::new(),
             letgo_core: AtomicBool::new(false),
+            jdk: OnceLock::new(),
         }
     }
 }
@@ -141,6 +152,17 @@ impl Index {
 
     pub fn lookup(&self, fqn: &str) -> Option<Symbol> {
         self.symbols.get(fqn).map(|r| r.clone())
+    }
+
+    /// The JDK source index, once background discovery has installed it.
+    pub fn jdk(&self) -> Option<&jdk::JdkIndex> {
+        self.jdk.get()
+    }
+
+    /// Installs the JDK source index (called once by the background discovery
+    /// task). A second call is ignored.
+    pub fn set_jdk(&self, jdk_index: jdk::JdkIndex) {
+        let _ = self.jdk.set(jdk_index);
     }
 
     pub fn lookup_in_ns(&self, ns: &str, name: &str) -> Option<Symbol> {

@@ -2,8 +2,10 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
+use crate::index::jdk::{JavaClassInfo, JavaCtor, JavaMember};
 use crate::index::{CoreSymbol, DefKind, Index, Symbol};
 
+use super::java::JavaTargetKind;
 use super::{resolve_symbol, ResolvedSymbol};
 
 pub fn handle(
@@ -39,12 +41,81 @@ pub fn handle(
 }
 
 pub fn resolve_and_format(index: &Index, word: &str, current_ns: &str) -> Option<String> {
-    match resolve_symbol(index, word, current_ns)? {
-        ResolvedSymbol::Project(sym) => Some(format_for_symbol(&sym)),
-        ResolvedSymbol::Core(core) => Some(format_for_core(&core)),
-        ResolvedSymbol::SpecialForm(sf) => Some(format_for_special_form(sf)),
-        ResolvedSymbol::LetgoNative(core) => Some(format_for_letgo_native(&core)),
+    if let Some(resolved) = resolve_symbol(index, word, current_ns) {
+        return Some(match resolved {
+            ResolvedSymbol::Project(sym) => format_for_symbol(&sym),
+            ResolvedSymbol::Core(core) => format_for_core(&core),
+            ResolvedSymbol::SpecialForm(sf) => format_for_special_form(sf),
+            ResolvedSymbol::LetgoNative(core) => format_for_letgo_native(&core),
+        });
     }
+    // Built-in Java interop fallback (class, static member, constructor).
+    format_for_java(index, word, current_ns)
+}
+
+/// Hover markdown for a built-in Java class, static member, or constructor.
+fn format_for_java(index: &Index, word: &str, current_ns: &str) -> Option<String> {
+    let target = super::java::resolve_java_word(index, word, current_ns)?;
+    let info = index.jdk()?.class(&target.class_fqn)?;
+    let md = match target.kind {
+        JavaTargetKind::StaticMember => {
+            let member = target.member.as_deref().unwrap_or_default();
+            if let Some(m) = info.methods.iter().find(|m| m.name == member) {
+                format_java_method(&info.fqn, m)
+            } else if let Some(f) = info.fields.iter().find(|f| f.name == member) {
+                format_java_field(&info.fqn, f)
+            } else {
+                format_java_class(&info)
+            }
+        }
+        JavaTargetKind::Ctor => info
+            .ctors
+            .first()
+            .map(|c| format_java_ctor(&info.fqn, c))
+            .unwrap_or_else(|| format_java_class(&info)),
+        JavaTargetKind::Class => format_java_class(&info),
+    };
+    Some(md)
+}
+
+fn java_md(signature: &str, label: &str, javadoc: Option<&str>) -> String {
+    let mut md = format!("```java\n{signature}\n```\n*{label}*\n");
+    if let Some(doc) = javadoc {
+        md.push('\n');
+        md.push_str(doc);
+    }
+    md
+}
+
+fn format_java_class(info: &JavaClassInfo) -> String {
+    let mut sig = format!("class {}", info.fqn);
+    if let Some(sup) = &info.extends {
+        sig.push_str(&format!(" extends {sup}"));
+    }
+    if !info.implements.is_empty() {
+        sig.push_str(&format!(" implements {}", info.implements.join(", ")));
+    }
+    java_md(&sig, "java class", info.javadoc.as_deref())
+}
+
+fn format_java_method(class_fqn: &str, m: &JavaMember) -> String {
+    let stat = if m.is_static { "static " } else { "" };
+    let ret = m.return_type.as_deref().unwrap_or("void");
+    let sig = format!("{stat}{ret} {}({})", m.name, m.params.join(", "));
+    java_md(&sig, class_fqn, m.javadoc.as_deref())
+}
+
+fn format_java_field(class_fqn: &str, f: &JavaMember) -> String {
+    let stat = if f.is_static { "static " } else { "" };
+    let ty = f.return_type.as_deref().unwrap_or("");
+    let sig = format!("{stat}{ty} {}", f.name);
+    java_md(sig.trim(), class_fqn, f.javadoc.as_deref())
+}
+
+fn format_java_ctor(class_fqn: &str, c: &JavaCtor) -> String {
+    let simple = class_fqn.rsplit('.').next().unwrap_or(class_fqn);
+    let sig = format!("{simple}({})", c.params.join(", "));
+    java_md(&sig, class_fqn, c.javadoc.as_deref())
 }
 
 pub fn format_for_special_form(sf: &super::builtins::SpecialForm) -> String {
@@ -168,5 +239,21 @@ mod tests {
             md
         );
         assert!(md.contains("([coll])"), "missing arglists: {}", md);
+    }
+
+    #[test]
+    fn java_member_hover_has_signature_and_javadoc() {
+        let (index, _zip) = crate::handlers::java::test_fixture();
+        let md = resolve_and_format(&index, "Greeter/greet", "app.core").unwrap();
+        assert!(md.contains("static String greet(String name)"), "{}", md);
+        assert!(md.contains("Greet by name"), "{}", md);
+    }
+
+    #[test]
+    fn java_class_hover_has_class_and_javadoc() {
+        let (index, _zip) = crate::handlers::java::test_fixture();
+        let md = resolve_and_format(&index, "Greeter", "app.core").unwrap();
+        assert!(md.contains("class demo.lib.Greeter"), "{}", md);
+        assert!(md.contains("A greeter"), "{}", md);
     }
 }

@@ -120,6 +120,30 @@ fn test_records_bare_symbol_require() {
 }
 
 #[test]
+fn test_extracts_imports() {
+    // All three `:import` shapes map a class simple name to its fully-qualified
+    // name: package vector, package list, and a bare fully-qualified symbol.
+    let (meta, _) = extract(
+        "(ns app.core\n  (:import [java.util Date List]\n           (java.time Instant)\n           java.io.File))\n",
+        Path::new("app/core.clj"),
+    )
+    .unwrap();
+    assert_eq!(
+        meta.imports.get("Date"),
+        Some(&"java.util.Date".to_string())
+    );
+    assert_eq!(
+        meta.imports.get("List"),
+        Some(&"java.util.List".to_string())
+    );
+    assert_eq!(
+        meta.imports.get("Instant"),
+        Some(&"java.time.Instant".to_string())
+    );
+    assert_eq!(meta.imports.get("File"), Some(&"java.io.File".to_string()));
+}
+
+#[test]
 fn test_qualified_usages_collects_and_skips_quotes() {
     use clj_pulse::index::extractor::qualified_usages;
     let src = "(ns my.app\n  (:require [clojure.string :as str]))\n\n\
