@@ -2,7 +2,7 @@
 
 A fast, lightweight Clojure language server.
 
-*With first-class [let-go](https://github.com/nooga/let-go) support: `.lg` projects and their [lgx](https://github.com/abogoyavlensky/lgx) deps are indexed and navigable.*
+With first-class [let-go](https://github.com/nooga/let-go) support: `.lg` projects, deps are indexed and navigable via [lgx](https://github.com/abogoyavlensky/lgx).
 
 > [!NOTE]
 > **Status:** clj-pulse is early-stage and a bit experimental, but it already
@@ -21,16 +21,14 @@ Language features:
 - **Autocomplete** - project symbols and `clojure.core` builtins.
 - **Hover** - docstrings and signatures for the symbol under the cursor.
 - **Signature help** - argument hints while typing a call (after `(` and spaces).
-- **Java interop (built-in/JDK)** - go to definition, Javadoc hover, completion,
-  and signature help for JDK classes, static members, and constructors
-  (`Thread/sleep`, `Instant/now`, `(StringBuilder.)`, imported classes). Reads the
-  JDK's bundled `src.zip`, so a full JDK (not a JRE) is required. Instance methods
-  (`(.foo obj)`), library classes, and decompilation aren't supported yet.
 - **Find references** - locate every usage of a symbol across the project.
 - **Rename** - rename a project symbol and all of its references.
 - **Keyword navigation** - go to definition and find references on namespaced
   keywords, including Integrant component keys: jump from `:my.app/db` in a
   `config.edn` system map (or an `#ig/ref`) to its `(defmethod ig/init-key ::db …)`.
+- **Java interop (built-in/JDK)** - go to definition, Javadoc hover, completion,
+  and signature help for JDK classes, static members, and constructors. (Instance methods
+  (`(.foo obj)`), library classes, and decompilation aren't supported yet.)
 - **Document symbols** - outline of the definitions in the current file.
 - **Workspace symbols** - fuzzy symbol search across the whole project.
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
@@ -105,6 +103,9 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 }
 ```
 
+> [NOTE!]
+> Currently, Zed editor, `clj-pulse` works only with project's own files, no libs inspection yet.
+
 ## Development
 
 Install [mise](https://mise.jdx.dev/) for managing tool versions, then:
@@ -124,7 +125,7 @@ bb check      # run all checks (fmt + lint + test)
 bb outdated   # check outdated deps 
 bb build      # build the dev binary
 bb release    # build release binary
-bb tag.       # create and push new git tag based on version form Cargo.toml
+bb tag        # create and push new git tag based on version form Cargo.toml
 ```
 
 > [!NOTE]
