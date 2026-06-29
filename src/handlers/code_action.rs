@@ -396,6 +396,63 @@ pub fn unused_requires(source: &str) -> Vec<UnusedRequire> {
     out
 }
 
+/// A `:require` of a namespace already required earlier in the same `ns` form,
+/// with the range of the redundant occurrence's namespace symbol.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DuplicateRequire {
+    pub namespace: String,
+    pub range: tower_lsp::lsp_types::Range,
+}
+
+/// Namespaces `source`'s `ns` form requires more than once — keyed on the
+/// namespace itself, so a repeat with a different `:as` alias or `:refer` still
+/// counts. Reports each occurrence after the first, in source order and across
+/// all `:require` clauses, with the range of its namespace symbol. Bare
+/// `some.ns` requires are considered too; reader-conditional specs are ignored,
+/// since their branches are mutually exclusive.
+pub fn duplicate_requires(source: &str) -> Vec<DuplicateRequire> {
+    let mut parser = Parser::new();
+    if parser.set_language(extractor::language()).is_err() {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let root = tree.root_node();
+    let Some(ns_form) = ns_form(root, source) else {
+        return vec![];
+    };
+    let requires: Vec<Node> = named_children(ns_form)
+        .into_iter()
+        .filter(|c| c.kind() == "list_lit" && first_token_is(*c, "kwd_lit", ":require", source))
+        .collect();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for require in requires {
+        // children[0] is the `:require` keyword; the rest are specs.
+        for spec in named_children(require).into_iter().skip(1) {
+            let (namespace, ns_node) = match spec.kind() {
+                "vec_lit" => match parse_libspec(spec, source) {
+                    Some(ls) => (ls.ns_name.clone(), ls.ns_node),
+                    None => continue,
+                },
+                // Bare `some.ns` side-effecting require.
+                "sym_lit" => (sym_name(spec, source), spec),
+                // Reader conditionals, comments, prefix lists: not duplicates.
+                _ => continue,
+            };
+            if !seen.insert(namespace.clone()) {
+                out.push(DuplicateRequire {
+                    namespace,
+                    range: node_range(ns_node, source),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The full LSP range of a tree-sitter node, via ropey-aware position mapping.
 fn node_range(node: Node, source: &str) -> tower_lsp::lsp_types::Range {
     tower_lsp::lsp_types::Range {
@@ -763,17 +820,21 @@ fn ns_form<'a>(root: Node<'a>, source: &str) -> Option<Node<'a>> {
 
 /// The namespace name a `(ns …)` form declares: the first symbol after the
 /// leading `ns` (skipping any docstring or attr-map, which aren't `sym_lit`).
-/// Reads the symbol's `name` field rather than the whole node, since a `sym_lit`
-/// also spans any leading `^meta`/type-hint (`(ns ^{:doc "…"} app)`) — taking
-/// the node text would yield `^{:doc "…"} app`, not `app`. `None` for a
-/// malformed `ns` form with no name.
+/// `None` for a malformed `ns` form with no name.
 fn ns_name_of(ns_form: Node, source: &str) -> Option<String> {
-    let sym = named_children(ns_form)
+    named_children(ns_form)
         .into_iter()
         .skip(1)
-        .find(|n| n.kind() == "sym_lit")?;
+        .find(|n| n.kind() == "sym_lit")
+        .map(|sym| sym_name(sym, source))
+}
+
+/// The bare name of a symbol node, reading its `name` field rather than the
+/// whole node: a `sym_lit` also spans any leading `^meta`/type-hint
+/// (`^{:doc "…"} app`), so the node text would include the metadata.
+fn sym_name(sym: Node, source: &str) -> String {
     let name = sym.child_by_field_name("name").unwrap_or(sym);
-    Some(node_text(name, source).to_string())
+    node_text(name, source).to_string()
 }
 
 /// The `(:require …)` clause inside an ns form, if present.

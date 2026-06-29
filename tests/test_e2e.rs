@@ -2221,6 +2221,50 @@ fn test_e2e_unused_namespace_diagnostic() {
 }
 
 #[test]
+fn test_e2e_duplicate_require_diagnostic() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    // dup.clj requires clojure.string twice with different aliases (both used,
+    // so the only finding is the duplicate, not an unused require).
+    let dup = root.join("src/dup.clj");
+    let source = "(ns simple.dup\n  (:require [clojure.string :as str]\n            \
+                  [clojure.string :as s]))\n\n(defn run []\n  [(str/trim \"a\") (s/upper-case \"b\")])\n";
+    std::fs::write(&dup, source).unwrap();
+    client.did_open(&dup);
+
+    let params = client.wait_for_diagnostics("/src/dup.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+
+    let duplicates: Vec<&Value> = diags
+        .iter()
+        .filter(|d| d["code"] == json!("duplicate-require"))
+        .collect();
+    assert_eq!(
+        duplicates.len(),
+        1,
+        "expected exactly one duplicate-require diagnostic, got {}",
+        params["diagnostics"]
+    );
+    let d = duplicates[0];
+    assert_eq!(d["severity"], json!(2)); // WARNING
+    assert_eq!(d["source"], json!("clj-pulse"));
+    assert!(
+        d["message"].as_str().unwrap().contains("clojure.string"),
+        "message: {}",
+        d["message"]
+    );
+    // duplicate-require is intentionally not tagged UNNECESSARY (the binding is
+    // used, so it is redundant rather than dead) — the tag must be absent.
+    assert_eq!(d["tags"], json!(null));
+    // It points at the second occurrence (line 2, 0-based).
+    assert_eq!(d["range"]["start"]["line"], json!(2));
+}
+
+#[test]
 fn test_e2e_find_references() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();

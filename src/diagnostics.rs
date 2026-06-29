@@ -56,6 +56,24 @@ pub fn compute(source: &str, path: &Path) -> Vec<Diagnostic> {
             }),
     );
 
+    // A namespace required more than once (even with a different `:as` alias).
+    // Keyed on the namespace, so it catches duplicates the exact-text dedup in
+    // "Clean namespace" misses. Deliberately *not* tagged UNNECESSARY: when each
+    // require provides a distinct, used alias/refer the later one is redundant
+    // but not dead, and fading it would wrongly imply it is safe to delete.
+    diags.extend(
+        crate::handlers::code_action::duplicate_requires(source)
+            .into_iter()
+            .map(|d| Diagnostic {
+                range: d.range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("duplicate-require".to_string())),
+                source: Some("clj-pulse".to_string()),
+                message: format!("Duplicate require: {}", d.namespace),
+                ..Default::default()
+            }),
+    );
+
     diags
 }
 
@@ -345,5 +363,78 @@ mod tests {
         let d = unused(src);
         assert_eq!(d.len(), 1);
         assert!(d[0].message.contains("a.b"), "message: {}", d[0].message);
+    }
+
+    /// The `duplicate-require` diagnostics for `source`.
+    fn dups(source: &str) -> Vec<Diagnostic> {
+        diags(source)
+            .into_iter()
+            .filter(|d| d.code == Some(NumberOrString::String("duplicate-require".to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn flags_duplicate_require_with_different_alias() {
+        // Same namespace, different `:as` alias — the second is a duplicate.
+        let src = "(ns my.app\n  (:require [clojure.string :as str]\n            \
+                   [clojure.string :as s]))\n(str/join \"\" [])\n(s/trim \"\")\n";
+        let d = dups(src);
+        assert_eq!(d.len(), 1);
+        let d = &d[0];
+        assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(
+            d.code,
+            Some(NumberOrString::String("duplicate-require".to_string()))
+        );
+        assert_eq!(d.source.as_deref(), Some("clj-pulse"));
+        assert!(
+            d.message.contains("clojure.string"),
+            "message: {}",
+            d.message
+        );
+        // Not tagged UNNECESSARY: both aliases are used, so the require is
+        // redundant but not dead — fading it would mislead.
+        assert_eq!(d.tags, None);
+        // The duplicate is the second occurrence, on line 2.
+        assert_eq!(d.range.start.line, 2);
+    }
+
+    #[test]
+    fn no_duplicate_for_distinct_namespaces() {
+        let src = "(ns my.app\n  (:require [a.b :as b]\n            [c.d :as d]))\n(b/x)\n(d/y)\n";
+        assert!(dups(src).is_empty());
+    }
+
+    #[test]
+    fn flags_duplicate_across_require_clauses() {
+        let src = "(ns my.app\n  (:require [c.d :as d])\n  (:require [c.d :as e]))\n(d/x)\n(e/y)\n";
+        assert_eq!(dups(src).len(), 1);
+    }
+
+    #[test]
+    fn flags_third_occurrence_too() {
+        // Three requires of the same ns flag the 2nd and 3rd.
+        let src = "(ns my.app\n  (:require [c.d :as d]\n            [c.d :as e]\n            \
+                   [c.d :as f]))\n(d/x)\n(e/y)\n(f/z)\n";
+        assert_eq!(dups(src).len(), 2);
+    }
+
+    #[test]
+    fn flags_duplicate_bare_and_vector_require() {
+        // A bare `c.d` and a `[c.d :as d]` are the same namespace twice.
+        let src = "(ns my.app\n  (:require c.d\n            [c.d :as d]))\n(d/x)\n";
+        assert_eq!(dups(src).len(), 1);
+    }
+
+    #[test]
+    fn no_duplicate_across_reader_conditional_branches() {
+        // Platform branches are mutually exclusive — not a duplicate.
+        let src = "(ns my.app\n  (:require\n   #?(:clj [c.d :as d]\n      :cljs [c.d :as e])))\n#?(:clj (d/x) :cljs (e/y))\n";
+        assert!(dups(src).is_empty(), "{:?}", dups(src));
+    }
+
+    #[test]
+    fn no_duplicate_for_single_require() {
+        assert!(dups("(ns my.app\n  (:require [c.d :as d]))\n(d/x)\n").is_empty());
     }
 }
