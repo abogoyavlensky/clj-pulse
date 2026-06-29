@@ -302,6 +302,7 @@ pub fn clean_ns_edits(source: &str) -> Option<Vec<TextEdit>> {
     let mut used_prefixes = used_prefixes(source);
     collect_keyword_prefixes(root, source, &mut used_prefixes);
     let used_bare = used_bare_symbols(root, ns_form, source);
+    let self_ns = ns_name_of(ns_form, source).unwrap_or_default();
 
     // `seen` is shared so a duplicate spec is dropped even across clauses.
     let mut seen: HashSet<String> = HashSet::new();
@@ -313,6 +314,7 @@ pub fn clean_ns_edits(source: &str) -> Option<Vec<TextEdit>> {
             source,
             &used_prefixes,
             &used_bare,
+            &self_ns,
             &mut seen,
         ) {
             edits.push(edit);
@@ -326,6 +328,139 @@ pub fn clean_ns_edits(source: &str) -> Option<Vec<TextEdit>> {
     }
 }
 
+/// A required namespace the file never uses, with the range of its namespace
+/// symbol — the basis for the `unused-namespace` diagnostic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnusedRequire {
+    pub namespace: String,
+    pub range: tower_lsp::lsp_types::Range,
+}
+
+/// Every namespace `source`'s `ns` form `:require`s but nothing in the file
+/// uses, each with the range of its namespace symbol. Shares its usage analysis
+/// with [`clean_ns_edits`] (via [`libspec_unused`]) so the unused-namespace
+/// diagnostic flags exactly what the Clean-namespace action removes as unused.
+/// Conservative: plain side-effecting requires (`[some.ns]` / bare `some.ns`),
+/// reader-conditional specs, and libspecs with options we don't model are never
+/// reported.
+pub fn unused_requires(source: &str) -> Vec<UnusedRequire> {
+    let mut parser = Parser::new();
+    if parser.set_language(extractor::language()).is_err() {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let root = tree.root_node();
+    let Some(ns_form) = ns_form(root, source) else {
+        return vec![];
+    };
+    let requires: Vec<Node> = named_children(ns_form)
+        .into_iter()
+        .filter(|c| c.kind() == "list_lit" && first_token_is(*c, "kwd_lit", ":require", source))
+        .collect();
+    if requires.is_empty() {
+        return vec![];
+    }
+
+    let mut used_prefixes = used_prefixes(source);
+    collect_keyword_prefixes(root, source, &mut used_prefixes);
+    let used_bare = used_bare_symbols(root, ns_form, source);
+    let self_ns = ns_name_of(ns_form, source).unwrap_or_default();
+
+    let mut out = Vec::new();
+    for require in requires {
+        // children[0] is the `:require` keyword; the rest are specs. Only plain
+        // `[ns …]` libspecs are analysed — bare requires, reader conditionals
+        // and comments are skipped (never flagged).
+        for spec in named_children(require).into_iter().skip(1) {
+            if spec.kind() != "vec_lit" {
+                continue;
+            }
+            let Some(ls) = parse_libspec(spec, source) else {
+                continue;
+            };
+            // The file's own namespace is never flagged, matching the
+            // unresolved-namespace diagnostic and the Clean-namespace action.
+            if ls.has_unknown_opt || ls.is_plain_side_effecting() || ls.ns_name == self_ns {
+                continue;
+            }
+            if libspec_unused(&ls, source, &used_prefixes, &used_bare) {
+                out.push(UnusedRequire {
+                    namespace: ls.ns_name.clone(),
+                    range: node_range(ls.ns_node, source),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A `:require` of a namespace already required earlier in the same `ns` form,
+/// with the range of the redundant occurrence's namespace symbol.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DuplicateRequire {
+    pub namespace: String,
+    pub range: tower_lsp::lsp_types::Range,
+}
+
+/// Namespaces `source`'s `ns` form requires more than once — keyed on the
+/// namespace itself, so a repeat with a different `:as` alias or `:refer` still
+/// counts. Reports each occurrence after the first, in source order and across
+/// all `:require` clauses, with the range of its namespace symbol. Bare
+/// `some.ns` requires are considered too; reader-conditional specs are ignored,
+/// since their branches are mutually exclusive.
+pub fn duplicate_requires(source: &str) -> Vec<DuplicateRequire> {
+    let mut parser = Parser::new();
+    if parser.set_language(extractor::language()).is_err() {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let root = tree.root_node();
+    let Some(ns_form) = ns_form(root, source) else {
+        return vec![];
+    };
+    let requires: Vec<Node> = named_children(ns_form)
+        .into_iter()
+        .filter(|c| c.kind() == "list_lit" && first_token_is(*c, "kwd_lit", ":require", source))
+        .collect();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for require in requires {
+        // children[0] is the `:require` keyword; the rest are specs.
+        for spec in named_children(require).into_iter().skip(1) {
+            let (namespace, ns_node) = match spec.kind() {
+                "vec_lit" => match parse_libspec(spec, source) {
+                    Some(ls) => (ls.ns_name.clone(), ls.ns_node),
+                    None => continue,
+                },
+                // Bare `some.ns` side-effecting require.
+                "sym_lit" => (sym_name(spec, source), spec),
+                // Reader conditionals, comments, prefix lists: not duplicates.
+                _ => continue,
+            };
+            if !seen.insert(namespace.clone()) {
+                out.push(DuplicateRequire {
+                    namespace,
+                    range: node_range(ns_node, source),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The full LSP range of a tree-sitter node, via ropey-aware position mapping.
+fn node_range(node: Node, source: &str) -> tower_lsp::lsp_types::Range {
+    tower_lsp::lsp_types::Range {
+        start: extractor::point_to_position(node.start_position(), node.start_byte(), source),
+        end: extractor::point_to_position(node.end_position(), node.end_byte(), source),
+    }
+}
+
 /// Builds the edit for a single `(:require …)` clause, or `None` if it needs no
 /// change. `ns_children` is the enclosing ns form's children (used to delete a
 /// fully-emptied clause); `seen` accumulates spec texts across clauses for
@@ -336,6 +471,7 @@ fn clean_one_clause(
     source: &str,
     used_prefixes: &HashSet<String>,
     used_bare: &HashSet<String>,
+    self_ns: &str,
     seen: &mut HashSet<String>,
 ) -> Option<TextEdit> {
     let clause_children = named_children(require);
@@ -348,7 +484,7 @@ fn clean_one_clause(
     let mut plans: Vec<Plan> = Vec::with_capacity(specs.len());
     let mut changed = false;
     for spec in specs {
-        let plan = plan_spec(*spec, source, used_prefixes, used_bare, seen);
+        let plan = plan_spec(*spec, source, used_prefixes, used_bare, self_ns, seen);
         match &plan {
             Plan::Remove => changed = true,
             Plan::Keep(t) if t.as_str() != node_text(*spec, source) => changed = true,
@@ -468,10 +604,11 @@ fn plan_spec(
     source: &str,
     used_prefixes: &HashSet<String>,
     used_bare: &HashSet<String>,
+    self_ns: &str,
     seen: &mut HashSet<String>,
 ) -> Plan {
     let plan = match spec.kind() {
-        "vec_lit" => plan_libspec(spec, source, used_prefixes, used_bare),
+        "vec_lit" => plan_libspec(spec, source, used_prefixes, used_bare, self_ns),
         // Bare `some.ns` side-effecting requires, reader conditionals, comments
         // and anything unrecognised are preserved untouched.
         _ => Plan::Keep(node_text(spec, source).to_string()),
@@ -488,23 +625,56 @@ fn plan_spec(
     plan
 }
 
-/// Plans a `[ns …]` libspec given the file's usage sets.
-fn plan_libspec(
-    spec: Node,
-    source: &str,
-    used_prefixes: &HashSet<String>,
-    used_bare: &HashSet<String>,
-) -> Plan {
-    let verbatim = || Plan::Keep(node_text(spec, source).to_string());
-    let items = named_children(spec);
-    let Some(first) = items.first() else {
-        return verbatim();
-    };
-    if first.kind() != "sym_lit" {
-        // e.g. a `[[a] [b]]` splice vector — not a shape we model; keep it.
-        return verbatim();
+/// A parsed `[ns …]` require libspec: the namespace symbol plus the `:as` /
+/// `:refer` options we model. Built by [`parse_libspec`] and shared by the
+/// Clean-namespace planner and the unused-namespace diagnostic so both read a
+/// libspec the same way.
+struct Libspec<'a> {
+    /// The namespace `sym_lit` node (`clojure.string` in `[clojure.string …]`).
+    ns_node: Node<'a>,
+    ns_name: String,
+    alias: Option<String>,
+    refer_kwd: Option<Node<'a>>,
+    refer_vec: Option<Node<'a>>,
+    refer_all: bool,
+    /// A libspec option we don't model (`:rename {old new}`, `:reload`, …): such
+    /// a spec may introduce usable names we never see, so it is always kept
+    /// untouched and never flagged as unused.
+    has_unknown_opt: bool,
+}
+
+impl<'a> Libspec<'a> {
+    /// A plain side-effecting require (`[some.ns]`) — no `:as`, no `:refer`. May
+    /// load a namespace for its `defmethod`/protocol-extension side effects, so
+    /// it is never removed or flagged.
+    fn is_plain_side_effecting(&self) -> bool {
+        self.alias.is_none() && self.refer_vec.is_none() && !self.refer_all
     }
-    let ns_name = node_text(*first, source).to_string();
+
+    /// The explicit `:refer [a b]` names (empty when there is no refer vector).
+    fn refers(&self, source: &str) -> Vec<String> {
+        self.refer_vec
+            .map(|v| {
+                named_children(v)
+                    .into_iter()
+                    .filter(|r| r.kind() == "sym_lit")
+                    .map(|r| node_text(r, source).to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Parses a `[ns :as a :refer […]]` libspec vector. `None` when the first
+/// element isn't a plain namespace symbol (e.g. a `[[a] [b]]` splice vector) —
+/// a shape we don't model.
+fn parse_libspec<'a>(spec: Node<'a>, source: &str) -> Option<Libspec<'a>> {
+    let items = named_children(spec);
+    let first = *items.first()?;
+    if first.kind() != "sym_lit" {
+        return None;
+    }
+    let ns_name = node_text(first, source).to_string();
 
     let mut alias: Option<String> = None;
     let mut refer_kwd: Option<Node> = None;
@@ -538,51 +708,76 @@ fn plan_libspec(
         i += 1;
     }
 
-    // Libspec options we don't model (`:rename {old new}`, `:reload`, …) can
-    // introduce usable names we never see, so removing or pruning such a spec
-    // could drop a used require or leave a dangling option. Keep it untouched.
     let has_unknown_opt = items.iter().any(|n| {
         n.kind() == "kwd_lit" && !matches!(node_text(*n, source), ":as" | ":refer" | ":all")
     });
-    if has_unknown_opt {
-        return verbatim();
-    }
 
-    // Plain side-effecting require (`[some.ns]`): never removed (it may load a
-    // namespace for its `defmethod`/protocol-extension side effects).
-    if alias.is_none() && refer_vec.is_none() && !refer_all {
-        return verbatim();
-    }
+    Some(Libspec {
+        ns_node: first,
+        ns_name,
+        alias,
+        refer_kwd,
+        refer_vec,
+        refer_all,
+        has_unknown_opt,
+    })
+}
 
-    let full_ns_used = used_prefixes.contains(&ns_name);
-    let alias_used = alias
+/// Whether nothing the libspec provides is used in the file: no fully-qualified
+/// `ns/…` use, no use of its `:as` alias, and no used `:refer` name. This is the
+/// single "unused" decision behind both the unused-namespace diagnostic and the
+/// Clean-namespace removal, so the squiggle and the fix never disagree. Callers
+/// must first exclude plain side-effecting and unknown-option specs (which are
+/// always kept).
+fn libspec_unused(
+    ls: &Libspec,
+    source: &str,
+    used_prefixes: &HashSet<String>,
+    used_bare: &HashSet<String>,
+) -> bool {
+    let full_ns_used = used_prefixes.contains(&ls.ns_name);
+    let alias_used = ls
+        .alias
         .as_deref()
         .map(|a| used_prefixes.contains(a))
         .unwrap_or(false);
+    let refer_has_use = ls.refer_all || ls.refers(source).iter().any(|r| used_bare.contains(r));
+    !full_ns_used && !alias_used && !refer_has_use
+}
 
-    let original_refers: Vec<String> = refer_vec
-        .map(|v| {
-            named_children(v)
-                .into_iter()
-                .filter(|r| r.kind() == "sym_lit")
-                .map(|r| node_text(r, source).to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let surviving: Vec<String> = original_refers
-        .iter()
-        .filter(|r| used_bare.contains(*r))
-        .cloned()
-        .collect();
-    let refer_has_use = refer_all || !surviving.is_empty();
+/// Plans a `[ns …]` libspec given the file's usage sets. `self_ns` is the
+/// file's own namespace, which is never removed even when it appears unused.
+fn plan_libspec(
+    spec: Node,
+    source: &str,
+    used_prefixes: &HashSet<String>,
+    used_bare: &HashSet<String>,
+    self_ns: &str,
+) -> Plan {
+    let verbatim = || Plan::Keep(node_text(spec, source).to_string());
+    let Some(ls) = parse_libspec(spec, source) else {
+        return verbatim();
+    };
+
+    // Options we don't model, plain side-effecting requires, and a require of
+    // the file's own namespace are all kept as-is.
+    if ls.has_unknown_opt || ls.is_plain_side_effecting() || ls.ns_name == self_ns {
+        return verbatim();
+    }
 
     // Nothing the spec provides is used → drop the whole spec.
-    if !full_ns_used && !alias_used && !refer_has_use {
+    if libspec_unused(&ls, source, used_prefixes, used_bare) {
         return Plan::Remove;
     }
 
     // Survives. Prune unused `:refer` names when an explicit vector shrank.
-    if let (Some(kwd), Some(vec)) = (refer_kwd, refer_vec) {
+    if let (Some(kwd), Some(vec)) = (ls.refer_kwd, ls.refer_vec) {
+        let original_refers = ls.refers(source);
+        let surviving: Vec<String> = original_refers
+            .iter()
+            .filter(|r| used_bare.contains(*r))
+            .cloned()
+            .collect();
         if surviving.len() != original_refers.len() {
             let spec_text = node_text(spec, source);
             let base = spec.start_byte();
@@ -621,6 +816,25 @@ fn ns_form<'a>(root: Node<'a>, source: &str) -> Option<Node<'a>> {
     (0..root.named_child_count())
         .filter_map(|i| root.named_child(i))
         .find(|child| child.kind() == "list_lit" && first_token_is(*child, "sym_lit", "ns", source))
+}
+
+/// The namespace name a `(ns …)` form declares: the first symbol after the
+/// leading `ns` (skipping any docstring or attr-map, which aren't `sym_lit`).
+/// `None` for a malformed `ns` form with no name.
+fn ns_name_of(ns_form: Node, source: &str) -> Option<String> {
+    named_children(ns_form)
+        .into_iter()
+        .skip(1)
+        .find(|n| n.kind() == "sym_lit")
+        .map(|sym| sym_name(sym, source))
+}
+
+/// The bare name of a symbol node, reading its `name` field rather than the
+/// whole node: a `sym_lit` also spans any leading `^meta`/type-hint
+/// (`^{:doc "…"} app`), so the node text would include the metadata.
+fn sym_name(sym: Node, source: &str) -> String {
+    let name = sym.child_by_field_name("name").unwrap_or(sym);
+    node_text(name, source).to_string()
 }
 
 /// The `(:require …)` clause inside an ns form, if present.
@@ -1093,5 +1307,63 @@ mod tests {
         // `(ns app)` declaration itself is preserved.
         let source = "(ns app\n  (:require [c.d :as d]))\n\n(println 1)\n";
         assert_eq!(clean(source).as_deref(), Some("(ns app)\n\n(println 1)\n"));
+    }
+
+    #[test]
+    fn unused_requires_agree_with_clean_ns_removal() {
+        // The unused-namespace diagnostic and the Clean-namespace action read
+        // the same usage analysis: the namespace `unused_requires` flags is
+        // exactly the one "Clean namespace" removes, and the used one survives.
+        let source = "(ns app\n  (:require [a.b :as b]\n            [c.d :as d]))\n\n(d/run)\n";
+
+        let flagged: Vec<String> = unused_requires(source)
+            .into_iter()
+            .map(|u| u.namespace)
+            .collect();
+        assert_eq!(flagged, vec!["a.b".to_string()]);
+
+        let cleaned = clean(source).expect("expected a clean edit");
+        assert!(
+            !cleaned.contains("a.b"),
+            "clean kept the flagged ns:\n{}",
+            cleaned
+        );
+        assert!(
+            cleaned.contains("[c.d :as d]"),
+            "clean dropped a used ns:\n{}",
+            cleaned
+        );
+    }
+
+    #[test]
+    fn self_require_is_neither_flagged_nor_removed() {
+        // Requiring the file's own namespace with an unused alias must not be
+        // flagged by the diagnostic nor removed by Clean-namespace — the
+        // "namespace being defined is never removed" invariant, kept consistent.
+        let source = "(ns app\n  (:require [app :as a]))\n\n(def x 1)\n";
+        assert!(unused_requires(source).is_empty());
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn self_require_with_ns_metadata_is_kept() {
+        // The ns name is metadata-wrapped (`^{:doc …}`); the declared namespace
+        // must still be recognised so the self-require is protected.
+        let source = "(ns ^{:doc \"d\"} app\n  (:require [app :as a]))\n\n(def x 1)\n";
+        assert!(
+            unused_requires(source).is_empty(),
+            "{:?}",
+            unused_requires(source)
+        );
+        assert!(clean(source).is_none());
+    }
+
+    #[test]
+    fn unused_requires_skip_plain_and_reader_conditional() {
+        // Plain side-effecting `[x.y]` and a reader-conditional spec are never
+        // reported, matching what Clean-namespace leaves untouched.
+        let source =
+            "(ns app\n  (:require [x.y]\n            #?(:clj [p.q :as q])))\n\n(def n 1)\n";
+        assert!(unused_requires(source).is_empty());
     }
 }
