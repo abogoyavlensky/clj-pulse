@@ -137,11 +137,16 @@ pub fn special_form(name: &str, letgo: bool) -> Option<&'static SpecialForm> {
 /// Whether `name` is a let-go native core function (implemented in Go, no `.lg`
 /// source). Callers borrow its doc/arglists from the clojure.core table.
 /// `NATIVE_NAMES` is sorted, so a binary search suffices.
+///
+/// This is the *fallback*: when a pinned let-go version's source is on disk the
+/// harvested set ([`crate::index::Index::letgo_native_contains`]) is preferred,
+/// since it tracks the actual version's vars/fns.
 pub fn is_native(name: &str) -> bool {
     NATIVE_NAMES.binary_search(&name).is_ok()
 }
 
-/// All native core fn names — for completion enumeration.
+/// All native core fn names — for completion enumeration. The fallback for when
+/// no per-version set was harvested (see [`is_native`]).
 pub fn native_names() -> &'static [&'static str] {
     NATIVE_NAMES
 }

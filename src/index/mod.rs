@@ -8,7 +8,7 @@ pub mod scanner;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -117,6 +117,14 @@ pub struct Index {
     /// fetched let-go source. Interior mutability because the `Arc<Index>` is
     /// already shared with handlers when background library indexing runs.
     letgo_core: AtomicBool,
+    /// Names let-go defines natively in Go (`ns.Def(...)` in `lang.go`),
+    /// harvested from the pinned version's source at index time so completion
+    /// and hover track the actual vars/fns of *this* let-go version (e.g. a
+    /// newly added `*command-line-args*`) instead of a hardcoded list. Empty
+    /// until harvested, or when no source is on disk — callers then fall back
+    /// to the static `NATIVE_NAMES`. Kept sorted for binary search. Interior
+    /// mutability because the `Arc<Index>` is already shared with handlers.
+    letgo_native: RwLock<Vec<String>>,
     /// JDK source index for built-in Java navigation/completion. Set once by the
     /// background discovery task; `None` until then, or when no JDK source is
     /// found. Interior mutability because the `Arc<Index>` is already shared.
@@ -133,6 +141,7 @@ impl Default for Index {
             occurrences: DashMap::new(),
             core_symbols: Vec::new(),
             letgo_core: AtomicBool::new(false),
+            letgo_native: RwLock::new(Vec::new()),
             jdk: OnceLock::new(),
         }
     }
@@ -188,6 +197,29 @@ impl Index {
     /// Whether let-go core has been indexed (see [`Index::mark_letgo_core`]).
     pub fn letgo_core(&self) -> bool {
         self.letgo_core.load(Ordering::Relaxed)
+    }
+
+    /// Records the let-go native names harvested from `lang.go`. Sorted and
+    /// de-duplicated for binary search; an empty input clears back to the
+    /// static fallback.
+    pub fn set_letgo_native(&self, mut names: Vec<String>) {
+        names.sort();
+        names.dedup();
+        *self.letgo_native.write().unwrap() = names;
+    }
+
+    /// The harvested let-go native names, or `None` when none were harvested
+    /// (no source on disk) — callers then fall back to the static list.
+    pub fn letgo_native_names(&self) -> Option<Vec<String>> {
+        let g = self.letgo_native.read().unwrap();
+        (!g.is_empty()).then(|| g.clone())
+    }
+
+    /// Whether `name` is a harvested let-go native, or `None` when nothing was
+    /// harvested (callers fall back to the static list).
+    pub fn letgo_native_contains(&self, name: &str) -> Option<bool> {
+        let g = self.letgo_native.read().unwrap();
+        (!g.is_empty()).then(|| g.binary_search_by(|n| n.as_str().cmp(name)).is_ok())
     }
 
     pub fn remove_file(&self, path: &Path) {
@@ -289,6 +321,10 @@ impl Index {
         // keeps skipping the static clojure.core fallback while `core` is empty.
         // `index_letgo_core` re-sets it when core is actually re-indexed.
         self.letgo_core.store(false, Ordering::Relaxed);
+        // The harvested native list is likewise library-derived: drop it so a
+        // project that stops being let-go (or bumps :lg-version) doesn't keep
+        // serving stale names. Re-harvested by `index_letgo_core` on re-index.
+        self.set_letgo_native(Vec::new());
 
         self.symbols
             .retain(|_, sym| sym.source == SymbolSource::Project);

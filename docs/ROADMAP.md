@@ -96,7 +96,6 @@ meantime and keeping the server dependency-free is worth more early on.
 - [x] Keyword indexing — navigation/rename for namespaced keywords. + Navigation on Integrant keys from integratn system edn file to components
 - [ ] Download docs for built-in functions from https://clojuredocs.org/
 - [ ] Custom macros definitions (example `defcomponent` from flockman)
-<<<<<<< Updated upstream
 - [x] Built-in (JDK) Java interop — go-to-definition, Javadoc hover, completion,
       and signature help for JDK classes, static members, and constructors. Reads
       the JDK's bundled `src.zip` (found via `JAVA_HOME`, a `java -XshowSettings`
@@ -107,9 +106,6 @@ meantime and keeping the server dependency-free is worth more early on.
       unaffected). Instance-method interop (`(.m obj)`), library `.class`
       bytecode, and decompilation are deliberately out of scope (later phases).
       See [the plan](plans/2026-06-26-java-builtin-navigation-completion.md).
-=======
-- [x] Java interop (class navigation/completion, decompilation, stubs). (if possible)
->>>>>>> Stashed changes
 - [x] let-go core navigation — when `:lg-version` is pinned in `lgx.edn` and
       lgx has fetched the source, indexes let-go's built-in `core`/stdlib from
       `$LGX_HOME/let-go/source/<version>/pkg/rt/core/*.lg` and navigates into the
@@ -117,10 +113,13 @@ meantime and keeping the server dependency-free is worth more early on.
       let-go name and the `clojure.*` alias (`[clojure.string :as str]` →
       `string.lg`), and bare builtins (`map`, `when`) resolve to `core`. Built-ins
       with no `.lg` source — compiler special forms (`if`, `try`, `catch`, …) and
-      native core fns (`count`, `subs`, `throw`, …, implemented in Go) — get
-      hover descriptions and completion entries (special forms from a curated
-      table; natives from a generated name list with docs borrowed from the
-      clojure.core table), but don't navigate, since no `.lg` definition exists.
+      native core vars/fns (`count`, `subs`, `*command-line-args*`, …,
+      implemented in Go) — get hover descriptions and completion entries
+      (special forms from a curated table; natives harvested from this version's
+      `pkg/rt/lang.go` `ns.Def(...)` calls so they track the actual let-go
+      version, falling back to a generated name list when the source isn't on
+      disk, with docs borrowed from the clojure.core table), but don't navigate,
+      since no `.lg` definition exists.
 - [X] Install with my homebrew-tap repo.
 - [x] Leiningen classpath (`project.clj` / NO `lein classpath`) — inspects
       `project.clj` only (no java): masks strings/comments then EDN-parses just
