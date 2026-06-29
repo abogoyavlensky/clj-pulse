@@ -578,6 +578,30 @@ public class Greeter {
     }
 
     #[test]
+    #[ignore = "needs a real JDK with lib/src.zip on the machine"]
+    fn real_jdk_completes_thread_sleep() {
+        use crate::index::extractor::extract;
+        use crate::index::Index;
+
+        let index = Index::new();
+        index.set_jdk(JdkIndex::discover().expect("discover real JDK"));
+        let (meta, syms) = extract("(ns app.x)", std::path::Path::new("app/x.clj")).unwrap();
+        index.insert_file(meta, syms, vec![]);
+
+        // `Thread/sl` on an auto-`java.lang` class (no `:import`) must offer the
+        // static `sleep`, labelled `Thread/sleep`.
+        let labels: Vec<String> =
+            crate::handlers::completion::complete_symbols(&index, "Thread/sl", "app.x")
+                .into_iter()
+                .map(|i| i.label)
+                .collect();
+        assert!(
+            labels.contains(&"Thread/sleep".to_string()),
+            "expected Thread/sleep, got {labels:?}"
+        );
+    }
+
+    #[test]
     fn finds_src_zip_in_both_layouts() {
         let tmp = tempfile::tempdir().unwrap();
         // Plain layout: <dir>/lib/src.zip

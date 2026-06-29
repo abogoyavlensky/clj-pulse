@@ -55,12 +55,12 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             if let Some(info) = index.jdk().and_then(|j| j.class(&class_fqn)) {
                 for m in &info.methods {
                     if m.is_static && m.name.starts_with(name_prefix) {
-                        items.push(java_member_completion(&m.name, &class_fqn, true));
+                        items.push(java_member_completion(alias, &m.name, &class_fqn, true));
                     }
                 }
                 for f in &info.fields {
                     if f.is_static && f.name.starts_with(name_prefix) {
-                        items.push(java_member_completion(&f.name, &class_fqn, false));
+                        items.push(java_member_completion(alias, &f.name, &class_fqn, false));
                     }
                 }
             }
@@ -186,9 +186,17 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
 /// hundreds of JDK classes into the list.
 const JAVA_CLASS_LIMIT: usize = 50;
 
-fn java_member_completion(name: &str, class_fqn: &str, is_method: bool) -> CompletionItem {
+fn java_member_completion(
+    alias: &str,
+    name: &str,
+    class_fqn: &str,
+    is_method: bool,
+) -> CompletionItem {
+    // Label as `Class/member` (e.g. `Thread/sleep`), mirroring Clojure
+    // alias-qualified completion — the editor filters the list against the typed
+    // `Class/...` word, so a bare `member` label would be filtered out.
     CompletionItem {
-        label: name.to_string(),
+        label: format!("{}/{}", alias, name),
         detail: Some(format!(
             "{} (static {})",
             class_fqn,
@@ -364,11 +372,18 @@ mod tests {
                 .map(|i| i.label)
                 .collect()
         };
-        // `Class/prefix` → static members.
+        // `Class/prefix` → static members, labelled `Class/member` so the editor
+        // (which filters against the typed `Class/...`) keeps them.
         assert!(
-            java_labels("Greeter/gr").contains(&"greet".to_string()),
-            "{:?}",
+            java_labels("Greeter/gr").contains(&"Greeter/greet".to_string()),
+            "imported class statics: {:?}",
             java_labels("Greeter/gr")
+        );
+        // Same for an auto-`java.lang` class with no `:import`.
+        assert!(
+            java_labels("Sample/o").contains(&"Sample/of".to_string()),
+            "auto-java.lang statics: {:?}",
+            java_labels("Sample/o")
         );
         // PascalCase prefix → class names (imported, then auto-`java.lang`).
         assert!(java_labels("Gr").contains(&"Greeter".to_string()));

@@ -1212,7 +1212,8 @@ fn test_e2e_java_completion_and_signature() {
 
     let base = std::fs::read_to_string(&probe).unwrap().lines().count() as u32;
 
-    // Static-member completion: `Greeter/g` → greet (no paren needed).
+    // Static-member completion: `Greeter/g` → `Greeter/greet` (labelled with the
+    // class prefix so the editor's `Class/...` filter keeps it).
     client.did_change_insert(&probe, base, 0, "Greeter/g\n");
     let comp = client.completion(&probe, base, 9);
     let labels: Vec<&str> = comp
@@ -1222,7 +1223,7 @@ fn test_e2e_java_completion_and_signature() {
         .filter_map(|i| i["label"].as_str())
         .collect();
     assert!(
-        labels.contains(&"greet"),
+        labels.contains(&"Greeter/greet"),
         "static-member completion: {labels:?}"
     );
 
