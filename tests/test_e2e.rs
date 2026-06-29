@@ -2172,6 +2172,55 @@ fn test_e2e_clean_ns_removes_unused_require() {
 }
 
 #[test]
+fn test_e2e_unused_namespace_diagnostic() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    // scratch.clj requires clojure.string (unused) and simple.helpers (used).
+    let scratch = root.join("src/scratch.clj");
+    let source = "(ns simple.scratch\n  (:require [clojure.string :as str]\n            \
+                  [simple.helpers :as helpers]))\n\n(defn run []\n  (helpers/greet \"hi\"))\n";
+    std::fs::write(&scratch, source).unwrap();
+    client.did_open(&scratch);
+
+    let params = client.wait_for_diagnostics("/src/scratch.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+
+    let unused: Vec<&Value> = diags
+        .iter()
+        .filter(|d| d["code"] == json!("unused-namespace"))
+        .collect();
+    assert_eq!(
+        unused.len(),
+        1,
+        "expected exactly one unused-namespace diagnostic, got {}",
+        params["diagnostics"]
+    );
+    let d = unused[0];
+    assert_eq!(d["severity"], json!(2)); // WARNING
+    assert_eq!(d["source"], json!("clj-pulse"));
+    assert!(
+        d["message"].as_str().unwrap().contains("clojure.string"),
+        "message: {}",
+        d["message"]
+    );
+    // DiagnosticTag::UNNECESSARY (1) so editors fade the unused require.
+    assert_eq!(d["tags"], json!([1]));
+    // The used require is never flagged.
+    assert!(
+        unused.iter().all(|d| !d["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("simple.helpers")),
+        "used require flagged as unused: {}",
+        params["diagnostics"]
+    );
+}
+
+#[test]
 fn test_e2e_find_references() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
