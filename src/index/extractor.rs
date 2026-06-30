@@ -8,7 +8,7 @@ use tree_sitter::{Node, Parser};
 use tree_sitter_clojure::LANGUAGE;
 use tree_sitter_language::LanguageFn;
 
-use super::{DefKind, NsMeta, Occurrence, Symbol};
+use super::{DefKind, ExtractConfig, NsMeta, Occurrence, Symbol};
 
 static LANGUAGE_REF: OnceLock<tree_sitter::Language> = OnceLock::new();
 
@@ -209,6 +209,11 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
 /// so an open build manifest (`deps.edn`, `bb.edn`) never leaks keyword
 /// occurrences into references.
 pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
+    file_occurrences_with(source, path, &ExtractConfig::default())
+}
+
+/// Like [`file_occurrences`] but honors `cfg` (`:lint-as`) for Clojure sources.
+pub fn file_occurrences_with(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Occurrence> {
     if crate::config::is_edn(path) {
         if is_integrant_edn(path, source) {
             extract_edn(source)
@@ -216,15 +221,28 @@ pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
             Vec::new()
         }
     } else {
-        extract_full(source, path)
+        extract_full_with(source, path, cfg)
             .map(|(_, _, occs)| occs)
             .unwrap_or_default()
     }
 }
 
 /// Like [`extract`] but also collects every resolved symbol usage
-/// (occurrences) in a second pass over the same parse tree.
+/// (occurrences) in a second pass over the same parse tree. Uses the default
+/// (empty) [`ExtractConfig`]; call [`extract_full_with`] to honor `:lint-as`.
 pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
+    extract_full_with(source, file, &ExtractConfig::default())
+}
+
+/// Like [`extract_full`] but honors `cfg`. The only setting consulted today is
+/// `:lint-as`: a list head whose fqn maps to a `def`-family kind is extracted as
+/// a definition (and still recorded as a usage), so names introduced by custom
+/// macros become navigable.
+pub fn extract_full_with(
+    source: &str,
+    file: &Path,
+    cfg: &ExtractConfig,
+) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
     let mut parser = Parser::new();
     parser
         .set_language(language())
@@ -262,6 +280,7 @@ pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, V
         source,
         ns_meta: &ns_meta,
         def_names,
+        lint_as: &cfg.lint_as,
     };
     let mut occurrences = Vec::new();
     let mut scope: Vec<HashSet<String>> = Vec::new();
@@ -771,6 +790,9 @@ struct OccurrenceCtx<'a> {
     source: &'a str,
     ns_meta: &'a NsMeta,
     def_names: HashSet<&'a str>,
+    /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
+    /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
+    lint_as: &'a HashMap<String, DefKind>,
 }
 
 static CORE_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
