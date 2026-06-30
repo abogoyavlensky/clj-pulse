@@ -56,18 +56,27 @@ This is not specific to macros. A macro is indexed like any other var
 exactly like a function call. The symbol is missing only because its JAR sits
 off the resolved classpath.
 
-### Fixing it
+### Stance: best effort, and never a JVM at startup
 
-Two independent paths, highest-leverage first:
+Leiningen is not a primary target for clj-pulse - `deps.edn` and let-go come
+first - so its dependency support stays best effort. One principle is fixed:
+**clj-pulse will not start a JVM.** That rules out shelling out to
+`lein classpath`, which is the only fully accurate way to get Leiningen's
+transitive and parent-inherited deps. Startup must stay fast and self-contained,
+so we accept the gap rather than pay JVM cost.
 
-1. **Resolve the full Leiningen classpath.** Shell out to `lein classpath` once
-   and cache the result keyed on `project.clj` mtime, mirroring how `deps.edn`
-   reuses `.cpcache`. This reverses the current "no java" decision, but it is the
-   only accurate way to get transitive and parent-inherited deps short of
-   reimplementing Maven resolution. It also restores navigation into version-less
-   direct deps.
-2. **Reimplement Maven resolution in Rust.** Parse each dep's `pom.xml` and the
-   parent's `:managed-dependencies`, then walk the tree. No subprocess, but a
-   large and fragile effort: version ranges, exclusions, and profiles all apply.
+Best-effort directions that respect the no-JVM rule, none urgent:
 
-See also the ROADMAP entry "Leiningen classpath ... Transitive deps deferred".
+1. **Resolve version-less direct deps from `~/.m2`.** When a direct dep declares
+   no version (the version comes from the parent project), look under
+   `~/.m2/repository/<group>/<artifact>/` and take the only, or newest,
+   downloaded version. Cheap and subprocess-free; covers parent-managed direct
+   deps, but still not transitive ones.
+2. **Reimplement enough Maven resolution in Rust.** Parse each dep's `pom.xml`
+   and the parent's `:managed-dependencies`, then walk the tree. No subprocess,
+   but a large and fragile effort: version ranges, exclusions, and profiles all
+   apply.
+
+For complete, accurate Leiningen support, clojure-lsp (which embeds clj-kondo
+and resolves the real classpath) remains the better tool. See also the ROADMAP
+entry "Leiningen classpath ... Transitive deps deferred".

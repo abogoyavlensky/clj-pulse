@@ -2,6 +2,8 @@
 
 Rust LSP server for Clojure (tower-lsp, tree-sitter). See ARCHITECTURE.md for data flow.
 
+See project's various notes at docs/MEMORY.md.
+
 ## Verification (run before claiming anything works)
 
 - `bb check` — fmt + clippy `-D warnings` + all tests. CI runs the same.
