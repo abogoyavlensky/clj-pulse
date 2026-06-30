@@ -47,6 +47,13 @@ Clojure & project support:
   index fresh across git pulls and branch switches; files outside the project's
   `:paths` are indexed when opened.
 
+> [!NOTE]
+> **Dependency depth:** `deps.edn` and let-go projects index the full transitive
+> dependency tree (from `.cpcache` and `lgx.edn`). Leiningen `project.clj`
+> projects index only direct dependencies that declare an explicit version and
+> already live in `~/.m2`; transitive deps and parent-inherited versions are not
+> indexed yet. See [docs/MEMORY.md](docs/MEMORY.md).
+
 ## Installation
 
 ### Homebrew (macOS, Linux)
