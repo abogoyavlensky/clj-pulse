@@ -47,6 +47,40 @@ pub enum DefKind {
     IntegrantKey,
 }
 
+impl DefKind {
+    /// Maps a `def`-family symbol name (`def`, `defn`, `defmacro`, …) to its
+    /// `DefKind`. The single source of truth for the extractor's top-level form
+    /// dispatch and the `:lint-as` reader (which maps a target like
+    /// `clojure.core/defn` by its name). Returns `None` for non-def names, so a
+    /// `:lint-as … clojure.core/for` entry is ignored - it defines nothing.
+    pub(crate) fn from_def_symbol(name: &str) -> Option<DefKind> {
+        Some(match name {
+            "def" => DefKind::Def,
+            "defonce" => DefKind::Defonce,
+            "defn" => DefKind::Defn,
+            "defn-" => DefKind::DefnPrivate,
+            "defmacro" => DefKind::Defmacro,
+            "defmulti" => DefKind::Defmulti,
+            "defmethod" => DefKind::Defmethod,
+            "defprotocol" => DefKind::Defprotocol,
+            "defrecord" => DefKind::Defrecord,
+            "deftype" => DefKind::Deftype,
+            _ => return None,
+        })
+    }
+}
+
+/// Project configuration that influences extraction. Resolved once at startup
+/// (see `crate::settings::load`) and borrowed by the extractor; the default
+/// (empty) reproduces the stock behavior exactly.
+#[derive(Debug, Clone, Default)]
+pub struct ExtractConfig {
+    /// Macro fqn (`defcomponent/defcomponent`) → the `def`-family form it should
+    /// be treated as, from a merged `:lint-as` map. Only def-like targets are
+    /// kept; a lint-as'd form's defined name is then extracted as that kind.
+    pub lint_as: HashMap<String, DefKind>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,

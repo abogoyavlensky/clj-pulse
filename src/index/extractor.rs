@@ -1471,19 +1471,7 @@ fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occu
 }
 
 fn str_to_defkind(s: &str) -> Option<DefKind> {
-    match s {
-        "def" => Some(DefKind::Def),
-        "defonce" => Some(DefKind::Defonce),
-        "defn" => Some(DefKind::Defn),
-        "defn-" => Some(DefKind::DefnPrivate),
-        "defmacro" => Some(DefKind::Defmacro),
-        "defmulti" => Some(DefKind::Defmulti),
-        "defmethod" => Some(DefKind::Defmethod),
-        "defprotocol" => Some(DefKind::Defprotocol),
-        "defrecord" => Some(DefKind::Defrecord),
-        "deftype" => Some(DefKind::Deftype),
-        _ => None,
-    }
+    DefKind::from_def_symbol(s)
 }
 
 #[cfg(test)]

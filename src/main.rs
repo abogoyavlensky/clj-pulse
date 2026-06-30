@@ -15,6 +15,7 @@ mod kondo;
 mod leiningen;
 mod lgx;
 mod server;
+mod settings;
 mod uri;
 
 use server::Backend;
