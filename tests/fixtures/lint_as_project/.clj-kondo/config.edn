@@ -1,0 +1,1 @@
+{:lint-as {app.macros/defthing clojure.core/def}}

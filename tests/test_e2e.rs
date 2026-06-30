@@ -649,6 +649,40 @@ fn test_e2e_letgo_navigation_into_lgx_deps() {
 }
 
 #[test]
+fn test_e2e_lint_as_navigates_to_macro_defined_name() {
+    // `:lint-as {app.macros/defthing clojure.core/def}` in .clj-kondo/config.edn
+    // makes `(defthing widget …)` define `widget`, so goto-def on a use of
+    // `widget` resolves to the defthing form — even though `defthing` is a macro
+    // from an (unindexed) dependency.
+    let project = setup_named("lint_as_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/app/core.clj");
+    client.did_open(&core);
+
+    // First `widget` in the file is the usage in `(defn use-it [] widget)`.
+    let (use_line, use_ch) = position_of(&core, "widget");
+    let resp = client.goto_definition(&core, use_line, use_ch);
+    let uri = resp["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no definition for widget: {}", resp));
+    assert!(
+        uri.ends_with("/src/app/core.clj"),
+        "expected core.clj, got {}",
+        uri
+    );
+    let (def_line, _) = position_of(&core, "defthing widget");
+    assert_eq!(
+        resp["range"]["start"]["line"].as_u64().unwrap() as u32,
+        def_line,
+        "definition should land on the `defthing widget` line"
+    );
+}
+
+#[test]
 fn test_e2e_letgo_core_navigation() {
     // A pinned let-go project (`:lg-version`) with no deps of its own: bare
     // builtins and clojure.*-aliased stdlib must navigate into the let-go core
