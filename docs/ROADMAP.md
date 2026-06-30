@@ -128,6 +128,14 @@ meantime and keeping the server dependency-free is worth more early on.
       direct deps (top-level + profiles) to existing `~/.m2`/`:local-repo` JARs
       and reuses the classpath JAR indexer. Used only when there is no
       `.cpcache`. Transitive deps deferred (see below).
+- [x] clj-kondo config compatibility (read-only) — reads `:lint-as` from
+      `.clj-pulse/config.edn` (primary) merged over `.clj-kondo/config.edn`, so
+      custom def-like macros (e.g. `defcomponent`) define navigable names. Only
+      def-family targets are honored; loaded once at startup (restart to
+      reload). The config layer is separated as a clj-kondo-compat boundary
+      (`src/kondo.rs`) so more of clj-kondo's config can be honored later.
+      Future: `.clj-kondo/config/` dir + JAR-exported configs, live reload, and
+      honoring `:linters` levels for clj-pulse's own diagnostics.
 - [ ] shadow-cljs classpath and cljs-aware indexing.
 - [ ] Keyword indexing for re-frame subs
 - [ ] Local cache for project's files
