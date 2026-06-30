@@ -7,7 +7,8 @@ use clj_pulse::index::scanner;
 fn test_indexes_all_files_in_project() {
     let root = Path::new("tests/fixtures/simple_project");
     let paths = vec![root.join("src")];
-    let index = scanner::build_index(root, &paths).unwrap();
+    let index =
+        scanner::build_index(root, &paths, &clj_pulse::index::ExtractConfig::default()).unwrap();
 
     assert!(index.lookup("simple.core/add").is_some());
     assert!(index.lookup("simple.core/multiply").is_some());
@@ -20,7 +21,8 @@ fn test_indexes_all_files_in_project() {
 fn test_index_contains_ns_metadata() {
     let root = Path::new("tests/fixtures/simple_project");
     let paths = vec![root.join("src")];
-    let index = scanner::build_index(root, &paths).unwrap();
+    let index =
+        scanner::build_index(root, &paths, &clj_pulse::index::ExtractConfig::default()).unwrap();
 
     let meta = index.ns_meta("simple.utils").unwrap();
     assert_eq!(
@@ -33,7 +35,8 @@ fn test_index_contains_ns_metadata() {
 fn test_remove_file_cleans_up_all_symbols() {
     let root = Path::new("tests/fixtures/simple_project");
     let paths = vec![root.join("src")];
-    let index = scanner::build_index(root, &paths).unwrap();
+    let index =
+        scanner::build_index(root, &paths, &clj_pulse::index::ExtractConfig::default()).unwrap();
 
     assert!(index.lookup("simple.utils/greet").is_some());
 
@@ -48,7 +51,8 @@ fn test_remove_file_cleans_up_all_symbols() {
 fn test_insert_file_updates_index() {
     let root = Path::new("tests/fixtures/simple_project");
     let paths = vec![root.join("src")];
-    let index = scanner::build_index(root, &paths).unwrap();
+    let index =
+        scanner::build_index(root, &paths, &clj_pulse::index::ExtractConfig::default()).unwrap();
 
     let new_source = r#"
         (ns simple.utils (:require [simple.core :as core]))

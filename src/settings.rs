@@ -52,7 +52,7 @@ fn merge(kondo_pairs: Vec<(String, String)>, pulse_pairs: Vec<(String, String)>)
 /// Reads `.clj-kondo/config.edn` and `.clj-pulse/config.edn` (both optional),
 /// merges their `:lint-as` maps, and resolves them to [`DefKind`]s. Missing or
 /// unparseable files contribute nothing.
-pub(crate) fn load(root: &Path) -> ExtractConfig {
+pub fn load(root: &Path) -> ExtractConfig {
     let kondo_pairs = kondo::lint_as(root);
     let pulse_pairs = std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
         .ok()

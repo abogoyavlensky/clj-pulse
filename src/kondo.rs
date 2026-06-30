@@ -60,9 +60,7 @@ mod tests {
     use super::*;
 
     fn has(pairs: &[(String, String)], macro_fqn: &str, target: &str) -> bool {
-        pairs
-            .iter()
-            .any(|(m, t)| m == macro_fqn && t == target)
+        pairs.iter().any(|(m, t)| m == macro_fqn && t == target)
     }
 
     #[test]

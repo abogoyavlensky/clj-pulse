@@ -6,7 +6,7 @@ use clj_pulse::index::scanner;
 fn build_test_index() -> clj_pulse::index::Index {
     let root = Path::new("tests/fixtures/simple_project");
     let paths = vec![root.join("src")];
-    scanner::build_index(root, &paths).unwrap()
+    scanner::build_index(root, &paths, &clj_pulse::index::ExtractConfig::default()).unwrap()
 }
 
 #[test]

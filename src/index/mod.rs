@@ -8,7 +8,7 @@ pub mod scanner;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{LazyLock, OnceLock, RwLock};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -163,6 +163,10 @@ pub struct Index {
     /// background discovery task; `None` until then, or when no JDK source is
     /// found. Interior mutability because the `Arc<Index>` is already shared.
     jdk: OnceLock<jdk::JdkIndex>,
+    /// Project config (currently `:lint-as`), resolved once at startup before
+    /// indexing. Interior mutability because the `Arc<Index>` is shared with
+    /// handlers; set once, never reloaded (a config change needs a restart).
+    extract_config: OnceLock<ExtractConfig>,
 }
 
 impl Default for Index {
@@ -177,6 +181,7 @@ impl Default for Index {
             letgo_core: AtomicBool::new(false),
             letgo_native: RwLock::new(Vec::new()),
             jdk: OnceLock::new(),
+            extract_config: OnceLock::new(),
         }
     }
 }
@@ -206,6 +211,19 @@ impl Index {
     /// task). A second call is ignored.
     pub fn set_jdk(&self, jdk_index: jdk::JdkIndex) {
         let _ = self.jdk.set(jdk_index);
+    }
+
+    /// The resolved project config (`:lint-as`), or an empty default until
+    /// [`Index::set_extract_config`] runs at startup.
+    pub fn extract_config(&self) -> &ExtractConfig {
+        static EMPTY: LazyLock<ExtractConfig> = LazyLock::new(ExtractConfig::default);
+        self.extract_config.get().unwrap_or(&EMPTY)
+    }
+
+    /// Installs the project config (called once at startup, before indexing).
+    /// A second call is ignored — config is not reloaded without a restart.
+    pub fn set_extract_config(&self, cfg: ExtractConfig) {
+        let _ = self.extract_config.set(cfg);
     }
 
     pub fn lookup_in_ns(&self, ns: &str, name: &str) -> Option<Symbol> {
