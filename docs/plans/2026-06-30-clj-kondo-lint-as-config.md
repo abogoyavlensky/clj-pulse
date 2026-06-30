@@ -417,3 +417,56 @@ uses the two-argument wrapper, which keeps passing the default.
 - DRY (one def-symbol → `DefKind` mapping), YAGNI (single config file, startup
   load, project-only), TDD, frequent commits.
 - Use `/writing-clearly` for all prose.
+
+---
+
+## Implementation Summary (completed 2026-07-01)
+
+**Status: done.** All seven tasks implemented, verified, and committed
+(`d363d56` → `8169cc2`).
+
+**What shipped:**
+- `src/kondo.rs` — reads `:lint-as` from `.clj-kondo/config.edn`.
+- `src/settings.rs` — merges `.clj-pulse/config.edn` over clj-kondo (clj-pulse
+  wins per key), drops non-def targets, builds `ExtractConfig`.
+- `src/index/mod.rs` — `ExtractConfig`, a shared `DefKind::from_def_symbol`
+  mapping, and the `Index` config field/accessor/setter.
+- `src/index/extractor.rs` — `resolve_head_fqn` plus lint-as branches in the
+  symbol pass (`process_top_level_list`) and occurrence pass (`walk_list`): a
+  lint-as'd form defines its name and keeps its head navigable.
+- Wiring in `src/index/scanner.rs` (`build_index` cfg param), `src/server.rs`
+  (load at startup), `src/handlers/{references,symbols}.rs`.
+- Tests: extractor unit tests, `settings`/`kondo` unit tests, and an e2e test
+  with the `tests/fixtures/lint_as_project` fixture.
+- Docs: README "Configuration" section, ROADMAP entry.
+
+**Deviations from the plan (all noted during execution):**
+1. Rather than add a required `cfg` parameter to `extract_full` /
+   `file_occurrences` (which would churn 37 test call sites), kept those as
+   two-argument wrappers passing the default config and added
+   `extract_full_with` / `file_occurrences_with` variants for the production
+   sites. Same design intent, far less churn — Task 3 touched only
+   `extractor.rs`.
+2. `settings::load` is `pub` (not `pub(crate)`): its only caller is `server`,
+   which is bin-only, so under `clippy -D warnings` the whole config chain was
+   dead code in the lib target. Making the entry point `pub` roots the chain,
+   matching how `leiningen::resolve` / `lgx::resolve` already do it.
+3. Reused `kondo::parse_lint_as` for both config files (identical `:lint-as`
+   shape) instead of a separate parser in `settings` (DRY).
+
+**Environment note:** this box (3.8 GB) OOM-kills the linker on the full debug
+binary/test targets. Verified with `cargo test --lib` (217 pass),
+`cargo clippy --all-targets -- -D warnings` (clean, no linking), and the
+integration + e2e suites built with reduced debug info
+(`RUSTFLAGS="-C debuginfo=0"` / `CARGO_PROFILE_TEST_DEBUG=0`): all integration
+tests pass and the full `test_e2e` suite is 74 passed / 0 failed / 2 ignored,
+including the new lint-as definition test. CI (normal memory) runs the standard
+`bb check` / `bb e2e`.
+
+**Second-opinion review (codex, branch vs master):** no issues in the feature.
+It raised one P2 about a pre-existing duplicate-require diagnostic in
+`src/handlers/code_action.rs` — unchanged from master and unrelated to this
+plan, so left untouched.
+
+**Fixture gotcha:** the repo's `.gitignore` ignores `.clj-kondo`, so the e2e
+fixture's `.clj-kondo/config.edn` had to be `git add -f`'d to be tracked.
