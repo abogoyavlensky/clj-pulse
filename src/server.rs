@@ -558,6 +558,30 @@ impl LanguageServer for Backend {
                         }
                     }
 
+                    // Open buffers outside :paths were indexed on didOpen with
+                    // the previous config; re-extract each open project buffer so
+                    // the reload reaches them too. Jar/dir-lib files have no
+                    // occurrences entry, so `is_project_path` skips them.
+                    if config_changed {
+                        let cfg = index.extract_config();
+                        for uri in documents.open_uris() {
+                            let Ok(path) = uri.to_file_path() else {
+                                continue;
+                            };
+                            if !config::is_clojure_source(&path) || !index.is_project_path(&path) {
+                                continue;
+                            }
+                            if let Some(text) = documents.text(&uri) {
+                                if let Ok((meta, symbols, occ)) =
+                                    extractor::extract_full_with(&text, &path, &cfg)
+                                {
+                                    index.remove_file(&path);
+                                    index.insert_file(meta, symbols, occ);
+                                }
+                            }
+                        }
+                    }
+
                     // Log the reload before the (optional) library branch, whose
                     // early return could otherwise skip it.
                     if config_changed {
