@@ -217,7 +217,7 @@ moves after the merge so a buffer with only locals still completes.
 - Create: `tests/fixtures/simple_project/src/locals.clj`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Add the fixture**
+- [x] **Step 1: Add the fixture**
   Create `tests/fixtures/simple_project/src/locals.clj` with namespace
   `simple.locals`, self-contained (no cross-file refs). Include a `let` where an
   early binding is used in a later binding and in the body, e.g.:
@@ -230,7 +230,7 @@ moves after the merge so a buffer with only locals still completes.
       (+ base scaled)))
   ```
 
-- [ ] **Step 2: Write the failing e2e test**
+- [x] **Step 2: Write the failing e2e test**
   Add `test_e2e_goto_definition_local_in_let`: `setup_project`, `initialize`,
   `did_open` `src/locals.clj`. Goto-def on the `base` usage inside the later
   binding `(* base 2)` (use a position on that `base`, distinct from the binding
@@ -239,21 +239,21 @@ moves after the merge so a buffer with only locals still completes.
   `[base   (inc n)`). Add a second assertion: goto-def on `scaled` in the body
   `(+ base scaled)` lands on the `scaled` binding site.
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
   Run: `cargo test --test test_e2e goto_definition_local`
   Expected: FAIL (no location, or wrong range).
 
-- [ ] **Step 4: Implement `local_definition` and wire it in**
+- [x] **Step 4: Implement `local_definition` and wire it in**
   Add `local_definition(documents, &uri, pos) -> Option<Location>` per the
   Design section (keyword/qualified guards, innermost match, same-`uri`
   Location). Call it at the top of `handle`, right after `current_ns` is
   computed and before `resolve_fqn_at`; return its `Scalar` location when `Some`.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
   Run: `cargo test --test test_e2e goto_definition_local`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -am "feat: go-to-definition for let/fn-bound locals"`
 
 ## Task 3: Completion for locals

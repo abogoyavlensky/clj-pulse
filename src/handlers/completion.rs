@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use super::builtins;
 use crate::document::DocumentStore;
-use crate::index::{CoreSymbol, DefKind, Index};
+use crate::index::{extractor, CoreSymbol, DefKind, Index};
 
 pub fn handle(
     index: &Index,
@@ -22,13 +24,50 @@ pub fn handle(
         .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
-    let items = complete_symbols(index, &prefix, &current_ns);
+    let mut items = complete_symbols(index, &prefix, &current_ns);
+
+    // Locals (let/fn/loop/… bound names) in scope at the cursor. They shadow
+    // globals, so offer them ahead of the index symbols. Qualified prefixes
+    // (`alias/…`) can't name a local, so skip the walk there.
+    if !prefix.contains('/') {
+        let mut merged = local_completions(documents, &uri, pos, &prefix);
+        merged.extend(items);
+        items = merged;
+    }
 
     if items.is_empty() {
         return Ok(None);
     }
 
     Ok(Some(CompletionResponse::Array(items)))
+}
+
+/// In-scope local bindings at `pos` whose name matches `prefix`, innermost-first
+/// and de-duplicated by name (an inner binding shadows an outer one). A
+/// `sort_text` floats them above vars/core so the most local names rank first.
+fn local_completions(
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let Some(text) = documents.text(uri) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for binding in extractor::locals_in_scope_at(&text, pos).into_iter().rev() {
+        if binding.name.starts_with(prefix) && seen.insert(binding.name.clone()) {
+            out.push(CompletionItem {
+                label: binding.name.clone(),
+                detail: Some("local".to_string()),
+                kind: Some(CompletionItemKind::VARIABLE),
+                sort_text: Some(format!("0-{}", binding.name)),
+                ..Default::default()
+            });
+        }
+    }
+    out
 }
 
 pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<CompletionItem> {

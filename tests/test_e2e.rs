@@ -1226,6 +1226,32 @@ fn test_e2e_goto_definition_local_in_let() {
 }
 
 #[test]
+fn test_e2e_completion_local_in_let() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+    let text = std::fs::read_to_string(&locals).unwrap();
+
+    // Type a partial local reference `ba` inside the let body, where `base`
+    // and `scaled` are in scope.
+    let (bl, bc) = start_of(&text, "(+ base");
+    client.did_change_insert(&locals, bl, bc, "ba");
+    let result = client.completion(&locals, bl, bc + 2);
+
+    let items = result.as_array().expect("expected CompletionItem array");
+    let base = items
+        .iter()
+        .find(|i| i["label"] == json!("base"))
+        .unwrap_or_else(|| panic!("expected `base` local in completions: {:?}", items));
+    assert_eq!(base["detail"], json!("local"), "base item: {}", base);
+}
+
+#[test]
 fn test_e2e_definition_from_file_outside_source_paths() {
     // deps.edn has :paths ["src"], so dev/scratch.clj is NOT indexed at
     // startup — but navigation from an opened file must still work.
