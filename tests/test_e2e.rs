@@ -521,6 +521,17 @@ fn position_of(path: &Path, needle: &str) -> (u32, u32) {
     panic!("{:?} not found in {}", needle, path.display());
 }
 
+/// The (line, character) of the *start* of the first occurrence of `needle`
+/// (ASCII), for asserting a binding-site range exactly.
+fn start_of(text: &str, needle: &str) -> (u32, u32) {
+    for (i, line) in text.lines().enumerate() {
+        if let Some(col) = line.find(needle) {
+            return (i as u32, col as u32);
+        }
+    }
+    panic!("{:?} not found in text", needle);
+}
+
 /// Like [`position_of`] but over an in-memory string — JAR content is served
 /// from the archive, not from a file on disk.
 fn position_in_text(text: &str, needle: &str) -> (u32, u32) {
@@ -1176,6 +1187,104 @@ fn test_e2e_cross_file_definition() {
     );
     let (def_line, _) = position_of(&core, "defn add");
     assert_eq!(result["range"]["start"]["line"], json!(def_line));
+}
+
+#[test]
+fn test_e2e_goto_definition_local_in_let() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+    let text = std::fs::read_to_string(&locals).unwrap();
+
+    // Binding sites are the first occurrence of each name.
+    let base_def = start_of(&text, "base");
+    let scaled_def = start_of(&text, "scaled");
+
+    // The reported bug: goto-def on `base` used in the *later* binding
+    // `(* base 2)` must land on the `base` binding site in the same file.
+    let (line, ch) = position_of(&locals, "base 2");
+    let r = client.goto_definition(&locals, line, ch);
+    assert!(!r.is_null(), "no definition for local `base`: {}", r);
+    assert!(
+        r["uri"].as_str().unwrap().ends_with("/src/locals.clj"),
+        "expected same file, got {}",
+        r
+    );
+    assert_eq!(r["range"]["start"]["line"], json!(base_def.0));
+    assert_eq!(r["range"]["start"]["character"], json!(base_def.1));
+
+    // And goto-def on `scaled` used in the body lands on its binding site.
+    let (line, ch) = position_of(&locals, "base scaled");
+    let r = client.goto_definition(&locals, line, ch);
+    assert_eq!(r["range"]["start"]["line"], json!(scaled_def.0));
+    assert_eq!(r["range"]["start"]["character"], json!(scaled_def.1));
+}
+
+#[test]
+fn test_e2e_completion_local_in_let() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+    let text = std::fs::read_to_string(&locals).unwrap();
+
+    // Type a partial local reference `ba` inside the let body, where `base`
+    // and `scaled` are in scope.
+    let (bl, bc) = start_of(&text, "(+ base");
+    client.did_change_insert(&locals, bl, bc, "ba");
+    let result = client.completion(&locals, bl, bc + 2);
+
+    let items = result.as_array().expect("expected CompletionItem array");
+    let base = items
+        .iter()
+        .find(|i| i["label"] == json!("base"))
+        .unwrap_or_else(|| panic!("expected `base` local in completions: {:?}", items));
+    assert_eq!(base["detail"], json!("local"), "base item: {}", base);
+}
+
+#[test]
+fn test_e2e_references_local_in_let() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+
+    // `base` is bound once and used twice (in the `scaled` binding and the
+    // body) → declaration + 2 usages = 3 locations, all in this file.
+    let (line, ch) = position_of(&locals, "base"); // first occurrence: the binding
+    let result = client.references(&locals, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null for local `base`: {}", result));
+    assert_eq!(locs.len(), 3, "decl + 2 usages: {:?}", locs);
+    assert!(
+        locs.iter()
+            .all(|l| l["uri"].as_str().unwrap().ends_with("/src/locals.clj")),
+        "all references in locals.clj: {:?}",
+        locs
+    );
+
+    // Without the declaration, only the two usages are returned.
+    let result = client.references(&locals, line, ch, false);
+    assert_eq!(
+        result.as_array().unwrap().len(),
+        2,
+        "two usages: {}",
+        result
+    );
 }
 
 #[test]
@@ -2493,8 +2602,9 @@ fn test_e2e_references_work_without_indexed_definition() {
 
 #[test]
 fn test_e2e_rename_rejects_local_shadowing_global() {
-    // `(defn f2 [add] add)` — the param shadows simple.core/add; rename and
-    // references on it must NOT touch the global var.
+    // `(defn f2 [add] add)` — the param shadows simple.core/add. Rename is still
+    // rejected (local rename unsupported), and references resolve to the local's
+    // own binding + usage, never the global var (its defn or cross-file uses).
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
 
@@ -2524,11 +2634,21 @@ fn test_e2e_rename_rejects_local_shadowing_global() {
         error
     );
 
+    // References resolve to the local (param binding + body usage, both on the
+    // inserted `f2` line) and must NOT reach the global `simple.core/add` — not
+    // its defn earlier in core.clj, not its usage in utils.clj.
     let refs = client.references(&core, last_line, 11, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("expected local references, got: {}", refs));
+    assert_eq!(locs.len(), 2, "param binding + body usage only: {:?}", locs);
     assert!(
-        refs.is_null(),
-        "local must have no global references: {:?}",
-        refs
+        locs.iter().all(|l| {
+            l["uri"].as_str().unwrap().ends_with("/src/core.clj")
+                && l["range"]["start"]["line"] == json!(last_line)
+        }),
+        "local refs stay on the shadowing form, never the global: {:?}",
+        locs
     );
 }
 

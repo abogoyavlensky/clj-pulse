@@ -15,6 +15,15 @@ pub fn references(
     let uri = params.text_document_position.text_document.uri;
     let pos = params.text_document_position.position;
 
+    // Local bindings (let/fn/loop/…) shadow vars and are never recorded as
+    // occurrences, so resolve their usages structurally, before the fqn path.
+    // When the cursor is on a local, this is authoritative — don't fall through.
+    if let Some(locations) =
+        local_references(documents, &uri, pos, params.context.include_declaration)
+    {
+        return Ok((!locations.is_empty()).then_some(locations));
+    }
+
     let Some(fqn) = resolve_fqn_at(index, documents, &uri, pos) else {
         return Ok(None);
     };
@@ -50,6 +59,43 @@ pub fn references(
     } else {
         Ok(Some(locations))
     }
+}
+
+/// Find-references for a local binding: the declaration (when requested) plus
+/// every in-scope usage, all in the same document. Returns `None` when the
+/// cursor is not on a local (caller falls back to fqn-based references) and
+/// `Some` — possibly empty — when it is, so a local never leaks into the fqn
+/// path. Mirrors `local_definition`'s keyword/qualified guards.
+fn local_references(
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+    include_declaration: bool,
+) -> Option<Vec<Location>> {
+    if documents.is_keyword_at(uri, pos) {
+        return None;
+    }
+    let word = documents.word_at(uri, pos)?;
+    if word.contains('/') {
+        return None;
+    }
+    let text = documents.text(uri)?;
+    let refs = extractor::local_references_at(&text, pos, &word)?;
+
+    let mut locations = Vec::new();
+    if include_declaration {
+        locations.push(Location {
+            uri: uri.clone(),
+            range: refs.declaration,
+        });
+    }
+    for range in refs.usages {
+        locations.push(Location {
+            uri: uri.clone(),
+            range,
+        });
+    }
+    Some(locations)
 }
 
 pub fn rename(

@@ -1552,6 +1552,495 @@ fn str_to_defkind(s: &str) -> Option<DefKind> {
     DefKind::from_def_symbol(s)
 }
 
+// --- local binding resolution (goto-def / completion) ----------------------
+
+/// A local binding (`let`/`fn`/`defn` params, `loop`, `for`/`doseq`,
+/// destructuring, `letfn`, …) with the source range of its binding-site symbol.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalBinding {
+    pub name: String,
+    pub name_range: Range,
+}
+
+/// The local bindings visible at `pos`, in outermost→innermost order so the
+/// last match shadows earlier ones. Powers go-to-definition and completion for
+/// locally-bound names (which are never recorded as occurrences). A cursor on a
+/// binding site itself yields that binding (a harmless self-jump).
+///
+/// Implemented as a position-directed spine walk: at each binding form on the
+/// path to `pos` it collects the names lexically visible there, then descends
+/// only into the child subtree containing `pos`. It mirrors the scope rules of
+/// the occurrence walker (`walk_let_form`/`walk_fn_form`/`walk_letfn_form`/
+/// `collect_binding_names`); `collect_binding_targets` additionally records each
+/// name's range. Exotic type-spec method params (`reify`/`extend-*`) are left to
+/// generic descent — enclosing scopes stay correct, those method params don't
+/// bind (outside the `let`/`fn` cases this targets).
+///
+/// Limitation: only literal binding heads are recognized. A `:lint-as` macro
+/// mapped to `defn`/`defmacro` is not treated as a binding form here (that would
+/// need the merged `ExtractConfig` + ns aliases, which this pure `source`-only
+/// primitive intentionally omits), so its params are not surfaced as locals —
+/// the same fall-through as before local support existed, not a regression.
+pub fn locals_in_scope_at(source: &str, pos: Position) -> Vec<LocalBinding> {
+    let Some(tree) = parse_tree(source) else {
+        return vec![];
+    };
+    locals_at_node(tree.root_node(), source, pos)
+}
+
+/// Parses `source` with the Clojure grammar, or `None` on setup/parse failure.
+fn parse_tree(source: &str) -> Option<tree_sitter::Tree> {
+    let mut parser = Parser::new();
+    parser.set_language(language()).ok()?;
+    parser.parse(source, None)
+}
+
+/// [`locals_in_scope_at`] against an already-parsed `root`, so callers that
+/// resolve many positions in one buffer (references) parse only once.
+fn locals_at_node(root: Node, source: &str, pos: Position) -> Vec<LocalBinding> {
+    let mut out = Vec::new();
+    descend_into(root, source, pos, &mut out);
+    out
+}
+
+/// Whether an LSP `range` contains `pos` (inclusive on both ends). Mirrors the
+/// rule in `handlers::references::range_contains`, kept local to the extractor.
+fn lsp_range_contains(range: Range, pos: Position) -> bool {
+    let after_start = range.start.line < pos.line
+        || (range.start.line == pos.line && range.start.character <= pos.character);
+    let before_end = pos.line < range.end.line
+        || (pos.line == range.end.line && pos.character <= range.end.character);
+    after_start && before_end
+}
+
+/// Descends into whichever named child of `node` contains `pos`, continuing the
+/// scope walk there. The generic step for any form that introduces no bindings.
+fn descend_into(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    for child in named_children(node) {
+        if lsp_range_contains(node_to_lsp_range(child, source), pos) {
+            walk_scope(child, source, pos, out);
+            return;
+        }
+    }
+}
+
+/// Dispatches on a node's form: binding forms collect their in-scope names and
+/// steer descent; everything else descends generically.
+fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    if node.kind() == "list_lit" {
+        let children = named_children(node);
+        if let Some(head) = children.first() {
+            // A head is a binding form when it is unqualified or explicitly
+            // qualified to `clojure.core` (`(clojure.core/let …)`), matching the
+            // occurrence walker's `head_is_core_form`. A qualified `s/def` etc.
+            // falls through to generic descent. (An `:as` alias of clojure.core
+            // is not resolved here — the primitive has no ns metadata — so
+            // `cc/let` is not treated as a binding form; that form is rare.)
+            let core_form = head.kind() == "sym_lit"
+                && match head.child_by_field_name("namespace") {
+                    None => true,
+                    Some(ns) => node_text(ns, source) == "clojure.core",
+                };
+            if core_form {
+                let head_text = sym_text(*head, source);
+                if let Some(kind) = str_to_defkind(head_text) {
+                    walk_scope_def(kind, &children, source, pos, out);
+                    return;
+                }
+                if is_let_like(head_text) {
+                    walk_scope_let(&children, source, pos, out);
+                    return;
+                }
+                if head_text == "fn" {
+                    walk_scope_fn(&children, source, pos, out);
+                    return;
+                }
+                if head_text == "letfn" {
+                    walk_scope_letfn(&children, source, pos, out);
+                    return;
+                }
+            }
+        }
+    }
+    descend_into(node, source, pos, out);
+}
+
+/// `(let [pat expr …] body…)` and every `is_let_like` form. Bindings accumulate
+/// left-to-right, then the body sees them all.
+fn walk_scope_let(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    if let Some(bindings) = children.get(1).filter(|n| n.kind() == "vec_lit") {
+        if walk_scope_binding_vec(*bindings, source, pos, out) {
+            return; // cursor was inside the binding vector; don't scan the body
+        }
+    }
+    for body in children.iter().skip(2) {
+        if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
+            walk_scope(*body, source, pos, out);
+            return;
+        }
+    }
+}
+
+/// Processes a `[pat expr …]` binding vector, accumulating each LHS pattern's
+/// names in order. A pair's LHS is visible to later pairs' RHS and the body, but
+/// not its own RHS. Comprehension `:let [..]` recurses; `:when`/`:while` are
+/// plain expressions. Returns true when `pos` fell inside the vector (an RHS,
+/// nested `:let`, or an LHS), so the caller stops before the body.
+fn walk_scope_binding_vec(
+    bindings: Node,
+    source: &str,
+    pos: Position,
+    out: &mut Vec<LocalBinding>,
+) -> bool {
+    let items = named_children(bindings);
+    let mut i = 0;
+    while i < items.len() {
+        let lhs = items[i];
+        let rhs = items.get(i + 1).copied();
+        if lhs.kind() == "kwd_lit" {
+            // `for`/`doseq` modifier: `:let [..]` is a nested binding vector;
+            // any other (`:when`/`:while`) has a plain expression RHS.
+            if node_text(lhs, source) == ":let" {
+                if let Some(v) = rhs.filter(|n| n.kind() == "vec_lit") {
+                    if walk_scope_binding_vec(v, source, pos, out) {
+                        return true;
+                    }
+                }
+            } else if let Some(r) = rhs {
+                if lsp_range_contains(node_to_lsp_range(r, source), pos) {
+                    walk_scope(r, source, pos, out);
+                    return true;
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(r) = rhs {
+            if lsp_range_contains(node_to_lsp_range(r, source), pos) {
+                walk_scope(r, source, pos, out); // cursor in this RHS: LHS not yet bound
+                return true;
+            }
+        }
+        collect_binding_targets(lhs, source, out);
+        if lsp_range_contains(node_to_lsp_range(lhs, source), pos) {
+            return true; // cursor on this LHS; later bindings aren't in scope here
+        }
+        i += 2;
+    }
+    lsp_range_contains(node_to_lsp_range(bindings, source), pos)
+}
+
+/// `(fn name? [params] body…)` or multi-arity `(fn name? ([params] body…) …)`.
+fn walk_scope_fn(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    let mut rest_start = 1;
+    if let Some(name) = children.get(1).filter(|n| n.kind() == "sym_lit") {
+        collect_binding_targets(*name, source, out); // optional self-reference name
+        rest_start = 2;
+    }
+    walk_scope_fn_tail(&children[rest_start..], source, pos, out);
+}
+
+/// Params + bodies of a fn-like tail: a leading vector binds params; each
+/// `([params] body…)` list is a per-arity scope entered only when it holds `pos`.
+fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    let mut params_bound = false;
+    for child in parts {
+        match child.kind() {
+            "vec_lit" if !params_bound => {
+                params_bound = true;
+                let in_vec = lsp_range_contains(node_to_lsp_range(*child, source), pos);
+                // An `:or` default is an expression evaluated in the *enclosing*
+                // scope, so this vector's params are not in scope inside it —
+                // bind nothing and stop. Anywhere else (a body, or a param
+                // binding site) the params do bind.
+                if in_vec && pos_in_or_default(*child, source, pos) {
+                    return;
+                }
+                collect_binding_targets(*child, source, out);
+                if in_vec {
+                    return; // cursor on a param binding site: params self-resolve
+                }
+            }
+            "list_lit" if arity_body(*child) => {
+                if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
+                    let inner = named_children(*child);
+                    let params = inner.first();
+                    // Same rule as the single-arity case: bind this arity's
+                    // params unless the cursor is inside one of their `:or`
+                    // defaults (an enclosing-scope expression).
+                    let in_or_default = params
+                        .map(|p| {
+                            lsp_range_contains(node_to_lsp_range(*p, source), pos)
+                                && pos_in_or_default(*p, source, pos)
+                        })
+                        .unwrap_or(false);
+                    if !in_or_default {
+                        if let Some(params) = params {
+                            collect_binding_targets(*params, source, out);
+                        }
+                    }
+                    for body in inner.iter().skip(1) {
+                        if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
+                            walk_scope(*body, source, pos, out);
+                            return;
+                        }
+                    }
+                    return;
+                }
+            }
+            _ => {
+                if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
+                    walk_scope(*child, source, pos, out);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// `def`-family forms. Function-like ones (`defn`/`defn-`/`defmacro`/
+/// `defmethod`) bind params; `defrecord`/`deftype` bind fields; the rest
+/// (`def`/`defonce`/`defmulti`/`defprotocol`) introduce no locals.
+fn walk_scope_def(
+    kind: DefKind,
+    children: &[Node],
+    source: &str,
+    pos: Position,
+    out: &mut Vec<LocalBinding>,
+) {
+    match kind {
+        DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro => {
+            // Skip the name and an optional docstring / attr-map before params.
+            let mut rest = 2;
+            if children.get(rest).map(|n| n.kind()) == Some("str_lit") {
+                rest += 1;
+            }
+            if children.get(rest).map(|n| n.kind()) == Some("map_lit") {
+                rest += 1;
+            }
+            if rest <= children.len() {
+                walk_scope_fn_tail(&children[rest.min(children.len())..], source, pos, out);
+            }
+        }
+        DefKind::Defmethod => {
+            // (defmethod name dispatch-val [params] body…): dispatch may itself
+            // be a vector, so params start at index 3, not "first vec_lit".
+            if let Some(dispatch) = children.get(2) {
+                if lsp_range_contains(node_to_lsp_range(*dispatch, source), pos) {
+                    walk_scope(*dispatch, source, pos, out);
+                    return;
+                }
+            }
+            if children.len() > 3 {
+                walk_scope_fn_tail(&children[3..], source, pos, out);
+            }
+        }
+        DefKind::Defrecord | DefKind::Deftype => {
+            if let Some(fields) = children.get(2).filter(|n| n.kind() == "vec_lit") {
+                collect_binding_targets(*fields, source, out);
+            }
+            for child in children.iter().skip(3) {
+                if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
+                    walk_scope(*child, source, pos, out);
+                    return;
+                }
+            }
+        }
+        _ => {
+            for child in children.iter().skip(2) {
+                if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
+                    walk_scope(*child, source, pos, out);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// `(letfn [(name [params] body…) …] body…)`: the fn names are mutually
+/// recursive locals visible in every fn body and the letfn body.
+fn walk_scope_letfn(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    let specs: Vec<Node> = children
+        .get(1)
+        .filter(|n| n.kind() == "vec_lit")
+        .map(|n| named_children(*n))
+        .unwrap_or_default();
+
+    for spec in &specs {
+        if spec.kind() == "list_lit" {
+            if let Some(name) = named_children(*spec)
+                .first()
+                .filter(|n| n.kind() == "sym_lit")
+            {
+                collect_binding_targets(*name, source, out);
+            }
+        }
+    }
+    // Cursor inside one of the fn specs → bind that fn's params and descend.
+    for spec in &specs {
+        if spec.kind() == "list_lit" && lsp_range_contains(node_to_lsp_range(*spec, source), pos) {
+            let inner = named_children(*spec);
+            walk_scope_fn_tail(&inner[1.min(inner.len())..], source, pos, out);
+            return;
+        }
+    }
+    for body in children.iter().skip(2) {
+        if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
+            walk_scope(*body, source, pos, out);
+            return;
+        }
+    }
+}
+
+/// Collects every symbol bound by a binding pattern (plain name, vector and map
+/// destructuring), each with its name range. The binding-site twin of
+/// [`collect_binding_names`] (which collects only names, for occurrence
+/// suppression) — keep the destructuring rules here in sync with it. `&` and `_`
+/// are not bindings; `:or` defaults are expressions but their keys still bind.
+fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBinding>) {
+    match pattern.kind() {
+        "sym_lit" => {
+            let nn = sym_name_node(pattern);
+            let name = node_text(nn, source);
+            if name != "&" && name != "_" {
+                out.push(LocalBinding {
+                    name: name.to_string(),
+                    name_range: node_to_lsp_range(nn, source),
+                });
+            }
+        }
+        "map_lit" => {
+            let items = named_children(pattern);
+            for pair in items.chunks(2) {
+                let [k, v] = pair else { continue };
+                if k.kind() == "kwd_lit" {
+                    // `:or {name default}` supplies defaults for names already
+                    // bound elsewhere in the destructuring (via :keys/:as/…), so
+                    // it introduces no new binding site. Skip it: emitting `name`
+                    // here would duplicate the real binding with the wrong (`:or`
+                    // key) range and, since the last match shadows, hijack
+                    // goto-definition. (This is where the binding-site collection
+                    // deliberately diverges from `collect_binding_names`, which
+                    // adds `:or` keys to a name-set where a duplicate is inert.)
+                    if node_text(*k, source) != ":or" {
+                        // :keys/:strs/:syms vectors, :as name, …
+                        collect_binding_targets(*v, source, out);
+                    }
+                } else {
+                    // {pattern :key} — the pattern binds; the key does not.
+                    collect_binding_targets(*k, source, out);
+                }
+            }
+        }
+        _ => {
+            for child in named_children(pattern) {
+                collect_binding_targets(child, source, out);
+            }
+        }
+    }
+}
+
+/// Whether `pos` sits inside an `:or {name default}` *default expression* within
+/// a binding pattern. Defaults are evaluated in the enclosing scope, so a cursor
+/// there must not see the pattern's own destructured names.
+fn pos_in_or_default(node: Node, source: &str, pos: Position) -> bool {
+    if node.kind() == "map_lit" {
+        let items = named_children(node);
+        for pair in items.chunks(2) {
+            let [k, v] = pair else { continue };
+            if k.kind() == "kwd_lit" && node_text(*k, source) == ":or" && v.kind() == "map_lit" {
+                for default in named_children(*v).chunks(2) {
+                    if let [_name, expr] = default {
+                        if lsp_range_contains(node_to_lsp_range(*expr, source), pos) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    named_children(node)
+        .iter()
+        .any(|child| pos_in_or_default(*child, source, pos))
+}
+
+/// The binding-site range of a local, plus the ranges of every usage that
+/// resolves to it — all within the one source file (locals never cross files).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalRefs {
+    pub declaration: Range,
+    pub usages: Vec<Range>,
+}
+
+/// Resolves the local named `name` under `pos` to its declaration and all
+/// in-scope usages, for find-references. `None` when `pos` is not on such a
+/// local (the caller then falls back to fqn-based references).
+///
+/// Each candidate occurrence of `name` is re-resolved with [`locals_at_node`]:
+/// only those whose innermost binding is *this* declaration are kept, so a
+/// nested rebinding of the same name and everything in its scope are excluded,
+/// and a same-named global outside the local's scope is not matched.
+pub fn local_references_at(source: &str, pos: Position, name: &str) -> Option<LocalRefs> {
+    let tree = parse_tree(source)?;
+    let root = tree.root_node();
+
+    let mut occurrences = Vec::new();
+    collect_name_occurrences(root, source, name, &mut occurrences);
+
+    // The cursor must sit on a real (non-quoted) occurrence of `name`. Quoted
+    // data (`'x`) is skipped by `collect_name_occurrences`, so a cursor there
+    // references no local even though the name is lexically in scope.
+    if !occurrences.iter().any(|r| lsp_range_contains(*r, pos)) {
+        return None;
+    }
+
+    let declaration = locals_at_node(root, source, pos)
+        .into_iter()
+        .rev()
+        .find(|b| b.name == name)?
+        .name_range;
+
+    let mut usages = Vec::new();
+    for occ in occurrences {
+        if occ == declaration {
+            continue; // the binding site itself, reported as the declaration
+        }
+        let resolved = locals_at_node(root, source, occ.start)
+            .into_iter()
+            .rev()
+            .find(|b| b.name == name)
+            .map(|b| b.name_range);
+        if resolved == Some(declaration) {
+            usages.push(occ);
+        }
+    }
+    Some(LocalRefs {
+        declaration,
+        usages,
+    })
+}
+
+/// Ranges of every unqualified `sym_lit` named `name`. Skips `'name` quoted
+/// data, which is not a usage. (A `(quote name)` list is a rare edge that isn't
+/// specially excluded; at worst it lists one extra location.)
+fn collect_name_occurrences(node: Node, source: &str, name: &str, out: &mut Vec<Range>) {
+    match node.kind() {
+        "quoting_lit" => {}
+        "sym_lit" => {
+            if node.child_by_field_name("namespace").is_none()
+                && node_text(sym_name_node(node), source) == name
+            {
+                out.push(node_to_lsp_range(sym_name_node(node), source));
+            }
+        }
+        _ => {
+            for child in named_children(node) {
+                collect_name_occurrences(child, source, name, out);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,5 +2150,235 @@ mod tests {
             symbols.iter().all(|s| s.name != "foo"),
             "with no :lint-as, defthing must not define foo"
         );
+    }
+
+    // --- locals_in_scope_at -------------------------------------------------
+
+    /// Position at char offset `within` into the `nth` (0-based) occurrence of
+    /// `needle` in `source`. Columns are UTF-16 (ASCII in these tests).
+    fn pos_of(source: &str, needle: &str, nth: usize, within: usize) -> Position {
+        let mut search = 0;
+        let mut seen = 0;
+        let byte = loop {
+            let rel = source[search..].find(needle).expect("needle not found");
+            let at = search + rel;
+            if seen == nth {
+                break at + within;
+            }
+            seen += 1;
+            search = at + needle.len();
+        };
+        let mut line = 0u32;
+        let mut col = 0u32;
+        for (i, c) in source.char_indices() {
+            if i >= byte {
+                break;
+            }
+            if c == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += c.len_utf16() as u32;
+            }
+        }
+        Position::new(line, col)
+    }
+
+    fn local_names(source: &str, pos: Position) -> Vec<String> {
+        locals_in_scope_at(source, pos)
+            .into_iter()
+            .map(|b| b.name)
+            .collect()
+    }
+
+    #[test]
+    fn locals_let_sequential_visibility() {
+        // The reported bug: an earlier `let` binding must be visible in a later
+        // binding's RHS and in the body, but not in its own RHS.
+        let src = "(ns x)\n(defn f []\n  (let [a 1\n        b (+ a 1)]\n    (+ a b)))";
+
+        // In the body `(+ a b)`, both `a` and `b` are in scope.
+        let body = local_names(src, pos_of(src, "(+ a b)", 0, 3));
+        assert!(body.contains(&"a".to_string()), "body sees a: {:?}", body);
+        assert!(body.contains(&"b".to_string()), "body sees b: {:?}", body);
+
+        // In `b`'s RHS `(+ a 1)`, `a` is visible but `b` is not yet.
+        let rhs = local_names(src, pos_of(src, "(+ a 1)", 0, 3));
+        assert!(rhs.contains(&"a".to_string()), "rhs sees a: {:?}", rhs);
+        assert!(
+            !rhs.contains(&"b".to_string()),
+            "rhs must not see b: {:?}",
+            rhs
+        );
+    }
+
+    #[test]
+    fn locals_let_binding_range_points_at_binding_site() {
+        let src = "(ns x)\n(defn f []\n  (let [a 1\n        b (+ a 1)]\n    (+ a b)))";
+        let binding = locals_in_scope_at(src, pos_of(src, "(+ a b)", 0, 3))
+            .into_iter()
+            .find(|b| b.name == "a")
+            .expect("a in scope");
+        assert_eq!(binding.name_range.start, pos_of(src, "[a 1", 0, 1));
+    }
+
+    #[test]
+    fn locals_innermost_shadows() {
+        // A nested `let` re-binding `a` shadows the param; the innermost binding
+        // is last and its range is the inner binding site.
+        let src = "(ns x)\n(defn f [a]\n  (let [a 2]\n    a))";
+        let binds = locals_in_scope_at(src, pos_of(src, "    a))", 0, 4));
+        let last_a = binds
+            .iter()
+            .rev()
+            .find(|b| b.name == "a")
+            .expect("a in scope");
+        assert_eq!(last_a.name_range.start, pos_of(src, "[a 2", 0, 1));
+    }
+
+    #[test]
+    fn locals_defn_params_visible_in_body() {
+        let src = "(ns x)\n(defn g [p q]\n  (+ p q))";
+        let body = local_names(src, pos_of(src, "(+ p q)", 0, 3));
+        assert!(body.contains(&"p".to_string()));
+        assert!(body.contains(&"q".to_string()));
+    }
+
+    #[test]
+    fn locals_destructuring_binds_all_targets() {
+        let src = "(ns x)\n(defn h [{:keys [p] :as m} [q & qs]]\n  (+ p q))";
+        let body = local_names(src, pos_of(src, "(+ p q)", 0, 3));
+        for name in ["p", "m", "q", "qs"] {
+            assert!(
+                body.contains(&name.to_string()),
+                "{} bound: {:?}",
+                name,
+                body
+            );
+        }
+        assert!(!body.contains(&"&".to_string()), "& is not a binding");
+    }
+
+    #[test]
+    fn locals_for_let_modifier() {
+        let src = "(ns x)\n(defn i [xs]\n  (for [n xs :let [m (inc n)]]\n    (+ n m)))";
+        let body = local_names(src, pos_of(src, "(+ n m)", 0, 3));
+        assert!(body.contains(&"n".to_string()), "n bound: {:?}", body);
+        assert!(body.contains(&"m".to_string()), "m bound: {:?}", body);
+    }
+
+    #[test]
+    fn locals_letfn_names_visible() {
+        let src =
+            "(ns x)\n(defn j []\n  (letfn [(foo [] (bar))\n          (bar [] 1)]\n    (foo)))";
+        let body = local_names(src, pos_of(src, "(foo)))", 0, 1));
+        assert!(body.contains(&"foo".to_string()), "foo bound: {:?}", body);
+        assert!(body.contains(&"bar".to_string()), "bar bound: {:?}", body);
+    }
+
+    #[test]
+    fn locals_or_default_does_not_duplicate_binding() {
+        // `{:keys [p] :or {p 0}}`: `p` binds exactly once, at the `:keys` site —
+        // the `:or` default must not add a second binding (which, shadowing,
+        // would hijack goto-definition to the default's position).
+        let src = "(ns x)\n(defn f [{:keys [p] :or {p 0}}]\n  p)";
+        let binds = locals_in_scope_at(src, pos_of(src, "\n  p)", 0, 3));
+        let ps: Vec<_> = binds.iter().filter(|b| b.name == "p").collect();
+        assert_eq!(ps.len(), 1, "p bound once: {:?}", binds);
+        assert_eq!(ps[0].name_range.start, pos_of(src, "[p]", 0, 1));
+    }
+
+    #[test]
+    fn locals_or_default_value_evaluated_in_outer_scope() {
+        // `{:keys [a] :or {a a}}`: the default value `a` is evaluated in the
+        // enclosing scope, so the sibling destructured `a` is NOT in scope there
+        // (matching how the occurrence walker treats defaults as outer usages).
+        let src = "(ns x)\n(defn f [{:keys [a] :or {a a}}]\n  a)";
+        // Cursor on the default value (the second `a` in `{a a}`).
+        let at_default = local_names(src, pos_of(src, "{a a}", 0, 3));
+        assert!(
+            !at_default.contains(&"a".to_string()),
+            "default value uses outer scope: {:?}",
+            at_default
+        );
+        // But in the body, the destructured `a` IS in scope.
+        let at_body = local_names(src, pos_of(src, "\n  a)", 0, 3));
+        assert!(
+            at_body.contains(&"a".to_string()),
+            "body sees a: {:?}",
+            at_body
+        );
+    }
+
+    #[test]
+    fn locals_qualified_clojure_core_let() {
+        // A head explicitly qualified to clojure.core is still a binding form.
+        let src = "(ns x)\n(defn f []\n  (clojure.core/let [a 1]\n    a))";
+        let body = local_names(src, pos_of(src, "    a))", 0, 4));
+        assert!(
+            body.contains(&"a".to_string()),
+            "qualified-core let: {:?}",
+            body
+        );
+    }
+
+    // --- local_references_at ------------------------------------------------
+
+    #[test]
+    fn local_refs_let_declaration_and_usages() {
+        let src = "(ns x)\n(defn f []\n  (let [a 1]\n    (+ a a)))";
+        let refs = local_references_at(src, pos_of(src, "[a 1", 0, 1), "a").expect("local");
+        assert_eq!(refs.declaration.start, pos_of(src, "[a 1", 0, 1));
+        assert_eq!(refs.usages.len(), 2, "two body usages: {:?}", refs.usages);
+        // Resolving from a usage gives the same declaration.
+        let from_use = local_references_at(src, pos_of(src, "(+ a a)", 0, 3), "a").expect("local");
+        assert_eq!(from_use.declaration, refs.declaration);
+        assert_eq!(from_use.usages.len(), 2);
+    }
+
+    #[test]
+    fn local_refs_exclude_shadowed_rebinding() {
+        // Outer `a` has one usage (the trailing body `a`); the inner `let`'s
+        // rebinding and its body must not be counted.
+        let src = "(ns x)\n(defn f []\n  (let [a 1]\n    (let [a 2]\n      a)\n    a))";
+        let refs = local_references_at(src, pos_of(src, "[a 1", 0, 1), "a").expect("local");
+        assert_eq!(
+            refs.usages.len(),
+            1,
+            "only the outer body use: {:?}",
+            refs.usages
+        );
+        assert_eq!(refs.usages[0].start.line, 5);
+    }
+
+    #[test]
+    fn local_refs_from_fn_param() {
+        let src = "(ns x)\n(defn f [a]\n  (+ a a))";
+        let refs = local_references_at(src, pos_of(src, "[a]", 0, 1), "a").expect("local param");
+        assert_eq!(refs.declaration.start, pos_of(src, "[a]", 0, 1));
+        assert_eq!(refs.usages.len(), 2);
+    }
+
+    #[test]
+    fn local_refs_sequential_binding_rhs_counts() {
+        // `a` is used in a later binding's RHS (`b a`) and in the body.
+        let src = "(ns x)\n(defn f []\n  (let [a 1\n        b a]\n    (+ a b)))";
+        let refs = local_references_at(src, pos_of(src, "[a 1", 0, 1), "a").expect("local");
+        assert_eq!(refs.usages.len(), 2, "rhs + body: {:?}", refs.usages);
+    }
+
+    #[test]
+    fn local_refs_none_for_non_local() {
+        // `undefined` is not bound anywhere → not a local.
+        let src = "(ns x)\n(defn f []\n  (+ undefined 1))";
+        assert!(local_references_at(src, pos_of(src, "undefined", 0, 2), "undefined").is_none());
+    }
+
+    #[test]
+    fn local_refs_none_on_quoted_symbol() {
+        // A cursor on quoted data `'x` is not a real usage of the local `x`,
+        // even though `x` is lexically in scope.
+        let src = "(ns y)\n(defn f []\n  (let [x 1]\n    'x))";
+        assert!(local_references_at(src, pos_of(src, "'x", 0, 1), "x").is_none());
     }
 }

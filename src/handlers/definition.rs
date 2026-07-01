@@ -3,7 +3,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::Index;
+use crate::index::{extractor, Index};
 use crate::uri;
 
 use super::{resolve_symbol, ResolvedSymbol};
@@ -30,6 +30,13 @@ pub fn handle(
         }
     };
     let current_ns = index.file_ns(&path).unwrap_or_default();
+
+    // Local bindings (let/fn/loop/…) shadow vars, so a cursor on a locally-bound
+    // name navigates to its binding site in the same file — checked before the
+    // var/alias/core resolvers below.
+    if let Some(loc) = local_definition(documents, &uri, pos) {
+        return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+    }
 
     // Position-aware resolution first. It is context-aware — a protocol method
     // impl resolves to the protocol's declaration even when the bare name also
@@ -106,6 +113,31 @@ pub fn handle(
             java_definition(index, &word, &current_ns)
         }
     }
+}
+
+/// Resolves a cursor on a locally-bound name (`let`/`fn`/`loop`/`for`/
+/// destructuring/…) to its binding site in the same document. Returns `None`
+/// for keywords, qualified words (never locals), or any name not bound in scope
+/// at `pos`, so ordinary var/alias/namespace resolution proceeds unchanged.
+/// The innermost binding wins, so a local correctly shadows an outer one or a
+/// same-named global var.
+fn local_definition(documents: &DocumentStore, uri: &Url, pos: Position) -> Option<Location> {
+    if documents.is_keyword_at(uri, pos) {
+        return None;
+    }
+    let word = documents.word_at(uri, pos)?;
+    if word.contains('/') {
+        return None;
+    }
+    let text = documents.text(uri)?;
+    let binding = extractor::locals_in_scope_at(&text, pos)
+        .into_iter()
+        .rev()
+        .find(|b| b.name == word)?;
+    Some(Location {
+        uri: uri.clone(),
+        range: binding.name_range,
+    })
 }
 
 /// Built-in Java interop fallback: navigate to a JDK class, static member, or
