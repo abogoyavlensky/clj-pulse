@@ -57,6 +57,12 @@ most of what follows.
 - [x] Add-missing-require code action — the most-used clojure-lsp
       refactoring; the namespace index needed to power it already exists.
 - [x] Clean ns.
+- [x] Indent-on-Enter (Tier A, structural) — `textDocument/onTypeFormatting`
+      on `\n` indents the new line per the Clojure Sublimed rule (align to
+      first element; 2-space for symbol-headed lists), computed by a
+      hand-written prefix scanner robust to unbalanced mid-edit code
+      (`handlers/indent.rs`). Tier B — cljfmt `:indents` table +
+      `.cljfmt.edn` — and whole-document/range formatting are follow-ups.
 - [ ] Sort requires.
 - [ ] Completion: auto-require on accept (`additionalTextEdits`), locals
       (params, `let` bindings), keywords, fuzzy matching.
@@ -149,7 +155,9 @@ meantime and keeping the server dependency-free is worth more early on.
 
 ## Out of scope for now
 
-- Formatting — Calva ships and defaults to its own formatter.
+- Formatting beyond indent-on-type — structural indent-on-Enter is done
+  (Phase 3); cljfmt-style whole-document reformatting stays out for now
+  (Calva ships and defaults to its own formatter).
 - The full clojure-lsp refactoring suite (extract function, inline symbol,
   thread/unthread, move-to-let, …) — each is its own project.
 - Call hierarchy, protocol implementations, Calva custom APIs

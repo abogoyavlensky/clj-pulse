@@ -76,7 +76,7 @@ clojure-pulse-vscode/
 - Create: `src/handlers/indent.rs`
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   Test `indent_at(source, pos)` (pos is the cursor after the newline, i.e. start of the new line):
   - `(let [a 1\n` → `Some(col of a)` (align, vector).
   - `(when x\n` and `(foo bar\n` → `Some(2-space)` (symbol-headed list).
@@ -88,18 +88,18 @@ clojure-pulse-vscode/
   - scanner-skip cases: an opener inside a preceding `;` comment (`; (a\n(foo x\n`), inside a closed string (`"(a" x\n` context), a `\(` char literal, and `#_`-discarded forms counting normally for bracket balance — none of these may corrupt the stack.
   - `position_to_byte` UTF-16 cases (a line with `café` / a `→` before the cursor).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib indent`
   Expected: FAIL — module/functions not found.
 
-- [ ] **Step 3: Implement the pure core**
+- [x] **Step 3: Implement the pure core**
   `position_to_byte(source, pos)`: walk to `pos.line`, convert `pos.character` (UTF-16) to a byte offset within the line, clamp to `source.len()`. `indent_at`: slice the prefix `&source[..cursor_byte]` and run the scanner from the Design section: one forward pass, stack of frames `{kind, col_after_opener (UTF-16), first_form_is_symbol}`; skip comments/strings/regexes/char literals; push `(` `[` `{` `#{` `#(`, pop `)` `]` `}` (ignore unmatched closers). At the end: in-string frame → `None`; empty stack → `Some(0)`; else `Some(col_after_opener + offset)` with `offset = 1` iff kind ∈ {`(`, `#(`} and the first inner form is a symbol (first non-whitespace token that is not itself an opener/closer/literal-start, per Sublimed's `is_symbol` check).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib indent`
   Expected: PASS.
 
-- [ ] **Step 5: Format, lint, commit**
+- [x] **Step 5: Format, lint, commit**
   Run: `bb fmt && bb lint`
   `git commit -m "feat: structural indent computation for indent-on-type"`
 
@@ -108,20 +108,20 @@ clojure-pulse-vscode/
 **Files:**
 - Modify: `src/handlers/indent.rs`, `src/handlers/mod.rs`, `src/server.rs`
 
-- [ ] **Step 1: Handler entry point**
+- [x] **Step 1: Handler entry point**
   Implement `on_type_formatting(documents, params) -> Result<Option<Vec<TextEdit>>>`: only act when `params.ch == "\n"`; get live text via `documents.text(&uri)` (None → `Ok(None)`); call `indent_at(&text, params.text_document_position.position)`; `None` → `Ok(None)`. Otherwise build a `TextEdit` replacing the new line's leading whitespace (`[line,0]..[line, first_non_ws_col]`) with `" ".repeat(indent)`; if that equals the current text, return `Ok(None)`.
 
-- [ ] **Step 2: Register module + advertise capability**
+- [x] **Step 2: Register module + advertise capability**
   `pub mod indent;` in `handlers/mod.rs`. In `server.rs` `ServerCapabilities`, set `document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions { first_trigger_character: "\n".into(), more_trigger_character: None })`.
 
-- [ ] **Step 3: Trait method**
+- [x] **Step 3: Trait method**
   Add `async fn on_type_formatting(&self, params) -> Result<Option<Vec<TextEdit>>>` to the `LanguageServer` impl, delegating to `handlers::indent::on_type_formatting(&self.documents, params)` (≤15 lines, matching `document_symbol`).
 
-- [ ] **Step 4: Build + lint**
+- [x] **Step 4: Build + lint**
   Run: `bb build && bb lint`
   Expected: compiles; no clippy warnings.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: serve textDocument/onTypeFormatting for indent-on-Enter"`
 
 ### Task 3: End-to-end test
@@ -129,17 +129,17 @@ clojure-pulse-vscode/
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Helper**
+- [x] **Step 1: Helper**
   Add `fn on_type_formatting(&mut self, path, line, character, ch) -> Value` sending `textDocument/onTypeFormatting`, mirroring existing helpers.
 
-- [ ] **Step 2: Round-trip test**
+- [x] **Step 2: Round-trip test**
   Open a fixture whose post-Enter state is `(let [a 1\n])` (cursor at line 1, col 0), request `onTypeFormatting` with `ch = "\n"`, assert the returned edit sets the new line's indent to align under `a`; assert `initialize` advertises `documentOnTypeFormattingProvider`.
 
-- [ ] **Step 3: Run e2e**
+- [x] **Step 3: Run e2e**
   Run: `bb e2e`
   Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "test: e2e for indent-on-type"`
 
 ### Task 4: Enable it in the VS Code extension
@@ -147,13 +147,13 @@ clojure-pulse-vscode/
 **Files:**
 - Modify: `clojure-pulse-vscode/package.json` (separate repo)
 
-- [ ] **Step 1: Add the default**
+- [x] **Step 1: Add the default**
   `package.json` has **no** `configurationDefaults` section yet — add one under `contributes`: `"configurationDefaults": { "[clojure]": { "editor.formatOnType": true } }`.
 
-- [ ] **Step 2: Verify**
+- [x] **Step 2: Verify**
   Run: `cd clojure-pulse-vscode && npm run compile && npx @vscode/vsce ls | grep package.json` (manifest still valid). Manually: F5, open a `.clj`, press Enter inside `(let [a 1|])`, confirm the new line aligns under `a`.
 
-- [ ] **Step 3: Commit** (in the extension repo)
+- [x] **Step 3: Commit** (in the extension repo)
   `git commit -m "feat: enable formatOnType for Clojure (indent-on-Enter)"`
 
 ### Task 5: Docs + final gate
@@ -161,15 +161,15 @@ clojure-pulse-vscode/
 **Files:**
 - Modify: `docs/ROADMAP.md`, `README.md`
 
-- [ ] **Step 1: Roadmap**
+- [x] **Step 1: Roadmap**
   Record indent-on-type (Tier A, structural) as done; note Tier B (cljfmt `:indents` table + `.cljfmt.edn`) and whole-document/range formatting as follow-ups.
 
-- [ ] **Step 2: README + Parinfer note**
+- [x] **Step 2: README + Parinfer note**
   Document indent-on-Enter, and add: "Using Parinfer in Paren/Smart mode? Set `editor.formatOnType: false` for Clojure — Parinfer manages indentation there. Indent Mode is complementary (Clojure Pulse indents; Parinfer places brackets)."
 
-- [ ] **Step 3: Full gate**
+- [x] **Step 3: Full gate**
   Run: `bb check` and `bb e2e` (and `bb e2e-nvim` if available)
   Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "docs: record indent-on-type (Tier A)"`

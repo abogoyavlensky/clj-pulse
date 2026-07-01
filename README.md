@@ -34,6 +34,14 @@ Language features:
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
   namespace isn't required yet.
 - **Diagnostics** - unresolved-namespace warnings, updated live as you type.
+- **Indent-on-Enter** - pressing Enter indents the new line to the structurally
+  correct column (`textDocument/onTypeFormatting`): vectors, maps, and
+  non-symbol-headed lists align to their first element; symbol-headed lists get
+  a 2-space body indent. In VS Code enable `editor.formatOnType` for Clojure
+  (the Clojure Pulse extension turns it on by default). Using Parinfer in
+  Paren/Smart mode? Set `editor.formatOnType: false` for Clojure — Parinfer
+  manages indentation there. Parinfer's Indent Mode is complementary
+  (clj-pulse indents; Parinfer places brackets).
 - **Ignored-form dimming** - the server reports the ranges of `#_` discard
   forms and `(comment …)` blocks over a `clojurePulse/ignoredForms` request; the
   editor extension dims them (brackets included, nested and multi-line) with a
