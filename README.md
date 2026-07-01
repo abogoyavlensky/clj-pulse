@@ -34,6 +34,11 @@ Language features:
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
   namespace isn't required yet.
 - **Diagnostics** - unresolved-namespace warnings, updated live as you type.
+- **Semantic tokens** - `textDocument/semanticTokens/full` for the comment
+  forms an editor's syntax grammar can't handle: `#_` discard forms and
+  `(comment …)` blocks render as single grey spans (nested and multi-line
+  included). Strings, numbers, and keywords are deliberately left to the
+  grammar. Needs an editor with semantic highlighting enabled.
 
 Clojure & project support:
 

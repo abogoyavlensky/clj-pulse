@@ -306,6 +306,13 @@ impl LspClient {
         )
     }
 
+    fn semantic_tokens_full(&mut self, path: &Path) -> Value {
+        self.request(
+            "textDocument/semanticTokens/full",
+            json!({ "textDocument": { "uri": format!("file://{}", path.display()) } }),
+        )
+    }
+
     fn workspace_symbols(&mut self, query: &str) -> Value {
         self.request("workspace/symbol", json!({ "query": query }))
     }
@@ -2157,6 +2164,103 @@ fn test_e2e_document_symbols_outline() {
         .filter_map(|s| s["name"].as_str())
         .collect();
     assert_eq!(names, vec!["helper"]);
+}
+
+#[test]
+fn test_e2e_semantic_tokens_full() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let init = client.initialize(&root);
+
+    // The server advertises the capability with a non-empty legend so
+    // vscode-languageclient auto-registers a semantic-tokens provider.
+    let provider = &init["capabilities"]["semanticTokensProvider"];
+    assert!(
+        !provider.is_null(),
+        "initialize did not advertise semanticTokensProvider: {}",
+        init["capabilities"]
+    );
+    assert!(
+        provider["legend"]["tokenTypes"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()),
+        "semanticTokensProvider missing a non-empty legend: {}",
+        provider
+    );
+    assert_eq!(provider["full"], json!(true));
+
+    // A buffer with a line comment, a `#_` discard, and a multi-line
+    // `(comment …)` block (all tokenized as comments), plus a number, string,
+    // and keyword that must be left to the grammar (NOT tokenized).
+    let src = "; a line comment\n(ns tokens.demo)\n\n(def n 42)\n(def s \"hello\")\n(def k :some/key)\n#_(unused 1)\n(comment\n  (+ 1 2)\n  :done)\n";
+    let file = root.join("src/tokens.clj");
+    std::fs::write(&file, src).unwrap();
+    client.did_open(&file);
+
+    let result = client.semantic_tokens_full(&file);
+    let data = result["data"]
+        .as_array()
+        .expect("semanticTokens/full result missing data array");
+    assert!(!data.is_empty(), "no semantic tokens produced");
+    assert_eq!(data.len() % 5, 0, "token stream must be a multiple of 5");
+
+    // Decode the flat [Δline, Δstart, len, type, mods] stream to absolutes.
+    let mut toks: Vec<(u64, u64, u64, u64)> = Vec::new();
+    let (mut line, mut ch) = (0u64, 0u64);
+    for chunk in data.chunks(5) {
+        let dl = chunk[0].as_u64().unwrap();
+        let ds = chunk[1].as_u64().unwrap();
+        if dl != 0 {
+            line += dl;
+            ch = ds;
+        } else {
+            ch += ds;
+        }
+        toks.push((
+            line,
+            ch,
+            chunk[2].as_u64().unwrap(),
+            chunk[3].as_u64().unwrap(),
+        ));
+    }
+
+    // Tier 1 tokenizes only comment forms (legend `comment` = 0), so every
+    // emitted token is a comment. The first is the line comment at (0,0), 16
+    // UTF-16 units.
+    assert_eq!(
+        toks[0],
+        (0, 0, 16, 0),
+        "first token should decode to the line comment: {:?}",
+        toks
+    );
+    assert!(
+        toks.iter().all(|&(_, _, _, t)| t == 0),
+        "every Tier-1 token should be a comment: {:?}",
+        toks
+    );
+
+    // The number/string/keyword lines (3/4/5) are left to the editor's grammar
+    // — we emit no semantic tokens over them.
+    assert!(
+        !toks.iter().any(|&(l, _, _, _)| l == 3 || l == 4 || l == 5),
+        "literals should be left to the grammar (no tokens on lines 3-5): {:?}",
+        toks
+    );
+
+    // The payoff a TextMate grammar can't give: the `#_` discard (line 6) and
+    // the `(comment …)` block (lines 7-9) are grey comment spans.
+    assert!(
+        toks.iter().any(|&(l, _, _, t)| l == 6 && t == 0),
+        "#_ form should be a comment span: {:?}",
+        toks
+    );
+    assert!(
+        toks.iter().any(|&(l, _, _, t)| l == 7 && t == 0),
+        "(comment …) block should be a comment span: {:?}",
+        toks
+    );
 }
 
 #[test]
