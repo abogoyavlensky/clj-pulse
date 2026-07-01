@@ -313,6 +313,18 @@ impl LspClient {
         )
     }
 
+    fn on_type_formatting(&mut self, path: &Path, line: u32, character: u32, ch: &str) -> Value {
+        self.request(
+            "textDocument/onTypeFormatting",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character },
+                "ch": ch,
+                "options": { "tabSize": 2, "insertSpaces": true }
+            }),
+        )
+    }
+
     fn workspace_symbols(&mut self, query: &str) -> Value {
         self.request("workspace/symbol", json!({ "query": query }))
     }
@@ -2164,6 +2176,50 @@ fn test_e2e_document_symbols_outline() {
         .filter_map(|s| s["name"].as_str())
         .collect();
     assert_eq!(names, vec!["helper"]);
+}
+
+/// Indent-on-type round trip: with the buffer in its post-Enter state (the
+/// newline already inserted), `onTypeFormatting` must return an edit that
+/// indents the new line to the structural column.
+#[test]
+fn test_e2e_on_type_formatting_indents_new_line() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let init = client.initialize(&root);
+    assert!(
+        init["capabilities"]["documentOnTypeFormattingProvider"].is_object(),
+        "documentOnTypeFormattingProvider not advertised: {}",
+        init["capabilities"]
+    );
+    assert_eq!(
+        init["capabilities"]["documentOnTypeFormattingProvider"]["firstTriggerCharacter"],
+        json!("\n")
+    );
+
+    // Enter was pressed inside `(let [a 1|])`: the closer now starts line 3.
+    let source = "(ns app.indent)\n\n(let [a 1\n])\n";
+    let path = root.join("src/indent_fixture.clj");
+    std::fs::write(&path, source).unwrap();
+    client.did_open(&path);
+
+    let result = client.on_type_formatting(&path, 3, 0, "\n");
+    let edits = result.as_array().expect("expected TextEdit array");
+    assert_eq!(
+        apply_edits(source, edits),
+        "(ns app.indent)\n\n(let [a 1\n      ])\n",
+        "new line should align under `a`"
+    );
+
+    // Inside a multiline string no edit is offered — indentation would
+    // change the string's value.
+    let str_source = "(def s \"line\n\")\n";
+    let str_path = root.join("src/indent_string_fixture.clj");
+    std::fs::write(&str_path, str_source).unwrap();
+    client.did_open(&str_path);
+    let result = client.on_type_formatting(&str_path, 1, 0, "\n");
+    assert!(result.is_null(), "expected no edits in string: {}", result);
 }
 
 #[test]
