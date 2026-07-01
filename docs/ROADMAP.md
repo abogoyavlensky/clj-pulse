@@ -22,13 +22,13 @@ roadmap is about the "understand usages and change code" half.
   win over library symbols.
 - Headless e2e infrastructure: stdio harness, real Maven classpath,
   headless Neovim, real VS Code + Calva under Xvfb.
-- Semantic tokens (Tier 1, syntactic): `textDocument/semanticTokens/full` emits
-  `comment` tokens from the tree-sitter parse for the comment forms a TextMate
-  grammar can't render — `#_` discard forms and `(comment …)` blocks (nested,
-  multi-line, with quoted-data guards) as single grey spans — plus plain line
-  comments. Strings/numbers/keywords are deliberately left to the editor's
-  grammar. Tier 2 (resolution-based classification of functions/macros/defs/
-  locals and unused-binding modifiers, driven by the index) is the follow-up.
+- Ignored-form dimming: the server reports the whole-form ranges of `#_`
+  discard forms and `(comment …)` blocks over the custom `clojurePulse/ignoredForms`
+  request (quoted-data guarded), and the editor extension dims them with an
+  opacity decoration — brackets included, unlike semantic tokens, which can't
+  override bracket-pair colorization. Resolution-based semantic tokens
+  (functions/macros/defs/locals, unused-binding modifiers) remain the Tier-2
+  follow-up.
 
 ## Phase 1 — quick wins
 

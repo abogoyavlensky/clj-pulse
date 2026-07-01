@@ -1,7 +1,14 @@
 # Semantic Tokens — Tier 1 (Syntactic) Implementation Plan
 
-> **Status: ✅ Completed 2026-07-01.** All five tasks implemented on branch
-> `feat/semantic-tokens-tier1`. See the [Implementation summary](#implementation-summary) at the end.
+> **Status: ✅ Completed 2026-07-01, then superseded for `#_`/`(comment …)`.**
+> All five tasks were implemented on branch `feat/semantic-tokens-tier1` (see the
+> [Implementation summary](#implementation-summary) at the end). Semantic tokens
+> could not override VS Code's bracket-pair colorization, leaving brackets inside
+> the greyed forms colored, so the `#_`/`(comment …)` rendering was reworked into
+> a server range request + client opacity decoration — see
+> [docs/plans/2026-07-01-dim-ignored-forms.md](2026-07-01-dim-ignored-forms.md).
+> The form-detection logic was reused verbatim; the semantic-tokens capability
+> was retired (returns in a future Tier 2 for macro/unused/local classification).
 
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
