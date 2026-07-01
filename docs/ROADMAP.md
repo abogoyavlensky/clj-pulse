@@ -131,11 +131,11 @@ meantime and keeping the server dependency-free is worth more early on.
 - [x] clj-kondo config compatibility (read-only) — reads `:lint-as` from
       `.clj-pulse/config.edn` (primary) merged over `.clj-kondo/config.edn`, so
       custom def-like macros (e.g. `defcomponent`) define navigable names. Only
-      def-family targets are honored; loaded once at startup (restart to
-      reload). The config layer is separated as a clj-kondo-compat boundary
+      def-family targets are honored; reloaded live when a watched config file
+      changes. The config layer is separated as a clj-kondo-compat boundary
       (`src/kondo.rs`) so more of clj-kondo's config can be honored later.
-      Future: `.clj-kondo/config/` dir + JAR-exported configs, live reload, and
-      honoring `:linters` levels for clj-pulse's own diagnostics.
+      Future: `.clj-kondo/config/` dir + JAR-exported configs, and honoring
+      `:linters` levels for clj-pulse's own diagnostics.
 - [ ] shadow-cljs classpath and cljs-aware indexing.
 - [ ] Keyword indexing for re-frame subs
 - [ ] Local cache for project's files

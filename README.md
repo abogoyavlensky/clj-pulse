@@ -127,8 +127,9 @@ it introduces becomes navigable:
 
 With that mapping, go-to-definition, hover, find-references, and the document
 outline all resolve a name defined by `(defcomponent thing …)`. clj-pulse merges
-the two files (with `.clj-pulse/config.edn` winning on conflicts) and reads them
-once at startup, so a config change needs a server restart. A project that
+the two files (with `.clj-pulse/config.edn` winning on conflicts) and watches
+them, reloading `:lint-as` when either changes, with no restart needed. A
+project that
 already configures `:lint-as` for clj-kondo works with no extra setup. Only
 mappings to `def`-family forms (`def`, `defn`, `defmethod`, …) take effect;
 others (such as `clojure.core/for`) are ignored.
