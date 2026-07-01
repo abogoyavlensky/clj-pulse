@@ -262,7 +262,7 @@ moves after the merge so a buffer with only locals still completes.
 - Modify: `src/handlers/completion.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e test**
+- [x] **Step 1: Write the failing e2e test**
   Add `test_e2e_completion_local_in_let`, following
   `test_e2e_completion_bare_prefix_in_current_ns`. Open `src/locals.clj`,
   `did_change_insert` a partial reference to a local inside the `let` body (e.g.
@@ -270,20 +270,20 @@ moves after the merge so a buffer with only locals still completes.
   request completion at that position. Assert the labels contain `base`, and
   that the `base` item has `detail == "local"`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
   Run: `cargo test --test test_e2e completion_local`
   Expected: FAIL (`base` not offered).
 
-- [ ] **Step 3: Implement `local_completions` and merge it**
+- [x] **Step 3: Implement `local_completions` and merge it**
   Add `local_completions(documents, &uri, pos, &prefix) -> Vec<CompletionItem>`
   per the Design section. In `handle`, when `prefix` has no `/`, prepend locals
   to `complete_symbols`' result; move the empty-check after the merge.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
   Run: `cargo test --test test_e2e completion_local`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "feat: offer in-scope locals in completion"`
 
 ## Task 4: Full verification & docs
@@ -291,24 +291,62 @@ moves after the merge so a buffer with only locals still completes.
 **Files:**
 - Modify: `ARCHITECTURE.md`
 
-- [ ] **Step 1: Note locals-first resolution**
+- [x] **Step 1: Note locals-first resolution**
   Under "Symbol Resolution (for definition + hover)" in `ARCHITECTURE.md`, add a
   short line that a cursor on a locally-bound name resolves to its binding site
   in the same file (via `extractor::locals_in_scope_at`), before var/alias/core
   resolution.
 
-- [ ] **Step 2: Full check**
+- [x] **Step 2: Full check**
   Run: `bb check`
   Expected: fmt clean, clippy `-D warnings` clean, all unit + integration tests
   pass (confirms no reference-count/other regression from the new fixture).
 
-- [ ] **Step 3: End-to-end**
+- [x] **Step 3: End-to-end**
   Run: `bb e2e`
   Expected: PASS, including the two new tests.
 
-- [ ] **Step 4: Real-editor client**
+- [x] **Step 4: Real-editor client**
   Run: `bb e2e-nvim`
   Expected: PASS (definition + completion are client-visible).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "docs: note locals-first symbol resolution"`
+
+---
+
+## Outcome (completed 2026-07-01)
+
+**Status: DONE.** All four tasks implemented on branch
+`feat/let-local-goto-def-completion`. `bb check`, `bb e2e` (77 passed), and
+`bb e2e-nvim` (all checks passed) are green.
+
+What shipped:
+
+- `extractor::locals_in_scope_at` + `LocalBinding` + `collect_binding_targets`
+  (`src/index/extractor.rs`) — position-directed spine walk over `let`-like
+  forms, `fn`/`defn`-family (incl. `defmethod`), `letfn`, `defrecord`/`deftype`
+  fields, and destructuring. 12 unit tests.
+- `local_definition` in `src/handlers/definition.rs`, checked before var/alias/
+  core resolution so locals shadow correctly.
+- `local_completions` in `src/handlers/completion.rs`, prepended for unqualified
+  prefixes, deduped innermost-first, `detail: "local"`, floated via `sort_text`.
+- E2E: `tests/fixtures/simple_project/src/locals.clj` + goto and completion
+  tests in `tests/test_e2e.rs`.
+
+Two codex review rounds ran (per-task + branch-level). Fixes folded in:
+
+- `:or` destructuring defaults no longer create a duplicate binding (a wrong
+  range would have hijacked goto-def), and are resolved in the **outer** scope
+  (a default value can't see its sibling destructured names).
+- Heads explicitly qualified to `clojure.core` (`(clojure.core/let …)`) are
+  recognized as binding forms.
+
+Known limitations (documented, not regressions):
+
+- `:lint-as` macros mapped to `defn`/`defmacro` don't have their params
+  surfaced as locals — the pure `source`-only primitive doesn't take
+  `ExtractConfig`/ns aliases. Same fall-through as before local support existed.
+- Hover-on-locals and local references/rename are out of scope; `reify`/
+  `extend-*` protocol-method params fall back to generic descent (enclosing
+  scopes stay correct).

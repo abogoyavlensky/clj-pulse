@@ -38,6 +38,13 @@ server.rs didSave handler
 
 ## Symbol Resolution (for definition + hover)
 
+Definition first checks for a **local binding** in scope at the cursor
+(`extractor::locals_in_scope_at`): a name bound by `let`/`fn`/`loop`/`for`/
+destructuring/`letfn`/… resolves to its binding site in the same file, shadowing
+any same-named var. Only when the cursor is not on an in-scope local does it fall
+back to the var/alias/namespace/core resolution below. (Completion likewise
+prepends in-scope locals.)
+
 word under cursor (from DocumentStore / ropey)
   → if contains "/": split into (alias, name)
       → look up alias in current file's NsMeta.aliases → get full_ns
