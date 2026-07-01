@@ -297,16 +297,6 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
-                semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensOptions(
-                        SemanticTokensOptions {
-                            work_done_progress_options: Default::default(),
-                            legend: handlers::semantic_tokens::legend(),
-                            range: Some(false),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
-                        },
-                    ),
-                ),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -694,16 +684,6 @@ impl LanguageServer for Backend {
     ) -> Result<Option<DocumentSymbolResponse>> {
         handlers::symbols::document_symbols(&self.index, &self.documents, params).map_err(|e| {
             tracing::error!("document symbol error: {}", e);
-            tower_lsp::jsonrpc::Error::internal_error()
-        })
-    }
-
-    async fn semantic_tokens_full(
-        &self,
-        params: SemanticTokensParams,
-    ) -> Result<Option<SemanticTokensResult>> {
-        handlers::semantic_tokens::semantic_tokens_full(&self.documents, params).map_err(|e| {
-            tracing::error!("semantic tokens error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
     }
