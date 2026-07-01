@@ -341,6 +341,19 @@ impl Index {
             self.remove_file(&path);
         }
 
+        // Re-scanned namespaces: drop their previous symbols before inserting
+        // the new set, so a def removed since the last scan (a file present in
+        // both scans but with fewer symbols — e.g. after a `:lint-as` change)
+        // does not linger. Whole stale files are already handled above.
+        for entry in new_index.ns_symbols.iter() {
+            let old_fqns = self.ns_symbols.get(entry.key()).map(|r| r.clone());
+            if let Some(old_fqns) = old_fqns {
+                for fqn in &old_fqns {
+                    self.symbols.remove(fqn);
+                }
+            }
+        }
+
         for entry in new_index.symbols.iter() {
             self.symbols
                 .insert(entry.key().clone(), entry.value().clone());
@@ -456,6 +469,48 @@ mod tests {
         assert!(
             !index.letgo_core(),
             "clear_libs must reset the let-go core marker"
+        );
+    }
+
+    #[test]
+    fn merge_project_drops_symbols_removed_from_a_rescanned_file() {
+        use std::path::PathBuf;
+        let file = PathBuf::from("/p/src/a.clj");
+        let mk = |name: &str| Symbol {
+            name: name.to_string(),
+            fqn: format!("a/{}", name),
+            ns: "a".to_string(),
+            kind: DefKind::Def,
+            params: vec![],
+            doc: None,
+            file: file.clone(),
+            source: SymbolSource::Project,
+            range: Range::default(),
+            name_range: Range::default(),
+        };
+        let meta = || NsMeta {
+            name: "a".to_string(),
+            file: file.clone(),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: vec![],
+            imports: HashMap::new(),
+        };
+
+        let index = Index::new();
+        index.insert_file(meta(), vec![mk("keep"), mk("gone")], vec![]);
+        assert!(index.lookup("a/gone").is_some());
+
+        // A re-scan of the same file now defines only `keep` (e.g. a `:lint-as`
+        // change stopped a macro from defining `gone`).
+        let new_index = Index::new();
+        new_index.insert_file(meta(), vec![mk("keep")], vec![]);
+        index.merge_project_from(new_index, &std::collections::HashSet::new());
+
+        assert!(index.lookup("a/keep").is_some(), "kept symbol must survive");
+        assert!(
+            index.lookup("a/gone").is_none(),
+            "a symbol removed from a re-scanned file must be dropped"
         );
     }
 }
