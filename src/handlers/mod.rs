@@ -6,6 +6,7 @@ pub mod hover;
 pub mod java;
 mod letgo_native_names;
 pub mod references;
+pub mod semantic_tokens;
 pub mod signature;
 pub mod symbols;
 
