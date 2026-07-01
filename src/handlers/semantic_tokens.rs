@@ -58,7 +58,7 @@ pub fn compute_tokens(source: &str) -> Vec<AbsToken> {
         return Vec::new();
     };
     let mut tokens = Vec::new();
-    walk(tree.root_node(), source, &mut tokens);
+    walk(tree.root_node(), source, false, &mut tokens);
     tokens
 }
 
@@ -79,15 +79,89 @@ fn token_type_for(node: &Node) -> Option<u32> {
 /// Pre-order walk. On a tokenized node, emit its token(s) and **stop** — never
 /// descend into it, so a `str_lit` inside a `#_` form (or a `kwd_ns` inside a
 /// `kwd_lit`) is never re-tokenized. Otherwise recurse over named children.
-fn walk(node: Node, source: &str, out: &mut Vec<AbsToken>) {
+///
+/// `quoted` marks a quoted-data context — a reader quote or syntax-quote (`'`,
+/// `` ` ``) or a spelled-out `(quote …)` — where a `(comment …)` list is inert
+/// data (the macro never runs) and must not be greyed. Only the `(comment …)`
+/// heuristic is gated on `quoted`; literal tokenization (strings, numbers,
+/// keywords) still runs inside quoted data so it keeps its normal colors.
+///
+/// Known limitation: an unquote (`~`/`~@`) inside a syntax-quote re-enters
+/// evaluated code, but the flag is not cleared there, so a `(comment …)` in that
+/// position is left ungreyed — a benign miss. Clearing it correctly would need
+/// to distinguish hard from soft quote (unquote is literal under `'`), which is
+/// out of scope for this syntactic Tier-1 heuristic.
+fn walk(node: Node, source: &str, quoted: bool, out: &mut Vec<AbsToken>) {
     if let Some(type_index) = token_type_for(&node) {
         push_node(node, source, type_index, out);
         return;
     }
+    if !quoted && node.kind() == "list_lit" && is_comment_form(node, source) {
+        push_node(node, source, TYPE_COMMENT, out);
+        return;
+    }
+    let quoted = quoted
+        || matches!(node.kind(), "quoting_lit" | "syn_quoting_lit")
+        || (node.kind() == "list_lit" && is_quote_form(node, source));
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        walk(child, source, out);
+        walk(child, source, quoted, out);
     }
+}
+
+/// The head (operator-position) form of a `list_lit`, if it is a symbol.
+/// Gap/metadata nodes (`comment`, `dis_expr`, `meta_lit`, `old_meta_lit`) are
+/// skipped so the *first real form* is what's returned; `None` for an empty
+/// list or one whose head is not a `sym_lit`.
+fn head_symbol<'a>(list: Node<'a>) -> Option<Node<'a>> {
+    for i in 0..list.named_child_count() {
+        let child = list.named_child(i)?;
+        if matches!(
+            child.kind(),
+            "comment" | "dis_expr" | "meta_lit" | "old_meta_lit"
+        ) {
+            continue;
+        }
+        return (child.kind() == "sym_lit").then_some(child);
+    }
+    None
+}
+
+/// A `list_lit` is a `(comment …)` block when its head is the symbol `comment`,
+/// unqualified or `clojure.core/comment`. Purely syntactic (no resolution); the
+/// exact-name match keeps `(commentary …)` and `(comment-foo …)` out.
+fn is_comment_form(list: Node, source: &str) -> bool {
+    let Some(head) = head_symbol(list) else {
+        return false;
+    };
+    let Some(name) = head.child_by_field_name("name") else {
+        return false;
+    };
+    if node_text(name, source) != "comment" {
+        return false;
+    }
+    match head.child_by_field_name("namespace") {
+        None => true,
+        Some(ns) => node_text(ns, source) == "clojure.core",
+    }
+}
+
+/// A `list_lit` is a spelled-out `(quote …)` when its head is the unqualified
+/// symbol `quote` — the special form equivalent to the `'` reader macro, so its
+/// body is data.
+fn is_quote_form(list: Node, source: &str) -> bool {
+    let Some(head) = head_symbol(list) else {
+        return false;
+    };
+    let name_is_quote = head
+        .child_by_field_name("name")
+        .map(|n| node_text(n, source) == "quote")
+        .unwrap_or(false);
+    head.child_by_field_name("namespace").is_none() && name_is_quote
+}
+
+fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
+    &source[node.start_byte()..node.end_byte()]
 }
 
 /// Emits one `AbsToken` per line the node spans — LSP tokens cannot cross
@@ -238,6 +312,94 @@ mod tests {
         assert_eq!(tuples("\"café\""), vec![(0, 0, 6, TYPE_STRING)]);
         // `; →` -> `;`, space, arrow = 3 UTF-16 units.
         assert_eq!(tuples("; →"), vec![(0, 0, 3, TYPE_COMMENT)]);
+    }
+
+    /// Asserts `src` (single line) yields exactly one comment token over it.
+    fn single_comment_over_all(src: &str) {
+        let ts = compute_tokens(src);
+        assert_eq!(ts.len(), 1, "expected one token for {src:?}: {ts:?}");
+        let t = &ts[0];
+        assert_eq!((t.line, t.start_char, t.type_index), (0, 0, TYPE_COMMENT));
+        assert_eq!(t.len as usize, src.encode_utf16().count());
+    }
+
+    #[test]
+    fn comment_form_is_one_span_swallowing_inner() {
+        // Inner num_lit/kwd_lit must not be separately tokenized.
+        single_comment_over_all("(comment (+ 1 2) :x)");
+    }
+
+    #[test]
+    fn empty_comment_form_is_a_comment() {
+        single_comment_over_all("(comment)");
+    }
+
+    #[test]
+    fn qualified_comment_form_matches() {
+        single_comment_over_all("(clojure.core/comment :x)");
+    }
+
+    #[test]
+    fn multiline_comment_form_splits_per_line() {
+        // `(comment<nl>  :x)` -> grey `(comment` then grey `  :x)`; no keyword.
+        assert_eq!(
+            tuples("(comment\n  :x)"),
+            vec![(0, 0, 8, TYPE_COMMENT), (1, 0, 5, TYPE_COMMENT)]
+        );
+    }
+
+    #[test]
+    fn commentary_is_not_a_comment_form() {
+        // Exact-name guard: `(commentary 1)` stays live code.
+        let ts = compute_tokens("(commentary 1)");
+        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
+        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+    }
+
+    #[test]
+    fn comment_foo_is_not_a_comment_form() {
+        let ts = compute_tokens("(comment-foo 1)");
+        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
+        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+    }
+
+    #[test]
+    fn quoted_comment_list_is_data_not_a_comment() {
+        // `'(comment 1 :x)` is quoted data: the macro never runs, so the inner
+        // number/keyword are colored normally and nothing is greyed.
+        let ts = compute_tokens("'(comment 1 :x)");
+        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
+        assert!(ts.iter().any(|t| t.type_index == TYPE_KEYWORD));
+        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+    }
+
+    #[test]
+    fn syntax_quoted_comment_list_is_data_not_a_comment() {
+        let ts = compute_tokens("`(comment 1)");
+        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
+        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+    }
+
+    #[test]
+    fn special_form_quote_makes_comment_list_data() {
+        // The spelled-out `(quote (comment 1))` is data, just like `'(comment 1)`.
+        let ts = compute_tokens("(quote (comment 1))");
+        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
+        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+    }
+
+    #[test]
+    fn nested_unquoted_comment_form_is_still_a_comment() {
+        // A real `(comment …)` nested in ordinary (unquoted) code is detected.
+        let ts = compute_tokens("(defn f [] (comment 1) 2)");
+        // The `1` inside the comment is swallowed; only the trailing `2` is a
+        // number, and a comment span is present.
+        assert!(ts.iter().any(|t| t.type_index == TYPE_COMMENT));
+        assert_eq!(
+            ts.iter().filter(|t| t.type_index == TYPE_NUMBER).count(),
+            1,
+            "only the trailing 2 is a number: {ts:?}"
+        );
     }
 
     #[test]
