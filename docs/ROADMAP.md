@@ -22,13 +22,13 @@ roadmap is about the "understand usages and change code" half.
   win over library symbols.
 - Headless e2e infrastructure: stdio harness, real Maven classpath,
   headless Neovim, real VS Code + Calva under Xvfb.
-- Semantic tokens (Tier 1, syntactic): `textDocument/semanticTokens/full`
-  colors comments, strings, regexes, numbers, and keywords straight from the
-  tree-sitter parse, and renders `#_` discard forms and `(comment …)` blocks
-  (including quoted-data guards) as single grey spans — highlighting a TextMate
-  grammar can't do. Tier 2 (resolution-based classification of
-  functions/macros/defs/locals and unused-binding modifiers, driven by the
-  index) is the follow-up.
+- Semantic tokens (Tier 1, syntactic): `textDocument/semanticTokens/full` emits
+  `comment` tokens from the tree-sitter parse for the comment forms a TextMate
+  grammar can't render — `#_` discard forms and `(comment …)` blocks (nested,
+  multi-line, with quoted-data guards) as single grey spans — plus plain line
+  comments. Strings/numbers/keywords are deliberately left to the editor's
+  grammar. Tier 2 (resolution-based classification of functions/macros/defs/
+  locals and unused-binding modifiers, driven by the index) is the follow-up.
 
 ## Phase 1 — quick wins
 

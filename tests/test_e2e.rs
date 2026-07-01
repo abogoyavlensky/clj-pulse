@@ -2191,8 +2191,9 @@ fn test_e2e_semantic_tokens_full() {
     );
     assert_eq!(provider["full"], json!(true));
 
-    // A buffer exercising every Tier-1 construct: line comment, number,
-    // string, keyword, a `#_` discard, and a multi-line `(comment …)` block.
+    // A buffer with a line comment, a `#_` discard, and a multi-line
+    // `(comment …)` block (all tokenized as comments), plus a number, string,
+    // and keyword that must be left to the grammar (NOT tokenized).
     let src = "; a line comment\n(ns tokens.demo)\n\n(def n 42)\n(def s \"hello\")\n(def k :some/key)\n#_(unused 1)\n(comment\n  (+ 1 2)\n  :done)\n";
     let file = root.join("src/tokens.clj");
     std::fs::write(&file, src).unwrap();
@@ -2225,35 +2226,31 @@ fn test_e2e_semantic_tokens_full() {
         ));
     }
 
-    // Legend order: comment=0, string=1, regexp=2, number=3, keyword=4. The
-    // first construct is the line comment at (0,0) — a 16-unit comment token.
+    // Tier 1 tokenizes only comment forms (legend `comment` = 0), so every
+    // emitted token is a comment. The first is the line comment at (0,0), 16
+    // UTF-16 units.
     assert_eq!(
         toks[0],
         (0, 0, 16, 0),
         "first token should decode to the line comment: {:?}",
         toks
     );
+    assert!(
+        toks.iter().all(|&(_, _, _, t)| t == 0),
+        "every Tier-1 token should be a comment: {:?}",
+        toks
+    );
 
-    // Literals carry their expected types.
+    // The number/string/keyword lines (3/4/5) are left to the editor's grammar
+    // — we emit no semantic tokens over them.
     assert!(
-        toks.iter().any(|&(l, _, _, t)| l == 3 && t == 3),
-        "42 should be a number: {:?}",
-        toks
-    );
-    assert!(
-        toks.iter().any(|&(l, _, _, t)| l == 4 && t == 1),
-        "\"hello\" should be a string: {:?}",
-        toks
-    );
-    assert!(
-        toks.iter().any(|&(l, _, _, t)| l == 5 && t == 4),
-        ":some/key should be a keyword: {:?}",
+        !toks.iter().any(|&(l, _, _, _)| l == 3 || l == 4 || l == 5),
+        "literals should be left to the grammar (no tokens on lines 3-5): {:?}",
         toks
     );
 
     // The payoff a TextMate grammar can't give: the `#_` discard (line 6) and
-    // the `(comment …)` block (lines 7-9) are grey comment spans, and their
-    // inner literals are swallowed — no live number/keyword tokens there.
+    // the `(comment …)` block (lines 7-9) are grey comment spans.
     assert!(
         toks.iter().any(|&(l, _, _, t)| l == 6 && t == 0),
         "#_ form should be a comment span: {:?}",
@@ -2262,13 +2259,6 @@ fn test_e2e_semantic_tokens_full() {
     assert!(
         toks.iter().any(|&(l, _, _, t)| l == 7 && t == 0),
         "(comment …) block should be a comment span: {:?}",
-        toks
-    );
-    assert!(
-        !toks
-            .iter()
-            .any(|&(l, _, _, t)| l >= 6 && (t == 3 || t == 4)),
-        "no live number/keyword tokens inside #_ or (comment …): {:?}",
         toks
     );
 }

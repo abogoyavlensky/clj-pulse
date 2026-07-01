@@ -187,24 +187,24 @@ task). Tier 1 syntactic semantic tokens ship end to end.
 **What was built**
 
 - `src/handlers/semantic_tokens.rs` — the whole pipeline:
-  - Legend `comment · string · regexp · number · keyword` (no modifiers),
-    shared by the capability and the encoder via `TYPE_*` index constants.
+  - Legend: `comment` only (no modifiers; see the scope-trim note below),
+    shared by the capability and the encoder via a `TYPE_*` index constant.
   - Pure `compute_tokens`: parses with the extractor's cached tree-sitter
-    `language()`, pre-order walks the tree, emits one token per lexical node
-    (`comment`, `str_lit`/`char_lit`, `regex_lit`, `num_lit`, `kwd_lit`) and
-    stops without recursing, so nested literals are never double-tokenized.
-    `#_` discard forms (`dis_expr`, incl. stacked/multi-line) and `(comment …)`
-    blocks render as single grey comment spans. Multi-line nodes split per line
-    with UTF-16 lengths (via `extractor::point_to_position`), stripping trailing
-    `\r`.
+    `language()`, pre-order walks the tree, and emits `comment` tokens for the
+    comment forms — plain `;` line comments, `#_` discards (`dis_expr`, incl.
+    stacked/multi-line), and `(comment …)` blocks — stopping without recursing
+    so inner forms are swallowed into the grey span. Multi-line nodes split per
+    line with UTF-16 lengths (via `extractor::point_to_position`), stripping
+    trailing `\r`.
   - `encode`: defensive sort + relative delta encoding to the LSP flat stream.
   - `semantic_tokens_full` handler: live text from `DocumentStore`, `Ok(None)`
     when the doc isn't open, never panics.
 - `src/server.rs` — advertises `semantic_tokens_provider` (`full: true`,
   `range: false`) and delegates the `semantic_tokens_full` trait method.
-- Tests: 25 unit tests (`compute_tokens`/`encode`) + 1 e2e round-trip
+- Tests: 20 unit tests (`compute_tokens`/`encode`) + 1 e2e round-trip
   (`tests/test_e2e.rs`) asserting the capability, the flat-stream shape, the
-  first token, literal types, and grey `#_`/`(comment …)` spans.
+  first token, grey `#_`/`(comment …)` spans, and that literals are left
+  untokenized.
 - Docs: `README.md` feature bullet and `docs/ROADMAP.md` (moved out of
   "Out of scope", recorded Tier 1 done + Tier 2 follow-up).
 
@@ -225,7 +225,20 @@ task). Tier 1 syntactic semantic tokens ship end to end.
   actual file is `handlers/symbols.rs::document_symbols`. No impact — a new
   module was created regardless.
 
-**Gates:** `bb check` (fmt + clippy `-D warnings` + 259 lib / 79 e2e tests) and
+**Post-review scope trim (2026-07-01, after discussion with the maintainer):**
+The original plan emitted five token types (`comment`, `string`, `regexp`,
+`number`, `keyword`). On review we narrowed Tier 1 to **`comment` only**. The
+reasoning: semantic tokens *override* the editor's TextMate grammar wherever they
+are emitted. For `#_`/`(comment …)` that override is the whole point (a regex
+grammar can't grey a balanced, nested, multi-line form). For strings, numbers,
+keywords, and regexes the grammar already colors them correctly and instantly,
+so overriding them adds nothing and only introduces risk — a brief wrong color
+mid-edit when the parse is momentarily off, and flattening of finer grammar
+sub-scopes (e.g. a two-tone `:ns/name`). Net: the LSP now contributes only what
+the grammar *can't* do and stays out of its lane otherwise. Tier 2 will extend
+the legend for resolution-based classification.
+
+**Gates:** `bb check` (fmt + clippy `-D warnings` + all lib / e2e tests) and
 `bb e2e-nvim` (real Neovim LSP client) both green.
 
 **Follow-up (Tier 2, not built here):** resolution-based classification of

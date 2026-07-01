@@ -1,7 +1,11 @@
-//! Tier 1 (syntactic) semantic tokens: colors the lexical structure of a
-//! buffer straight from the tree-sitter parse — comments, strings, regexes,
-//! numbers, keywords, plus `#_` discard forms and `(comment …)` blocks rendered
-//! as single grey spans. No name resolution (that is Tier 2). Reuses the
+//! Tier 1 (syntactic) semantic tokens. Emits `comment`-typed tokens straight
+//! from the tree-sitter parse for the comment forms an editor's TextMate grammar
+//! can't handle: `#_` discard forms and `(comment …)` blocks — rendered as
+//! single grey spans, including nested/multi-line — plus plain `;` line
+//! comments, which ride the same token type. Strings, numbers, keywords, and
+//! regexes are deliberately left to the grammar: emitting them would only
+//! duplicate what it already does well and risk overriding correct coloring
+//! mid-edit, for no gain. No name resolution — that is Tier 2. Reuses the
 //! extractor's parser (`language()`) and UTF-16 position conversion
 //! (`point_to_position`).
 
@@ -15,22 +19,13 @@ use tree_sitter::{Node, Parser};
 use crate::document::DocumentStore;
 use crate::index::extractor;
 
-/// Token types advertised in the legend, in legend order. A node maps to the
-/// index of its type in this list (the `token_type` in the encoded stream), so
-/// the `TYPE_*` constants below must stay in sync with these positions.
-pub const LEGEND_TYPES: &[SemanticTokenType] = &[
-    SemanticTokenType::COMMENT,
-    SemanticTokenType::STRING,
-    SemanticTokenType::REGEXP,
-    SemanticTokenType::NUMBER,
-    SemanticTokenType::KEYWORD,
-];
+/// Token types advertised in the legend. Tier 1 emits only `comment` (for `#_`
+/// discards, `(comment …)` blocks, and plain `;` line comments); every other
+/// lexical category is left to the editor's grammar. The `TYPE_*` constant(s)
+/// below index into this list. Tier 2 will extend it.
+pub const LEGEND_TYPES: &[SemanticTokenType] = &[SemanticTokenType::COMMENT];
 
 const TYPE_COMMENT: u32 = 0;
-const TYPE_STRING: u32 = 1;
-const TYPE_REGEXP: u32 = 2;
-const TYPE_NUMBER: u32 = 3;
-const TYPE_KEYWORD: u32 = 4;
 
 /// The semantic-tokens legend (types + modifiers) shared by the server
 /// capability and the encoder. Tier 1 has no modifiers.
@@ -70,7 +65,7 @@ pub struct AbsToken {
     type_index: u32,
 }
 
-/// Parses `source` and collects lexical semantic tokens in document order.
+/// Parses `source` and collects comment-form semantic tokens in document order.
 /// Purely syntactic — no `Index`, no resolution. Never panics: a parser or
 /// language failure yields an empty vec (same contract as `extractor::extract`).
 pub fn compute_tokens(source: &str) -> Vec<AbsToken> {
@@ -86,29 +81,29 @@ pub fn compute_tokens(source: &str) -> Vec<AbsToken> {
     tokens
 }
 
-/// The legend index for a node that maps to a single token type, or `None` for
-/// container nodes we recurse through. A `dis_expr` (`#_ form`) is a comment as
-/// a whole — including stacked `#_ #_` and multi-line forms.
+/// The legend index for a node that maps to a token, or `None` for container
+/// nodes we recurse through. Only comment forms are tokenized: a `comment` node
+/// (plain `;` line comment) and a `dis_expr` (`#_ form`, as a whole — including
+/// stacked `#_ #_` and multi-line). `(comment …)` blocks are handled in `walk`.
+/// Strings, numbers, keywords, and regexes are intentionally not tokenized —
+/// the grammar already colors them.
 fn token_type_for(node: &Node) -> Option<u32> {
     match node.kind() {
         "comment" | "dis_expr" => Some(TYPE_COMMENT),
-        "str_lit" | "char_lit" => Some(TYPE_STRING),
-        "regex_lit" => Some(TYPE_REGEXP),
-        "num_lit" => Some(TYPE_NUMBER),
-        "kwd_lit" => Some(TYPE_KEYWORD),
         _ => None,
     }
 }
 
-/// Pre-order walk. On a tokenized node, emit its token(s) and **stop** — never
-/// descend into it, so a `str_lit` inside a `#_` form (or a `kwd_ns` inside a
-/// `kwd_lit`) is never re-tokenized. Otherwise recurse over named children.
+/// Pre-order walk. On a tokenized (comment-form) node, emit its token(s) and
+/// **stop** — never descend into it, so the inner forms of a `#_` discard or a
+/// `(comment …)` block are swallowed into the one grey span rather than tokenized
+/// separately. Otherwise recurse over named children.
 ///
 /// `quoted` marks a quoted-data context — a reader quote or syntax-quote (`'`,
 /// `` ` ``) or a spelled-out `(quote …)` — where a `(comment …)` list is inert
-/// data (the macro never runs) and must not be greyed. Only the `(comment …)`
-/// heuristic is gated on `quoted`; literal tokenization (strings, numbers,
-/// keywords) still runs inside quoted data so it keeps its normal colors.
+/// data (the macro never runs) and must not be greyed. It gates only the
+/// `(comment …)` heuristic; nothing else is tokenized, so quoted literals are
+/// simply left to the editor's grammar.
 ///
 /// Known limitation: an unquote (`~`/`~@`) inside a syntax-quote re-enters
 /// evaluated code, but the flag is not cleared there, so a `(comment …)` in that
@@ -266,42 +261,23 @@ mod tests {
     }
 
     #[test]
-    fn string_literal() {
-        assert_eq!(tuples(r#""hi""#), vec![(0, 0, 4, TYPE_STRING)]);
-    }
-
-    #[test]
-    fn char_literal_is_string_typed() {
-        assert_eq!(tuples(r"\a"), vec![(0, 0, 2, TYPE_STRING)]);
-    }
-
-    #[test]
-    fn multiline_string_splits_per_line_utf16() {
-        // `"a<nl>bc"` -> line0 `"a` (2 units), line1 `bc"` (3 units).
-        assert_eq!(
-            tuples("\"a\nbc\""),
-            vec![(0, 0, 2, TYPE_STRING), (1, 0, 3, TYPE_STRING)]
-        );
-    }
-
-    #[test]
-    fn regex_literal() {
-        // `#"\d+"` is 6 UTF-16 units.
-        assert_eq!(tuples(r##"#"\d+""##), vec![(0, 0, 6, TYPE_REGEXP)]);
-    }
-
-    #[test]
-    fn number_literals_int_float_ratio() {
-        assert_eq!(tuples("42"), vec![(0, 0, 2, TYPE_NUMBER)]);
-        assert_eq!(tuples("3.14"), vec![(0, 0, 4, TYPE_NUMBER)]);
-        assert_eq!(tuples("1/2"), vec![(0, 0, 3, TYPE_NUMBER)]);
-    }
-
-    #[test]
-    fn keyword_plain_and_qualified_are_single_tokens() {
-        assert_eq!(tuples(":foo"), vec![(0, 0, 4, TYPE_KEYWORD)]);
-        // The whole `:ns/name` is one keyword token (never split into ns/name).
-        assert_eq!(tuples(":ns/name"), vec![(0, 0, 8, TYPE_KEYWORD)]);
+    fn lexical_literals_are_left_to_the_grammar() {
+        // Strings, chars, regexes, numbers, and keywords are deliberately NOT
+        // tokenized — the editor's grammar already colors them. Only comment
+        // forms produce tokens in Tier 1.
+        for src in [
+            r#""hi""#,     // str_lit
+            r"\a",         // char_lit
+            r##"#"\d+""##, // regex_lit
+            "42",          // num_lit
+            "3.14",
+            "1/2",
+            ":foo", // kwd_lit
+            ":ns/name",
+        ] {
+            let ts = compute_tokens(src);
+            assert!(ts.is_empty(), "{src:?} should not be tokenized: {ts:?}");
+        }
     }
 
     #[test]
@@ -332,10 +308,11 @@ mod tests {
 
     #[test]
     fn non_ascii_lengths_are_utf16() {
-        // `"café"` -> quotes + café = 6 UTF-16 units.
-        assert_eq!(tuples("\"café\""), vec![(0, 0, 6, TYPE_STRING)]);
-        // `; →` -> `;`, space, arrow = 3 UTF-16 units.
-        assert_eq!(tuples("; →"), vec![(0, 0, 3, TYPE_COMMENT)]);
+        // `; café →` -> `;`, space, café (é = 1 UTF-16 unit), space, arrow
+        // (1 UTF-16 unit) = 8 units, counted in UTF-16 rather than bytes.
+        assert_eq!(tuples("; café →"), vec![(0, 0, 8, TYPE_COMMENT)]);
+        // Non-ASCII inside a `#_` span is counted the same way: `#_ "café"`.
+        assert_eq!(tuples("#_ \"café\""), vec![(0, 0, 9, TYPE_COMMENT)]);
     }
 
     /// Asserts `src` (single line) yields exactly one comment token over it.
@@ -374,81 +351,68 @@ mod tests {
 
     #[test]
     fn commentary_is_not_a_comment_form() {
-        // Exact-name guard: `(commentary 1)` stays live code.
+        // Exact-name guard: `(commentary 1)` is live code, not a comment span.
         let ts = compute_tokens("(commentary 1)");
-        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
-        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+        assert!(ts.is_empty(), "should not be greyed: {ts:?}");
     }
 
     #[test]
     fn comment_foo_is_not_a_comment_form() {
         let ts = compute_tokens("(comment-foo 1)");
-        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
-        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+        assert!(ts.is_empty(), "should not be greyed: {ts:?}");
     }
 
     #[test]
     fn quoted_comment_list_is_data_not_a_comment() {
-        // `'(comment 1 :x)` is quoted data: the macro never runs, so the inner
-        // number/keyword are colored normally and nothing is greyed.
+        // `'(comment 1 :x)` is quoted data: the macro never runs, so the list is
+        // not greyed (its literals are left to the grammar → no tokens at all).
         let ts = compute_tokens("'(comment 1 :x)");
-        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
-        assert!(ts.iter().any(|t| t.type_index == TYPE_KEYWORD));
-        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+        assert!(
+            ts.is_empty(),
+            "quoted (comment …) must not be greyed: {ts:?}"
+        );
     }
 
     #[test]
     fn syntax_quoted_comment_list_is_data_not_a_comment() {
         let ts = compute_tokens("`(comment 1)");
-        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
-        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
+        assert!(
+            ts.is_empty(),
+            "syntax-quoted (comment …) must not be greyed: {ts:?}"
+        );
     }
 
     #[test]
     fn special_form_quote_makes_comment_list_data() {
         // The spelled-out `(quote (comment 1))` is data, just like `'(comment 1)`.
         let ts = compute_tokens("(quote (comment 1))");
-        assert!(ts.iter().any(|t| t.type_index == TYPE_NUMBER));
-        assert!(ts.iter().all(|t| t.type_index != TYPE_COMMENT));
-    }
-
-    #[test]
-    fn nested_unquoted_comment_form_is_still_a_comment() {
-        // A real `(comment …)` nested in ordinary (unquoted) code is detected.
-        let ts = compute_tokens("(defn f [] (comment 1) 2)");
-        // The `1` inside the comment is swallowed; only the trailing `2` is a
-        // number, and a comment span is present.
-        assert!(ts.iter().any(|t| t.type_index == TYPE_COMMENT));
-        assert_eq!(
-            ts.iter().filter(|t| t.type_index == TYPE_NUMBER).count(),
-            1,
-            "only the trailing 2 is a number: {ts:?}"
+        assert!(
+            ts.is_empty(),
+            "(quote (comment …)) must not be greyed: {ts:?}"
         );
     }
 
     #[test]
-    fn legend_type_indices_match_constants() {
+    fn nested_unquoted_comment_form_is_still_a_comment() {
+        // A real `(comment …)` nested in ordinary (unquoted) code is greyed, and
+        // is the only token — the surrounding code is left to the grammar.
+        let ts = tuples("(defn f [] (comment 1) 2)");
+        assert_eq!(
+            ts,
+            vec![(0, 11, 11, TYPE_COMMENT)],
+            "the nested (comment 1) should be the sole comment span: {ts:?}"
+        );
+    }
+
+    #[test]
+    fn legend_is_comment_only_with_no_modifiers() {
         let l = legend();
         assert_eq!(
             l.token_types[TYPE_COMMENT as usize],
             SemanticTokenType::COMMENT
         );
-        assert_eq!(
-            l.token_types[TYPE_STRING as usize],
-            SemanticTokenType::STRING
-        );
-        assert_eq!(
-            l.token_types[TYPE_REGEXP as usize],
-            SemanticTokenType::REGEXP
-        );
-        assert_eq!(
-            l.token_types[TYPE_NUMBER as usize],
-            SemanticTokenType::NUMBER
-        );
-        assert_eq!(
-            l.token_types[TYPE_KEYWORD as usize],
-            SemanticTokenType::KEYWORD
-        );
+        // Tier 1 advertises exactly one type — no lexical types.
+        assert_eq!(l.token_types.len(), 1);
         assert!(l.token_modifiers.is_empty());
     }
 
