@@ -331,6 +331,17 @@ impl LanguageServer for Backend {
                 glob_pattern: GlobPattern::String("**/.cpcache/*.cp".to_string()),
                 kind: None,
             },
+            // clj-pulse and clj-kondo config: reload `:lint-as` on change. Named
+            // explicitly so clients that skip dotfiles under `**/*.edn` still
+            // watch them.
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/.clj-kondo/config.edn".to_string()),
+                kind: None,
+            },
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/.clj-pulse/config.edn".to_string()),
+                kind: None,
+            },
         ];
         let registration = Registration {
             id: "clj-pulse-watched-files".to_string(),
@@ -438,6 +449,7 @@ impl LanguageServer for Backend {
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let mut classpath_changed = false;
         let mut source_paths_changed = false;
+        let mut config_changed = false;
         for event in params.changes {
             let Ok(path) = event.uri.to_file_path() else {
                 continue;
@@ -456,6 +468,20 @@ impl LanguageServer for Backend {
             }
             if path.components().any(|c| c.as_os_str() == ".cpcache") {
                 classpath_changed = true;
+                continue;
+            }
+
+            // clj-pulse / clj-kondo config: reload `:lint-as` and re-index the
+            // project. Intercept before the EDN branch below, since `config.edn`
+            // is itself `.edn` but is not an Integrant config.
+            let is_config = path.file_name().map(|n| n == "config.edn").unwrap_or(false)
+                && path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|d| d == ".clj-kondo" || d == ".clj-pulse")
+                    .unwrap_or(false);
+            if is_config {
+                config_changed = true;
                 continue;
             }
 
@@ -507,16 +533,22 @@ impl LanguageServer for Backend {
             }
         }
 
-        if classpath_changed {
+        if classpath_changed || config_changed {
             let root = self.root.lock().unwrap().clone();
             if let Some(root) = root {
                 let index = self.index.clone();
                 let client = self.client.clone();
                 let documents = self.documents.clone();
                 tokio::spawn(async move {
-                    if source_paths_changed {
-                        // :paths may have changed — rebuild project sources,
-                        // dropping files from removed roots.
+                    // A config change reloads `:lint-as` before re-indexing, so
+                    // the rebuild extracts project files with the new mapping.
+                    if config_changed {
+                        index.set_extract_config(settings::load(&root));
+                    }
+
+                    // Rebuild project sources when :paths changed or the config
+                    // changed (lint-as affects how every project file extracts).
+                    if source_paths_changed || config_changed {
                         let source_paths = config::source_paths(&root);
                         match scanner::build_index(&root, &source_paths, &index.extract_config()) {
                             Ok(new_index) => {
@@ -526,14 +558,24 @@ impl LanguageServer for Backend {
                         }
                     }
 
-                    // Drop symbols of removed/replaced dependencies first
-                    index.clear_libs();
-                    if resolve_and_index_libs(&root, &index) == 0 {
-                        return;
+                    // Log the reload before the (optional) library branch, whose
+                    // early return could otherwise skip it.
+                    if config_changed {
+                        client
+                            .log_message(MessageType::INFO, "clj-pulse: config reloaded")
+                            .await;
                     }
-                    let msg = "clj-pulse: library re-indexing complete";
-                    tracing::info!("{}", msg);
-                    client.log_message(MessageType::INFO, msg).await;
+
+                    if classpath_changed {
+                        // Drop symbols of removed/replaced dependencies first
+                        index.clear_libs();
+                        if resolve_and_index_libs(&root, &index) == 0 {
+                            return;
+                        }
+                        let msg = "clj-pulse: library re-indexing complete";
+                        tracing::info!("{}", msg);
+                        client.log_message(MessageType::INFO, msg).await;
+                    }
                 });
             }
         }
