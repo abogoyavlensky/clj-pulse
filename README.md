@@ -34,6 +34,11 @@ Language features:
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
   namespace isn't required yet.
 - **Diagnostics** - unresolved-namespace warnings, updated live as you type.
+- **Semantic tokens** - syntax highlighting from the tree-sitter parse
+  (`textDocument/semanticTokens/full`): comments, strings, regexes, numbers,
+  and keywords. Editors with semantic highlighting enabled also get `#_`
+  discard forms and `(comment …)` blocks rendered as single grey spans — for
+  free, and beyond what a TextMate grammar can do.
 
 Clojure & project support:
 

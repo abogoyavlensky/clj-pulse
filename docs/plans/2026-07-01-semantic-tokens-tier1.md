@@ -1,5 +1,8 @@
 # Semantic Tokens — Tier 1 (Syntactic) Implementation Plan
 
+> **Status: ✅ Completed 2026-07-01.** All five tasks implemented on branch
+> `feat/semantic-tokens-tier1`. See the [Implementation summary](#implementation-summary) at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a `textDocument/semanticTokens/full` provider that colors the lexical structure of a buffer from the tree-sitter parse — comments, strings, regexes, numbers, keywords, and crucially `#_` discard forms and `(comment …)` blocks — without any name resolution.
@@ -75,21 +78,21 @@ clj-pulse/
 - Create: `src/handlers/semantic_tokens.rs`
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   In `semantic_tokens.rs` `#[cfg(test)]`, test `compute_tokens` on: a line `comment`; a `str_lit`; a multi-line `str_lit` (asserts per-line split with correct UTF-16 lengths); a `regex_lit`; a `num_lit` (int, float, ratio); a `kwd_lit` (plain and `:ns/name`); a single-line and a multi-line `#_` discard (asserts one `comment` span, and that a `str_lit`/`num_lit` inside it is **not** separately tokenized); stacked `#_ #_ a b`. Add a focused `encode` test: a known `Vec<AbsToken>` → expected flat `u32` deltas (including a same-line delta and a line-advance that resets `start_char`). Include a non-ASCII case (e.g. `"café"` or a comment with `→`) asserting UTF-16 lengths.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib semantic_tokens`
   Expected: FAIL — module/functions not found.
 
-- [ ] **Step 3: Implement the pure core**
+- [x] **Step 3: Implement the pure core**
   Define `AbsToken { line, start_char, len, type_index }`, `LEGEND_TYPES` (`comment`, `string`, `regexp`, `number`, `keyword`) and `legend()`. Implement `compute_tokens`: create a `Parser`, `set_language(extractor::language())`, `parse` (on `None` tree → return empty). Walk recursively: match tokenized node kinds (`comment`, `dis_expr`, `str_lit`, `char_lit`, `regex_lit`, `num_lit`, `kwd_lit`) → push token(s) via a `push_node` helper and **return without recursing**; otherwise recurse over children. `push_node` computes start/end via `extractor::point_to_position`, then splits the node's source text on `\n` (stripping a trailing `\r`) into per-line `AbsToken`s using `encode_utf16().count()` for lengths. Implement `encode` (sort by `(line, start_char)` defensively, then delta-encode to `[Δline, Δstart, len, type, 0]`).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib semantic_tokens`
   Expected: PASS.
 
-- [ ] **Step 5: Format, lint, commit**
+- [x] **Step 5: Format, lint, commit**
   Run: `bb fmt && bb lint`
   `git commit -m "feat: syntactic semantic-token computation core"`
 
@@ -98,21 +101,21 @@ clj-pulse/
 **Files:**
 - Modify: `src/handlers/semantic_tokens.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   Add cases to `compute_tokens` tests: `(comment (+ 1 2) :x)` → a single `comment` span over the whole list, with the inner `num_lit`/`kwd_lit` **not** separately tokenized; a multi-line `(comment …)` block (per-line grey split); `(comment)` (empty) still a comment; `(clojure.core/comment …)` matches; and negative guards `(commentary 1)` and `(comment-foo 1)` do **not** become comments (their inner tokens are emitted normally).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib semantic_tokens`
   Expected: FAIL — `(comment …)` not yet special-cased.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In the walk, when the node is a `list_lit`, first check its head: the first named child form; if it is a `sym_lit` whose `name` field text is exactly `comment` and whose `namespace` field is absent or `clojure.core`, push a `comment` token over the whole `list_lit` (via `push_node`) and return without recursing. Otherwise recurse as a normal container.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib semantic_tokens`
   Expected: PASS.
 
-- [ ] **Step 5: Format, lint, commit**
+- [x] **Step 5: Format, lint, commit**
   Run: `bb fmt && bb lint`
   `git commit -m "feat: render (comment …) blocks as comment tokens"`
 
@@ -122,20 +125,20 @@ clj-pulse/
 - Modify: `src/handlers/semantic_tokens.rs` (add the handler entry point)
 - Modify: `src/handlers/mod.rs`, `src/server.rs`
 
-- [ ] **Step 1: Add the handler entry point**
+- [x] **Step 1: Add the handler entry point**
   Implement `semantic_tokens_full(documents: &DocumentStore, params: SemanticTokensParams) -> Result<Option<SemanticTokensResult>>`: resolve the URI, get live text via `documents.text(&uri)` (None → `Ok(None)`), run `compute_tokens` + `encode`, return `Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data }))`. On any internal error, log a warning and return `Ok(None)` — never panic.
 
-- [ ] **Step 2: Register the module and advertise the capability**
+- [x] **Step 2: Register the module and advertise the capability**
   Add `pub mod semantic_tokens;` to `handlers/mod.rs`. In `server.rs` `ServerCapabilities`, set `semantic_tokens_provider` to `SemanticTokensOptions { legend: handlers::semantic_tokens::legend(), full: Some(SemanticTokensFullOptions::Bool(true)), range: Some(false), .. }` wrapped in `SemanticTokensServerCapabilities::SemanticTokensOptions`.
 
-- [ ] **Step 3: Add the trait method**
+- [x] **Step 3: Add the trait method**
   Add `async fn semantic_tokens_full(&self, params) -> Result<Option<SemanticTokensResult>>` to the `LanguageServer` impl, delegating to the handler with `&self.documents` (≤15 lines, matching `document_symbol`). Map errors to an internal LSP error like the other handlers.
 
-- [ ] **Step 4: Build and lint**
+- [x] **Step 4: Build and lint**
   Run: `bb build && bb lint`
   Expected: compiles; no clippy warnings.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: advertise and serve textDocument/semanticTokens/full"`
 
 ### Task 4: End-to-end test
@@ -143,17 +146,17 @@ clj-pulse/
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Add a request helper**
+- [x] **Step 1: Add a request helper**
   Add `fn semantic_tokens_full(&mut self, path: &Path) -> Value` sending `textDocument/semanticTokens/full` with the file URI, mirroring the existing `document_symbols` helper.
 
-- [ ] **Step 2: Write the round-trip test**
+- [x] **Step 2: Write the round-trip test**
   Using `setup_project()` / `initialize` / `did_open` on a fixture containing a line comment, a string, a number, a keyword, a `#_` form, and a `(comment …)` block, assert the response `.result.data` is a non-empty array whose length is a multiple of 5, and that decoding the first token matches the first construct's position/type. Assert the `initialize` result advertises `semanticTokensProvider`.
 
-- [ ] **Step 3: Run the e2e suite**
+- [x] **Step 3: Run the e2e suite**
   Run: `bb e2e`
   Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "test: e2e for semantic tokens full request"`
 
 ### Task 5: Docs and final gate
@@ -161,17 +164,70 @@ clj-pulse/
 **Files:**
 - Modify: `docs/ROADMAP.md`, `README.md`
 
-- [ ] **Step 1: Update the roadmap**
+- [x] **Step 1: Update the roadmap**
   Move "Semantic tokens" out of "Out of scope for now"; record Tier 1 (syntactic: comments, strings, regexes, numbers, keywords, `#_` discard, `(comment …)`) as done, and note Tier 2 (resolution-based symbol classification, locals, unused) as the follow-up.
 
-- [ ] **Step 2: Update the README**
+- [x] **Step 2: Update the README**
   Under features, note that clj-pulse now emits semantic tokens for syntax highlighting (editors with semantic highlighting on get grey `#_`/`(comment …)` blocks for free).
 
-- [ ] **Step 3: Full verification**
+- [x] **Step 3: Full verification**
   Run: `bb check`
   Expected: fmt clean, clippy `-D warnings` clean, all tests pass.
   Run: `bb e2e` (and `bb e2e-nvim` if headless Neovim is available)
   Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "docs: record Tier 1 semantic tokens"`
+
+## Implementation summary
+
+Completed 2026-07-01 on branch `feat/semantic-tokens-tier1` (5 commits, one per
+task). Tier 1 syntactic semantic tokens ship end to end.
+
+**What was built**
+
+- `src/handlers/semantic_tokens.rs` — the whole pipeline:
+  - Legend `comment · string · regexp · number · keyword` (no modifiers),
+    shared by the capability and the encoder via `TYPE_*` index constants.
+  - Pure `compute_tokens`: parses with the extractor's cached tree-sitter
+    `language()`, pre-order walks the tree, emits one token per lexical node
+    (`comment`, `str_lit`/`char_lit`, `regex_lit`, `num_lit`, `kwd_lit`) and
+    stops without recursing, so nested literals are never double-tokenized.
+    `#_` discard forms (`dis_expr`, incl. stacked/multi-line) and `(comment …)`
+    blocks render as single grey comment spans. Multi-line nodes split per line
+    with UTF-16 lengths (via `extractor::point_to_position`), stripping trailing
+    `\r`.
+  - `encode`: defensive sort + relative delta encoding to the LSP flat stream.
+  - `semantic_tokens_full` handler: live text from `DocumentStore`, `Ok(None)`
+    when the doc isn't open, never panics.
+- `src/server.rs` — advertises `semantic_tokens_provider` (`full: true`,
+  `range: false`) and delegates the `semantic_tokens_full` trait method.
+- Tests: 25 unit tests (`compute_tokens`/`encode`) + 1 e2e round-trip
+  (`tests/test_e2e.rs`) asserting the capability, the flat-stream shape, the
+  first token, literal types, and grey `#_`/`(comment …)` spans.
+- Docs: `README.md` feature bullet and `docs/ROADMAP.md` (moved out of
+  "Out of scope", recorded Tier 1 done + Tier 2 follow-up).
+
+**Deviations & issues**
+
+- Codex review (the executing-plans checkpoint) flagged a real false positive
+  beyond the plan's scope: quoted `(comment …)` **data** was being greyed.
+  Fixed by threading a `quoted` flag through the walk that suppresses the
+  `(comment …)` heuristic inside reader-quote (`'`), syntax-quote (`` ` ``), and
+  the spelled-out `(quote …)` special form — literal tokenization still runs
+  there, so data keeps its normal colors.
+- Known limitation (documented in `walk`): an unquote (`~`/`~@`) inside a
+  syntax-quote re-enters evaluated code, but the flag is not cleared, so a
+  `(comment …)` there is left ungreyed — a benign miss. Handling it correctly
+  needs hard-vs-soft-quote tracking, deliberately out of scope for this
+  syntactic Tier-1 heuristic.
+- Minor: the plan referenced a `document_symbol` handler as the template; the
+  actual file is `handlers/symbols.rs::document_symbols`. No impact — a new
+  module was created regardless.
+
+**Gates:** `bb check` (fmt + clippy `-D warnings` + 259 lib / 79 e2e tests) and
+`bb e2e-nvim` (real Neovim LSP client) both green.
+
+**Follow-up (Tier 2, not built here):** resolution-based classification of
+functions/macros/defs/namespaces/Java classes, locals and unused-binding
+modifiers, booleans/`nil`, and `range`/delta requests.
