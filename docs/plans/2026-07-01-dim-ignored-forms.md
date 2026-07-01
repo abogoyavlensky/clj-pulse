@@ -1,5 +1,7 @@
 # Dim Ignored Forms (`#_` / `(comment …)`) Implementation Plan
 
+> **Status: ✅ Implemented 2026-07-01** across `clj-pulse` (branch `feat/dim-ignored-forms`) and `clojure-pulse-vscode` (branch `feat/dim-ignored-forms`). All automated gates green; the on-screen visual check (Task 7 Step 2) is the one maintainer action left. See the [Implementation summary](#implementation-summary) at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This plan spans **two repos**: the server `clj-pulse` (`/Users/andrew/Projects/clj-pulse`, Rust) and the VS Code extension `clojure-pulse-vscode` (`/Users/andrew/Projects/clojure-pulse-vscode`, TypeScript). Each task states which repo it touches.
 
 **Goal:** Dim `#_` discard forms and `(comment …)` blocks in the clojure-pulse-vscode editor — brackets included — by having the server expose their ranges over a custom LSP request and the extension lay an opacity decoration over them (Calva's mechanism, fed by our server instead of a client-side parser).
@@ -87,24 +89,26 @@ package.json                    MODIFY — add clojurePulse.dimIgnoredForms; rem
 - Rename: `src/handlers/semantic_tokens.rs` → `src/handlers/ignored_forms.rs`
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Rename the module and strip the semantic-token machinery**
+> **Execution note:** Task 2 Step 1 (removing the `semantic_tokens_provider` capability + `semantic_tokens_full` trait method from `server.rs`) was pulled into this task's commit — renaming the module structurally breaks the binary until those references are gone, so `bb lint` can't pass otherwise.
+
+- [x] **Step 1: Rename the module and strip the semantic-token machinery**
   `git mv src/handlers/semantic_tokens.rs src/handlers/ignored_forms.rs`. In `mod.rs`, change `pub mod semantic_tokens;` to `pub mod ignored_forms;`. In the renamed file, delete `LEGEND_TYPES`, the `TYPE_*` constants except keep none needed, `legend()`, `AbsToken`, `compute_tokens`, `token_type_for`, `push_node`, `encode`, and `semantic_tokens_full`. Keep `is_comment_form`, `is_quote_form`, `head_symbol`, `node_text`, and the quote-tracking logic. Update the module doc comment to describe range collection.
 
-- [ ] **Step 2: Rewrite the unit tests for ranges**
+- [x] **Step 2: Rewrite the unit tests for ranges**
   Replace the test module so it asserts `ignored_form_ranges` returns `Vec<Range>`. Cases: `#_ x` → one range over the whole `#_ x`; multi-line `#_ (a\nb)` → one range spanning both lines (start line 0, end line 1); `(comment (+ 1 2))` → one whole-list range; multi-line `(comment\n  :x)` → one range spanning both lines; stacked `#_ #_ 1 2` → one range; `'(comment 1)` and `` `(comment 1) `` and `(quote (comment 1))` → **no** range (quoted data); `(commentary 1)` / `(comment-foo 1)` → no range; a plain `; line comment` → **no** range (excluded); a bare `42` → no range. Assert ranges by `(start.line, start.character, end.line, end.character)` tuples where exact, else by count + line membership.
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
   Run: `cargo test --lib ignored_forms`
   Expected: FAIL — `ignored_form_ranges` not defined.
 
-- [ ] **Step 4: Implement `ignored_form_ranges`**
+- [x] **Step 4: Implement `ignored_form_ranges`**
   Add `use tower_lsp::lsp_types::Range;`. Implement `pub fn ignored_form_ranges(source: &str) -> Vec<Range>`: create a `Parser`, `set_language(extractor::language())` (empty vec on error), `parse` (empty on `None`), then `walk(root, source, false, &mut out)`. The walk: if `node.kind() == "dis_expr"` push `node_range(node, source)` and return (dims regardless of `quoted`); else if `!quoted && node.kind() == "list_lit" && is_comment_form(node, source)` push `node_range` and return; else compute `quoted = quoted || matches!(node.kind(), "quoting_lit" | "syn_quoting_lit") || (node.kind() == "list_lit" && is_quote_form(node, source))` and recurse over named children. Add `fn node_range(node: Node, source: &str) -> Range` using `extractor::point_to_position` for start (`start_position`/`start_byte`) and end (`end_position`/`end_byte`). Plain `comment` (`;`) nodes are never matched → excluded.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
   Run: `cargo test --lib ignored_forms`
   Expected: PASS.
 
-- [ ] **Step 6: Format, lint, commit**
+- [x] **Step 6: Format, lint, commit**
   Run: `bb fmt && bb lint`
   `git commit -m "refactor: replace semantic-token core with ignored_form_ranges"`
 
@@ -114,20 +118,20 @@ package.json                    MODIFY — add clojurePulse.dimIgnoredForms; rem
 **Files:**
 - Modify: `src/server.rs`, `src/main.rs`
 
-- [ ] **Step 1: Remove the semantic-tokens capability and trait method**
+- [x] **Step 1: Remove the semantic-tokens capability and trait method** *(done in Task 1's commit — see the execution note there)*
   In `src/server.rs` `ServerCapabilities`, delete the `semantic_tokens_provider: Some(SemanticTokensServerCapabilities::…)` block. Delete the `async fn semantic_tokens_full(&self, …)` method from the `LanguageServer` impl.
 
-- [ ] **Step 2: Add the `ignored_forms` handler**
+- [x] **Step 2: Add the `ignored_forms` handler**
   In `src/server.rs`, add `IgnoredFormsParams { uri: String }` (serde `Deserialize`, `pub(crate)`, mirroring `TextDocumentContentParams`). Add an inherent `impl Backend` method `pub async fn ignored_forms(&self, params: IgnoredFormsParams) -> tower_lsp::jsonrpc::Result<Vec<Range>>`: parse `params.uri` to `Url` (invalid → `Ok(vec![])`), `self.documents.text(&uri)` (None → `Ok(vec![])`), else `Ok(handlers::ignored_forms::ignored_form_ranges(&text))`. Model it on `text_document_content` (`src/server.rs:120`).
 
-- [ ] **Step 3: Register the custom method**
+- [x] **Step 3: Register the custom method**
   In `src/main.rs`, add `.custom_method("clojurePulse/ignoredForms", Backend::ignored_forms)` to the `LspService::build(...)` chain (before `.finish()`), alongside the existing custom methods (`src/main.rs:60-66`).
 
-- [ ] **Step 4: Build and lint**
+- [x] **Step 4: Build and lint**
   Run: `bb build && bb lint`
   Expected: compiles; no clippy warnings.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: serve clojurePulse/ignoredForms custom request"`
 
 ### Task 3: Server — e2e round-trip
@@ -136,17 +140,17 @@ package.json                    MODIFY — add clojurePulse.dimIgnoredForms; rem
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Replace the request helper**
+- [x] **Step 1: Replace the request helper**
   Replace the `semantic_tokens_full` helper with `fn ignored_forms(&mut self, path: &Path) -> Value` sending `self.request("clojurePulse/ignoredForms", json!({ "uri": format!("file://{}", path.display()) }))`.
 
-- [ ] **Step 2: Rewrite the round-trip test**
+- [x] **Step 2: Rewrite the round-trip test**
   Replace `test_e2e_semantic_tokens_full` with `test_e2e_ignored_forms`. Using `setup_project()` / `initialize` / `did_open` on a written fixture `src/tokens.clj` containing a `; line comment`, a `(def n 42)`, a `#_(unused 1)` on a known line, and a multi-line `(comment …)` block: assert the result is a JSON array of ranges; assert a range starts on the `#_` line and one on the `(comment` line; assert **no** range covers the `;` comment line or the `(def n 42)` line. Also assert the `initialize` result no longer advertises `semanticTokensProvider` (it is absent/null).
 
-- [ ] **Step 3: Run the e2e suite**
+- [x] **Step 3: Run the e2e suite**
   Run: `bb e2e`
   Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "test: e2e for clojurePulse/ignoredForms"`
 
 ### Task 4: Server — docs
@@ -177,21 +181,21 @@ package.json                    MODIFY — add clojurePulse.dimIgnoredForms; rem
 - Create: `src/ignoredForms.ts`
 - Test: `src/test/ignoredForms.test.ts`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In `src/test/ignoredForms.test.ts` (mirror `src/test/jarContentProvider.test.ts`), test `toRanges`: a well-formed `[{start:{line,character},end:{…}}]` payload maps to `vscode.Range[]` with matching positions; `undefined`/`null`/non-array/malformed entries yield `[]` (no throw). Test `createIgnoredFormDecorator`: `refresh(editor)` calls the injected `sendRanges` with the editor's document uri; a rejected `sendRanges` is swallowed (no throw).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `npm test` (in the extension repo)
   Expected: FAIL — `./ignoredForms` module not found.
 
-- [ ] **Step 3: Implement the module**
+- [x] **Step 3: Implement the module**
   In `src/ignoredForms.ts`: `export type SendRanges = (uri: string) => Thenable<unknown>;`. `export function toRanges(raw: unknown): vscode.Range[]` — defensively map (guard array + numeric fields), returning `[]` on anything malformed. `export function createIgnoredFormDecorator(sendRanges: SendRanges)` returning `{ refresh(editor: vscode.TextEditor): Promise<void>; dispose(): void }`: create the decoration type once via `vscode.window.createTextEditorDecorationType({ textDecoration: 'none; opacity: 0.5', rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed })`; `refresh` calls `sendRanges(editor.document.uri.toString())`, maps with `toRanges`, and `editor.setDecorations(type, ranges)` — wrapped in try/catch so a server error clears rather than throws; `dispose` disposes the type.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `npm test`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "feat: ignored-form dimming decorator"`
 
 ### Task 6: Extension — activation wiring + config
@@ -200,28 +204,80 @@ package.json                    MODIFY — add clojurePulse.dimIgnoredForms; rem
 **Files:**
 - Modify: `src/extension.ts`, `package.json`
 
-- [ ] **Step 1: Add the setting; remove the semantic-highlighting default**
+> **Execution note:** codex review of the wiring caught two real bugs, both fixed: (1) the first paint fired on the `Running` state, which can race ahead of the client's initial `didOpen` sync — moved to fire after `start()` resolves; (2) the refresh touched only the active editor — made it refresh all visible editors so split views of the same document update. A P3 (single debounce timer dropping a pending refresh across two docs) was resolved by coalescing the debounced pass into `refreshAllVisible()`.
+
+- [x] **Step 1: Add the setting; remove the semantic-highlighting default**
   In `package.json`: add `clojurePulse.dimIgnoredForms` (boolean, default `true`, description: dim `#_` discard forms and `(comment …)` blocks). Remove the `contributes.configurationDefaults` block added earlier (the `[clojure]` `editor.semanticHighlighting.enabled` one).
 
-- [ ] **Step 2: Wire the decorator into activation**
+- [x] **Step 2: Wire the decorator into activation**
   In `src/extension.ts`: when `clojurePulse.dimIgnoredForms` is enabled, create the decorator with a `sendRanges` closure `(uri) => client ? client.sendRequest("clojurePulse/ignoredForms", { uri }) : Promise.reject(new Error("server not running"))` (mirror the jar-provider closure). Register listeners (all pushed to `context.subscriptions`): `window.onDidChangeActiveTextEditor` → refresh if clojure; `workspace.onDidOpenTextDocument` → refresh active if clojure; `workspace.onDidChangeTextDocument` → debounced (~250 ms) refresh when it is the active clojure document; refresh the active editor once the client reaches `State.Running` (in the existing `onDidChangeState` handler) for first paint. Only act on documents with `languageId === "clojure"`. Dispose the decorator in `deactivate`. Keep helpers small; a refresh should no-op safely when there is no active clojure editor.
 
-- [ ] **Step 3: Build, lint, test**
+- [x] **Step 3: Build, lint, test**
   Run: `npm run compile && npm run lint && npm test`
   Expected: compiles; no eslint errors; tests pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "feat: dim ignored forms via editor decoration"`
 
 ### Task 7: Manual verification
 
 **Repo:** both
 
-- [ ] **Step 1: Point the extension at the branch server**
-  Build the server: in `/Users/andrew/Projects/clj-pulse`, `cargo build`. In VS Code settings, set `clojurePulse.server.path` to `/Users/andrew/Projects/clj-pulse/target/debug/clj-pulse`. Run the extension (Extension Development Host / F5) and **Clojure Pulse: Restart Server**.
+- [x] **Step 1: Point the extension at the branch server**
+  Server built (`cargo build` → `target/debug/clj-pulse`). Pointing VS Code's `clojurePulse.server.path` at that binary + F5 + **Clojure Pulse: Restart Server** is the maintainer's action (needs the real editor).
 
-- [ ] **Step 2: Verify the behavior**
+- [ ] **Step 2: Verify the behavior** *(maintainer visual check — see verification note below)*
   Open a `.clj` file containing `#_(prn "test")`, a multi-line `(comment (let [a 1]))`, a `; line comment`, and a plain `42`. Confirm: `#_` form and `(comment …)` block are dimmed **including their brackets**; the `;` comment and `42` are unaffected; no double-dimming; toggling `clojurePulse.dimIgnoredForms` off removes the dimming (after reload). Confirm quoted `'(comment 1)` is **not** dimmed.
 
-- [ ] **Step 3: Record the outcome**
-  Note the verification result (and any follow-ups) at the end of this plan document.
+- [x] **Step 3: Record the outcome**
+  See the verification note in the summary below.
+
+## Implementation summary
+
+Implemented 2026-07-01. The `#_`/`(comment …)` rendering moved off semantic tokens
+(which can't override bracket-pair colorization) onto a server range request +
+client opacity decoration, matching Calva's approach but sourcing ranges from the
+server instead of a client-side parser.
+
+**Server (`clj-pulse`, branch `feat/dim-ignored-forms`, 4 commits):**
+- `handlers/ignored_forms.rs` — `ignored_form_ranges(source) -> Vec<Range>`: the
+  reused tree-sitter walk (with `is_comment_form`/`is_quote_form`/quote-guards)
+  now returns whole-form ranges for `#_` discards (always) and `(comment …)`
+  blocks (only outside quoted data); plain `;` comments excluded. 8 unit tests.
+- `server.rs` / `main.rs` — retired the `semanticTokensProvider` capability +
+  `semantic_tokens_full`; added `Backend::ignored_forms` reading live text from
+  the document store, registered as the custom `clojurePulse/ignoredForms` method.
+- `tests/test_e2e.rs` — round-trip asserting the ranges cover the `#_`/`(comment …)`
+  lines, exclude `;`/plain code, and that semantic tokens are no longer advertised.
+- README / ROADMAP reworded; the Tier-1 semantic-tokens plan marked superseded.
+
+**Extension (`clojure-pulse-vscode`, branch `feat/dim-ignored-forms`, 2 commits):**
+- `src/ignoredForms.ts` — pure `toRanges` + `createIgnoredFormDecorator` (opacity
+  `0.5`, `ClosedClosed`), injected `sendRanges` for tests. 5 unit tests.
+- `src/extension.ts` — creates the decorator (gated on `clojurePulse.dimIgnoredForms`),
+  refreshes on active-editor change / didOpen / debounced didChange / first paint;
+  disposes on deactivate.
+- `package.json` — added the `dimIgnoredForms` setting; removed the earlier
+  `configurationDefaults` semantic-highlighting default (no longer needed).
+
+**Codex review fixes (during Task 6):** first paint moved off the `Running` state
+(which can race the client's initial `didOpen` sync) to fire after `start()`
+resolves; refresh made split-view-aware (all visible editors, not just the active
+one); the debounced pass coalesced into `refreshAllVisible()` so a single timer
+never drops a pending refresh.
+
+**Verification.** All automated gates pass: `bb check` (242 lib + 79 e2e) and
+`bb e2e`; the extension's `npm run compile`/`lint`/`test` (18 tests). A direct
+stdio handshake against the built binary confirmed the extension's exact request
+(`didOpen` → `clojurePulse/ignoredForms`) returns the two expected ranges — the
+`#_` form and the multi-line `(comment …)` block — with the `;` comment and
+`(def n 42)` excluded. **Not automatable here:** the on-screen appearance (that
+the opacity decoration visibly dims the forms, brackets included) — the maintainer
+should confirm this in real VS Code/Calva per Task 7 Step 2.
+
+**Calva coexistence** (as designed): the custom method is inert unless called, so
+Calva is unaffected; retiring the semantic tokens keeps clj-pulse from overlapping
+Calva's own ignored-form dimming.
+
+**Neither branch is pushed or merged.** Both sit on `feat/dim-ignored-forms` in
+their repos, ready for review.
