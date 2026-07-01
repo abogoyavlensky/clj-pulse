@@ -173,3 +173,20 @@ clojure-pulse-vscode/
 
 - [x] **Step 4: Commit**
   `git commit -m "docs: record indent-on-type (Tier A)"`
+
+---
+
+## Status: COMPLETE (2026-07-02)
+
+Implemented as planned across commits `80a08bb` (scanner core), `d8115e6`
+(onTypeFormatting handler + capability), `1d28590` (e2e), `1876bee`
+(extension `formatOnType` default, in clojure-pulse-vscode), `824a073` (docs).
+
+Notes:
+- The indent core is the hand-written prefix scanner (per the revised plan) —
+  15 unit tests including UTF-16, comment/string/regex/char-literal skipping,
+  and `#_` transparency.
+- Codex review checkpoint added one hardening fix: mismatched closers (`]`
+  against an open `(`) are ignored instead of popping the wrong frame.
+- Gates: `bb check`, `bb e2e` (80 tests, incl. the new round-trip +
+  capability assertion), and `bb e2e-nvim` all pass. No issues remain.
