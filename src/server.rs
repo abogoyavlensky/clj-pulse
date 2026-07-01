@@ -194,7 +194,7 @@ impl LanguageServer for Backend {
                     );
                     index.set_extract_config(settings::load(&root_path));
 
-                    match scanner::build_index(&root_path, &source_paths, index.extract_config()) {
+                    match scanner::build_index(&root_path, &source_paths, &index.extract_config()) {
                         Ok(new_index) => {
                             let sym_count = new_index.symbols.len();
                             let ns_count = new_index.namespaces.len();
@@ -360,7 +360,7 @@ impl LanguageServer for Backend {
         // index them on open so navigation from them works.
         if let Ok(path) = uri.to_file_path() {
             if config::is_clojure_source(&path) && self.index.file_ns(&path).is_none() {
-                match extractor::extract_full_with(&text, &path, self.index.extract_config()) {
+                match extractor::extract_full_with(&text, &path, &self.index.extract_config()) {
                     Ok((meta, symbols, occurrences)) => {
                         tracing::info!("indexed opened file {}", path.display());
                         self.index.insert_file(meta, symbols, occurrences);
@@ -402,7 +402,7 @@ impl LanguageServer for Backend {
             match std::fs::read_to_string(&path) {
                 Ok(source) => {
                     self.index.remove_file(&path);
-                    match extractor::extract_full_with(&source, &path, self.index.extract_config())
+                    match extractor::extract_full_with(&source, &path, &self.index.extract_config())
                     {
                         Ok((meta, symbols, occurrences)) => {
                             let count = symbols.len();
@@ -492,7 +492,7 @@ impl LanguageServer for Backend {
             match std::fs::read_to_string(&path) {
                 Ok(source) => {
                     self.index.remove_file(&path);
-                    match extractor::extract_full_with(&source, &path, self.index.extract_config())
+                    match extractor::extract_full_with(&source, &path, &self.index.extract_config())
                     {
                         Ok((meta, symbols, occurrences)) => {
                             tracing::info!("watched re-index: {}", path.display());
@@ -518,7 +518,7 @@ impl LanguageServer for Backend {
                         // :paths may have changed — rebuild project sources,
                         // dropping files from removed roots.
                         let source_paths = config::source_paths(&root);
-                        match scanner::build_index(&root, &source_paths, index.extract_config()) {
+                        match scanner::build_index(&root, &source_paths, &index.extract_config()) {
                             Ok(new_index) => {
                                 index.merge_project_from(new_index, &Self::open_paths(&documents))
                             }
