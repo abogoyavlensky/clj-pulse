@@ -22,6 +22,13 @@ roadmap is about the "understand usages and change code" half.
   win over library symbols.
 - Headless e2e infrastructure: stdio harness, real Maven classpath,
   headless Neovim, real VS Code + Calva under Xvfb.
+- Ignored-form dimming: the server reports the whole-form ranges of `#_`
+  discard forms and `(comment …)` blocks over the custom `clojurePulse/ignoredForms`
+  request (quoted-data guarded), and the editor extension dims them with an
+  opacity decoration — brackets included, unlike semantic tokens, which can't
+  override bracket-pair colorization. Resolution-based semantic tokens
+  (functions/macros/defs/locals, unused-binding modifiers) remain the Tier-2
+  follow-up.
 
 ## Phase 1 — quick wins
 
@@ -145,6 +152,6 @@ meantime and keeping the server dependency-free is worth more early on.
 - Formatting — Calva ships and defaults to its own formatter.
 - The full clojure-lsp refactoring suite (extract function, inline symbol,
   thread/unthread, move-to-let, …) — each is its own project.
-- Semantic tokens, call hierarchy, protocol implementations, Calva custom
-  APIs (`clojure/serverInfo`, test tree, project tree), `.lsp/config.edn`
-  settings system, persistent project analysis cache.
+- Call hierarchy, protocol implementations, Calva custom APIs
+  (`clojure/serverInfo`, test tree, project tree), `.lsp/config.edn` settings
+  system, persistent project analysis cache.

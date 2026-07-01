@@ -64,6 +64,9 @@ async fn main() {
         // clojure-lsp-compatible jar content provider — what Calva calls to open
         // `jar:` navigation targets (clojure.core and library sources).
         .custom_method("clojure/dependencyContents", Backend::dependency_contents)
+        // clj-pulse custom: ranges of `#_`/`(comment …)` forms for the extension
+        // to dim (Calva-style opacity decoration).
+        .custom_method("clojurePulse/ignoredForms", Backend::ignored_forms)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

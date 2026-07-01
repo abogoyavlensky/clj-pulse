@@ -34,6 +34,10 @@ Language features:
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
   namespace isn't required yet.
 - **Diagnostics** - unresolved-namespace warnings, updated live as you type.
+- **Ignored-form dimming** - the server reports the ranges of `#_` discard
+  forms and `(comment …)` blocks over a `clojurePulse/ignoredForms` request; the
+  editor extension dims them (brackets included, nested and multi-line) with a
+  decoration a syntax grammar can't produce. No theme configuration needed.
 
 Clojure & project support:
 

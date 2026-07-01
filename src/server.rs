@@ -60,6 +60,11 @@ pub(crate) struct TextDocumentContentResult {
     text: String,
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct IgnoredFormsParams {
+    uri: String,
+}
+
 pub struct Backend {
     pub client: Client,
     pub index: Arc<Index>,
@@ -134,6 +139,23 @@ impl Backend {
         params: TextDocumentContentParams,
     ) -> tower_lsp::jsonrpc::Result<String> {
         Self::read_jar_uri(&params.uri)
+    }
+
+    /// clj-pulse custom `clojurePulse/ignoredForms`: the whole-form ranges of
+    /// `#_` discard forms and `(comment …)` blocks in the live buffer, for the
+    /// editor to dim. An unparseable or unopened URI yields an empty list. Never
+    /// errors — dimming is best-effort.
+    pub async fn ignored_forms(
+        &self,
+        params: IgnoredFormsParams,
+    ) -> tower_lsp::jsonrpc::Result<Vec<Range>> {
+        let Ok(uri) = Url::parse(&params.uri) else {
+            return Ok(Vec::new());
+        };
+        let Some(text) = self.documents.text(&uri) else {
+            return Ok(Vec::new());
+        };
+        Ok(handlers::ignored_forms::ignored_form_ranges(&text))
     }
 
     /// Computes unresolved-namespace diagnostics from the live buffer and

@@ -306,6 +306,13 @@ impl LspClient {
         )
     }
 
+    fn ignored_forms(&mut self, path: &Path) -> Value {
+        self.request(
+            "clojurePulse/ignoredForms",
+            json!({ "uri": format!("file://{}", path.display()) }),
+        )
+    }
+
     fn workspace_symbols(&mut self, query: &str) -> Value {
         self.request("workspace/symbol", json!({ "query": query }))
     }
@@ -2157,6 +2164,56 @@ fn test_e2e_document_symbols_outline() {
         .filter_map(|s| s["name"].as_str())
         .collect();
     assert_eq!(names, vec!["helper"]);
+}
+
+#[test]
+fn test_e2e_ignored_forms() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let init = client.initialize(&root);
+
+    // The Tier-1 semantic-tokens capability was retired — dimming is served
+    // over the custom `clojurePulse/ignoredForms` request instead.
+    assert!(
+        init["capabilities"]["semanticTokensProvider"].is_null(),
+        "semanticTokensProvider should no longer be advertised: {}",
+        init["capabilities"]
+    );
+
+    // A `;` line comment (line 0), a plain def (line 3), a `#_` discard
+    // (line 6), and a multi-line `(comment …)` block (lines 7-9).
+    let src = "; a line comment\n(ns tokens.demo)\n\n(def n 42)\n(def s \"hello\")\n(def k :some/key)\n#_(unused 1)\n(comment\n  (+ 1 2)\n  :done)\n";
+    let file = root.join("src/tokens.clj");
+    std::fs::write(&file, src).unwrap();
+    client.did_open(&file);
+
+    let result = client.ignored_forms(&file);
+    let ranges = result
+        .as_array()
+        .expect("ignoredForms result should be an array");
+
+    let covers = |r: &Value, l: u64| {
+        r["start"]["line"].as_u64().unwrap() <= l && l <= r["end"]["line"].as_u64().unwrap()
+    };
+
+    // Exactly the two ignored forms: the `#_` discard and the `(comment …)`.
+    assert_eq!(ranges.len(), 2, "expected 2 ignored-form ranges: {result}");
+    assert!(
+        ranges.iter().any(|r| r["start"]["line"] == json!(6)),
+        "a range should start on the #_ line (6): {result}"
+    );
+    assert!(
+        ranges.iter().any(|r| r["start"]["line"] == json!(7)),
+        "a range should start on the (comment …) line (7): {result}"
+    );
+
+    // The `;` line comment (0) and the plain `(def n 42)` (3) are never dimmed.
+    assert!(
+        !ranges.iter().any(|r| covers(r, 0) || covers(r, 3)),
+        "line comments and plain code must not be dimmed: {result}"
+    );
 }
 
 #[test]
