@@ -1575,6 +1575,12 @@ pub struct LocalBinding {
 /// name's range. Exotic type-spec method params (`reify`/`extend-*`) are left to
 /// generic descent — enclosing scopes stay correct, those method params don't
 /// bind (outside the `let`/`fn` cases this targets).
+///
+/// Limitation: only literal binding heads are recognized. A `:lint-as` macro
+/// mapped to `defn`/`defmacro` is not treated as a binding form here (that would
+/// need the merged `ExtractConfig` + ns aliases, which this pure `source`-only
+/// primitive intentionally omits), so its params are not surfaced as locals —
+/// the same fall-through as before local support existed, not a regression.
 pub fn locals_in_scope_at(source: &str, pos: Position) -> Vec<LocalBinding> {
     let mut parser = Parser::new();
     if parser.set_language(language()).is_err() {
@@ -1732,17 +1738,29 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
     for child in parts {
         match child.kind() {
             "vec_lit" if !params_bound => {
-                collect_binding_targets(*child, source, out);
                 params_bound = true;
+                // A cursor inside the params vector is either on a binding site
+                // or inside an `:or` default — and defaults are expressions
+                // evaluated in the *enclosing* scope. In neither case are this
+                // vector's own params in scope there, so bind nothing and stop.
                 if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
-                    return; // cursor within the params vector (e.g. an :or default)
+                    return;
                 }
+                collect_binding_targets(*child, source, out);
             }
             "list_lit" if arity_body(*child) => {
                 if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
                     let inner = named_children(*child);
-                    if let Some(params) = inner.first() {
-                        collect_binding_targets(*params, source, out);
+                    let params = inner.first();
+                    let in_params = params
+                        .map(|p| lsp_range_contains(node_to_lsp_range(*p, source), pos))
+                        .unwrap_or(false);
+                    // Same rule as the single-arity case: don't bind this arity's
+                    // params when the cursor sits within the params vector.
+                    if !in_params {
+                        if let Some(params) = params {
+                            collect_binding_targets(*params, source, out);
+                        }
                     }
                     for body in inner.iter().skip(1) {
                         if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
@@ -2150,6 +2168,28 @@ mod tests {
         let ps: Vec<_> = binds.iter().filter(|b| b.name == "p").collect();
         assert_eq!(ps.len(), 1, "p bound once: {:?}", binds);
         assert_eq!(ps[0].name_range.start, pos_of(src, "[p]", 0, 1));
+    }
+
+    #[test]
+    fn locals_or_default_value_evaluated_in_outer_scope() {
+        // `{:keys [a] :or {a a}}`: the default value `a` is evaluated in the
+        // enclosing scope, so the sibling destructured `a` is NOT in scope there
+        // (matching how the occurrence walker treats defaults as outer usages).
+        let src = "(ns x)\n(defn f [{:keys [a] :or {a a}}]\n  a)";
+        // Cursor on the default value (the second `a` in `{a a}`).
+        let at_default = local_names(src, pos_of(src, "{a a}", 0, 3));
+        assert!(
+            !at_default.contains(&"a".to_string()),
+            "default value uses outer scope: {:?}",
+            at_default
+        );
+        // But in the body, the destructured `a` IS in scope.
+        let at_body = local_names(src, pos_of(src, "\n  a)", 0, 3));
+        assert!(
+            at_body.contains(&"a".to_string()),
+            "body sees a: {:?}",
+            at_body
+        );
     }
 
     #[test]
