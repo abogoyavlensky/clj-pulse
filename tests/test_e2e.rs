@@ -683,6 +683,47 @@ fn test_e2e_lint_as_navigates_to_macro_defined_name() {
 }
 
 #[test]
+fn test_e2e_lint_as_config_live_reload() {
+    // Editing `.clj-kondo/config.edn` reloads `:lint-as` without a restart:
+    // goto-def on a macro-defined name works, then stops once the mapping is
+    // removed and the config change is signaled.
+    let project = setup_named("lint_as_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/app/core.clj");
+    client.did_open(&core);
+
+    // Initially `defthing` is lint-as'd to `def`, so `widget` navigates.
+    let (use_line, use_ch) = position_of(&core, "widget");
+    let before = client.goto_definition(&core, use_line, use_ch);
+    assert!(
+        before["uri"].is_string(),
+        "widget should resolve before reload, got {}",
+        before
+    );
+
+    // Drop the mapping and signal the watched-file change.
+    let config = root.join(".clj-kondo/config.edn");
+    std::fs::write(&config, "{}\n").unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", config.display()), "type": 2 }] }),
+    );
+    client.wait_for_log("config reloaded");
+
+    // With no lint-as, `(defthing widget 1)` no longer defines `widget`.
+    let after = client.goto_definition(&core, use_line, use_ch);
+    assert!(
+        after.is_null(),
+        "widget must not resolve after the lint-as mapping is removed, got {}",
+        after
+    );
+}
+
+#[test]
 fn test_e2e_letgo_core_navigation() {
     // A pinned let-go project (`:lg-version`) with no deps of its own: bare
     // builtins and clojure.*-aliased stdlib must navigate into the let-go core
