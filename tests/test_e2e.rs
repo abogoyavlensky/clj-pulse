@@ -1252,6 +1252,42 @@ fn test_e2e_completion_local_in_let() {
 }
 
 #[test]
+fn test_e2e_references_local_in_let() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+
+    // `base` is bound once and used twice (in the `scaled` binding and the
+    // body) → declaration + 2 usages = 3 locations, all in this file.
+    let (line, ch) = position_of(&locals, "base"); // first occurrence: the binding
+    let result = client.references(&locals, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null for local `base`: {}", result));
+    assert_eq!(locs.len(), 3, "decl + 2 usages: {:?}", locs);
+    assert!(
+        locs.iter()
+            .all(|l| l["uri"].as_str().unwrap().ends_with("/src/locals.clj")),
+        "all references in locals.clj: {:?}",
+        locs
+    );
+
+    // Without the declaration, only the two usages are returned.
+    let result = client.references(&locals, line, ch, false);
+    assert_eq!(
+        result.as_array().unwrap().len(),
+        2,
+        "two usages: {}",
+        result
+    );
+}
+
+#[test]
 fn test_e2e_definition_from_file_outside_source_paths() {
     // deps.edn has :paths ["src"], so dev/scratch.clj is NOT indexed at
     // startup — but navigation from an opened file must still work.
@@ -2566,8 +2602,9 @@ fn test_e2e_references_work_without_indexed_definition() {
 
 #[test]
 fn test_e2e_rename_rejects_local_shadowing_global() {
-    // `(defn f2 [add] add)` — the param shadows simple.core/add; rename and
-    // references on it must NOT touch the global var.
+    // `(defn f2 [add] add)` — the param shadows simple.core/add. Rename is still
+    // rejected (local rename unsupported), and references resolve to the local's
+    // own binding + usage, never the global var (its defn or cross-file uses).
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
 
@@ -2597,11 +2634,21 @@ fn test_e2e_rename_rejects_local_shadowing_global() {
         error
     );
 
+    // References resolve to the local (param binding + body usage, both on the
+    // inserted `f2` line) and must NOT reach the global `simple.core/add` — not
+    // its defn earlier in core.clj, not its usage in utils.clj.
     let refs = client.references(&core, last_line, 11, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("expected local references, got: {}", refs));
+    assert_eq!(locs.len(), 2, "param binding + body usage only: {:?}", locs);
     assert!(
-        refs.is_null(),
-        "local must have no global references: {:?}",
-        refs
+        locs.iter().all(|l| {
+            l["uri"].as_str().unwrap().ends_with("/src/core.clj")
+                && l["range"]["start"]["line"] == json!(last_line)
+        }),
+        "local refs stay on the shadowing form, never the global: {:?}",
+        locs
     );
 }
 
