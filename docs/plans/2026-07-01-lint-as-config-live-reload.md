@@ -224,3 +224,36 @@ No new files.
 - DRY (reuse the existing rebuild path), YAGNI (single `config.edn` files only,
   project re-index only), frequent commits.
 - Use `/writing-clearly` for prose.
+
+---
+
+## Implementation Summary (completed 2026-07-01)
+
+**Status: done.** Tasks 1-4 implemented, verified, and committed
+(`4b3daf1` → `66ead8d`).
+
+**What shipped:**
+- `src/index/mod.rs` — `extract_config` `OnceLock` → `RwLock`; accessor returns a
+  clone; setter replaces. Callers gained a `&`.
+- `src/server.rs` — explicit `.clj-kondo`/`.clj-pulse` `config.edn` watcher
+  globs; a `config_changed` flag detected before the EDN branch; the post-loop
+  spawn now runs on `classpath_changed || config_changed`, reloading
+  `settings::load`, re-indexing the project, and logging `config reloaded`
+  before the (optional) library branch.
+- `tests/test_e2e.rs` — before/after reload test.
+- `README.md`, `docs/ROADMAP.md` — config now reloads live.
+
+**Issue found and fixed (unplanned):** the reload e2e test initially failed —
+`widget` still resolved after the `:lint-as` mapping was removed.
+`merge_project_from` removed only *stale files*; a file present in both scans
+that lost a symbol (exactly the `:lint-as` case) left the old symbol lingering
+in `symbols`, since the fqn-keyed insert never overwrote it. Fixed by dropping
+each re-scanned namespace's previous symbols before inserting the new set
+(`src/index/mod.rs`), with a unit test. This also hardens the existing
+`source_paths_changed` rebuild path. Committed as `f705fec`.
+
+**Verification:** `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt`
+clean, 218 lib tests (incl. the new merge test), and the full `test_e2e` suite
+75 passed / 0 failed / 2 ignored (incl. the new reload test), built with
+`RUSTFLAGS="-C debuginfo=0"` to avoid the memory-constrained linker OOM. A
+second-opinion codex review was run against `fb0728a..HEAD`.
