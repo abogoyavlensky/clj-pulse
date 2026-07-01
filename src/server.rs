@@ -319,6 +319,10 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "\n".to_string(),
+                    more_trigger_character: None,
+                }),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -723,6 +727,16 @@ impl LanguageServer for Backend {
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         handlers::code_action::handle(&self.index, &self.documents, params).map_err(|e| {
             tracing::error!("code action error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        handlers::indent::on_type_formatting(&self.documents, params).map_err(|e| {
+            tracing::error!("on type formatting error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
     }

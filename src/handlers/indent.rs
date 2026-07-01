@@ -12,10 +12,50 @@
 //! comments, strings, regexes and char literals. Prefix-only ⇒ robust to
 //! unbalanced mid-edit code and independent of anything right of the cursor.
 
-// TODO(next commit): remove once the onTypeFormatting handler consumes indent_at.
-#![allow(dead_code)]
+use tower_lsp::lsp_types::{DocumentOnTypeFormattingParams, Position, Range, TextEdit};
 
-use tower_lsp::lsp_types::Position;
+use crate::document::DocumentStore;
+
+/// `textDocument/onTypeFormatting`, triggered on `\n`: one edit replacing the
+/// new line's leading whitespace with the structural indent. Anything
+/// unexpected (unknown document, in-string position, already-correct indent)
+/// returns no edits — indentation is best-effort, never an error.
+pub fn on_type_formatting(
+    documents: &DocumentStore,
+    params: DocumentOnTypeFormattingParams,
+) -> anyhow::Result<Option<Vec<TextEdit>>> {
+    if params.ch != "\n" {
+        return Ok(None);
+    }
+    let pos = params.text_document_position.position;
+    let uri = params.text_document_position.text_document.uri;
+    let Some(text) = documents.text(&uri) else {
+        return Ok(None);
+    };
+    let Some(indent) = indent_at(&text, pos) else {
+        return Ok(None);
+    };
+
+    let line_start = position_to_byte(&text, Position::new(pos.line, 0));
+    let line_end = text[line_start..]
+        .find('\n')
+        .map(|i| line_start + i)
+        .unwrap_or(text.len());
+    let line = &text[line_start..line_end];
+    let ws_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let desired = " ".repeat(indent as usize);
+    if line[..ws_len] == desired {
+        return Ok(None);
+    }
+    Ok(Some(vec![TextEdit {
+        // Leading whitespace is spaces/tabs only, so bytes == UTF-16 units.
+        range: Range::new(
+            Position::new(pos.line, 0),
+            Position::new(pos.line, ws_len as u32),
+        ),
+        new_text: desired,
+    }]))
+}
 
 /// One unclosed open delimiter to the left of the cursor.
 #[derive(Clone, Copy)]
@@ -24,6 +64,10 @@ struct Frame {
     col_after: u32,
     /// `(` / `#(` — the only frames eligible for the symbol-head offset.
     paren_like: bool,
+    /// The closer that ends this frame; a mismatched closer (`]` against `(`)
+    /// is ignored rather than popping the wrong frame — mid-edit code is
+    /// routinely malformed and must not collapse the context to top level.
+    closer: char,
     /// Whether the first form inside is a symbol; `None` until one is seen.
     first_form_symbol: Option<bool>,
 }
@@ -108,6 +152,7 @@ pub(crate) fn indent_at(source: &str, pos: Position) -> Option<u32> {
                     stack.push(Frame {
                         col_after: col,
                         paren_like: true,
+                        closer: ')',
                         first_form_symbol: None,
                     });
                 }
@@ -117,6 +162,7 @@ pub(crate) fn indent_at(source: &str, pos: Position) -> Option<u32> {
                     stack.push(Frame {
                         col_after: col,
                         paren_like: false,
+                        closer: '}',
                         first_form_symbol: None,
                     });
                 }
@@ -151,6 +197,7 @@ pub(crate) fn indent_at(source: &str, pos: Position) -> Option<u32> {
                 stack.push(Frame {
                     col_after: col,
                     paren_like: true,
+                    closer: ')',
                     first_form_symbol: None,
                 });
             }
@@ -159,11 +206,14 @@ pub(crate) fn indent_at(source: &str, pos: Position) -> Option<u32> {
                 stack.push(Frame {
                     col_after: col,
                     paren_like: false,
+                    closer: if c == '[' { ']' } else { '}' },
                     first_form_symbol: None,
                 });
             }
             ')' | ']' | '}' => {
-                stack.pop();
+                if stack.last().is_some_and(|frame| frame.closer == c) {
+                    stack.pop();
+                }
             }
             c => {
                 let is_symbol = symbol_start(c, chars.peek().copied());
@@ -295,6 +345,14 @@ mod tests {
     #[test]
     fn unmatched_closer_is_ignored() {
         assert_eq!(indent(")\n(foo x\n"), Some(2));
+    }
+
+    #[test]
+    fn mismatched_closer_does_not_pop_the_open_frame() {
+        // `]` must not close `(foo` — mid-edit buffers are routinely broken.
+        assert_eq!(indent("(foo ]\n"), Some(2));
+        // `)` against an open `[` is ignored; the vector stays innermost.
+        assert_eq!(indent("(a [b ) c\n"), Some(4));
     }
 
     #[test]
