@@ -4,9 +4,9 @@
 
 **Goal:** When the user presses Enter inside a Clojure form, indent the new line to the structurally-correct column (Clojure Sublimed / tonsky rule). Implemented in clj-pulse as `textDocument/onTypeFormatting` on `\n`; the VS Code extension just turns on `editor.formatOnType` for Clojure.
 
-**Tech Stack:** Rust, tower-lsp (`on_type_formatting`, confirmed at tower-lsp-0.20 lib.rs:1072), tree-sitter-clojure. Reuses `index::extractor::language()` and `index::extractor::point_to_position()`. Extension side: one `configurationDefaults` entry.
+**Tech Stack:** Rust, tower-lsp (`on_type_formatting`, confirmed at tower-lsp-0.20 lib.rs:1072), a small hand-written prefix scanner (no tree-sitter on this path). Reuses `Documents::text` / `Documents::text_up_to` (document.rs:133/143). Extension side: one `configurationDefaults` entry.
 
-**Relationship to Plan B-client:** This plan is standalone and shippable. Plan `clojure-pulse-vscode/docs/plans/2026-07-01-indent-on-enter-client-side.md` (Option B-client) is a *follow-on* to try only if the `onTypeFormatting` cursor "settle" is too visible — it owns the Enter key in the extension for a jump-free feel while **keeping this server-side indenter** for other editors and explicit formatting.
+**Relationship to Plan B-client:** This plan is standalone and shippable, and the server-side indenter stays regardless — it serves other editors (nvim/zed/emacs) and backs future explicit reindent/range formatting. Plan `clojure-pulse-vscode/docs/plans/2026-07-01-indent-on-enter-client-side.md` (Option B-client) was originally a contingency for a too-visible `onTypeFormatting` cursor "settle"; it is now planned regardless, because the maintain-relative-indentation feature (`clojure-pulse-vscode/docs/plans/2026-07-01-maintain-relative-indentation.md`) needs the same client-side scanner — and both client features and this plan must implement the **identical rule and scanner algorithm** so all paths agree.
 
 ---
 
@@ -14,7 +14,7 @@
 
 ### Approach
 
-Register `onTypeFormatting` triggered on `\n`. On Enter, compute the new line's indent from the buffer's structure and return one `TextEdit` that sets the leading whitespace. Config-free, no external tools, reuses clj-pulse's parser and UTF-16 conversion.
+Register `onTypeFormatting` triggered on `\n`. On Enter, compute the new line's indent from the buffer's structure and return one `TextEdit` that sets the leading whitespace. Config-free, no external tools; the indent core is a self-contained prefix scanner using clj-pulse's UTF-16 position conventions.
 
 ### The rule (faithful port of Clojure Sublimed `cs_indent.py:indent`)
 
@@ -23,15 +23,15 @@ Register `onTypeFormatting` triggered on `\n`. On Enter, compute the new line's 
 - `[] {} #{}` → align to first element (offset 0). `(let [a 1⏎` → under `a`.
 - `(` / `#()` with a **symbol head** → 2-space body indent. `(when x⏎` → 2 spaces.
 - `(` with a non-symbol head (`((f) …`, `(:k …`) → align to first element.
-- inside a `str_lit` / `regex_lit` → **no edit** (return nothing).
+- inside a string / regex → **no edit** (return nothing). *Deliberate deviation from Sublimed, which aligns the new line under the open quote (`cs_indent.py:59`) — adding alignment spaces changes the string's value, so we leave string content alone.*
 - no enclosing bracket → **top level → 0**.
 
 This is uniform 2-space for symbol-headed lists (no argument alignment) — the Sublimed default, deliberately simpler than cljfmt's symbol table (that is Tier B).
 
 ### Key decisions
 
-- **Prefix-parse, not full-document.** Indentation depends only on the *preceding* context (which brackets are open to the left). Parse `&source[..cursor_byte]` and find the innermost **unclosed** bracket/string at the end of the prefix. This is robust to unbalanced/mid-edit code, immune to anything after the cursor, and — importantly — **plays well with Parinfer** (it ignores the closing brackets Parinfer manages on the right). Task 1 must pin how tree-sitter-clojure represents an unclosed form on a prefix (an incomplete `*_lit` with a missing close vs. an `ERROR` node whose first child is the open delimiter) and match on it.
-- **Reuse position helpers:** `point_to_position` for the delimiter column; a small local `position_to_byte(&str, Position)` (same UTF-16 logic as `document.rs::position_to_char`, but over a `&str`). **No `extractor.rs` changes.**
+- **Prefix-scan with a hand-written tokenizer, not tree-sitter.** Indentation depends only on the *preceding* context (which brackets are open to the left). Scan `&source[..cursor_byte]` once, maintaining a stack of open delimiters; each frame records the delimiter kind, the UTF-16 column just after it, and whether the first inner form is a symbol. Skip Clojure lexical constructs: `;`→EOL comments, `"…"` / `#"…"` strings (honoring `\"`), `\c` char literals (so `\(` is not an opener); treat `#_` as transparent for bracket balance. Push on `(` `[` `{` `#{` `#(`, pop on `)` `]` `}`. The stack top at the cursor is the innermost open context → apply the rule (string frame → `None`). *Why not tree-sitter:* error recovery on a truncated prefix produces undocumented, version-dependent `ERROR` shapes (an unclosed opener can be dropped or nested arbitrarily) — too brittle for something that runs on every Enter. A ~100-line scanner is deterministic, robust to unbalanced mid-edit code, immune to anything after the cursor, **plays well with Parinfer** (ignores the closers Parinfer manages on the right), and is the *same algorithm* as Plan B-client's TS scanner — rule parity by construction. Sublimed likewise indents off its own parser's explicit unmatched-opener nodes (`cs_indent.py:indent`), not a general grammar.
+- **Reuse position machinery, don't extend it:** a small local `position_to_byte(&str, Position)` (same UTF-16 logic as `document.rs::position_to_char`, but over a `&str`) slices the prefix; the scanner tracks columns in UTF-16 code units as it decodes. `Documents::text_up_to` (document.rs:143) already exists as an alternative prefix source. **No `extractor.rs` changes.**
 - **Pure, testable core:** `indent_at(source: &str, pos: Position) -> Option<u32>` (`None` = don't reindent). The handler wraps it into a `TextEdit` on the new line's leading whitespace, returning nothing when the indent already matches.
 - **Trigger `\n` only** in Tier A.
 - **Never crash** (house invariant): parse/edge failures return no edits.
@@ -76,32 +76,30 @@ clojure-pulse-vscode/
 - Create: `src/handlers/indent.rs`
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Pin the unclosed-form node shape**
-  Add a throwaway `#[test]` that parses `"(let [a 1"` (prefix, no closers) and prints the node kinds/structure around the last byte, to confirm whether the open `(`/`[` appear as incomplete `list_lit`/`vec_lit` (missing close) or as `ERROR` nodes. Record the finding as a comment; it drives Step 3's matching. Then remove/replace the throwaway test.
-
-- [ ] **Step 2: Write failing unit tests**
+- [ ] **Step 1: Write failing unit tests**
   Test `indent_at(source, pos)` (pos is the cursor after the newline, i.e. start of the new line):
   - `(let [a 1\n` → `Some(col of a)` (align, vector).
   - `(when x\n` and `(foo bar\n` → `Some(2-space)` (symbol-headed list).
-  - `[a 1\n` / `{:a 1\n` → align; `#{a\n` and `#(foo\n` → align / 2-space (delimiter length handled via the opener token's end column).
+  - `[a 1\n` / `{:a 1\n` → align; `#{a\n` and `#(foo\n` → align / 2-space (delimiter length handled via the column after the full opener token `#{` / `#(`).
   - non-symbol head `((f)\n` → align.
   - nested `(a (b c\n` → 2-space from the inner `(`.
   - inside string `"ab\n` → `None`.
   - top level (between forms) → `Some(0)`.
+  - scanner-skip cases: an opener inside a preceding `;` comment (`; (a\n(foo x\n`), inside a closed string (`"(a" x\n` context), a `\(` char literal, and `#_`-discarded forms counting normally for bracket balance — none of these may corrupt the stack.
   - `position_to_byte` UTF-16 cases (a line with `café` / a `→` before the cursor).
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [ ] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib indent`
   Expected: FAIL — module/functions not found.
 
-- [ ] **Step 4: Implement the pure core**
-  `position_to_byte(source, pos)`: walk to `pos.line`, convert `pos.character` (UTF-16) to a byte offset within the line, clamp to `source.len()`. `indent_at`: slice the prefix `&source[..cursor_byte]`, parse with `extractor::language()`, take the deepest node at the prefix end and walk up (`parent()`) to the nearest enclosing **unclosed** bracket form (`list_lit`/`vec_lit`/`map_lit`/`set_lit`/`anon_fn_lit`/`ns_map_lit`, or the `ERROR`/incomplete shape from Step 1) or string (`str_lit`/`regex_lit`); apply the rule: string → `None`; none → `Some(0)`; else `col_after = point_to_position(opener_token.end_position(), opener_token.end_byte(), prefix).character` and `offset = 1` iff kind ∈ {`list_lit`,`anon_fn_lit`} and the first named child is a `sym_lit`, returning `Some(col_after + offset)`.
+- [ ] **Step 3: Implement the pure core**
+  `position_to_byte(source, pos)`: walk to `pos.line`, convert `pos.character` (UTF-16) to a byte offset within the line, clamp to `source.len()`. `indent_at`: slice the prefix `&source[..cursor_byte]` and run the scanner from the Design section: one forward pass, stack of frames `{kind, col_after_opener (UTF-16), first_form_is_symbol}`; skip comments/strings/regexes/char literals; push `(` `[` `{` `#{` `#(`, pop `)` `]` `}` (ignore unmatched closers). At the end: in-string frame → `None`; empty stack → `Some(0)`; else `Some(col_after_opener + offset)` with `offset = 1` iff kind ∈ {`(`, `#(`} and the first inner form is a symbol (first non-whitespace token that is not itself an opener/closer/literal-start, per Sublimed's `is_symbol` check).
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib indent`
   Expected: PASS.
 
-- [ ] **Step 6: Format, lint, commit**
+- [ ] **Step 5: Format, lint, commit**
   Run: `bb fmt && bb lint`
   `git commit -m "feat: structural indent computation for indent-on-type"`
 
@@ -150,7 +148,7 @@ clojure-pulse-vscode/
 - Modify: `clojure-pulse-vscode/package.json` (separate repo)
 
 - [ ] **Step 1: Add the default**
-  In `contributes.configurationDefaults`, add `"editor.formatOnType": true` under the existing `"[clojure]"` block (which already sets `editor.semanticHighlighting.enabled`).
+  `package.json` has **no** `configurationDefaults` section yet — add one under `contributes`: `"configurationDefaults": { "[clojure]": { "editor.formatOnType": true } }`.
 
 - [ ] **Step 2: Verify**
   Run: `cd clojure-pulse-vscode && npm run compile && npx @vscode/vsce ls | grep package.json` (manifest still valid). Manually: F5, open a `.clj`, press Enter inside `(let [a 1|])`, confirm the new line aligns under `a`.
