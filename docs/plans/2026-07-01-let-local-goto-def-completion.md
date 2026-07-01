@@ -173,7 +173,7 @@ moves after the merge so a buffer with only locals still completes.
 - Modify: `src/index/extractor.rs`
 - Test: `src/index/extractor.rs` (`#[cfg(test)] mod tests`)
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   Add a test helper `locals_at(source, line, col) -> Vec<LocalBinding>` calling
   `locals_in_scope_at(source, Position::new(line, col))`. Cover:
   - **let sequential (the bug):** for
@@ -190,11 +190,11 @@ moves after the merge so a buffer with only locals still completes.
     `j` in the body.
   - **letfn:** both fn names are visible in the letfn body.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib locals_`
   Expected: FAIL (unresolved `locals_in_scope_at` / `LocalBinding`).
 
-- [ ] **Step 3: Implement the primitive**
+- [x] **Step 3: Implement the primitive**
   Add `pub struct LocalBinding { pub name: String, pub name_range: Range }` and
   `pub fn locals_in_scope_at`. Implement the position-directed spine walk and
   `collect_binding_targets` per the Design section, reusing the module's private
@@ -203,11 +203,11 @@ moves after the merge so a buffer with only locals still completes.
   `collect_binding_names`, adding a comment on `collect_binding_targets` and
   `collect_binding_names` that cross-references the other (keep-in-sync note).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib locals_`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "feat: resolve local bindings in scope at a position"`
 
 ## Task 2: Go-to-definition for locals
