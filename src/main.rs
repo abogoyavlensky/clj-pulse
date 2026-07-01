@@ -11,9 +11,11 @@ mod edn;
 mod handlers;
 mod index;
 mod jar_content;
+mod kondo;
 mod leiningen;
 mod lgx;
 mod server;
+mod settings;
 mod uri;
 
 use server::Backend;

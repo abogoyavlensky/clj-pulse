@@ -8,7 +8,7 @@ use tree_sitter::{Node, Parser};
 use tree_sitter_clojure::LANGUAGE;
 use tree_sitter_language::LanguageFn;
 
-use super::{DefKind, NsMeta, Occurrence, Symbol};
+use super::{DefKind, ExtractConfig, NsMeta, Occurrence, Symbol};
 
 static LANGUAGE_REF: OnceLock<tree_sitter::Language> = OnceLock::new();
 
@@ -209,6 +209,11 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
 /// so an open build manifest (`deps.edn`, `bb.edn`) never leaks keyword
 /// occurrences into references.
 pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
+    file_occurrences_with(source, path, &ExtractConfig::default())
+}
+
+/// Like [`file_occurrences`] but honors `cfg` (`:lint-as`) for Clojure sources.
+pub fn file_occurrences_with(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Occurrence> {
     if crate::config::is_edn(path) {
         if is_integrant_edn(path, source) {
             extract_edn(source)
@@ -216,15 +221,28 @@ pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
             Vec::new()
         }
     } else {
-        extract_full(source, path)
+        extract_full_with(source, path, cfg)
             .map(|(_, _, occs)| occs)
             .unwrap_or_default()
     }
 }
 
 /// Like [`extract`] but also collects every resolved symbol usage
-/// (occurrences) in a second pass over the same parse tree.
+/// (occurrences) in a second pass over the same parse tree. Uses the default
+/// (empty) [`ExtractConfig`]; call [`extract_full_with`] to honor `:lint-as`.
 pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
+    extract_full_with(source, file, &ExtractConfig::default())
+}
+
+/// Like [`extract_full`] but honors `cfg`. The only setting consulted today is
+/// `:lint-as`: a list head whose fqn maps to a `def`-family kind is extracted as
+/// a definition (and still recorded as a usage), so names introduced by custom
+/// macros become navigable.
+pub fn extract_full_with(
+    source: &str,
+    file: &Path,
+    cfg: &ExtractConfig,
+) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
     let mut parser = Parser::new();
     parser
         .set_language(language())
@@ -248,9 +266,11 @@ pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, V
     for i in 0..root.named_child_count() {
         let child = root.named_child(i).unwrap();
         match child.kind() {
-            "list_lit" => process_top_level_list(child, source, file, &mut ns_meta, &mut symbols),
+            "list_lit" => {
+                process_top_level_list(child, source, file, &mut ns_meta, &mut symbols, cfg)
+            }
             "read_cond_lit" => {
-                process_reader_conditional(child, source, file, &mut ns_meta, &mut symbols);
+                process_reader_conditional(child, source, file, &mut ns_meta, &mut symbols, cfg);
             }
             _ => {}
         }
@@ -262,6 +282,7 @@ pub fn extract_full(source: &str, file: &Path) -> Result<(NsMeta, Vec<Symbol>, V
         source,
         ns_meta: &ns_meta,
         def_names,
+        lint_as: &cfg.lint_as,
     };
     let mut occurrences = Vec::new();
     let mut scope: Vec<HashSet<String>> = Vec::new();
@@ -279,6 +300,7 @@ fn process_reader_conditional(
     file: &Path,
     ns_meta: &mut NsMeta,
     symbols: &mut Vec<Symbol>,
+    cfg: &ExtractConfig,
 ) {
     let children: Vec<Node> = named_children(node);
     // read_cond_lit contains alternating kwd_lit and form pairs
@@ -286,9 +308,38 @@ fn process_reader_conditional(
     while i + 1 < children.len() {
         let form = &children[i + 1];
         if form.kind() == "list_lit" {
-            process_top_level_list(*form, source, file, ns_meta, symbols);
+            process_top_level_list(*form, source, file, ns_meta, symbols, cfg);
         }
         i += 2;
+    }
+}
+
+/// Resolves a list-head `sym_lit` to the fully-qualified name clj-kondo would
+/// use, for matching against `:lint-as` keys. A qualified head resolves its
+/// `:as` alias (an unknown alias is kept literal); a bare head resolves a
+/// `:refer`, else falls back to the current namespace. `None` for a nameless
+/// head, or a bare name when there is no current namespace to qualify it.
+fn resolve_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
+    let name = node_text(sym_name_node(head), source);
+    if name.is_empty() {
+        return None;
+    }
+    if let Some(ns_node) = head.child_by_field_name("namespace") {
+        let alias = node_text(ns_node, source);
+        let ns = ns_meta
+            .aliases
+            .get(alias)
+            .map(String::as_str)
+            .unwrap_or(alias);
+        return Some(format!("{}/{}", ns, name));
+    }
+    if let Some(fqn) = ns_meta.refers.get(name) {
+        return Some(fqn.clone());
+    }
+    if ns_meta.name.is_empty() {
+        None
+    } else {
+        Some(format!("{}/{}", ns_meta.name, name))
     }
 }
 
@@ -298,6 +349,7 @@ fn process_top_level_list(
     file: &Path,
     ns_meta: &mut NsMeta,
     symbols: &mut Vec<Symbol>,
+    cfg: &ExtractConfig,
 ) {
     let children: Vec<Node> = named_children(node);
     if children.is_empty() {
@@ -313,7 +365,16 @@ fn process_top_level_list(
 
     if first_text == "ns" {
         extract_ns(&children, source, ns_meta);
-    } else if let Some(kind) = str_to_defkind(first_text) {
+        return;
+    }
+
+    // A built-in def form (`defn`, `def`, …), or a `:lint-as` macro mapped to
+    // one (`defcomponent` → `def`). The mapped kind reuses the normal def
+    // extraction, so the macro's defined name becomes a real symbol.
+    let kind = str_to_defkind(first_text).or_else(|| {
+        resolve_head_fqn(first, ns_meta, source).and_then(|fqn| cfg.lint_as.get(&fqn).cloned())
+    });
+    if let Some(kind) = kind {
         let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
         if is_defmethod {
@@ -771,6 +832,9 @@ struct OccurrenceCtx<'a> {
     source: &'a str,
     ns_meta: &'a NsMeta,
     def_names: HashSet<&'a str>,
+    /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
+    /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
+    lint_as: &'a HashMap<String, DefKind>,
 }
 
 static CORE_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
@@ -854,6 +918,20 @@ fn walk_list(
 ) {
     let children = named_children(node);
     let Some(head) = children.first() else { return };
+
+    // A `:lint-as` head (e.g. `defcomponent` → `def`) introduces a definition.
+    // Record the head itself as a usage (so it still navigates to the macro when
+    // that macro's namespace is indexed), then walk the form as the def-family
+    // kind it maps to — its name binds as a def, its body args are usages.
+    if head.kind() == "sym_lit" {
+        if let Some(kind) = resolve_head_fqn(*head, ctx.ns_meta, ctx.source)
+            .and_then(|fqn| ctx.lint_as.get(&fqn).cloned())
+        {
+            record_occurrence(*head, ctx, scope, out);
+            walk_def_form(kind, &children, ctx, scope, out);
+            return;
+        }
+    }
 
     // A head names a core/special form only when it is unqualified or qualified
     // to `clojure.core`. Matching on the name part alone would misread a
@@ -1471,19 +1549,7 @@ fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occu
 }
 
 fn str_to_defkind(s: &str) -> Option<DefKind> {
-    match s {
-        "def" => Some(DefKind::Def),
-        "defonce" => Some(DefKind::Defonce),
-        "defn" => Some(DefKind::Defn),
-        "defn-" => Some(DefKind::DefnPrivate),
-        "defmacro" => Some(DefKind::Defmacro),
-        "defmulti" => Some(DefKind::Defmulti),
-        "defmethod" => Some(DefKind::Defmethod),
-        "defprotocol" => Some(DefKind::Defprotocol),
-        "defrecord" => Some(DefKind::Defrecord),
-        "deftype" => Some(DefKind::Deftype),
-        _ => None,
-    }
+    DefKind::from_def_symbol(s)
 }
 
 #[cfg(test)]
@@ -1561,5 +1627,39 @@ mod tests {
     #[test]
     fn keyword_fqn_auto_without_ns_or_current_ns_is_none() {
         assert_eq!(resolve_kwd("::x", "", &[]), None);
+    }
+
+    #[test]
+    fn lint_as_def_extracts_defined_name_and_keeps_head_usage() {
+        let src = "(ns x (:require [my :refer [defthing]]))\n(defthing foo 1)\n(inc foo)";
+        let cfg = ExtractConfig {
+            lint_as: HashMap::from([("my/defthing".to_string(), DefKind::Def)]),
+        };
+        let (_, symbols, occs) =
+            extract_full_with(src, std::path::Path::new("x.clj"), &cfg).unwrap();
+
+        // The macro's name argument is now a real definition.
+        let foo = symbols
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("foo should be defined");
+        assert_eq!(foo.fqn, "x/foo");
+        assert!(matches!(foo.kind, DefKind::Def));
+
+        // The macro head still resolves to the macro (navigable when indexed).
+        assert!(occs.iter().any(|o| o.fqn == "my/defthing"));
+        // The later `(inc foo)` use points at the new def, and the def-site name
+        // is not itself recorded as an occurrence (exactly one `x/foo`).
+        assert_eq!(occs.iter().filter(|o| o.fqn == "x/foo").count(), 1);
+    }
+
+    #[test]
+    fn without_lint_as_macro_defines_nothing() {
+        let src = "(ns x (:require [my :refer [defthing]]))\n(defthing foo 1)\n(inc foo)";
+        let (_, symbols, _) = extract_full(src, std::path::Path::new("x.clj")).unwrap();
+        assert!(
+            symbols.iter().all(|s| s.name != "foo"),
+            "with no :lint-as, defthing must not define foo"
+        );
     }
 }

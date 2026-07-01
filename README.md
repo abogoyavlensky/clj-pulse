@@ -47,6 +47,13 @@ Clojure & project support:
   index fresh across git pulls and branch switches; files outside the project's
   `:paths` are indexed when opened.
 
+> [!NOTE]
+> **Dependency depth:** `deps.edn` and let-go projects index the full transitive
+> dependency tree (from `.cpcache` and `lgx.edn`). Leiningen `project.clj`
+> projects index only direct dependencies that declare an explicit version and
+> already live in `~/.m2`; transitive deps and parent-inherited versions are not
+> indexed yet. See [docs/MEMORY.md](docs/MEMORY.md).
+
 ## Installation
 
 ### Homebrew (macOS, Linux)
@@ -105,6 +112,30 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 
 > [NOTE!]
 > Currently, Zed editor, `clj-pulse` works only with project's own files, no libs inspection yet.
+
+## Configuration
+
+clj-pulse reads an optional `.clj-pulse/config.edn` at the project root and falls
+back to `.clj-kondo/config.edn`. Today it understands one key, `:lint-as`, which
+tells clj-pulse to treat a custom macro like a built-in `def` form so the name
+it introduces becomes navigable:
+
+```clojure
+;; .clj-pulse/config.edn  (or .clj-kondo/config.edn)
+{:lint-as {my.app/defcomponent clojure.core/def}}
+```
+
+With that mapping, go-to-definition, hover, find-references, and the document
+outline all resolve a name defined by `(defcomponent thing …)`. clj-pulse merges
+the two files (with `.clj-pulse/config.edn` winning on conflicts) and watches
+them, reloading `:lint-as` when either changes, with no restart needed. A
+project that
+already configures `:lint-as` for clj-kondo works with no extra setup. Only
+mappings to `def`-family forms (`def`, `defn`, `defmethod`, …) take effect;
+others (such as `clojure.core/for`) are ignored.
+
+`.clj-pulse/` also holds generated data (`jar-cache/`, `server.log`), so commit
+`config.edn` and gitignore the rest.
 
 ## Development
 

@@ -5,9 +5,9 @@ use rayon::prelude::*;
 
 use super::extractor;
 use super::jar_cache;
-use super::{Index, NsMeta, Symbol};
+use super::{ExtractConfig, Index, NsMeta, Symbol};
 
-pub fn build_index(_root: &Path, source_paths: &[PathBuf]) -> Result<Index> {
+pub fn build_index(_root: &Path, source_paths: &[PathBuf], cfg: &ExtractConfig) -> Result<Index> {
     let index = Index::new();
     let files = collect_clojure_files(source_paths);
 
@@ -23,7 +23,7 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf]) -> Result<Index> {
                 }
             };
 
-            match extractor::extract_full(&source, file) {
+            match extractor::extract_full_with(&source, file, cfg) {
                 Ok(result) => Some(result),
                 Err(e) => {
                     tracing::warn!("failed to extract {}: {}", file.display(), e);

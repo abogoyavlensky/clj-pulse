@@ -6,6 +6,8 @@ pub mod edn;
 pub mod handlers;
 pub mod index;
 pub mod jar_content;
+pub mod kondo;
 pub mod leiningen;
 pub mod lgx;
+pub mod settings;
 pub mod uri;

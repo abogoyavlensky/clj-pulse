@@ -99,7 +99,7 @@ pub fn rename(
     let decl_range = documents
         .text(&decl_uri)
         .and_then(|text| {
-            extractor::extract_full(&text, &sym.file)
+            extractor::extract_full_with(&text, &sym.file, &index.extract_config())
                 .ok()
                 .and_then(|(_, syms, _)| {
                     syms.into_iter()
@@ -167,13 +167,14 @@ pub fn resolve_fqn_at(
     // the `#ig/ref` gate, so a cursor in a non-Integrant manifest resolves to
     // nothing.
     if crate::config::is_edn(&path) {
-        return extractor::file_occurrences(&text, &path)
+        return extractor::file_occurrences_with(&text, &path, &index.extract_config())
             .into_iter()
             .find(|occ| range_contains(&occ.name_range, pos))
             .map(|occ| occ.fqn);
     }
 
-    if let Ok((_, syms, occs)) = extractor::extract_full(&text, &path) {
+    if let Ok((_, syms, occs)) = extractor::extract_full_with(&text, &path, &index.extract_config())
+    {
         for sym in &syms {
             // A `defmethod` head names the multimethod it extends, not a new
             // definition — its symbol points at itself. Skip it so the
@@ -233,7 +234,7 @@ pub fn occurrences_for(
         let Some(text) = documents.text(&uri) else {
             continue;
         };
-        let occs = extractor::file_occurrences(&text, &path);
+        let occs = extractor::file_occurrences_with(&text, &path, &index.extract_config());
         live.insert(path, occs);
     }
 

@@ -47,6 +47,40 @@ pub enum DefKind {
     IntegrantKey,
 }
 
+impl DefKind {
+    /// Maps a `def`-family symbol name (`def`, `defn`, `defmacro`, …) to its
+    /// `DefKind`. The single source of truth for the extractor's top-level form
+    /// dispatch and the `:lint-as` reader (which maps a target like
+    /// `clojure.core/defn` by its name). Returns `None` for non-def names, so a
+    /// `:lint-as … clojure.core/for` entry is ignored - it defines nothing.
+    pub(crate) fn from_def_symbol(name: &str) -> Option<DefKind> {
+        Some(match name {
+            "def" => DefKind::Def,
+            "defonce" => DefKind::Defonce,
+            "defn" => DefKind::Defn,
+            "defn-" => DefKind::DefnPrivate,
+            "defmacro" => DefKind::Defmacro,
+            "defmulti" => DefKind::Defmulti,
+            "defmethod" => DefKind::Defmethod,
+            "defprotocol" => DefKind::Defprotocol,
+            "defrecord" => DefKind::Defrecord,
+            "deftype" => DefKind::Deftype,
+            _ => return None,
+        })
+    }
+}
+
+/// Project configuration that influences extraction. Resolved once at startup
+/// (see `crate::settings::load`) and borrowed by the extractor; the default
+/// (empty) reproduces the stock behavior exactly.
+#[derive(Debug, Clone, Default)]
+pub struct ExtractConfig {
+    /// Macro fqn (`defcomponent/defcomponent`) → the `def`-family form it should
+    /// be treated as, from a merged `:lint-as` map. Only def-like targets are
+    /// kept; a lint-as'd form's defined name is then extracted as that kind.
+    pub lint_as: HashMap<String, DefKind>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
@@ -129,6 +163,10 @@ pub struct Index {
     /// background discovery task; `None` until then, or when no JDK source is
     /// found. Interior mutability because the `Arc<Index>` is already shared.
     jdk: OnceLock<jdk::JdkIndex>,
+    /// Project config (currently `:lint-as`), resolved at startup and reloaded
+    /// when a watched config file changes. Interior mutability because the
+    /// `Arc<Index>` is shared with handlers.
+    extract_config: RwLock<ExtractConfig>,
 }
 
 impl Default for Index {
@@ -143,6 +181,7 @@ impl Default for Index {
             letgo_core: AtomicBool::new(false),
             letgo_native: RwLock::new(Vec::new()),
             jdk: OnceLock::new(),
+            extract_config: RwLock::new(ExtractConfig::default()),
         }
     }
 }
@@ -172,6 +211,19 @@ impl Index {
     /// task). A second call is ignored.
     pub fn set_jdk(&self, jdk_index: jdk::JdkIndex) {
         let _ = self.jdk.set(jdk_index);
+    }
+
+    /// A snapshot of the resolved project config (`:lint-as`). Cloned so callers
+    /// hold no lock; the `lint_as` map is tiny, and hot-path indexing borrows a
+    /// single snapshot across all files rather than cloning per file.
+    pub fn extract_config(&self) -> ExtractConfig {
+        self.extract_config.read().unwrap().clone()
+    }
+
+    /// Replaces the project config. Called at startup and again whenever a
+    /// watched config file changes.
+    pub fn set_extract_config(&self, cfg: ExtractConfig) {
+        *self.extract_config.write().unwrap() = cfg;
     }
 
     pub fn lookup_in_ns(&self, ns: &str, name: &str) -> Option<Symbol> {
@@ -289,6 +341,19 @@ impl Index {
             self.remove_file(&path);
         }
 
+        // Re-scanned namespaces: drop their previous symbols before inserting
+        // the new set, so a def removed since the last scan (a file present in
+        // both scans but with fewer symbols — e.g. after a `:lint-as` change)
+        // does not linger. Whole stale files are already handled above.
+        for entry in new_index.ns_symbols.iter() {
+            let old_fqns = self.ns_symbols.get(entry.key()).map(|r| r.clone());
+            if let Some(old_fqns) = old_fqns {
+                for fqn in &old_fqns {
+                    self.symbols.remove(fqn);
+                }
+            }
+        }
+
         for entry in new_index.symbols.iter() {
             self.symbols
                 .insert(entry.key().clone(), entry.value().clone());
@@ -404,6 +469,48 @@ mod tests {
         assert!(
             !index.letgo_core(),
             "clear_libs must reset the let-go core marker"
+        );
+    }
+
+    #[test]
+    fn merge_project_drops_symbols_removed_from_a_rescanned_file() {
+        use std::path::PathBuf;
+        let file = PathBuf::from("/p/src/a.clj");
+        let mk = |name: &str| Symbol {
+            name: name.to_string(),
+            fqn: format!("a/{}", name),
+            ns: "a".to_string(),
+            kind: DefKind::Def,
+            params: vec![],
+            doc: None,
+            file: file.clone(),
+            source: SymbolSource::Project,
+            range: Range::default(),
+            name_range: Range::default(),
+        };
+        let meta = || NsMeta {
+            name: "a".to_string(),
+            file: file.clone(),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: vec![],
+            imports: HashMap::new(),
+        };
+
+        let index = Index::new();
+        index.insert_file(meta(), vec![mk("keep"), mk("gone")], vec![]);
+        assert!(index.lookup("a/gone").is_some());
+
+        // A re-scan of the same file now defines only `keep` (e.g. a `:lint-as`
+        // change stopped a macro from defining `gone`).
+        let new_index = Index::new();
+        new_index.insert_file(meta(), vec![mk("keep")], vec![]);
+        index.merge_project_from(new_index, &std::collections::HashSet::new());
+
+        assert!(index.lookup("a/keep").is_some(), "kept symbol must survive");
+        assert!(
+            index.lookup("a/gone").is_none(),
+            "a symbol removed from a re-scanned file must be dropped"
         );
     }
 }

@@ -22,8 +22,8 @@ pub fn document_symbols(
             let extract_path = path
                 .clone()
                 .unwrap_or_else(|| std::path::PathBuf::from(uri.path()));
-            extractor::extract(&text, &extract_path)
-                .map(|(_, syms)| syms)
+            extractor::extract_full_with(&text, &extract_path, &index.extract_config())
+                .map(|(_, syms, _)| syms)
                 .unwrap_or_default()
         }
         None => path
