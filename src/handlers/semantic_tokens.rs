@@ -5,9 +5,14 @@
 //! extractor's parser (`language()`) and UTF-16 position conversion
 //! (`point_to_position`).
 
-use tower_lsp::lsp_types::{SemanticToken, SemanticTokenType, SemanticTokensLegend};
+use anyhow::Result;
+use tower_lsp::lsp_types::{
+    SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensLegend, SemanticTokensParams,
+    SemanticTokensResult,
+};
 use tree_sitter::{Node, Parser};
 
+use crate::document::DocumentStore;
 use crate::index::extractor;
 
 /// Token types advertised in the legend, in legend order. A node maps to the
@@ -34,6 +39,25 @@ pub fn legend() -> SemanticTokensLegend {
         token_types: LEGEND_TYPES.to_vec(),
         token_modifiers: Vec::new(),
     }
+}
+
+/// Answers `textDocument/semanticTokens/full`: reads the live document text and
+/// returns delta-encoded Tier-1 tokens, or `Ok(None)` when the document is not
+/// open. Purely syntactic (no `Index`) and non-panicking — a parse failure just
+/// yields an empty token set from `compute_tokens`.
+pub fn semantic_tokens_full(
+    documents: &DocumentStore,
+    params: SemanticTokensParams,
+) -> Result<Option<SemanticTokensResult>> {
+    let uri = params.text_document.uri;
+    let Some(text) = documents.text(&uri) else {
+        return Ok(None);
+    };
+    let data = encode(&compute_tokens(&text));
+    Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+        result_id: None,
+        data,
+    })))
 }
 
 /// One absolute (non-delta) semantic token covering a single line. Multi-line
