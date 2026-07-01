@@ -255,5 +255,11 @@ each re-scanned namespace's previous symbols before inserting the new set
 **Verification:** `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt`
 clean, 218 lib tests (incl. the new merge test), and the full `test_e2e` suite
 75 passed / 0 failed / 2 ignored (incl. the new reload test), built with
-`RUSTFLAGS="-C debuginfo=0"` to avoid the memory-constrained linker OOM. A
-second-opinion codex review was run against `fb0728a..HEAD`.
+`RUSTFLAGS="-C debuginfo=0"` to avoid the memory-constrained linker OOM.
+
+**Second-opinion review (codex, `fb0728a..HEAD`):** one in-scope P2 — a config
+reload rebuilt only `source_paths`, so a file open *outside* `deps.edn :paths`
+(indexed on `didOpen`) kept its old `:lint-as` extraction until save/reopen.
+Fixed by re-extracting each open project buffer with the new config after the
+rebuild (`src/server.rs`, commit `6012538`); jar/dir-lib buffers are skipped via
+`is_project_path`.
