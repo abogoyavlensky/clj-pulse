@@ -122,7 +122,7 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 }
 ```
 
-> [NOTE!]
+> [!NOTE]
 > Currently, Zed editor, `clj-pulse` works only with project's own files, no libs inspection yet.
 
 ## Configuration
