@@ -77,7 +77,7 @@ brew install abogoyavlensky/tap/clj-pulse
 ### mise (macOS, Linux)
 
 ```sh
-mise use -g ubi:abogoyavlensky/clj-pulse
+mise use -g github:abogoyavlensky/clj-pulse
 ```
 
 ### Manual download
