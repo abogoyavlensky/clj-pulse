@@ -14,6 +14,7 @@ mod jar_content;
 mod kondo;
 mod leiningen;
 mod lgx;
+mod libraries;
 mod server;
 mod settings;
 mod uri;
@@ -67,6 +68,13 @@ async fn main() {
         // clj-pulse custom: ranges of `#_`/`(comment …)` forms for the extension
         // to dim (Calva-style opacity decoration).
         .custom_method("clojurePulse/ignoredForms", Backend::ignored_forms)
+        // clj-pulse custom: the External Libraries panel — the resolved library
+        // list and, per jar, its browsable file entries.
+        .custom_method(
+            "clojurePulse/externalLibraries",
+            Backend::external_libraries,
+        )
+        .custom_method("clojurePulse/libraryEntries", Backend::library_entries)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

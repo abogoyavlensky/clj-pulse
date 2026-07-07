@@ -14,6 +14,7 @@ use crate::index::Index;
 use crate::jar_content;
 use crate::leiningen;
 use crate::lgx;
+use crate::libraries;
 use crate::settings;
 
 /// Resolves and indexes a project's libraries: lgx git/local deps (indexed as
@@ -34,19 +35,35 @@ fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> usize {
             dirs.len() + lgx::index_letgo_core(root, index)
         }
         config::ProjectKind::Clojure => {
-            // deps.edn's `.cpcache` is authoritative (full transitive
-            // classpath). Only when it is empty do we consult a Leiningen
-            // `project.clj` for its direct dependencies.
-            let mut classpath = classpath::discover(root);
-            if classpath.is_empty() && root.join("project.clj").exists() {
-                classpath = leiningen::resolve(root);
-            }
+            let classpath = clojure_classpath(root);
             let n = classpath.len();
             if n > 0 {
                 scanner::index_classpath_libs(root, classpath, index);
             }
             n
         }
+    }
+}
+
+/// A Clojure project's classpath: deps.edn's `.cpcache` is authoritative (full
+/// transitive classpath); only when it is empty do we consult a Leiningen
+/// `project.clj` for its direct dependencies.
+fn clojure_classpath(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut classpath = classpath::discover(root);
+    if classpath.is_empty() && root.join("project.clj").exists() {
+        classpath = leiningen::resolve(root);
+    }
+    classpath
+}
+
+/// The library classpath entries for the External Libraries panel, derived the
+/// same way `resolve_and_index_libs` does but without indexing. For let-go this
+/// is the resolved dependency source dirs; the built-in core stdlib is
+/// intentionally excluded (mirroring JDK being out of the panel's scope).
+fn resolve_lib_entries(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    match config::project_kind(root) {
+        config::ProjectKind::LetGo => lgx::resolve(root),
+        config::ProjectKind::Clojure => clojure_classpath(root),
     }
 }
 
@@ -63,6 +80,21 @@ pub(crate) struct TextDocumentContentResult {
 #[derive(serde::Deserialize)]
 pub(crate) struct IgnoredFormsParams {
     uri: String,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LibraryEntriesParams {
+    path: String,
+}
+
+/// clj-pulse custom notification, pushed whenever library (re)indexing
+/// completes — including the zero-entries case, so the External Libraries panel
+/// refreshes (and clears when deps disappear) without polling. Zero params.
+enum LibrariesChanged {}
+
+impl tower_lsp::lsp_types::notification::Notification for LibrariesChanged {
+    type Params = ();
+    const METHOD: &'static str = "clojurePulse/librariesChanged";
 }
 
 pub struct Backend {
@@ -156,6 +188,59 @@ impl Backend {
             return Ok(Vec::new());
         };
         Ok(handlers::ignored_forms::ignored_form_ranges(&text))
+    }
+
+    /// clj-pulse custom `clojurePulse/externalLibraries`: the resolved external
+    /// libraries for the panel. Re-derives from disk per request (reading
+    /// `.cpcache`/lgx is cheap) so it survives server restarts without new
+    /// state. No project root yet → empty list, never an error.
+    pub async fn external_libraries(
+        &self,
+        _params: Option<serde_json::Value>,
+    ) -> tower_lsp::jsonrpc::Result<Vec<libraries::Library>> {
+        let Some(root) = self.root.lock().unwrap().clone() else {
+            return Ok(Vec::new());
+        };
+        // Re-derivation reads `.cpcache`/lgx/source-paths from disk; keep it off
+        // the LSP executor so it can't stall hover/completion/definition.
+        tokio::task::spawn_blocking(move || {
+            let entries = resolve_lib_entries(&root);
+            let own_paths = config::source_paths(&root);
+            libraries::from_entries(&own_paths, &entries)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("externalLibraries task panicked: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
+    /// clj-pulse custom `clojurePulse/libraryEntries`: the file entries of a jar
+    /// library, for the panel to fold into a browsable tree. Rejects anything
+    /// that is not an existing `.jar` file with `invalid_params`.
+    pub async fn library_entries(
+        &self,
+        params: LibraryEntriesParams,
+    ) -> tower_lsp::jsonrpc::Result<Vec<String>> {
+        let path = std::path::PathBuf::from(&params.path);
+        if path.extension().and_then(|e| e.to_str()) != Some("jar") || !path.is_file() {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "not an existing .jar file: {}",
+                params.path
+            )));
+        }
+        // Reading a jar's central directory can be slow for large or
+        // network-mounted archives; run it off the LSP executor.
+        tokio::task::spawn_blocking(move || jar_content::list_entries(&path))
+            .await
+            .map_err(|e| {
+                tracing::error!("libraryEntries task panicked: {}", e);
+                tower_lsp::jsonrpc::Error::internal_error()
+            })?
+            .map_err(|e| {
+                tracing::warn!("libraryEntries: failed to list {}: {}", params.path, e);
+                tower_lsp::jsonrpc::Error::internal_error()
+            })
     }
 
     /// Computes unresolved-namespace diagnostics from the live buffer and
@@ -262,6 +347,7 @@ impl LanguageServer for Backend {
                         };
                         tracing::warn!("{}", msg);
                         client_jars.log_message(MessageType::WARNING, msg).await;
+                        client_jars.send_notification::<LibrariesChanged>(()).await;
                         return;
                     }
                     let sym_count = index_jars.symbols.len();
@@ -271,6 +357,7 @@ impl LanguageServer for Backend {
                     );
                     tracing::info!("{}", msg);
                     client_jars.log_message(MessageType::INFO, msg).await;
+                    client_jars.send_notification::<LibrariesChanged>(()).await;
                 });
 
                 // Background task: discover and index the JDK's bundled Java
@@ -620,11 +707,14 @@ impl LanguageServer for Backend {
                         // Drop symbols of removed/replaced dependencies first
                         index.clear_libs();
                         if resolve_and_index_libs(&root, &index) == 0 {
+                            // Deps disappeared — refresh so the panel clears.
+                            client.send_notification::<LibrariesChanged>(()).await;
                             return;
                         }
                         let msg = "clj-pulse: library re-indexing complete";
                         tracing::info!("{}", msg);
                         client.log_message(MessageType::INFO, msg).await;
+                        client.send_notification::<LibrariesChanged>(()).await;
                     }
                 });
             }
