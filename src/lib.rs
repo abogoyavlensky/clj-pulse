@@ -9,5 +9,6 @@ pub mod jar_content;
 pub mod kondo;
 pub mod leiningen;
 pub mod lgx;
+pub mod libraries;
 pub mod settings;
 pub mod uri;
