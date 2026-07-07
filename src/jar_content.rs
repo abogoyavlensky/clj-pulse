@@ -53,6 +53,31 @@ pub fn extract_content(jar_path: &Path, entry_path: &str) -> anyhow::Result<Stri
     Ok(content)
 }
 
+/// Lists a JAR's file entries as a sorted, flat list of paths, excluding
+/// directory entries (whose names end with `/`). Used by the External
+/// Libraries panel to fold a jar into a browsable tree.
+pub fn list_entries(jar_path: &Path) -> anyhow::Result<Vec<String>> {
+    let file = std::fs::File::open(jar_path)
+        .map_err(|e| anyhow::anyhow!("Could not open JAR '{}': {}", jar_path.display(), e))?;
+
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| {
+        anyhow::anyhow!("Could not read ZIP archive '{}': {}", jar_path.display(), e)
+    })?;
+
+    let mut names = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let entry = zip
+            .by_index(i)
+            .map_err(|e| anyhow::anyhow!("Failed to read entry {}: {}", i, e))?;
+        let name = entry.name();
+        if !name.ends_with('/') {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +137,46 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("not found"), "unexpected error: {}", msg);
+    }
+
+    #[test]
+    fn test_list_entries_returns_sorted_files_excluding_directories() {
+        // Build a jar with nested files plus an explicit directory entry.
+        let tmp = tempfile::Builder::new().suffix(".jar").tempfile().unwrap();
+        {
+            let file = std::fs::File::create(tmp.path()).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.add_directory("aero/", opts).unwrap();
+            zip.start_file("aero/core.cljc", opts).unwrap();
+            zip.write_all(b"(ns aero.core)").unwrap();
+            zip.start_file("aero/alpha/core.cljc", opts).unwrap();
+            zip.write_all(b"(ns aero.alpha.core)").unwrap();
+            zip.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+            zip.write_all(b"Manifest-Version: 1.0").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let entries = list_entries(tmp.path()).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                "META-INF/MANIFEST.MF".to_string(),
+                "aero/alpha/core.cljc".to_string(),
+                "aero/core.cljc".to_string(),
+            ]
+        );
+        // The directory entry `aero/` must not leak through.
+        assert!(
+            !entries.iter().any(|e| e.ends_with('/')),
+            "directory entry leaked: {:?}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_list_entries_missing_jar_errors() {
+        let result = list_entries(Path::new("/nonexistent/does-not-exist.jar"));
+        assert!(result.is_err());
     }
 }
