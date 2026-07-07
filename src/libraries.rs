@@ -30,15 +30,16 @@ pub enum LibraryKind {
 
 /// Derives the library list from resolved classpath entries.
 ///
-/// Entries under `root` (the project's own `src`/`resources`) are excluded,
-/// duplicate absolute paths collapse to one library, and the result is sorted
-/// by name then version.
-pub fn from_entries(root: &Path, entries: &[PathBuf]) -> Vec<Library> {
+/// Entries under one of `own_paths` (the project's own source roots, e.g.
+/// `src`/`resources`) are excluded — but an in-workspace `:local/root`
+/// dependency, which lives outside those roots, is kept. Duplicate absolute
+/// paths collapse to one library, and the result is sorted by name, then
+/// version, then path (a total order, so the panel is deterministic).
+pub fn from_entries(own_paths: &[PathBuf], entries: &[PathBuf]) -> Vec<Library> {
     let mut seen: HashSet<&PathBuf> = HashSet::new();
     let mut libs: Vec<Library> = Vec::new();
     for entry in entries {
-        // The project's own source/resource roots are not libraries.
-        if entry.starts_with(root) {
+        if own_paths.iter().any(|p| entry.starts_with(p)) {
             continue;
         }
         // Resolved classpaths can repeat entries; keep the first.
@@ -47,7 +48,12 @@ pub fn from_entries(root: &Path, entries: &[PathBuf]) -> Vec<Library> {
         }
         libs.push(classify(entry));
     }
-    libs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.version.cmp(&b.version)));
+    libs.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.version.cmp(&b.version))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     libs
 }
 
@@ -135,7 +141,10 @@ fn parse_maven_jar(path: &Path) -> Option<(String, Option<String>)> {
     if stem != format!("{artifact}-{version}") {
         return None;
     }
-    let repo_idx = comps.iter().rposition(|c| *c == "repository")?;
+    // Anchor on the `repository` dir *above* the artifact — searching only the
+    // ancestors avoids matching an artifact literally named `repository` (which
+    // would make the group slice below start past its end and panic).
+    let repo_idx = comps[..n - 3].iter().rposition(|c| *c == "repository")?;
     let group_segs = &comps[repo_idx + 1..n - 3];
     if group_segs.is_empty() {
         return None;
@@ -165,6 +174,15 @@ fn parse_deps_gitlib(path: &Path) -> Option<(String, Option<String>)> {
 fn parse_lgx_gitlib(path: &Path) -> Option<(String, Option<String>)> {
     let comps = normal_components(path);
     let idx = comps.iter().position(|c| *c == "gitlibs")?;
+    // Distinguish a real lgx checkout from an incidental `gitlibs/` dir: it sits
+    // directly under `.lgx/` (the default `$LGX_HOME`) or its first segment is a
+    // git host (contains a dot, e.g. `github.com`). Otherwise fall through to
+    // the basename fallback rather than inventing a bogus name/version.
+    let under_lgx_home = idx >= 1 && comps[idx - 1] == ".lgx";
+    let host_like = comps.get(idx + 1).is_some_and(|c| c.contains('.'));
+    if !under_lgx_home && !host_like {
+        return None;
+    }
     let mut after = &comps[idx + 1..];
     if after.last() == Some(&"src") {
         after = &after[..after.len() - 1];
@@ -196,38 +214,63 @@ mod tests {
     #[test]
     fn maven_jar_parses_group_artifact_version() {
         let p = "/home/u/.m2/repository/babashka/fs/0.5.30/fs-0.5.30.jar";
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(p)]);
-        assert_eq!(out, vec![lib("babashka/fs", Some("0.5.30"), p, LibraryKind::Jar)]);
+        let out = from_entries(&[], &[PathBuf::from(p)]);
+        assert_eq!(
+            out,
+            vec![lib("babashka/fs", Some("0.5.30"), p, LibraryKind::Jar)]
+        );
     }
 
     #[test]
     fn maven_jar_collapses_group_equal_artifact() {
         let p = "/home/u/.m2/repository/aero/aero/1.1.6/aero-1.1.6.jar";
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[PathBuf::from(p)]);
         assert_eq!(out, vec![lib("aero", Some("1.1.6"), p, LibraryKind::Jar)]);
     }
 
     #[test]
     fn maven_jar_joins_multi_segment_group_with_dots() {
         let p = "/home/u/.m2/repository/org/clojure/clojure/1.11.1/clojure-1.11.1.jar";
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[PathBuf::from(p)]);
         assert_eq!(
             out,
-            vec![lib("org.clojure/clojure", Some("1.11.1"), p, LibraryKind::Jar)]
+            vec![lib(
+                "org.clojure/clojure",
+                Some("1.11.1"),
+                p,
+                LibraryKind::Jar
+            )]
         );
     }
 
     #[test]
     fn non_maven_jar_falls_back_to_file_stem() {
         let p = "/opt/vendored/some-lib.jar";
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[PathBuf::from(p)]);
         assert_eq!(out, vec![lib("some-lib", None, p, LibraryKind::Jar)]);
+    }
+
+    #[test]
+    fn maven_jar_with_artifact_named_repository_does_not_panic() {
+        // The artifact dir is literally `repository`; anchoring on the m2 root
+        // (not the artifact) must avoid a slice-out-of-order panic.
+        let p = "/home/u/.m2/repository/com/acme/repository/1.0.0/repository-1.0.0.jar";
+        let out = from_entries(&[], &[PathBuf::from(p)]);
+        assert_eq!(
+            out,
+            vec![lib(
+                "com.acme/repository",
+                Some("1.0.0"),
+                p,
+                LibraryKind::Jar
+            )]
+        );
     }
 
     #[test]
     fn deps_gitlib_dir_yields_group_artifact_and_short_sha() {
         let p = format!("/home/u/.gitlibs/libs/io.github.foo/bar/{SHA}");
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(&p)]);
+        let out = from_entries(&[], &[PathBuf::from(&p)]);
         assert_eq!(
             out,
             vec![lib("io.github.foo/bar", Some(SHORT), &p, LibraryKind::Dir)]
@@ -237,34 +280,65 @@ mod tests {
     #[test]
     fn lgx_gitlib_dir_yields_repo_and_short_ref_ignoring_src_subdir() {
         let p = format!("/home/u/.lgx/gitlibs/github.com/some/cool-lib/{SHA}/src");
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(&p)]);
-        assert_eq!(out, vec![lib("cool-lib", Some(SHORT), &p, LibraryKind::Dir)]);
+        let out = from_entries(&[], &[PathBuf::from(&p)]);
+        assert_eq!(
+            out,
+            vec![lib("cool-lib", Some(SHORT), &p, LibraryKind::Dir)]
+        );
     }
 
     #[test]
     fn unrecognized_dir_yields_basename_no_version() {
         let p = "/home/u/checkouts/my-local-lib";
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[PathBuf::from(p)]);
         assert_eq!(out, vec![lib("my-local-lib", None, p, LibraryKind::Dir)]);
     }
 
     #[test]
-    fn entries_under_project_root_are_excluded() {
-        let root = Path::new("/home/u/project");
+    fn incidental_gitlibs_dir_falls_back_to_basename() {
+        // An ordinary local dir that merely contains a `gitlibs` component (no
+        // `.lgx` parent, no host-like segment) must not be parsed as a checkout.
+        let p = "/repo/vendor/gitlibs/foo/bar";
+        let out = from_entries(&[], &[PathBuf::from(p)]);
+        assert_eq!(out, vec![lib("bar", None, p, LibraryKind::Dir)]);
+    }
+
+    #[test]
+    fn lgx_gitlib_under_custom_home_uses_host_like_segment() {
+        // A custom `$LGX_HOME` (no `.lgx` parent) is still recognized because
+        // the first segment after `gitlibs` is a git host.
+        let p = format!("/opt/cache/gitlibs/github.com/some/cool-lib/{SHA}/src");
+        let out = from_entries(&[], &[PathBuf::from(&p)]);
+        assert_eq!(
+            out,
+            vec![lib("cool-lib", Some(SHORT), &p, LibraryKind::Dir)]
+        );
+    }
+
+    #[test]
+    fn project_own_source_paths_are_excluded_but_in_workspace_local_dep_is_kept() {
+        // The project's own source roots — not an in-workspace `:local/root`
+        // dependency, which lives outside them.
+        let own_paths = vec![
+            PathBuf::from("/home/u/project/src"),
+            PathBuf::from("/home/u/project/resources"),
+        ];
         let entries = vec![
             PathBuf::from("/home/u/project/src"),
             PathBuf::from("/home/u/project/resources"),
+            PathBuf::from("/home/u/project/vendored-lib"), // in-workspace local dep
             PathBuf::from("/home/u/.m2/repository/aero/aero/1.1.6/aero-1.1.6.jar"),
         ];
-        let out = from_entries(root, &entries);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].name, "aero");
+        let out = from_entries(&own_paths, &entries);
+        let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
+        // `src`/`resources` dropped; the local dep under the workspace is kept.
+        assert_eq!(names, vec!["aero", "vendored-lib"]);
     }
 
     #[test]
     fn duplicate_paths_collapse_to_one_library() {
         let p = "/home/u/.m2/repository/aero/aero/1.1.6/aero-1.1.6.jar";
-        let out = from_entries(Path::new("/proj"), &[PathBuf::from(p), PathBuf::from(p)]);
+        let out = from_entries(&[], &[PathBuf::from(p), PathBuf::from(p)]);
         assert_eq!(out.len(), 1);
     }
 
@@ -275,7 +349,7 @@ mod tests {
         let c1 = "/home/u/.m2/repository/org/clojure/clojure/1.10.0/clojure-1.10.0.jar";
         let c2 = "/home/u/.m2/repository/org/clojure/clojure/1.11.1/clojure-1.11.1.jar";
         let out = from_entries(
-            Path::new("/proj"),
+            &[],
             &[
                 PathBuf::from(c2),
                 PathBuf::from(b),
@@ -308,6 +382,9 @@ mod tests {
         let dir = lib("local", None, "/x/local", LibraryKind::Dir);
         let v = serde_json::to_value(&dir).unwrap();
         assert_eq!(v["kind"], "dir");
-        assert!(v.get("version").is_none(), "version must be omitted when None");
+        assert!(
+            v.get("version").is_none(),
+            "version must be omitted when None"
+        );
     }
 }
