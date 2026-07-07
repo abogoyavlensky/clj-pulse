@@ -87,6 +87,16 @@ pub(crate) struct LibraryEntriesParams {
     path: String,
 }
 
+/// clj-pulse custom notification, pushed whenever library (re)indexing
+/// completes — including the zero-entries case, so the External Libraries panel
+/// refreshes (and clears when deps disappear) without polling. Zero params.
+enum LibrariesChanged {}
+
+impl tower_lsp::lsp_types::notification::Notification for LibrariesChanged {
+    type Params = ();
+    const METHOD: &'static str = "clojurePulse/librariesChanged";
+}
+
 pub struct Backend {
     pub client: Client,
     pub index: Arc<Index>,
@@ -320,6 +330,7 @@ impl LanguageServer for Backend {
                         };
                         tracing::warn!("{}", msg);
                         client_jars.log_message(MessageType::WARNING, msg).await;
+                        client_jars.send_notification::<LibrariesChanged>(()).await;
                         return;
                     }
                     let sym_count = index_jars.symbols.len();
@@ -329,6 +340,7 @@ impl LanguageServer for Backend {
                     );
                     tracing::info!("{}", msg);
                     client_jars.log_message(MessageType::INFO, msg).await;
+                    client_jars.send_notification::<LibrariesChanged>(()).await;
                 });
 
                 // Background task: discover and index the JDK's bundled Java
@@ -678,11 +690,14 @@ impl LanguageServer for Backend {
                         // Drop symbols of removed/replaced dependencies first
                         index.clear_libs();
                         if resolve_and_index_libs(&root, &index) == 0 {
+                            // Deps disappeared — refresh so the panel clears.
+                            client.send_notification::<LibrariesChanged>(()).await;
                             return;
                         }
                         let msg = "clj-pulse: library re-indexing complete";
                         tracing::info!("{}", msg);
                         client.log_message(MessageType::INFO, msg).await;
+                        client.send_notification::<LibrariesChanged>(()).await;
                     }
                 });
             }
