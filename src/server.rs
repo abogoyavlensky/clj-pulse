@@ -14,6 +14,7 @@ use crate::index::Index;
 use crate::jar_content;
 use crate::leiningen;
 use crate::lgx;
+use crate::libraries;
 use crate::settings;
 
 /// Resolves and indexes a project's libraries: lgx git/local deps (indexed as
@@ -34,19 +35,35 @@ fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> usize {
             dirs.len() + lgx::index_letgo_core(root, index)
         }
         config::ProjectKind::Clojure => {
-            // deps.edn's `.cpcache` is authoritative (full transitive
-            // classpath). Only when it is empty do we consult a Leiningen
-            // `project.clj` for its direct dependencies.
-            let mut classpath = classpath::discover(root);
-            if classpath.is_empty() && root.join("project.clj").exists() {
-                classpath = leiningen::resolve(root);
-            }
+            let classpath = clojure_classpath(root);
             let n = classpath.len();
             if n > 0 {
                 scanner::index_classpath_libs(root, classpath, index);
             }
             n
         }
+    }
+}
+
+/// A Clojure project's classpath: deps.edn's `.cpcache` is authoritative (full
+/// transitive classpath); only when it is empty do we consult a Leiningen
+/// `project.clj` for its direct dependencies.
+fn clojure_classpath(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut classpath = classpath::discover(root);
+    if classpath.is_empty() && root.join("project.clj").exists() {
+        classpath = leiningen::resolve(root);
+    }
+    classpath
+}
+
+/// The library classpath entries for the External Libraries panel, derived the
+/// same way `resolve_and_index_libs` does but without indexing. For let-go this
+/// is the resolved dependency source dirs; the built-in core stdlib is
+/// intentionally excluded (mirroring JDK being out of the panel's scope).
+fn resolve_lib_entries(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    match config::project_kind(root) {
+        config::ProjectKind::LetGo => lgx::resolve(root),
+        config::ProjectKind::Clojure => clojure_classpath(root),
     }
 }
 
@@ -63,6 +80,11 @@ pub(crate) struct TextDocumentContentResult {
 #[derive(serde::Deserialize)]
 pub(crate) struct IgnoredFormsParams {
     uri: String,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LibraryEntriesParams {
+    path: String,
 }
 
 pub struct Backend {
@@ -156,6 +178,42 @@ impl Backend {
             return Ok(Vec::new());
         };
         Ok(handlers::ignored_forms::ignored_form_ranges(&text))
+    }
+
+    /// clj-pulse custom `clojurePulse/externalLibraries`: the resolved external
+    /// libraries for the panel. Re-derives from disk per request (reading
+    /// `.cpcache`/lgx is cheap) so it survives server restarts without new
+    /// state. No project root yet → empty list, never an error.
+    pub async fn external_libraries(
+        &self,
+        _params: Option<serde_json::Value>,
+    ) -> tower_lsp::jsonrpc::Result<Vec<libraries::Library>> {
+        let Some(root) = self.root.lock().unwrap().clone() else {
+            return Ok(Vec::new());
+        };
+        let entries = resolve_lib_entries(&root);
+        let own_paths = config::source_paths(&root);
+        Ok(libraries::from_entries(&own_paths, &entries))
+    }
+
+    /// clj-pulse custom `clojurePulse/libraryEntries`: the file entries of a jar
+    /// library, for the panel to fold into a browsable tree. Rejects anything
+    /// that is not an existing `.jar` file with `invalid_params`.
+    pub async fn library_entries(
+        &self,
+        params: LibraryEntriesParams,
+    ) -> tower_lsp::jsonrpc::Result<Vec<String>> {
+        let path = std::path::PathBuf::from(&params.path);
+        if path.extension().and_then(|e| e.to_str()) != Some("jar") || !path.is_file() {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "not an existing .jar file: {}",
+                params.path
+            )));
+        }
+        jar_content::list_entries(&path).map_err(|e| {
+            tracing::warn!("libraryEntries: failed to list {}: {}", params.path, e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
     }
 
     /// Computes unresolved-namespace diagnostics from the live buffer and
