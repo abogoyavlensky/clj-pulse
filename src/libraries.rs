@@ -30,16 +30,19 @@ pub enum LibraryKind {
 
 /// Derives the library list from resolved classpath entries.
 ///
-/// Entries under one of `own_paths` (the project's own source roots, e.g.
-/// `src`/`resources`) are excluded — but an in-workspace `:local/root`
-/// dependency, which lives outside those roots, is kept. Duplicate absolute
-/// paths collapse to one library, and the result is sorted by name, then
-/// version, then path (a total order, so the panel is deterministic).
+/// Entries that are one of `own_paths` (the project's own source roots, e.g.
+/// `src`/`resources`) are excluded. The match is exact, not prefix-based: a
+/// classpath entry for the project's own source is always exactly a declared
+/// root, whereas an in-workspace `:local/root` dependency is a *deeper* path —
+/// even one nested under `test/` (which `source_paths` always unions in) — so
+/// exact matching keeps it. Duplicate absolute paths collapse to one library,
+/// and the result is sorted by name, then version, then path (a total order,
+/// so the panel is deterministic).
 pub fn from_entries(own_paths: &[PathBuf], entries: &[PathBuf]) -> Vec<Library> {
     let mut seen: HashSet<&PathBuf> = HashSet::new();
     let mut libs: Vec<Library> = Vec::new();
     for entry in entries {
-        if own_paths.iter().any(|p| entry.starts_with(p)) {
+        if own_paths.iter().any(|p| entry == p) {
             continue;
         }
         // Resolved classpaths can repeat entries; keep the first.
@@ -333,6 +336,23 @@ mod tests {
         let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
         // `src`/`resources` dropped; the local dep under the workspace is kept.
         assert_eq!(names, vec!["aero", "vendored-lib"]);
+    }
+
+    #[test]
+    fn local_dep_nested_under_a_source_path_is_kept() {
+        // `source_paths` always unions in `root/test`; a `:local/root` dep whose
+        // classpath entry sits *under* `test/` must not be excluded by prefix.
+        let own_paths = vec![
+            PathBuf::from("/home/u/project/src"),
+            PathBuf::from("/home/u/project/test"),
+        ];
+        let entries = vec![
+            PathBuf::from("/home/u/project/test"), // own test root → excluded
+            PathBuf::from("/home/u/project/test/fixtures/my-lib/src"), // local dep → kept
+        ];
+        let out = from_entries(&own_paths, &entries);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "src"); // basename fallback for a bare local dir
     }
 
     #[test]

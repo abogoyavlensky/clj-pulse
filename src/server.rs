@@ -201,9 +201,18 @@ impl Backend {
         let Some(root) = self.root.lock().unwrap().clone() else {
             return Ok(Vec::new());
         };
-        let entries = resolve_lib_entries(&root);
-        let own_paths = config::source_paths(&root);
-        Ok(libraries::from_entries(&own_paths, &entries))
+        // Re-derivation reads `.cpcache`/lgx/source-paths from disk; keep it off
+        // the LSP executor so it can't stall hover/completion/definition.
+        tokio::task::spawn_blocking(move || {
+            let entries = resolve_lib_entries(&root);
+            let own_paths = config::source_paths(&root);
+            libraries::from_entries(&own_paths, &entries)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("externalLibraries task panicked: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
     }
 
     /// clj-pulse custom `clojurePulse/libraryEntries`: the file entries of a jar
@@ -220,10 +229,18 @@ impl Backend {
                 params.path
             )));
         }
-        jar_content::list_entries(&path).map_err(|e| {
-            tracing::warn!("libraryEntries: failed to list {}: {}", params.path, e);
-            tower_lsp::jsonrpc::Error::internal_error()
-        })
+        // Reading a jar's central directory can be slow for large or
+        // network-mounted archives; run it off the LSP executor.
+        tokio::task::spawn_blocking(move || jar_content::list_entries(&path))
+            .await
+            .map_err(|e| {
+                tracing::error!("libraryEntries task panicked: {}", e);
+                tower_lsp::jsonrpc::Error::internal_error()
+            })?
+            .map_err(|e| {
+                tracing::warn!("libraryEntries: failed to list {}: {}", params.path, e);
+                tower_lsp::jsonrpc::Error::internal_error()
+            })
     }
 
     /// Computes unresolved-namespace diagnostics from the live buffer and
