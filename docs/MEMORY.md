@@ -13,14 +13,22 @@ depth it indexes varies:
 
 | Project type | Resolver | Transitive depth |
 |---|---|---|
-| `deps.edn` | reads `.cpcache/*.cp` (`src/classpath.rs`) | Full closure - the Clojure CLI already flattened it |
+| `deps.edn` | reads `.cpcache/*.cp`, then background `clojure -A:dev:test -Spath` (`src/classpath.rs`) | Full closure, including alias deps |
 | let-go `lgx.edn` | `lgx::resolve` (`src/lgx.rs`) | Full transitive - breadth-first walk of each dep's own `:deps` |
 | Leiningen `project.clj` | `leiningen::resolve` (`src/leiningen.rs`) | Direct deps only |
 
-For `deps.edn`, clj-pulse does no resolution of its own. It reads the classpath
-that `clojure -Spath` already wrote to `.cpcache`, which is the full transitive
-set, and indexes every entry. For let-go, `lgx::resolve` walks each
-dependency's own `:deps` until the queue drains, so depth is unbounded.
+For `deps.edn`, indexing is graduated. Stage 2 reads whatever classpath a prior
+`clojure` invocation left in `.cpcache` — instant, no subprocess. Stage 3 then
+runs `clojure -A:dev:test -Spath` in the background (aliases configurable via
+`.clj-pulse/config.edn` `{:classpath {:aliases […]}}`, the whole stage
+disableable with `:enabled false`) and re-indexes when the authoritative
+classpath differs — this is what makes `:test`/`:dev` alias deps navigable.
+The clojure CLI is its own staleness check: with a warm cache it prints the
+classpath from a bash script without booting a JVM; only a deps.edn change or
+a never-resolved alias combo costs a JVM (and possibly downloads). Every stage-3
+failure (CLI missing, offline, bad alias) degrades to the stage-2 result. For
+let-go, `lgx::resolve` walks each dependency's own `:deps` until the queue
+drains, so depth is unbounded.
 
 ### The gap
 
@@ -56,14 +64,19 @@ This is not specific to macros. A macro is indexed like any other var
 exactly like a function call. The symbol is missing only because its JAR sits
 off the resolved classpath.
 
-### Stance: best effort, and never a JVM at startup
+### Stance: best effort, and never a JVM on the hot path
 
 Leiningen is not a primary target for clj-pulse - `deps.edn` and let-go come
-first - so its dependency support stays best effort. One principle is fixed:
-**clj-pulse will not start a JVM.** That rules out shelling out to
-`lein classpath`, which is the only fully accurate way to get Leiningen's
-transitive and parent-inherited deps. Startup must stay fast and self-contained,
-so we accept the gap rather than pay JVM cost.
+first - so its dependency support stays best effort. The original fixed
+principle here was "clj-pulse will not start a JVM"; it has since been
+narrowed to: **never a JVM on the hot path.** deps.edn projects now run
+`clojure -Spath` in a background task (see the resolver table above) because
+the clojure CLI itself skips the JVM when its cache is warm and accurate alias
+navigation outranks JVM purity. The narrowed principle still rules out shelling
+out to `lein classpath` — `lein` boots a JVM *every* run, warm or not — which
+is the only fully accurate way to get Leiningen's transitive and
+parent-inherited deps. Startup stays fast and self-contained, so we accept the
+Leiningen gap rather than pay unconditional JVM cost.
 
 Best-effort directions that respect the no-JVM rule, none urgent:
 

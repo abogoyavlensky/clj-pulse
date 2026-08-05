@@ -26,14 +26,33 @@ impl LspClient {
         Self::start_with_env(project_root, &[])
     }
 
+    /// Like [`start`] but with stage-3 classpath resolution left enabled —
+    /// only for tests that exercise the `clojure -Spath` flow.
+    fn start_with_classpath_cli(project_root: &Path) -> Self {
+        Self::spawn(project_root, &[], false)
+    }
+
     /// Like [`start`] but sets extra environment variables on the server
     /// process (e.g. `LGX_HOME` for hermetic lgx dep resolution).
     fn start_with_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
+        Self::spawn(project_root, envs, true)
+    }
+
+    fn spawn(project_root: &Path, envs: &[(&str, &Path)], disable_classpath_cli: bool) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
         cmd.current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if disable_classpath_cli {
+            // Fixtures carry a deps.edn; without this every test would spawn
+            // `clojure` for stage-3 classpath resolution.
+            cmd.env("CLJ_PULSE_DISABLE_CLASSPATH_CLI", "1");
+        } else {
+            // Strip an inherited kill-switch too — the stage-3 tests must not
+            // be silently neutered by the parent environment.
+            cmd.env_remove("CLJ_PULSE_DISABLE_CLASSPATH_CLI");
+        }
         for (key, value) in envs {
             cmd.env(key, value);
         }
@@ -145,6 +164,12 @@ impl LspClient {
     /// Waits until a `window/logMessage` whose text contains `needle` has
     /// been received (checks already-stashed notifications first).
     fn wait_for_log(&mut self, needle: &str) {
+        self.wait_for_log_within(needle, TIMEOUT);
+    }
+
+    /// [`wait_for_log`] with a custom deadline — for waits that legitimately
+    /// exceed the harness default, like a cold-network dependency download.
+    fn wait_for_log_within(&mut self, needle: &str, timeout: Duration) {
         let matches = |m: &Value| {
             m["method"] == "window/logMessage"
                 && m["params"]["message"]
@@ -155,7 +180,7 @@ impl LspClient {
         if self.notifications.iter().any(matches) {
             return;
         }
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -3227,6 +3252,103 @@ fn test_e2e_gitlib_directory_dependency() {
     assert_eq!(uri, expected, "expected file: URI into the lib directory");
     let (def_line, _) = position_of(&lib_file, "defn helper");
     assert_eq!(result["range"]["start"]["line"], json!(def_line));
+}
+
+/// `{:classpath {:enabled false}}` must fully suppress stage-3 resolution:
+/// no "resolving classpath" attempt, just the stage-2 outcome (here the
+/// no-classpath warning, since the fixture has no `.cpcache`).
+#[test]
+fn test_e2e_classpath_cli_disabled_by_config() {
+    let project = tempfile::TempDir::new().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(root.join("deps.edn"), "{:paths [\"src\"]}\n").unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:classpath {:enabled false}}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/app.clj"), "(ns app)\n\n(defn go [] 1)\n").unwrap();
+
+    // No kill-switch env var: the config file itself is what disables stage 3.
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize(&root);
+    // The zero-entry stage-2 path emits the warning (never "library indexing
+    // complete"); by then any stage-3 attempt would already have logged.
+    client.wait_for_log("no classpath found");
+
+    let resolving = client.notifications.iter().any(|m| {
+        m["method"] == "window/logMessage"
+            && m["params"]["message"]
+                .as_str()
+                .map(|s| s.contains("resolving classpath"))
+                .unwrap_or(false)
+    });
+    assert!(
+        !resolving,
+        ":classpath {{:enabled false}} must suppress the clojure CLI run"
+    );
+}
+
+/// The headline scenario: a dep declared only under a `:test` alias's
+/// `:extra-deps`, with `.cpcache` primed by plain `clojure -Spath` (main deps
+/// only — the original bug). Stage 3 must resolve `-A:dev:test` and make the
+/// alias-only jar navigable. Requires the `clojure` CLI, so ignored by
+/// default: `cargo test --test test_e2e -- --ignored`
+#[test]
+#[ignore = "requires clojure CLI (downloads deps on first run)"]
+fn test_e2e_alias_classpath_navigation() {
+    let project = tempfile::TempDir::new().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("deps.edn"),
+        r#"{:paths ["src"]
+ :aliases {:test {:extra-deps {org.clojure/data.json {:mvn/version "2.5.0"}}}}}
+"#,
+    )
+    .unwrap();
+    let app = root.join("src/app.clj");
+    std::fs::write(
+        &app,
+        "(ns app\n  (:require [clojure.data.json :as json]))\n\n(json/write-str {:a 1})\n",
+    )
+    .unwrap();
+
+    // Prime the cache the way a plain REPL start would — without the :test
+    // alias, so data.json is NOT on the stage-2 classpath.
+    let out = std::process::Command::new("clojure")
+        .args(["-Spath"])
+        .current_dir(&root)
+        .output()
+        .expect("clojure CLI not available");
+    assert!(out.status.success(), "clojure -Spath failed");
+
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize(&root);
+    // Stage 3 may download the alias-only dep on a cold machine; give it the
+    // resolver's own budget rather than the harness default.
+    client.wait_for_log_within("full classpath indexed", Duration::from_secs(300));
+    client.did_open(&app);
+
+    let (line, ch) = position_of(&app, "json/write-str");
+    let result = client.goto_definition(&app, line, ch);
+
+    assert!(
+        !result.is_null(),
+        "goto-definition into the :test-alias dep returned null"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.starts_with("jar:file://") && uri.ends_with("!/clojure/data/json.clj"),
+        "unexpected URI: {}",
+        uri
+    );
+
+    let content = client.text_document_content(uri);
+    let text = content["text"].as_str().expect("expected text");
+    assert!(text.contains("(defn write-str"), "wrong JAR content");
 }
 
 /// Full realistic scenario against a real Maven classpath. Requires the

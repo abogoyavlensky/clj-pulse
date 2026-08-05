@@ -30,7 +30,11 @@ protocol changes should also pass `bb e2e-nvim`.
   feature tests: copy the fixture with `setup_project()`, `initialize`, `did_open`,
   then assert on raw JSON responses. `wait_for_log("Indexed")` /
   `wait_for_log("library indexing complete")` synchronize with the two
-  background indexing tasks.
+  background indexing tasks; `wait_for_log("full classpath indexed")` with
+  stage-3 CLI resolution.
+- The harness sets `CLJ_PULSE_DISABLE_CLASSPATH_CLI=1` so regular e2e tests
+  (whose fixtures contain a deps.edn) never spawn `clojure`; tests that
+  exercise stage 3 use `LspClient::start_with_classpath_cli`.
 - Test realistic Clojure, not just toy snippets: real libraries use ns/def
   metadata (`(ns ^{:doc "…"} foo)`), reader conditionals, multi-arity fns.
   The extractor must handle them (see `test_extractor.rs`).
@@ -43,6 +47,13 @@ protocol changes should also pass `bb e2e-nvim`.
 - Project symbols always win over library symbols with the same fqn; project
   and library indexing run concurrently, so library insertion uses
   `Index::insert_lib_file` (never plain `insert_file`).
+- deps.edn classpath indexing is graduated: stage 2 reads `.cpcache` instantly,
+  then stage 3 runs `clojure -A:dev:test -Spath` in the background (config:
+  `.clj-pulse/config.edn` `{:classpath {:enabled … :aliases […]}}`) and
+  re-indexes when the authoritative classpath differs. Stage-3 runs are
+  serialized (`ClasspathCliLock`) and compare against the server's last-indexed
+  entry set — never re-read `.cpcache` to detect change, `-Spath` just wrote it.
+  Any stage-3 failure degrades to the stage-2 result.
 - Classpath libraries come in two shapes: JARs (`SymbolSource::Jar`, navigated
   via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
