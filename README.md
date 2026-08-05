@@ -128,9 +128,30 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 ## Configuration
 
 clj-pulse reads an optional `.clj-pulse/config.edn` at the project root and falls
-back to `.clj-kondo/config.edn`. Today it understands one key, `:lint-as`, which
-tells clj-pulse to treat a custom macro like a built-in `def` form so the name
-it introduces becomes navigable:
+back to `.clj-kondo/config.edn` where the keys overlap. It understands two keys.
+
+`:classpath` controls automatic classpath resolution for deps.edn projects.
+After indexing whatever `.cpcache` already holds, clj-pulse runs
+`clojure -A:dev:test -Spath` in the background so dependencies declared under
+aliases (`:test`, `:dev`, …) are indexed and navigable too. The clojure CLI
+skips the JVM entirely when its cache is warm; on the first resolve — or after
+a deps.edn change — it may download dependencies. Defaults shown:
+
+```clojure
+;; .clj-pulse/config.edn
+{:classpath {:enabled true
+             :aliases [:dev :test]}}
+```
+
+Set `:aliases` to your own list (an empty vector `[]` means plain
+`clojure -Spath` with no aliases), or `:enabled false` to opt out of the CLI
+run entirely — clj-pulse then indexes only the classpath your last `clojure`
+invocation left in `.cpcache`. Editing the config re-resolves live, no restart
+needed.
+
+`:lint-as` (also read from `.clj-kondo/config.edn`) tells clj-pulse to treat a
+custom macro like a built-in `def` form so the name it introduces becomes
+navigable:
 
 ```clojure
 ;; .clj-pulse/config.edn  (or .clj-kondo/config.edn)
