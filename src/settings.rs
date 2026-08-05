@@ -98,7 +98,9 @@ fn parse_classpath(contents: &str) -> ClasspathConfig {
     }
     if let Some(Value::Vector(aliases)) = get(spec, kw("aliases")) {
         // Keywords are the natural spelling; strings are accepted leniently.
-        let names: Vec<String> = aliases
+        // An explicitly empty vector is honored: it means "plain `clojure
+        // -Spath`, no aliases" — only an *absent* key keeps the defaults.
+        cfg.aliases = aliases
             .iter()
             .filter_map(|v| match v {
                 Value::Keyword(k) => Some(match k.namespace() {
@@ -109,9 +111,6 @@ fn parse_classpath(contents: &str) -> ClasspathConfig {
                 _ => None,
             })
             .collect();
-        if !names.is_empty() {
-            cfg.aliases = names;
-        }
     }
     cfg
 }
@@ -180,6 +179,17 @@ mod tests {
         write_config(dir.path(), r#"{:classpath {:aliases ["dev"]}}"#);
         let cfg = classpath(dir.path());
         assert_eq!(cfg.aliases, vec!["dev".to_string()]);
+    }
+
+    #[test]
+    fn classpath_explicitly_empty_aliases_stay_empty() {
+        // `[]` means "resolve with no aliases" (plain `clojure -Spath`), not
+        // "use the defaults".
+        let dir = tempfile::TempDir::new().unwrap();
+        write_config(dir.path(), "{:classpath {:aliases []}}");
+        let cfg = classpath(dir.path());
+        assert!(cfg.enabled);
+        assert!(cfg.aliases.is_empty());
     }
 
     #[test]
