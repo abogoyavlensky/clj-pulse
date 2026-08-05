@@ -52,6 +52,70 @@ fn merge(kondo_pairs: Vec<(String, String)>, pulse_pairs: Vec<(String, String)>)
 /// Reads `.clj-kondo/config.edn` and `.clj-pulse/config.edn` (both optional),
 /// merges their `:lint-as` maps, and resolves them to [`DefKind`]s. Missing or
 /// unparseable files contribute nothing.
+/// Classpath-resolution settings from `.clj-pulse/config.edn`'s `:classpath`
+/// key: `{:classpath {:enabled false :aliases [:dev :test]}}`. Every missing or
+/// unreadable piece falls back to its default, so a config that never mentions
+/// `:classpath` gets automatic resolution with the `:dev`/`:test` aliases.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClasspathConfig {
+    pub enabled: bool,
+    /// Alias names without the leading `:`; qualified keywords keep the
+    /// `namespace/name` form.
+    pub aliases: Vec<String>,
+}
+
+impl Default for ClasspathConfig {
+    fn default() -> Self {
+        ClasspathConfig {
+            enabled: true,
+            aliases: vec!["dev".to_string(), "test".to_string()],
+        }
+    }
+}
+
+/// Loads the [`ClasspathConfig`] for the project rooted at `root`.
+pub fn classpath(root: &Path) -> ClasspathConfig {
+    std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
+        .ok()
+        .map(|src| parse_classpath(&src))
+        .unwrap_or_default()
+}
+
+fn parse_classpath(contents: &str) -> ClasspathConfig {
+    use crate::edn::{get, kw};
+    use edn_format::Value;
+
+    let mut cfg = ClasspathConfig::default();
+    let Ok(Value::Map(top)) = edn_format::parse_str(contents) else {
+        return cfg;
+    };
+    let Some(Value::Map(spec)) = get(&top, kw("classpath")) else {
+        return cfg;
+    };
+
+    if let Some(Value::Boolean(enabled)) = get(spec, kw("enabled")) {
+        cfg.enabled = *enabled;
+    }
+    if let Some(Value::Vector(aliases)) = get(spec, kw("aliases")) {
+        // Keywords are the natural spelling; strings are accepted leniently.
+        let names: Vec<String> = aliases
+            .iter()
+            .filter_map(|v| match v {
+                Value::Keyword(k) => Some(match k.namespace() {
+                    Some(ns) => format!("{}/{}", ns, k.name()),
+                    None => k.name().to_string(),
+                }),
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        if !names.is_empty() {
+            cfg.aliases = names;
+        }
+    }
+    cfg
+}
+
 pub fn load(root: &Path) -> ExtractConfig {
     let kondo_pairs = kondo::lint_as(root);
     let pulse_pairs = std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
@@ -67,6 +131,64 @@ mod tests {
 
     fn pair(m: &str, t: &str) -> (String, String) {
         (m.to_string(), t.to_string())
+    }
+
+    fn write_config(dir: &Path, contents: &str) {
+        let cfg_dir = dir.join(".clj-pulse");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.edn"), contents).unwrap();
+    }
+
+    #[test]
+    fn classpath_defaults_when_no_config_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = classpath(dir.path());
+        assert!(cfg.enabled);
+        assert_eq!(cfg.aliases, vec!["dev".to_string(), "test".to_string()]);
+    }
+
+    #[test]
+    fn classpath_defaults_when_key_absent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_config(dir.path(), "{:lint-as {a/b clojure.core/def}}");
+        let cfg = classpath(dir.path());
+        assert!(cfg.enabled);
+        assert_eq!(cfg.aliases, vec!["dev".to_string(), "test".to_string()]);
+    }
+
+    #[test]
+    fn classpath_enabled_false_keeps_default_aliases() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_config(dir.path(), "{:classpath {:enabled false}}");
+        let cfg = classpath(dir.path());
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.aliases, vec!["dev".to_string(), "test".to_string()]);
+    }
+
+    #[test]
+    fn classpath_aliases_from_keywords_incl_qualified() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_config(dir.path(), "{:classpath {:aliases [:bench :ci/int]}}");
+        let cfg = classpath(dir.path());
+        assert!(cfg.enabled);
+        assert_eq!(cfg.aliases, vec!["bench".to_string(), "ci/int".to_string()]);
+    }
+
+    #[test]
+    fn classpath_aliases_accept_strings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_config(dir.path(), r#"{:classpath {:aliases ["dev"]}}"#);
+        let cfg = classpath(dir.path());
+        assert_eq!(cfg.aliases, vec!["dev".to_string()]);
+    }
+
+    #[test]
+    fn classpath_malformed_edn_falls_back_to_defaults() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_config(dir.path(), "{:classpath {:enabled");
+        let cfg = classpath(dir.path());
+        assert!(cfg.enabled);
+        assert_eq!(cfg.aliases, vec!["dev".to_string(), "test".to_string()]);
     }
 
     #[test]
