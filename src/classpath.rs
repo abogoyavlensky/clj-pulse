@@ -70,7 +70,10 @@ async fn resolve_with(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let snippet: String = stderr.trim().chars().take(500).collect();
-        return Err(format!("`{name} -Spath` failed ({}): {snippet}", output.status));
+        return Err(format!(
+            "`{name} -Spath` failed ({}): {snippet}",
+            output.status
+        ));
     }
 
     // The CLI may print download-progress lines; the classpath is the last
@@ -159,6 +162,13 @@ mod tests {
         assert_eq!(alias_arg(&[]), None);
     }
 
+    /// Serializes the stub-spawning tests. Writing one test's stub while
+    /// another test forks its child races into ETXTBSY: the forked child
+    /// inherits the still-open write fd for the instant before its exec, and
+    /// exec'ing a file someone holds open for writing fails.
+    #[cfg(unix)]
+    static STUB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Writes an executable stub script standing in for the `clojure` CLI.
     #[cfg(unix)]
     fn stub_program(dir: &Path, script: &str) -> std::path::PathBuf {
@@ -172,6 +182,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn resolve_with_parses_last_line_and_resolves_relative_entries() {
+        let _serial = STUB_LOCK.lock().await;
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         fs::create_dir(root.join("src")).unwrap();
@@ -198,8 +209,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn resolve_with_reports_stderr_on_failure() {
+        let _serial = STUB_LOCK.lock().await;
         let dir = tempfile::TempDir::new().unwrap();
-        let stub = stub_program(dir.path(), "#!/bin/sh\necho 'boom: bad alias' >&2\nexit 1\n");
+        let stub = stub_program(
+            dir.path(),
+            "#!/bin/sh\necho 'boom: bad alias' >&2\nexit 1\n",
+        );
         let err = resolve_with(
             stub.as_os_str(),
             dir.path(),
@@ -214,6 +229,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn resolve_with_errors_on_empty_output() {
+        let _serial = STUB_LOCK.lock().await;
         let dir = tempfile::TempDir::new().unwrap();
         let stub = stub_program(dir.path(), "#!/bin/sh\nexit 0\n");
         let err = resolve_with(
@@ -230,6 +246,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn resolve_with_kills_child_on_timeout() {
+        let _serial = STUB_LOCK.lock().await;
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         let marker = root.join("survived");
