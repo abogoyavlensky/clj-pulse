@@ -29,11 +29,20 @@ impl LspClient {
     /// Like [`start`] but sets extra environment variables on the server
     /// process (e.g. `LGX_HOME` for hermetic lgx dep resolution).
     fn start_with_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
+        Self::spawn(project_root, envs, true)
+    }
+
+    fn spawn(project_root: &Path, envs: &[(&str, &Path)], disable_classpath_cli: bool) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
         cmd.current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if disable_classpath_cli {
+            // Fixtures carry a deps.edn; without this every test would spawn
+            // `clojure` for stage-3 classpath resolution.
+            cmd.env("CLJ_PULSE_DISABLE_CLASSPATH_CLI", "1");
+        }
         for (key, value) in envs {
             cmd.env(key, value);
         }

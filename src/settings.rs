@@ -74,11 +74,20 @@ impl Default for ClasspathConfig {
 }
 
 /// Loads the [`ClasspathConfig`] for the project rooted at `root`.
+///
+/// A non-empty `CLJ_PULSE_DISABLE_CLASSPATH_CLI` env var forces
+/// `enabled = false` regardless of config: the e2e harness sets it because
+/// its fixtures contain a `deps.edn`, and without the switch every harness
+/// test would spawn `clojure`.
 pub fn classpath(root: &Path) -> ClasspathConfig {
-    std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
+    let mut cfg = std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
         .ok()
         .map(|src| parse_classpath(&src))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if std::env::var("CLJ_PULSE_DISABLE_CLASSPATH_CLI").is_ok_and(|v| !v.is_empty()) {
+        cfg.enabled = false;
+    }
+    cfg
 }
 
 fn parse_classpath(contents: &str) -> ClasspathConfig {

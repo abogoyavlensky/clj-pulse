@@ -17,30 +17,102 @@ use crate::lgx;
 use crate::libraries;
 use crate::settings;
 
+/// What [`resolve_and_index_libs`] indexed: the classpath entries / dep dirs,
+/// plus library sources indexed outside them (let-go's pinned core stdlib —
+/// a pinned project with no deps of its own must still count as indexed).
+struct ResolvedLibs {
+    entries: Vec<std::path::PathBuf>,
+    extra: usize,
+}
+
+impl ResolvedLibs {
+    fn indexed_any(&self) -> bool {
+        !self.entries.is_empty() || self.extra > 0
+    }
+}
+
 /// Resolves and indexes a project's libraries: lgx git/local deps (indexed as
 /// source dirs, including in-workspace `:local/root` deps) for let-go projects,
 /// or the `.cpcache` classpath (JARs + dirs) for Clojure projects. When there
 /// is no usable `.cpcache` but a Leiningen `project.clj` is present, falls back
-/// to resolving its direct deps to `~/.m2` JARs. Returns the number of resolved
-/// entries; 0 means nothing was found to index.
-fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> usize {
+/// to resolving its direct deps to `~/.m2` JARs.
+fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> ResolvedLibs {
     match config::project_kind(root) {
         config::ProjectKind::LetGo => {
             let dirs = lgx::resolve(root);
             scanner::index_dir_libs(&dirs, index);
             // Also index let-go's built-in core/stdlib from the source `lgx
-            // install` fetched (only when `:lg-version` is pinned). Its count is
-            // added so a pinned project with no deps of its own still reports
-            // library indexing as complete rather than "nothing to index".
-            dirs.len() + lgx::index_letgo_core(root, index)
+            // install` fetched (only when `:lg-version` is pinned).
+            let extra = lgx::index_letgo_core(root, index);
+            ResolvedLibs {
+                entries: dirs,
+                extra,
+            }
         }
         config::ProjectKind::Clojure => {
             let classpath = clojure_classpath(root);
-            let n = classpath.len();
-            if n > 0 {
-                scanner::index_classpath_libs(root, classpath, index);
+            if !classpath.is_empty() {
+                scanner::index_classpath_libs(root, classpath.clone(), index);
             }
-            n
+            ResolvedLibs {
+                entries: classpath,
+                extra: 0,
+            }
+        }
+    }
+}
+
+/// Shared record of the classpath entries the library index was last built
+/// from. Stage 3 and the config-watcher rerun compare against it to skip
+/// no-op re-indexing; re-reading `.cpcache` instead would observe the `.cp`
+/// file `clojure -Spath` itself just wrote and always conclude "no change".
+type LibEntries = Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>;
+
+/// Stage 3: resolves the authoritative classpath by running the clojure CLI
+/// (`clojure -A:dev:test -Spath` by default) and re-indexes libraries when the
+/// result differs from what is already indexed. Returns whether resolution
+/// succeeded; every failure only logs, keeping the stage-2 index intact.
+async fn run_classpath_cli(
+    root: &std::path::Path,
+    index: &Index,
+    client: &Client,
+    lib_entries: &LibEntries,
+    aliases: &[String],
+) -> bool {
+    let cmd = match classpath::alias_arg(aliases) {
+        Some(arg) => format!("clojure {arg} -Spath"),
+        None => "clojure -Spath".to_string(),
+    };
+    let msg = format!("clj-pulse: resolving classpath via '{cmd}' (may download dependencies)...");
+    tracing::info!("{}", msg);
+    client.log_message(MessageType::INFO, msg).await;
+
+    match classpath::resolve_via_cli(root, aliases).await {
+        Ok(entries) => {
+            let set: std::collections::HashSet<std::path::PathBuf> =
+                entries.iter().cloned().collect();
+            let changed = *lib_entries.lock().unwrap() != set;
+            if changed {
+                index.clear_libs();
+                scanner::index_classpath_libs(root, entries.clone(), index);
+                *lib_entries.lock().unwrap() = set;
+            }
+            let msg = format!(
+                "clj-pulse: full classpath indexed ({} entries)",
+                entries.len()
+            );
+            tracing::info!("{}", msg);
+            client.log_message(MessageType::INFO, msg).await;
+            if changed {
+                client.send_notification::<LibrariesChanged>(()).await;
+            }
+            true
+        }
+        Err(reason) => {
+            let msg = format!("clj-pulse: classpath resolution failed: {reason}");
+            tracing::warn!("{}", msg);
+            client.log_message(MessageType::WARNING, msg).await;
+            false
         }
     }
 }
@@ -102,6 +174,8 @@ pub struct Backend {
     pub index: Arc<Index>,
     pub documents: Arc<DocumentStore>,
     root: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// See [`LibEntries`].
+    lib_entries: LibEntries,
 }
 
 impl Backend {
@@ -111,6 +185,7 @@ impl Backend {
             index: Arc::new(Index::new_with_core()),
             documents: Arc::new(DocumentStore::new()),
             root: std::sync::Mutex::new(None),
+            lib_entries: LibEntries::default(),
         }
     }
 
@@ -328,11 +403,45 @@ impl LanguageServer for Backend {
                     }
                 });
 
-                // Background task: index library JARs from the classpath
+                // Background task: index library JARs from the classpath.
+                // Graduated: stage 2 indexes whatever `.cpcache` already holds
+                // (instant), then stage 3 resolves the authoritative classpath
+                // via the clojure CLI and re-indexes on change.
                 let index_jars = self.index.clone();
                 let client_jars = self.client.clone();
+                let lib_entries = self.lib_entries.clone();
                 tokio::spawn(async move {
-                    if resolve_and_index_libs(&root_path_jars, &index_jars) == 0 {
+                    let resolved = resolve_and_index_libs(&root_path_jars, &index_jars);
+                    let stage2_ok = resolved.indexed_any();
+                    *lib_entries.lock().unwrap() = resolved.entries.into_iter().collect();
+                    if stage2_ok {
+                        let msg = format!(
+                            "clj-pulse: library indexing complete ({} total symbols)",
+                            index_jars.symbols.len()
+                        );
+                        tracing::info!("{}", msg);
+                        client_jars.log_message(MessageType::INFO, msg).await;
+                        client_jars.send_notification::<LibrariesChanged>(()).await;
+                    }
+
+                    // Stage 3 applies only to deps.edn projects; let-go and
+                    // Leiningen resolution has no CLI-backed refinement.
+                    let is_deps_project = config::project_kind(&root_path_jars)
+                        == config::ProjectKind::Clojure
+                        && root_path_jars.join("deps.edn").exists();
+                    let cp_cfg = settings::classpath(&root_path_jars);
+                    let stage3_ok = is_deps_project
+                        && cp_cfg.enabled
+                        && run_classpath_cli(
+                            &root_path_jars,
+                            &index_jars,
+                            &client_jars,
+                            &lib_entries,
+                            &cp_cfg.aliases,
+                        )
+                        .await;
+
+                    if !stage2_ok && !stage3_ok {
                         let msg = match config::project_kind(&root_path_jars) {
                             config::ProjectKind::LetGo => {
                                 "clj-pulse: no lgx deps resolved (no ~/.lgx/gitlibs, or deps not \
@@ -341,23 +450,14 @@ impl LanguageServer for Backend {
                             }
                             config::ProjectKind::Clojure => {
                                 "clj-pulse: no classpath found (no .cpcache/ in project root?) \
-                                 — library symbols will not be indexed. Run `clojure -Spath` \
-                                 or start a REPL once to generate it."
+                                 — library symbols will not be indexed. Run \
+                                 `clojure -A:dev:test -Spath` or start a REPL once to generate it."
                             }
                         };
                         tracing::warn!("{}", msg);
                         client_jars.log_message(MessageType::WARNING, msg).await;
                         client_jars.send_notification::<LibrariesChanged>(()).await;
-                        return;
                     }
-                    let sym_count = index_jars.symbols.len();
-                    let msg = format!(
-                        "clj-pulse: library indexing complete ({} total symbols)",
-                        sym_count
-                    );
-                    tracing::info!("{}", msg);
-                    client_jars.log_message(MessageType::INFO, msg).await;
-                    client_jars.send_notification::<LibrariesChanged>(()).await;
                 });
 
                 // Background task: discover and index the JDK's bundled Java
@@ -563,6 +663,9 @@ impl LanguageServer for Backend {
         let mut classpath_changed = false;
         let mut source_paths_changed = false;
         let mut config_changed = false;
+        // `.clj-pulse/config.edn` specifically: only it carries `:classpath`,
+        // so only it triggers a CLI re-resolution (`.clj-kondo` does not).
+        let mut pulse_config_changed = false;
         for event in params.changes {
             let Ok(path) = event.uri.to_file_path() else {
                 continue;
@@ -587,14 +690,15 @@ impl LanguageServer for Backend {
             // clj-pulse / clj-kondo config: reload `:lint-as` and re-index the
             // project. Intercept before the EDN branch below, since `config.edn`
             // is itself `.edn` but is not an Integrant config.
-            let is_config = path.file_name().map(|n| n == "config.edn").unwrap_or(false)
-                && path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|d| d == ".clj-kondo" || d == ".clj-pulse")
-                    .unwrap_or(false);
-            if is_config {
+            let config_dir = path
+                .file_name()
+                .map(|n| n == "config.edn")
+                .unwrap_or(false)
+                .then(|| path.parent().and_then(|p| p.file_name()))
+                .flatten();
+            if config_dir.is_some_and(|d| d == ".clj-kondo" || d == ".clj-pulse") {
                 config_changed = true;
+                pulse_config_changed |= config_dir.is_some_and(|d| d == ".clj-pulse");
                 continue;
             }
 
@@ -652,6 +756,7 @@ impl LanguageServer for Backend {
                 let index = self.index.clone();
                 let client = self.client.clone();
                 let documents = self.documents.clone();
+                let lib_entries = self.lib_entries.clone();
                 tokio::spawn(async move {
                     // A config change reloads `:lint-as` before re-indexing, so
                     // the rebuild extracts project files with the new mapping.
@@ -706,15 +811,37 @@ impl LanguageServer for Backend {
                     if classpath_changed {
                         // Drop symbols of removed/replaced dependencies first
                         index.clear_libs();
-                        if resolve_and_index_libs(&root, &index) == 0 {
-                            // Deps disappeared — refresh so the panel clears.
-                            client.send_notification::<LibrariesChanged>(()).await;
-                            return;
+                        let resolved = resolve_and_index_libs(&root, &index);
+                        *lib_entries.lock().unwrap() = resolved.entries.iter().cloned().collect();
+                        if resolved.indexed_any() {
+                            let msg = "clj-pulse: library re-indexing complete";
+                            tracing::info!("{}", msg);
+                            client.log_message(MessageType::INFO, msg).await;
                         }
-                        let msg = "clj-pulse: library re-indexing complete";
-                        tracing::info!("{}", msg);
-                        client.log_message(MessageType::INFO, msg).await;
+                        // Notify either way — on nothing resolved the panel
+                        // must clear.
                         client.send_notification::<LibrariesChanged>(()).await;
+                    }
+
+                    // `:classpath` (aliases / enabled) may have changed — e.g.
+                    // an editor UI writing the alias selection — so re-resolve
+                    // via the CLI. Comparing against `lib_entries` skips the
+                    // re-index when the classpath is unchanged.
+                    if pulse_config_changed {
+                        let cp_cfg = settings::classpath(&root);
+                        let is_deps_project = config::project_kind(&root)
+                            == config::ProjectKind::Clojure
+                            && root.join("deps.edn").exists();
+                        if is_deps_project && cp_cfg.enabled {
+                            run_classpath_cli(
+                                &root,
+                                &index,
+                                &client,
+                                &lib_entries,
+                                &cp_cfg.aliases,
+                            )
+                            .await;
+                        }
                     }
                 });
             }
