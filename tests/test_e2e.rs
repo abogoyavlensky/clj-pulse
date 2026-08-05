@@ -48,6 +48,10 @@ impl LspClient {
             // Fixtures carry a deps.edn; without this every test would spawn
             // `clojure` for stage-3 classpath resolution.
             cmd.env("CLJ_PULSE_DISABLE_CLASSPATH_CLI", "1");
+        } else {
+            // Strip an inherited kill-switch too — the stage-3 tests must not
+            // be silently neutered by the parent environment.
+            cmd.env_remove("CLJ_PULSE_DISABLE_CLASSPATH_CLI");
         }
         for (key, value) in envs {
             cmd.env(key, value);
@@ -160,6 +164,12 @@ impl LspClient {
     /// Waits until a `window/logMessage` whose text contains `needle` has
     /// been received (checks already-stashed notifications first).
     fn wait_for_log(&mut self, needle: &str) {
+        self.wait_for_log_within(needle, TIMEOUT);
+    }
+
+    /// [`wait_for_log`] with a custom deadline — for waits that legitimately
+    /// exceed the harness default, like a cold-network dependency download.
+    fn wait_for_log_within(&mut self, needle: &str, timeout: Duration) {
         let matches = |m: &Value| {
             m["method"] == "window/logMessage"
                 && m["params"]["message"]
@@ -170,7 +180,7 @@ impl LspClient {
         if self.notifications.iter().any(matches) {
             return;
         }
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -3317,7 +3327,9 @@ fn test_e2e_alias_classpath_navigation() {
 
     let mut client = LspClient::start_with_classpath_cli(&root);
     client.initialize(&root);
-    client.wait_for_log("full classpath indexed");
+    // Stage 3 may download the alias-only dep on a cold machine; give it the
+    // resolver's own budget rather than the harness default.
+    client.wait_for_log_within("full classpath indexed", Duration::from_secs(300));
     client.did_open(&app);
 
     let (line, ch) = position_of(&app, "json/write-str");
