@@ -68,17 +68,33 @@ fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> ResolvedLibs
 /// file `clojure -Spath` itself just wrote and always conclude "no change".
 type LibEntries = Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>;
 
+/// Serializes stage-3 runs. Startup resolution and a config-watcher rerun can
+/// overlap (a cold resolve may download for minutes); without the lock the
+/// slower run — possibly carrying obsolete aliases — would clear and rebuild
+/// the index last, overwriting the newer result.
+type ClasspathCliLock = Arc<tokio::sync::Mutex<()>>;
+
 /// Stage 3: resolves the authoritative classpath by running the clojure CLI
 /// (`clojure -A:dev:test -Spath` by default) and re-indexes libraries when the
 /// result differs from what is already indexed. Returns whether resolution
-/// succeeded; every failure only logs, keeping the stage-2 index intact.
+/// succeeded; every failure — including `:enabled false` — only logs at most,
+/// keeping the stage-2 index intact.
+///
+/// The `:classpath` config is read *under the lock*, so a run queued behind a
+/// slow one always applies the freshest alias selection.
 async fn run_classpath_cli(
     root: &std::path::Path,
     index: &Index,
     client: &Client,
     lib_entries: &LibEntries,
-    aliases: &[String],
+    cli_lock: &ClasspathCliLock,
 ) -> bool {
+    let _serial = cli_lock.lock().await;
+    let cfg = settings::classpath(root);
+    if !cfg.enabled {
+        return false;
+    }
+    let aliases = &cfg.aliases;
     let cmd = match classpath::alias_arg(aliases) {
         Some(arg) => format!("clojure {arg} -Spath"),
         None => "clojure -Spath".to_string(),
@@ -176,6 +192,8 @@ pub struct Backend {
     root: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// See [`LibEntries`].
     lib_entries: LibEntries,
+    /// See [`ClasspathCliLock`].
+    classpath_cli_lock: ClasspathCliLock,
 }
 
 impl Backend {
@@ -186,6 +204,7 @@ impl Backend {
             documents: Arc::new(DocumentStore::new()),
             root: std::sync::Mutex::new(None),
             lib_entries: LibEntries::default(),
+            classpath_cli_lock: ClasspathCliLock::default(),
         }
     }
 
@@ -410,6 +429,7 @@ impl LanguageServer for Backend {
                 let index_jars = self.index.clone();
                 let client_jars = self.client.clone();
                 let lib_entries = self.lib_entries.clone();
+                let cli_lock = self.classpath_cli_lock.clone();
                 tokio::spawn(async move {
                     let resolved = resolve_and_index_libs(&root_path_jars, &index_jars);
                     let stage2_ok = resolved.indexed_any();
@@ -429,15 +449,13 @@ impl LanguageServer for Backend {
                     let is_deps_project = config::project_kind(&root_path_jars)
                         == config::ProjectKind::Clojure
                         && root_path_jars.join("deps.edn").exists();
-                    let cp_cfg = settings::classpath(&root_path_jars);
                     let stage3_ok = is_deps_project
-                        && cp_cfg.enabled
                         && run_classpath_cli(
                             &root_path_jars,
                             &index_jars,
                             &client_jars,
                             &lib_entries,
-                            &cp_cfg.aliases,
+                            &cli_lock,
                         )
                         .await;
 
@@ -757,6 +775,7 @@ impl LanguageServer for Backend {
                 let client = self.client.clone();
                 let documents = self.documents.clone();
                 let lib_entries = self.lib_entries.clone();
+                let cli_lock = self.classpath_cli_lock.clone();
                 tokio::spawn(async move {
                     // A config change reloads `:lint-as` before re-indexing, so
                     // the rebuild extracts project files with the new mapping.
@@ -828,19 +847,12 @@ impl LanguageServer for Backend {
                     // via the CLI. Comparing against `lib_entries` skips the
                     // re-index when the classpath is unchanged.
                     if pulse_config_changed {
-                        let cp_cfg = settings::classpath(&root);
                         let is_deps_project = config::project_kind(&root)
                             == config::ProjectKind::Clojure
                             && root.join("deps.edn").exists();
-                        if is_deps_project && cp_cfg.enabled {
-                            run_classpath_cli(
-                                &root,
-                                &index,
-                                &client,
-                                &lib_entries,
-                                &cp_cfg.aliases,
-                            )
-                            .await;
+                        if is_deps_project {
+                            run_classpath_cli(&root, &index, &client, &lib_entries, &cli_lock)
+                                .await;
                         }
                     }
                 });
