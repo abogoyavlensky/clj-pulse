@@ -145,7 +145,7 @@ fn scoped_walker(root: &ScanRoot) -> ignore::Walk {
 
 /// Removes `.` and `..` components lexically (no filesystem access, symlinks
 /// untouched), so path comparisons see the same clean form the walker yields.
-fn normalize_lexically(path: &Path) -> PathBuf {
+pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

@@ -87,6 +87,15 @@ pub fn from_entries(
 /// therefore *not* owned and stays listed — the panel is the only way to
 /// browse it.
 fn owned_by_project(entry: &Path, project_dirs: &[PathBuf]) -> bool {
+    // Lexical `..`/`.` defeat prefix and equality checks (`lgx::resolve`
+    // keeps a sibling `:local/root "../common"` verbatim): compare clean
+    // paths only.
+    let entry = crate::index::scanner::normalize_lexically(entry);
+    let project_dirs: Vec<PathBuf> = project_dirs
+        .iter()
+        .map(|d| crate::index::scanner::normalize_lexically(d))
+        .collect();
+
     // Outermost enclosing project dir; entries outside every project dir are
     // never owned (gitlibs/m2 checkouts).
     let Some(outermost) = project_dirs
@@ -97,7 +106,7 @@ fn owned_by_project(entry: &Path, project_dirs: &[PathBuf]) -> bool {
         return false;
     };
 
-    let mut dir = entry;
+    let mut dir = entry.as_path();
     loop {
         let has_manifest = ["deps.edn", "project.clj", "lgx.edn"]
             .iter()
@@ -328,6 +337,28 @@ mod tests {
         let out = from_entries(&[], &[ws.to_path_buf()], &[ws.join("vendor/y/src")]);
         assert_eq!(out.len(), 1, "vendored checkout must be kept: {out:?}");
         assert_eq!(out[0].path, ws.join("vendor/y/src").display().to_string());
+    }
+
+    #[test]
+    fn parent_relative_sibling_project_entry_is_excluded() {
+        // lgx keeps `:local/root "../common"` verbatim: the entry arrives as
+        // `<ws>/app/../common/src` and must still resolve to the sibling
+        // project `common` (a resolved project → excluded).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        mk_manifest(&ws.join("app"));
+        mk_manifest(&ws.join("common"));
+        std::fs::create_dir_all(ws.join("common/src")).unwrap();
+
+        let out = from_entries(
+            &[],
+            &[ws.join("app"), ws.join("common")],
+            &[ws.join("app/../common/src")],
+        );
+        assert!(
+            out.is_empty(),
+            "parent-relative sibling project entry must be excluded: {out:?}"
+        );
     }
 
     #[test]
