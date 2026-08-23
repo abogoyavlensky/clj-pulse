@@ -1098,6 +1098,12 @@ impl Backend {
                 })
                 .map(|p| p.rel_path.clone())
                 .collect();
+            // Revert forced projects to stage-2 truth first: if a rerun's
+            // command now fails, its error path must leave stage-2 data
+            // behind, not the previous run's stage-3 entries.
+            if reconcile_projects(&root, &resolved, &state_arc, &index, false, &forced) {
+                client.send_notification::<LibrariesChanged>(()).await;
+            }
             for rel_path in forced {
                 run_stage3_project(
                     &root,
