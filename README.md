@@ -171,8 +171,11 @@ Editors can also force a full refresh with the custom `clojurePulse/rescan`
 request: it re-runs project detection, re-reads the config, and re-resolves
 every enabled project's classpath — the way to retry a failed resolution or
 pick up a subproject created inside a gitignored directory, where no file
-watcher ever fires. The request returns null immediately; completion arrives
-as a `clojurePulse/librariesChanged` notification. While a classpath command
+watcher ever fires. The request returns null immediately and the work runs in
+the background, emitting `clojurePulse/librariesChanged` as it progresses —
+clients should simply re-request on each notification (one is guaranteed at
+the end even when nothing changed, so the panel never waits forever). While a
+classpath command
 runs, clj-pulse reports standard LSP work-done progress
 ("Resolving classpath: …") to clients that advertise the
 `window.workDoneProgress` capability, so the editor shows why library
