@@ -183,14 +183,16 @@ fn set_status(state_arc: &SharedState, rel_path: &str, status: ClasspathStatus) 
 
 /// Re-detects and re-resolves the project list from the current config layers,
 /// bumping the config generation (the stale-result guard for in-flight stage-3
-/// runs) and pruning state of removed projects. Returns the new list.
+/// runs) and pruning state of removed projects. Returns the new list, whether
+/// any pruned project had contributed libraries, and whether the list changed
+/// (so callers can notify the panel).
 fn refresh_projects(
     root: &std::path::Path,
     projects_arc: &SharedProjects,
     editor_config: &SharedEditorConfig,
     state_arc: &SharedState,
     generation: &ConfigGeneration,
-) -> (Vec<projects::Project>, bool) {
+) -> (Vec<projects::Project>, bool, bool) {
     let detected = projects::detect(root);
     let file = std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
         .map(|src| projects::parse_edn(&src))
@@ -198,7 +200,12 @@ fn refresh_projects(
     let editor = editor_config.lock().unwrap().clone();
     let resolved = projects::resolve(root, &detected, &file, &editor);
     generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    *projects_arc.lock().unwrap() = resolved.clone();
+    let list_changed = {
+        let mut projects = projects_arc.lock().unwrap();
+        let changed = *projects != resolved;
+        *projects = resolved.clone();
+        changed
+    };
     let mut state = state_arc.lock().unwrap();
     let mut pruned_any = false;
     state.retain(|rel, ps| {
@@ -210,7 +217,7 @@ fn refresh_projects(
         }
         keep
     });
-    (resolved, pruned_any)
+    (resolved, pruned_any, list_changed)
 }
 
 /// Reverts projects whose stage 3 is no longer active (disabled by a config
@@ -815,6 +822,10 @@ impl LanguageServer for Backend {
                             );
                         }
                     }
+                    // The project list is now available: tell the panel even
+                    // when no libraries will ever be indexed (all disabled /
+                    // empty classpaths), so it doesn't stay permanently empty.
+                    client.send_notification::<LibrariesChanged>(()).await;
 
                     // Background task: index libraries from each project's
                     // classpath, concurrent with the source scan below.
@@ -1232,13 +1243,17 @@ impl LanguageServer for Backend {
                     // A manifest or config change can add/remove projects or
                     // retoggle their classpath resolution: re-resolve the list
                     // (this also bumps the stage-3 stale-result generation).
-                    let (resolved, pruned_any) = refresh_projects(
+                    let (resolved, pruned_any, list_changed) = refresh_projects(
                         &root,
                         &projects_arc,
                         &editor_config,
                         &state_arc,
                         &generation,
                     );
+                    if list_changed {
+                        // The projects panel re-requests on this notification.
+                        client.send_notification::<LibrariesChanged>(()).await;
+                    }
 
                     // Rebuild project sources when :paths changed or the config
                     // changed (lint-as affects how every project file extracts).
