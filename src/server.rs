@@ -45,6 +45,10 @@ pub(crate) enum ClasspathStatus {
 struct ProjectState {
     entries: std::collections::HashSet<std::path::PathBuf>,
     status: ClasspathStatus,
+    /// Whether stage 2 indexed library sources *outside* the entries (let-go's
+    /// pinned core). A project can contribute libraries with zero entries;
+    /// removing it must still trigger a union rebuild.
+    extra_indexed: bool,
 }
 
 impl ProjectState {
@@ -52,6 +56,7 @@ impl ProjectState {
         ProjectState {
             entries: std::collections::HashSet::new(),
             status,
+            extra_indexed: false,
         }
     }
 }
@@ -199,8 +204,8 @@ fn refresh_projects(
     state.retain(|rel, ps| {
         let keep = resolved.iter().any(|p| p.rel_path == *rel);
         // A pruned project only forces a union rebuild when it actually
-        // contributed libraries.
-        if !keep && !ps.entries.is_empty() {
+        // contributed libraries (entries, or let-go core outside them).
+        if !keep && (!ps.entries.is_empty() || ps.extra_indexed) {
             pruned_any = true;
         }
         keep
@@ -289,6 +294,7 @@ fn run_stage2_all(
             ProjectState {
                 entries: entries.into_iter().collect(),
                 status,
+                extra_indexed: extra > 0,
             },
         );
     }

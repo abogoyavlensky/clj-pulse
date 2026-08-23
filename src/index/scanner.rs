@@ -119,18 +119,21 @@ fn collect_edn_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
 /// included — and prunes everything off the path to the source root.
 /// `parents(false)` cuts the ancestry discovery above the project dir.
 fn scoped_walker(root: &ScanRoot) -> ignore::Walk {
-    // A source path outside the project dir (never produced by
-    // `config::source_paths`, but be safe) degrades to a plain scoped walk of
-    // itself.
-    let walk_from = if root.path.starts_with(&root.project_dir) {
-        root.project_dir.clone()
+    // Normalize `..`/`.` away first: `:paths ["../shared/src"]` joins to
+    // `project/../shared/src`, which lexically starts_with the project dir
+    // while the walker's real paths never would — the filter must compare
+    // clean paths. A target outside the project dir (that `../` case)
+    // degrades to a plain scoped walk of itself.
+    let target = normalize_lexically(&root.path);
+    let project_dir = normalize_lexically(&root.project_dir);
+    let walk_from = if target.starts_with(&project_dir) {
+        project_dir
     } else {
-        root.path.clone()
+        target.clone()
     };
     let mut builder = ignore::WalkBuilder::new(&walk_from);
     builder.parents(false).require_git(false);
-    if walk_from != root.path {
-        let target = root.path.clone();
+    if walk_from != target {
         // Keep only the target subtree and the dirs leading down to it.
         builder.filter_entry(move |entry| {
             let path = entry.path();
@@ -138,6 +141,24 @@ fn scoped_walker(root: &ScanRoot) -> ignore::Walk {
         });
     }
     builder.build()
+}
+
+/// Removes `.` and `..` components lexically (no filesystem access, symlinks
+/// untouched), so path comparisons see the same clean form the walker yields.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Indexes library sources from a classpath: JAR files (with a per-JAR disk
@@ -393,6 +414,29 @@ mod tests {
         assert!(
             !index.namespaces.contains_key("gone"),
             "non-negated project-level exclusion must hold"
+        );
+    }
+
+    /// A parent-relative source root (`:paths ["../shared/src"]` joins to
+    /// `project/../shared/src`) must still be scanned — the lexical `..` used
+    /// to defeat the subtree filter and silently drop the whole root.
+    #[test]
+    fn scoped_scan_handles_parent_relative_source_roots() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("app")).unwrap();
+        fs::create_dir_all(ws.join("shared/src")).unwrap();
+        fs::write(ws.join("shared/src/lib.clj"), "(ns lib)\n").unwrap();
+
+        let roots = [ScanRoot {
+            project_dir: ws.join("app"),
+            path: ws.join("app/../shared/src"),
+        }];
+        let index = build_index_scoped(&roots, &ExtractConfig::default()).unwrap();
+
+        assert!(
+            index.namespaces.contains_key("lib"),
+            "parent-relative source root must be scanned"
         );
     }
 }
