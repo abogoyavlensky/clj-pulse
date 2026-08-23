@@ -10,12 +10,21 @@ editor keystroke
 
 ## Index Population (startup)
 
-config.rs: find project root (walk up dirs for deps.edn / project.clj)
-config.rs: read :paths from deps.edn (default ["src" "test"])
-scanner.rs: walk each path with `ignore::WalkBuilder`, collect .clj/.cljs/.cljc files
+projects.rs: detect subprojects (dirs holding deps.edn / project.clj / lgx.edn,
+  gitignore-respecting, max depth 4); merge `.clj-pulse/config.edn` and editor
+  `:projects` overrides into the resolved project list (workspace root first)
+config.rs: read :paths from each project's manifest (default ["src" "test"])
+scanner.rs: walk each project's paths with a project-scoped walker
+  (`ScanRoot`: gitignore ancestry stops at the project dir), collect
+  .clj/.cljs/.cljc files
 scanner.rs: rayon::par_iter → call extractor::extract(file_contents) per file
 extractor.rs: tree-sitter parse → return (NsMeta, Vec<Symbol>)
-scanner.rs: merge results into Arc<Index> via DashMap inserts
+scanner.rs: merge results into the one shared Arc<Index> via DashMap inserts
+  (a namespace defined by two projects: last writer wins, with a warning)
+server.rs: per project, stage 2 indexes the cached classpath (.cpcache / lgx /
+  lein) into the same index; stage 3 (opt-in per project, root-only by
+  default) runs the project's `:cmd` and rebuilds the per-project library
+  union when the entry set changed
 
 ## Keyword & Integrant Indexing
 
