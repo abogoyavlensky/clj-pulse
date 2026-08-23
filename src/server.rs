@@ -184,7 +184,7 @@ fn lib_union(state: &std::collections::HashMap<String, ProjectState>) -> Vec<std
 fn rebuild_libs(
     workspace_root: &std::path::Path,
     project_list: &[projects::Project],
-    state: &std::collections::HashMap<String, ProjectState>,
+    state: &mut std::collections::HashMap<String, ProjectState>,
     index: &Index,
 ) {
     index.clear_libs();
@@ -197,13 +197,22 @@ fn rebuild_libs(
             projects::ProjectKindTag::Lgx => {
                 scanner::index_dir_libs(&entries, index);
                 // Even with no dep dirs: pinned core is indexed outside the
-                // entries, and `clear_libs` dropped its marker.
-                lgx::index_letgo_core(&p.dir, index);
+                // entries, and `clear_libs` dropped its marker. Track the
+                // outcome so removing a core-only project later still forces
+                // a union rebuild.
+                let extra = lgx::index_letgo_core(&p.dir, index);
+                if let Some(ps) = state.get_mut(&p.rel_path) {
+                    ps.extra_indexed = extra > 0;
+                }
             }
             _ if !entries.is_empty() => {
                 scanner::index_classpath_libs(workspace_root, entries, index)
             }
-            _ => {}
+            _ => {
+                if let Some(ps) = state.get_mut(&p.rel_path) {
+                    ps.extra_indexed = false;
+                }
+            }
         }
     }
 }
@@ -310,8 +319,8 @@ fn reconcile_projects(
         entry.status = status;
     }
     if changed {
-        let state = state_arc.lock().unwrap();
-        rebuild_libs(workspace_root, resolved, &state, index);
+        let mut state = state_arc.lock().unwrap();
+        rebuild_libs(workspace_root, resolved, &mut state, index);
     }
     changed
 }
@@ -322,6 +331,18 @@ fn stage2_discover(p: &projects::Project) -> Vec<std::path::PathBuf> {
         projects::ProjectKindTag::Lgx => lgx::resolve(&p.dir),
         _ => clojure_classpath(&p.dir),
     }
+}
+
+/// The project whose own dir directly contains this manifest file. Manifests
+/// live at project roots, so exact-parent matching is precise — and a deleted
+/// subproject's manifest (its project already pruned from the list) resolves
+/// to `None` instead of being misattributed to a surviving ancestor.
+fn manifest_owner<'a>(
+    project_list: &'a [projects::Project],
+    manifest: &std::path::Path,
+) -> Option<&'a projects::Project> {
+    let dir = manifest.parent()?;
+    project_list.iter().find(|p| p.dir == dir)
 }
 
 /// The project owning `path`: the one with the longest dir prefix.
@@ -366,8 +387,8 @@ fn stage2_refresh(
         }
     }
     if changed {
-        let state = state_arc.lock().unwrap();
-        rebuild_libs(workspace_root, all_projects, &state, index);
+        let mut state = state_arc.lock().unwrap();
+        rebuild_libs(workspace_root, all_projects, &mut state, index);
     }
     changed
 }
@@ -482,7 +503,7 @@ async fn run_stage3_project(
                 entry.entries = set;
                 entry.status = ClasspathStatus::Resolved;
                 if changed {
-                    rebuild_libs(workspace_root, &project_list, &state, index);
+                    rebuild_libs(workspace_root, &project_list, &mut state, index);
                 }
             }
             let msg = format!(
@@ -568,11 +589,13 @@ async fn apply_project_diff(
     let mut stage3_runs: Vec<String> = Vec::new();
     let mut force_revert: Vec<String> = Vec::new();
     let mut added: Vec<projects::Project> = Vec::new();
+    let mut kind_changed = false;
     for p in resolved {
         let old_p = old.iter().find(|o| o.rel_path == p.rel_path);
         if old_p.is_none() {
             added.push(p.clone());
         }
+        kind_changed |= old_p.is_some_and(|o| o.kind != p.kind);
         let was_active = old_p.is_some_and(|o| o.classpath_enabled && o.classpath_cmd.is_some());
         let cmd_changed = old_p.is_none_or(|o| o.classpath_cmd != p.classpath_cmd);
         if p.classpath_enabled && p.classpath_cmd.is_some() && (!was_active || cmd_changed) {
@@ -629,7 +652,14 @@ async fn apply_project_diff(
     // Newly disabled projects revert to stage-2 truth (their stage-2
     // libraries stay indexed — disabling only gates stage 3).
     let rebuilt = reconcile_projects(root, resolved, state_arc, index, pruned_any, &force_revert);
-    if rebuilt || list_changed || !added.is_empty() {
+    if kind_changed && !rebuilt {
+        // Per-kind indexing differs even with identical entries (lgx dirs vs
+        // classpath, let-go core): a kind flip forces the union rebuild that
+        // the entry-set comparison would skip.
+        let mut state = state_arc.lock().unwrap();
+        rebuild_libs(root, resolved, &mut state, index);
+    }
+    if rebuilt || kind_changed || list_changed || !added.is_empty() {
         client.send_notification::<LibrariesChanged>(()).await;
     }
 
@@ -1580,8 +1610,12 @@ impl LanguageServer for Backend {
                         let mut seen = std::collections::HashSet::new();
                         manifest_paths
                             .iter()
-                            .chain(cpcache_paths.iter())
-                            .filter_map(|path| owning_project(&resolved, path))
+                            .filter_map(|path| manifest_owner(&resolved, path))
+                            .chain(
+                                cpcache_paths
+                                    .iter()
+                                    .filter_map(|path| owning_project(&resolved, path)),
+                            )
                             .filter(|p| seen.insert(p.rel_path.clone()))
                             .cloned()
                             .collect()
@@ -1605,7 +1639,7 @@ impl LanguageServer for Backend {
                         stage3_ran.into_iter().collect();
                     for path in &manifest_paths {
                         let Some(rel_path) =
-                            owning_project(&resolved, path).map(|p| p.rel_path.clone())
+                            manifest_owner(&resolved, path).map(|p| p.rel_path.clone())
                         else {
                             continue;
                         };
