@@ -221,6 +221,28 @@ impl LspClient {
         result
     }
 
+    /// Like [`initialize`] but advertising `window.workDoneProgress`, so the
+    /// server may report `$/progress`.
+    fn initialize_with_progress(&mut self, root: &Path) -> Value {
+        let root_uri = format!("file://{}", root.display());
+        let result = self.request(
+            "initialize",
+            json!({
+                "processId": std::process::id(),
+                "rootUri": root_uri,
+                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
+                "capabilities": {
+                    "textDocument": { "definition": { "linkSupport": true } },
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "window": { "workDoneProgress": true }
+                }
+            }),
+        );
+        self.notify("initialized", json!({}));
+        self.wait_for_log("Indexed");
+        result
+    }
+
     /// Zed-shaped startup: only `workspaceFolders` (no deprecated `rootUri`),
     /// offering UTF-8 then UTF-16 position encodings — what Zed's LSP client
     /// sends. Exercises the same indexing path real Zed users hit.
@@ -4543,4 +4565,82 @@ fn test_e2e_own_dirs_filtered_from_library_lists() {
         lib_paths.iter().any(|p| p.ends_with("/dep/src")),
         "dependency dir missing from projects response: {lib_paths:?}"
     );
+}
+
+/// Prepares a project whose root stage-3 command is a stub echoing an
+/// existing dir, so classpath resolution runs without a real `clojure`.
+fn setup_stub_stage3() -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let stub = root.join("stub-classpath.sh");
+    std::fs::write(&stub, format!("echo '{}'\n", root.join("src").display())).unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        format!(
+            "{{:projects [{{:path \".\" :classpath {{:cmd \"sh {}\"}}}}]}}\n",
+            stub.display()
+        ),
+    )
+    .unwrap();
+    (project, root)
+}
+
+/// Stage-3 resolution reports LSP work-done progress when the client
+/// advertises `window.workDoneProgress`: a `workDoneProgress/create` request,
+/// then `$/progress` Begin and End on a per-run token.
+#[test]
+fn test_e2e_stage3_reports_work_done_progress() {
+    let (_project, root) = setup_stub_stage3();
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize_with_progress(&root);
+    client.wait_for_log("full classpath indexed");
+
+    let progress: Vec<Value> = client
+        .notifications
+        .iter()
+        .filter(|m| m["method"] == "$/progress")
+        .cloned()
+        .collect();
+    let token_of = |m: &Value| m["params"]["token"].as_str().unwrap_or("").to_string();
+    let begin = progress
+        .iter()
+        .find(|m| m["params"]["value"]["kind"] == "begin")
+        .unwrap_or_else(|| panic!("no $/progress begin: {progress:?}"));
+    assert!(
+        token_of(begin).starts_with("clj-pulse/classpath/./"),
+        "unexpected token: {}",
+        token_of(begin)
+    );
+    assert_eq!(
+        begin["params"]["value"]["title"], "Resolving classpath: .",
+        "unexpected begin: {begin}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|m| m["params"]["value"]["kind"] == "end" && token_of(m) == token_of(begin)),
+        "no matching $/progress end: {progress:?}"
+    );
+    let create = client
+        .notifications
+        .iter()
+        .any(|m| m["method"] == "window/workDoneProgress/create");
+    assert!(create, "workDoneProgress/create request not sent");
+}
+
+/// Without the capability, stage 3 must stay silent — no `$/progress`, no
+/// `workDoneProgress/create`.
+#[test]
+fn test_e2e_stage3_no_progress_without_capability() {
+    let (_project, root) = setup_stub_stage3();
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize(&root);
+    client.wait_for_log("full classpath indexed");
+
+    let noisy = client
+        .notifications
+        .iter()
+        .any(|m| m["method"] == "$/progress" || m["method"] == "window/workDoneProgress/create");
+    assert!(!noisy, "progress sent without the capability");
 }

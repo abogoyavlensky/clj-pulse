@@ -74,6 +74,54 @@ type ConfigGeneration = Arc<std::sync::atomic::AtomicU64>;
 /// rebuild the index last, overwriting the newer result.
 type ClasspathCliLock = Arc<tokio::sync::Mutex<()>>;
 
+/// Work-done progress reporting state: whether the client advertised
+/// `window.workDoneProgress`, plus the counter making each run's token unique
+/// (`clj-pulse/classpath/<rel_path>/<n>` — rescans repeat runs for the same
+/// project, and the spec requires per-operation tokens).
+#[derive(Clone, Default)]
+struct ProgressState {
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+    counter: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ProgressState {
+    /// Creates a progress token for one stage-3 run, or `None` when the
+    /// client lacks the capability or rejects the create request (progress
+    /// then downgrades to silence, never an error).
+    async fn begin_token(&self, client: &Client, rel_path: &str) -> Option<NumberOrString> {
+        use std::sync::atomic::Ordering;
+        if !self.enabled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        let token = NumberOrString::String(format!("clj-pulse/classpath/{rel_path}/{n}"));
+        match client
+            .send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+                token: token.clone(),
+            })
+            .await
+        {
+            Ok(()) => Some(token),
+            Err(e) => {
+                tracing::debug!("workDoneProgress/create failed: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Sends one `$/progress` value for `token`; no-op when progress is off.
+async fn send_progress(client: &Client, token: &Option<NumberOrString>, value: WorkDoneProgress) {
+    if let Some(token) = token {
+        client
+            .send_notification::<notification::Progress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(value),
+            })
+            .await;
+    }
+}
+
 /// Serializes whole config-application tasks (`didChangeConfiguration`,
 /// watched-file reruns, the startup library task). Without it two
 /// back-to-back config notifications interleave their refresh/rescan/stage
@@ -438,6 +486,7 @@ async fn run_stage3_project(
     state_arc: &SharedState,
     generation: &ConfigGeneration,
     cli_lock: &ClasspathCliLock,
+    progress: &ProgressState,
 ) -> bool {
     use std::sync::atomic::Ordering;
 
@@ -468,6 +517,17 @@ async fn run_stage3_project(
     tracing::info!("{}", msg);
     client.log_message(MessageType::INFO, msg).await;
 
+    let progress_token = progress.begin_token(client, rel_path).await;
+    send_progress(
+        client,
+        &progress_token,
+        WorkDoneProgress::Begin(WorkDoneProgressBegin {
+            title: format!("Resolving classpath: {rel_path}"),
+            ..Default::default()
+        }),
+    )
+    .await;
+
     let result = classpath::resolve_via_cmd(&cmd, &project.dir, classpath::CMD_TIMEOUT).await;
 
     // Stale-result guard: apply nothing (entries, status, rebuild) if the
@@ -483,6 +543,12 @@ async fn run_stage3_project(
             "stage-3 result for {} discarded (config changed mid-run)",
             rel_path
         );
+        send_progress(
+            client,
+            &progress_token,
+            WorkDoneProgress::End(WorkDoneProgressEnd::default()),
+        )
+        .await;
         return false;
     }
 
@@ -510,6 +576,12 @@ async fn run_stage3_project(
                 "clj-pulse: full classpath indexed ({} entries)",
                 entries.len()
             );
+            send_progress(
+                client,
+                &progress_token,
+                WorkDoneProgress::End(WorkDoneProgressEnd::default()),
+            )
+            .await;
             tracing::info!("{}", msg);
             client.log_message(MessageType::INFO, msg).await;
             client.send_notification::<LibrariesChanged>(()).await;
@@ -519,6 +591,12 @@ async fn run_stage3_project(
             // Keep stage-2 entries; only the status records the failure.
             set_status(state_arc, rel_path, ClasspathStatus::Error(reason.clone()));
             let msg = format!("clj-pulse: classpath resolution failed: {reason}");
+            send_progress(
+                client,
+                &progress_token,
+                WorkDoneProgress::End(WorkDoneProgressEnd::default()),
+            )
+            .await;
             tracing::warn!("{}", msg);
             client.log_message(MessageType::WARNING, msg).await;
             client.send_notification::<LibrariesChanged>(()).await;
@@ -529,6 +607,7 @@ async fn run_stage3_project(
 
 /// Stage 3 across every enabled project with a command and a manifest.
 /// Notifies progressively (per project) via [`run_stage3_project`].
+#[allow(clippy::too_many_arguments)]
 async fn run_stage3_all(
     workspace_root: &std::path::Path,
     index: &Index,
@@ -537,6 +616,7 @@ async fn run_stage3_all(
     state_arc: &SharedState,
     generation: &ConfigGeneration,
     cli_lock: &ClasspathCliLock,
+    progress: &ProgressState,
 ) -> bool {
     let candidates: Vec<String> = projects_arc
         .lock()
@@ -556,6 +636,7 @@ async fn run_stage3_all(
             state_arc,
             generation,
             cli_lock,
+            progress,
         )
         .await;
     }
@@ -584,6 +665,7 @@ async fn apply_project_diff(
     state_arc: &SharedState,
     generation: &ConfigGeneration,
     cli_lock: &ClasspathCliLock,
+    progress: &ProgressState,
 ) -> Vec<String> {
     // Diff old vs new resolved config per project.
     let mut stage3_runs: Vec<String> = Vec::new();
@@ -673,6 +755,7 @@ async fn apply_project_diff(
             state_arc,
             generation,
             cli_lock,
+            progress,
         )
         .await;
     }
@@ -728,6 +811,8 @@ pub struct Backend {
     classpath_cli_lock: ClasspathCliLock,
     /// See [`ConfigApplyLock`].
     config_apply_lock: ConfigApplyLock,
+    /// See [`ProgressState`].
+    progress: ProgressState,
 }
 
 impl Backend {
@@ -743,6 +828,7 @@ impl Backend {
             config_generation: ConfigGeneration::default(),
             classpath_cli_lock: ClasspathCliLock::default(),
             config_apply_lock: ConfigApplyLock::default(),
+            progress: ProgressState::default(),
         }
     }
 
@@ -1013,6 +1099,18 @@ fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // `$/progress` reporting is capability-gated; clients without
+        // `window.workDoneProgress` get nothing.
+        self.progress.enabled.store(
+            params
+                .capabilities
+                .window
+                .as_ref()
+                .and_then(|w| w.work_done_progress)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         if let Some(root_path) = initialize_root(&params) {
             {
                 *self.root.lock().unwrap() = Some(root_path.clone());
@@ -1034,6 +1132,7 @@ impl LanguageServer for Backend {
                 let generation = self.config_generation.clone();
                 let cli_lock = self.classpath_cli_lock.clone();
                 let apply_lock = self.config_apply_lock.clone();
+                let progress = self.progress.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
 
@@ -1082,6 +1181,7 @@ impl LanguageServer for Backend {
                         let generation = generation.clone();
                         let cli_lock = cli_lock.clone();
                         let apply_lock = apply_lock.clone();
+                        let progress = progress.clone();
                         let root = root_path.clone();
                         let resolved = resolved.clone();
                         tokio::spawn(async move {
@@ -1107,6 +1207,7 @@ impl LanguageServer for Backend {
                                 &state_arc,
                                 &generation,
                                 &cli_lock,
+                                &progress,
                             )
                             .await;
 
@@ -1287,6 +1388,7 @@ impl LanguageServer for Backend {
         let generation = self.config_generation.clone();
         let cli_lock = self.classpath_cli_lock.clone();
         let apply_lock = self.config_apply_lock.clone();
+        let progress = self.progress.clone();
         tokio::spawn(async move {
             // Serialize whole applications: a slower, staler task must not
             // finish after — and overwrite — a newer one. (The editor layer
@@ -1317,6 +1419,7 @@ impl LanguageServer for Backend {
                 &state_arc,
                 &generation,
                 &cli_lock,
+                &progress,
             )
             .await;
         });
@@ -1520,6 +1623,7 @@ impl LanguageServer for Backend {
                 let generation = self.config_generation.clone();
                 let cli_lock = self.classpath_cli_lock.clone();
                 let apply_lock = self.config_apply_lock.clone();
+                let progress = self.progress.clone();
                 tokio::spawn(async move {
                     // Serialize with other config-application tasks (see
                     // `ConfigApplyLock`).
@@ -1603,6 +1707,7 @@ impl LanguageServer for Backend {
                             &state_arc,
                             &generation,
                             &cli_lock,
+                            &progress,
                         )
                         .await
                     } else {
@@ -1661,6 +1766,7 @@ impl LanguageServer for Backend {
                             &state_arc,
                             &generation,
                             &cli_lock,
+                            &progress,
                         )
                         .await;
                     }
