@@ -292,12 +292,8 @@ fn reconcile_projects(
             continue;
         }
         // Fresh stage-2 discovery, without indexing (the rebuild below does it).
-        let entries: std::collections::HashSet<std::path::PathBuf> = match p.kind {
-            projects::ProjectKindTag::Lgx => lgx::resolve(&p.dir),
-            _ => clojure_classpath(&p.dir),
-        }
-        .into_iter()
-        .collect();
+        let entries: std::collections::HashSet<std::path::PathBuf> =
+            stage2_discover(p).into_iter().collect();
         let status = if entries.is_empty() {
             ClasspathStatus::Unresolved
         } else {
@@ -316,6 +312,62 @@ fn reconcile_projects(
     if changed {
         let state = state_arc.lock().unwrap();
         rebuild_libs(workspace_root, resolved, &state, index);
+    }
+    changed
+}
+
+/// A project's stage-2 classpath discovery, without indexing.
+fn stage2_discover(p: &projects::Project) -> Vec<std::path::PathBuf> {
+    match p.kind {
+        projects::ProjectKindTag::Lgx => lgx::resolve(&p.dir),
+        _ => clojure_classpath(&p.dir),
+    }
+}
+
+/// The project owning `path`: the one with the longest dir prefix.
+fn owning_project<'a>(
+    project_list: &'a [projects::Project],
+    path: &std::path::Path,
+) -> Option<&'a projects::Project> {
+    project_list
+        .iter()
+        .filter(|p| path.starts_with(&p.dir))
+        .max_by_key(|p| p.dir.components().count())
+}
+
+/// Re-runs stage-2 discovery for the given projects and rebuilds the library
+/// union when any entry set changed. A project whose entries are unchanged
+/// keeps its status untouched — the `.cpcache` write being reacted to may be
+/// stage 3's own `-Spath` output, and downgrading `resolved` → `cached` on it
+/// would misreport. Returns whether the union was rebuilt.
+fn stage2_refresh(
+    workspace_root: &std::path::Path,
+    affected: &[projects::Project],
+    all_projects: &[projects::Project],
+    state_arc: &SharedState,
+    index: &Index,
+) -> bool {
+    let mut changed = false;
+    for p in affected {
+        let entries: std::collections::HashSet<std::path::PathBuf> =
+            stage2_discover(p).into_iter().collect();
+        let mut state = state_arc.lock().unwrap();
+        let entry = state
+            .entry(p.rel_path.clone())
+            .or_insert_with(|| ProjectState::empty(ClasspathStatus::Unresolved));
+        if entry.entries != entries {
+            entry.status = if entries.is_empty() {
+                ClasspathStatus::Unresolved
+            } else {
+                ClasspathStatus::Cached
+            };
+            entry.entries = entries;
+            changed = true;
+        }
+    }
+    if changed {
+        let state = state_arc.lock().unwrap();
+        rebuild_libs(workspace_root, all_projects, &state, index);
     }
     changed
 }
@@ -487,6 +539,114 @@ async fn run_stage3_all(
         .await;
     }
     any_ok
+}
+
+/// Applies the difference between the previous and freshly resolved project
+/// lists: indexes added projects (sources + stage 2) — or rescans the whole
+/// source union when projects were removed, unless the caller already did —
+/// reverts disabled / command-changed projects to stage-2 truth, notifies the
+/// panel, and runs stage 3 for newly enabled (or command-changed) projects.
+/// Returns the rel_paths stage 3 was run for. Call with the
+/// [`ConfigApplyLock`] held.
+#[allow(clippy::too_many_arguments)]
+async fn apply_project_diff(
+    root: &std::path::Path,
+    old: &[projects::Project],
+    resolved: &[projects::Project],
+    pruned_any: bool,
+    list_changed: bool,
+    sources_rescanned: bool,
+    index: &Index,
+    client: &Client,
+    documents: &DocumentStore,
+    projects_arc: &SharedProjects,
+    state_arc: &SharedState,
+    generation: &ConfigGeneration,
+    cli_lock: &ClasspathCliLock,
+) -> Vec<String> {
+    // Diff old vs new resolved config per project.
+    let mut stage3_runs: Vec<String> = Vec::new();
+    let mut force_revert: Vec<String> = Vec::new();
+    let mut added: Vec<projects::Project> = Vec::new();
+    for p in resolved {
+        let old_p = old.iter().find(|o| o.rel_path == p.rel_path);
+        if old_p.is_none() {
+            added.push(p.clone());
+        }
+        let was_active = old_p.is_some_and(|o| o.classpath_enabled && o.classpath_cmd.is_some());
+        let cmd_changed = old_p.is_none_or(|o| o.classpath_cmd != p.classpath_cmd);
+        if p.classpath_enabled && p.classpath_cmd.is_some() && (!was_active || cmd_changed) {
+            stage3_runs.push(p.rel_path.clone());
+            // A changed command reverts to stage-2 truth first: if the new
+            // command fails, the old command's entries must not stay indexed
+            // behind the error status.
+            if was_active && cmd_changed {
+                force_revert.push(p.rel_path.clone());
+            }
+        }
+    }
+    let removed_any = old
+        .iter()
+        .any(|o| !resolved.iter().any(|p| p.rel_path == o.rel_path));
+
+    if removed_any && !sources_rescanned {
+        // A removed project's sources must leave the index: rescan the whole
+        // union (the merge prunes files no longer covered).
+        if let Err(e) = rescan_all_sources(resolved, index, documents) {
+            tracing::error!("project re-index failed: {}", e);
+        }
+    } else if !added.is_empty() && !sources_rescanned {
+        // A project newly added by config (a gitignored dir listed live):
+        // index its sources so the panel entry isn't an empty shell.
+        let scan_roots: Vec<scanner::ScanRoot> = added
+            .iter()
+            .flat_map(|p| {
+                let dir = p.dir.clone();
+                config::source_paths(&p.dir)
+                    .into_iter()
+                    .map(move |path| scanner::ScanRoot {
+                        project_dir: dir.clone(),
+                        path,
+                    })
+            })
+            .collect();
+        match scanner::build_index_scoped(&scan_roots, &index.extract_config()) {
+            Ok(new_index) => {
+                Backend::warn_ns_collisions(index, &new_index);
+                // Keep every existing file: this scan covers only the added
+                // projects, not the whole workspace.
+                let keep: std::collections::HashSet<std::path::PathBuf> =
+                    index.occurrences.iter().map(|e| e.key().clone()).collect();
+                index.merge_project_from(new_index, &keep);
+            }
+            Err(e) => tracing::error!("added-project index failed: {}", e),
+        }
+    }
+    if !added.is_empty() {
+        run_stage2_all(root, &added, state_arc, index);
+    }
+
+    // Newly disabled projects revert to stage-2 truth (their stage-2
+    // libraries stay indexed — disabling only gates stage 3).
+    let rebuilt = reconcile_projects(root, resolved, state_arc, index, pruned_any, &force_revert);
+    if rebuilt || list_changed || !added.is_empty() {
+        client.send_notification::<LibrariesChanged>(()).await;
+    }
+
+    for rel_path in &stage3_runs {
+        run_stage3_project(
+            root,
+            rel_path,
+            index,
+            client,
+            projects_arc,
+            state_arc,
+            generation,
+            cli_lock,
+        )
+        .await;
+    }
+    stage3_runs
 }
 
 #[derive(serde::Deserialize)]
@@ -1107,98 +1267,22 @@ impl LanguageServer for Backend {
                 &generation,
             );
 
-            // Diff old vs new resolved config per project.
-            let mut stage3_runs: Vec<String> = Vec::new();
-            let mut force_revert: Vec<String> = Vec::new();
-            let mut added: Vec<projects::Project> = Vec::new();
-            for p in &resolved {
-                let old_p = old.iter().find(|o| o.rel_path == p.rel_path);
-                if old_p.is_none() {
-                    added.push(p.clone());
-                }
-                let was_active =
-                    old_p.is_some_and(|o| o.classpath_enabled && o.classpath_cmd.is_some());
-                let cmd_changed = old_p.is_none_or(|o| o.classpath_cmd != p.classpath_cmd);
-                if p.classpath_enabled && p.classpath_cmd.is_some() && (!was_active || cmd_changed)
-                {
-                    stage3_runs.push(p.rel_path.clone());
-                    // A changed command reverts to stage-2 truth first: if the
-                    // new command fails, the old command's entries must not
-                    // stay indexed behind the error status.
-                    if was_active && cmd_changed {
-                        force_revert.push(p.rel_path.clone());
-                    }
-                }
-            }
-            let removed_any = old
-                .iter()
-                .any(|o| !resolved.iter().any(|p| p.rel_path == o.rel_path));
-
-            if removed_any {
-                // A removed project's sources must leave the index: rescan the
-                // whole union (the merge prunes files no longer covered).
-                if let Err(e) = rescan_all_sources(&resolved, &index, &documents) {
-                    tracing::error!("project re-index failed: {}", e);
-                }
-            } else if !added.is_empty() {
-                // A project newly added by the editor config (a gitignored dir
-                // listed live): index its sources so the panel entry isn't an
-                // empty shell.
-                let scan_roots: Vec<scanner::ScanRoot> = added
-                    .iter()
-                    .flat_map(|p| {
-                        let dir = p.dir.clone();
-                        config::source_paths(&p.dir).into_iter().map(move |path| {
-                            scanner::ScanRoot {
-                                project_dir: dir.clone(),
-                                path,
-                            }
-                        })
-                    })
-                    .collect();
-                match scanner::build_index_scoped(&scan_roots, &index.extract_config()) {
-                    Ok(new_index) => {
-                        Self::warn_ns_collisions(&index, &new_index);
-                        // Keep every existing file: this scan covers only the
-                        // added projects, not the whole workspace.
-                        let keep: std::collections::HashSet<std::path::PathBuf> =
-                            index.occurrences.iter().map(|e| e.key().clone()).collect();
-                        index.merge_project_from(new_index, &keep);
-                    }
-                    Err(e) => tracing::error!("added-project index failed: {}", e),
-                }
-            }
-            if !added.is_empty() {
-                run_stage2_all(&root, &added, &state_arc, &index);
-            }
-
-            // Newly disabled projects revert to stage-2 truth (their stage-2
-            // libraries stay indexed — disabling only gates stage 3).
-            let rebuilt = reconcile_projects(
+            apply_project_diff(
                 &root,
+                &old,
                 &resolved,
-                &state_arc,
-                &index,
                 pruned_any,
-                &force_revert,
-            );
-            if rebuilt || list_changed || !added.is_empty() {
-                client.send_notification::<LibrariesChanged>(()).await;
-            }
-
-            for rel_path in stage3_runs {
-                run_stage3_project(
-                    &root,
-                    &rel_path,
-                    &index,
-                    &client,
-                    &projects_arc,
-                    &state_arc,
-                    &generation,
-                    &cli_lock,
-                )
-                .await;
-            }
+                list_changed,
+                false,
+                &index,
+                &client,
+                &documents,
+                &projects_arc,
+                &state_arc,
+                &generation,
+                &cli_lock,
+            )
+            .await;
         });
     }
 
@@ -1293,11 +1377,13 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        let mut classpath_changed = false;
-        let mut source_paths_changed = false;
+        // Manifest / `.cpcache` events are routed to their owning project (by
+        // longest project-dir prefix) after the project list is re-resolved.
+        let mut manifest_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut cpcache_paths: Vec<std::path::PathBuf> = Vec::new();
         let mut config_changed = false;
-        // `.clj-pulse/config.edn` specifically: only it carries `:classpath`,
-        // so only it triggers a CLI re-resolution (`.clj-kondo` does not).
+        // `.clj-pulse/config.edn` specifically: only it carries `:projects`,
+        // so only it triggers a stage-3 re-resolution (`.clj-kondo` does not).
         let mut pulse_config_changed = false;
         for event in params.changes {
             let Ok(path) = event.uri.to_file_path() else {
@@ -1305,18 +1391,19 @@ impl LanguageServer for Backend {
             };
 
             // deps.edn / lgx.edn / project.clj affect both the classpath/deps
-            // and the project's own :paths; .cpcache only the classpath.
+            // and the owning project's own :paths; .cpcache only the classpath.
+            // A created or deleted manifest also changes the project *list* —
+            // covered by the unconditional re-detection below.
             let manifest = path
                 .file_name()
                 .map(|n| n == "deps.edn" || n == "lgx.edn" || n == "project.clj")
                 .unwrap_or(false);
             if manifest {
-                classpath_changed = true;
-                source_paths_changed = true;
+                manifest_paths.push(path);
                 continue;
             }
             if path.components().any(|c| c.as_os_str() == ".cpcache") {
-                classpath_changed = true;
+                cpcache_paths.push(path);
                 continue;
             }
 
@@ -1383,6 +1470,8 @@ impl LanguageServer for Backend {
             }
         }
 
+        let classpath_changed = !manifest_paths.is_empty() || !cpcache_paths.is_empty();
+        let source_paths_changed = !manifest_paths.is_empty();
         if classpath_changed || config_changed {
             let root = self.root.lock().unwrap().clone();
             if let Some(root) = root {
@@ -1409,6 +1498,7 @@ impl LanguageServer for Backend {
                     // A manifest or config change can add/remove projects or
                     // retoggle their classpath resolution: re-resolve the list
                     // (this also bumps the stage-3 stale-result generation).
+                    let old = projects_arc.lock().unwrap().clone();
                     let (resolved, pruned_any, list_changed) = refresh_projects(
                         &root,
                         &projects_arc,
@@ -1416,14 +1506,12 @@ impl LanguageServer for Backend {
                         &state_arc,
                         &generation,
                     );
-                    if list_changed {
-                        // The projects panel re-requests on this notification.
-                        client.send_notification::<LibrariesChanged>(()).await;
-                    }
 
-                    // Rebuild project sources when :paths changed or the config
+                    // Rebuild project sources when :paths changed, the project
+                    // list changed (created/deleted manifest), or the config
                     // changed (lint-as affects how every project file extracts).
-                    if source_paths_changed || config_changed {
+                    let sources_rescanned = source_paths_changed || config_changed || list_changed;
+                    if sources_rescanned {
                         if let Err(e) = rescan_all_sources(&resolved, &index, &documents) {
                             tracing::error!("project re-index failed: {}", e);
                         }
@@ -1461,11 +1549,47 @@ impl LanguageServer for Backend {
                             .await;
                     }
 
+                    // Project list / config toggles: index added projects,
+                    // prune removed ones, revert disabled or command-changed
+                    // ones, and run stage 3 for newly enabled ones.
+                    let stage3_ran = if pulse_config_changed || list_changed {
+                        apply_project_diff(
+                            &root,
+                            &old,
+                            &resolved,
+                            pruned_any,
+                            list_changed,
+                            sources_rescanned,
+                            &index,
+                            &client,
+                            &documents,
+                            &projects_arc,
+                            &state_arc,
+                            &generation,
+                            &cli_lock,
+                        )
+                        .await
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Routed stage 2: re-discover only the projects owning the
+                    // changed manifest / `.cpcache` paths; rebuild the union
+                    // when any entry set changed.
+                    let affected: Vec<projects::Project> = {
+                        let mut seen = std::collections::HashSet::new();
+                        manifest_paths
+                            .iter()
+                            .chain(cpcache_paths.iter())
+                            .filter_map(|path| owning_project(&resolved, path))
+                            .filter(|p| seen.insert(p.rel_path.clone()))
+                            .cloned()
+                            .collect()
+                    };
                     if classpath_changed {
-                        // Drop symbols of removed/replaced dependencies first
-                        index.clear_libs();
-                        let stage2_ok = run_stage2_all(&root, &resolved, &state_arc, &index);
-                        if stage2_ok {
+                        let stage2_changed =
+                            stage2_refresh(&root, &affected, &resolved, &state_arc, &index);
+                        if stage2_changed {
                             let msg = "clj-pulse: library re-indexing complete";
                             tracing::info!("{}", msg);
                             client.log_message(MessageType::INFO, msg).await;
@@ -1475,27 +1599,22 @@ impl LanguageServer for Backend {
                         client.send_notification::<LibrariesChanged>(()).await;
                     }
 
-                    // `:projects` (per-project enablement / command) may have
-                    // changed — e.g. an editor UI writing the config — so
-                    // reconcile disabled/removed projects back to stage-2
-                    // truth, then re-run stage 3. Per-project entry comparison
-                    // skips the re-index when a classpath is unchanged.
-                    if pulse_config_changed {
-                        // Skip when the stage-2 pass above already rebuilt.
-                        if !classpath_changed
-                            && reconcile_projects(
-                                &root,
-                                &resolved,
-                                &state_arc,
-                                &index,
-                                pruned_any,
-                                &[],
-                            )
-                        {
-                            client.send_notification::<LibrariesChanged>(()).await;
+                    // A changed manifest re-runs stage 3 for its (enabled)
+                    // owning project — unless the diff above already did.
+                    let mut ran: std::collections::HashSet<String> =
+                        stage3_ran.into_iter().collect();
+                    for path in &manifest_paths {
+                        let Some(rel_path) =
+                            owning_project(&resolved, path).map(|p| p.rel_path.clone())
+                        else {
+                            continue;
+                        };
+                        if !ran.insert(rel_path.clone()) {
+                            continue;
                         }
-                        run_stage3_all(
+                        run_stage3_project(
                             &root,
+                            &rel_path,
                             &index,
                             &client,
                             &projects_arc,
