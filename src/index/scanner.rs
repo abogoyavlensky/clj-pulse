@@ -7,9 +7,32 @@ use super::extractor;
 use super::jar_cache;
 use super::{ExtractConfig, Index, NsMeta, Symbol};
 
-pub fn build_index(_root: &Path, source_paths: &[PathBuf], cfg: &ExtractConfig) -> Result<Index> {
+/// A source root to scan: `path` is walked with gitignore ancestry stopping at
+/// `project_dir` — a configured project may itself live under a dir the
+/// workspace `.gitignore` excludes (e.g. `repos/foo`), and its scan must not
+/// inherit that exclusion.
+#[derive(Debug, Clone)]
+pub struct ScanRoot {
+    pub project_dir: PathBuf,
+    pub path: PathBuf,
+}
+
+pub fn build_index(root: &Path, source_paths: &[PathBuf], cfg: &ExtractConfig) -> Result<Index> {
+    let roots: Vec<ScanRoot> = source_paths
+        .iter()
+        .map(|p| ScanRoot {
+            project_dir: root.to_path_buf(),
+            path: p.clone(),
+        })
+        .collect();
+    build_index_scoped(&roots, cfg)
+}
+
+/// [`build_index`] over source roots that may belong to different projects,
+/// each scanned with project-scoped ignore rules (see [`ScanRoot`]).
+pub fn build_index_scoped(roots: &[ScanRoot], cfg: &ExtractConfig) -> Result<Index> {
     let index = Index::new();
-    let files = collect_clojure_files(source_paths);
+    let files = collect_clojure_files(roots);
 
     type Extracted = (NsMeta, Vec<Symbol>, Vec<super::Occurrence>);
     let results: Vec<Extracted> = files
@@ -34,13 +57,25 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf], cfg: &ExtractConfig) 
         .collect();
 
     for (meta, symbols, occurrences) in results {
+        // Cross-project namespace collisions (two projects both defining ns
+        // `user` in their dev dirs): last one wins, but say so.
+        if let Some(existing) = index.namespaces.get(&meta.name) {
+            if existing.file != meta.file {
+                tracing::warn!(
+                    "namespace {} defined in both {} and {}; last one wins",
+                    meta.name,
+                    existing.file.display(),
+                    meta.file.display()
+                );
+            }
+        }
         index.insert_file(meta, symbols, occurrences);
     }
 
     // Index keyword occurrences from Integrant/Aero EDN config files. Gated on
     // a `#ig/ref` tag so build manifests (deps.edn, bb.edn, shadow-cljs.edn)
     // are never indexed. EDN files are few, so this stays sequential.
-    for file in collect_edn_files(source_paths) {
+    for file in collect_edn_files(roots) {
         let Ok(source) = std::fs::read_to_string(&file) else {
             continue;
         };
@@ -56,15 +91,15 @@ pub fn build_index(_root: &Path, source_paths: &[PathBuf], cfg: &ExtractConfig) 
     Ok(index)
 }
 
-/// Collects `.edn` files under the given source paths (Integrant configs live
+/// Collects `.edn` files under the given source roots (Integrant configs live
 /// in `:paths`/resources). Mirrors [`collect_clojure_files`].
-fn collect_edn_files(source_paths: &[PathBuf]) -> Vec<PathBuf> {
+fn collect_edn_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for path in source_paths {
-        if !path.exists() {
+    for root in roots {
+        if !root.path.exists() {
             continue;
         }
-        for entry in ignore::WalkBuilder::new(path).build() {
+        for entry in scoped_walker(root) {
             let Ok(entry) = entry else {
                 continue;
             };
@@ -75,6 +110,43 @@ fn collect_edn_files(source_paths: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+/// The walker for one project source root: gitignore rules from the project
+/// dir down apply (whether or not a `.git` exists), rules from above it do
+/// not. `parents(false)` cuts the ancestry discovery; the gitignores strictly
+/// *between* the project dir and the walk root are re-applied as explicit
+/// matchers anchored at their own directory (`WalkBuilder::add_ignore` can't
+/// do this — it anchors patterns at the walk root). Gitignores at or below
+/// the walk root are handled natively by the walker.
+fn scoped_walker(root: &ScanRoot) -> ignore::Walk {
+    let mut matchers: Vec<ignore::gitignore::Gitignore> = Vec::new();
+    let mut dir = root.path.as_path();
+    while dir != root.project_dir {
+        let Some(parent) = dir.parent() else { break };
+        dir = parent;
+        let gitignore = dir.join(".gitignore");
+        if gitignore.is_file() {
+            let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
+            builder.add(&gitignore);
+            match builder.build() {
+                Ok(matcher) => matchers.push(matcher),
+                Err(e) => tracing::warn!("unreadable {}: {}", gitignore.display(), e),
+            }
+        }
+    }
+
+    let mut builder = ignore::WalkBuilder::new(&root.path);
+    builder.parents(false).require_git(false);
+    if !matchers.is_empty() {
+        builder.filter_entry(move |entry| {
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            !matchers
+                .iter()
+                .any(|m| m.matched(entry.path(), is_dir).is_ignore())
+        });
+    }
+    builder.build()
 }
 
 /// Indexes library sources from a classpath: JAR files (with a per-JAR disk
@@ -127,7 +199,10 @@ pub fn index_dir_libs(dirs: &[PathBuf], index: &Index) {
 /// Indexes a library source directory from the classpath. No disk cache:
 /// directories are cheap to walk and, unlike JARs, can change in place.
 fn index_classpath_dir(dir: &Path, index: &Index) {
-    let files = collect_clojure_files(&[dir.to_path_buf()]);
+    let files = collect_clojure_files(&[ScanRoot {
+        project_dir: dir.to_path_buf(),
+        path: dir.to_path_buf(),
+    }]);
     let results: Vec<(NsMeta, Vec<Symbol>)> = files
         .par_iter()
         .filter_map(|file| {
@@ -214,13 +289,13 @@ fn index_classpath_jars(root: &Path, jars: Vec<PathBuf>, index: &Index) {
     }
 }
 
-fn collect_clojure_files(source_paths: &[PathBuf]) -> Vec<PathBuf> {
+fn collect_clojure_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for path in source_paths {
-        if !path.exists() {
+    for root in roots {
+        if !root.path.exists() {
             continue;
         }
-        for entry in ignore::WalkBuilder::new(path).build() {
+        for entry in scoped_walker(root) {
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -236,4 +311,69 @@ fn collect_clojure_files(source_paths: &[PathBuf]) -> Vec<PathBuf> {
 
 fn jar_mtime(jar: &Path) -> Option<u64> {
     jar_cache::jar_mtime(jar)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A project living inside a workspace-gitignored dir must still scan (the
+    /// workspace `.gitignore` stops applying at the project dir), while the
+    /// project's *own* `.gitignore` keeps applying.
+    #[test]
+    fn scoped_scan_ignores_ancestry_above_the_project_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        fs::write(ws.join(".gitignore"), "repos/\n").unwrap();
+
+        let project = ws.join("repos/foo");
+        fs::create_dir_all(project.join("src/generated")).unwrap();
+        fs::write(project.join(".gitignore"), "src/generated/\n").unwrap();
+        fs::write(project.join("src/app.clj"), "(ns app)\n(defn go [] 1)\n").unwrap();
+        fs::write(
+            project.join("src/generated/gen.clj"),
+            "(ns gen)\n(defn hidden [] 2)\n",
+        )
+        .unwrap();
+
+        let roots = [ScanRoot {
+            project_dir: project.clone(),
+            path: project.join("src"),
+        }];
+        let index = build_index_scoped(&roots, &ExtractConfig::default()).unwrap();
+
+        assert!(
+            index.namespaces.contains_key("app"),
+            "sources under a workspace-gitignored project dir must be scanned"
+        );
+        assert!(
+            !index.namespaces.contains_key("gen"),
+            "the project's own .gitignore must still apply"
+        );
+    }
+
+    /// The gitignore *between* the project dir and the walk root applies too:
+    /// walking `src` directly must still honor the project-root `.gitignore`.
+    #[test]
+    fn scoped_scan_applies_gitignores_between_project_dir_and_walk_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path();
+        fs::create_dir_all(project.join("src/skipme")).unwrap();
+        fs::write(project.join(".gitignore"), "src/skipme/\n").unwrap();
+        fs::write(project.join("src/app.clj"), "(ns app)\n").unwrap();
+        fs::write(project.join("src/skipme/x.clj"), "(ns skipme.x)\n").unwrap();
+
+        let roots = [ScanRoot {
+            project_dir: project.to_path_buf(),
+            path: project.join("src"),
+        }];
+        let index = build_index_scoped(&roots, &ExtractConfig::default()).unwrap();
+
+        assert!(index.namespaces.contains_key("app"));
+        assert!(
+            !index.namespaces.contains_key("skipme.x"),
+            "project-root .gitignore must apply when walking src directly"
+        );
+    }
 }
