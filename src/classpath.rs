@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -20,74 +19,85 @@ fn parse_entries(root: &Path, classpath: &str) -> (Vec<PathBuf>, bool) {
     (entries, has_lib_entry)
 }
 
-/// The `-A:dev:test`-style alias argument for `clojure`, `None` when no
-/// aliases are configured (plain `-Spath`).
-pub fn alias_arg(aliases: &[String]) -> Option<String> {
-    if aliases.is_empty() {
-        None
-    } else {
-        Some(format!("-A:{}", aliases.join(":")))
-    }
-}
+/// Default timeout for a stage-3 classpath command (a cold resolve may
+/// download dependencies for minutes).
+pub const CMD_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Resolves the full classpath by running `clojure [-A:…] -Spath` in `root`.
+/// Resolves a project's classpath by running a verbatim shell command
+/// (`sh -c` on Unix, `cmd /C` on Windows) in `dir`.
 ///
-/// The clojure CLI is its own staleness check: with a warm `.cpcache` it
-/// prints the cached classpath without booting a JVM; otherwise it resolves
-/// (and may download) dependencies first. Errors are human-readable reasons
-/// for the caller to log — resolution failing must never take the server down.
-pub async fn resolve_via_cli(root: &Path, aliases: &[String]) -> Result<Vec<PathBuf>, String> {
-    resolve_with(
-        OsStr::new("clojure"),
-        root,
-        aliases,
-        Duration::from_secs(300),
-    )
-    .await
-}
-
-/// [`resolve_via_cli`] with the program and timeout injectable for tests.
-async fn resolve_with(
-    program: &OsStr,
-    root: &Path,
-    aliases: &[String],
+/// The command's last non-empty stdout line is the classpath; relative entries
+/// resolve against `dir`. For `clojure -Spath` the CLI is its own staleness
+/// check: with a warm `.cpcache` it prints the cached classpath without
+/// booting a JVM. Errors are human-readable reasons for the caller to log —
+/// resolution failing must never take the server down.
+pub async fn resolve_via_cmd(
+    cmd_str: &str,
+    dir: &Path,
     timeout: Duration,
 ) -> Result<Vec<PathBuf>, String> {
-    let name = program.to_string_lossy().into_owned();
-    let mut cmd = tokio::process::Command::new(program);
-    if let Some(arg) = alias_arg(aliases) {
-        cmd.arg(arg);
-    }
-    cmd.arg("-Spath").current_dir(root);
-    // A dropped future (timeout) must not orphan a JVM mid-download.
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(cmd_str);
+        // The shell's children (the actual command, its JVM) must die with it
+        // on timeout: run the whole tree as its own process group so the
+        // timeout path can signal the group, not just the shell.
+        c.process_group(0);
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/C").arg(cmd_str);
+        c
+    };
+    cmd.current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // A dropped future (timeout) must not orphan a JVM mid-download. On Unix
+    // the explicit group kill below is the real cleanup; kill_on_drop is the
+    // fallback (and all Windows has).
     cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| format!("`{name} -Spath` timed out after {timeout:?}"))?
-        .map_err(|e| format!("failed to run `{name}`: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to run `{cmd_str}`: {e}"))?;
+    #[cfg(unix)]
+    let pgid = child.id();
+
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => result.map_err(|e| format!("failed to run `{cmd_str}`: {e}"))?,
+        Err(_elapsed) => {
+            // The child future was dropped (kill_on_drop reaps the shell);
+            // also kill its process group so the command itself dies too.
+            #[cfg(unix)]
+            if let Some(pgid) = pgid {
+                unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+            }
+            return Err(format!("`{cmd_str}` timed out after {timeout:?}"));
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let snippet: String = stderr.trim().chars().take(500).collect();
-        return Err(format!(
-            "`{name} -Spath` failed ({}): {snippet}",
-            output.status
-        ));
+        return Err(format!("`{cmd_str}` failed ({}): {snippet}", output.status));
     }
 
-    // The CLI may print download-progress lines; the classpath is the last
-    // non-empty line of stdout.
+    // The command may print download-progress lines; the classpath is the
+    // last non-empty line of stdout.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
-        .ok_or_else(|| format!("`{name} -Spath` produced no output"))?;
+        .ok_or_else(|| format!("`{cmd_str}` produced no output"))?;
 
-    let (entries, _) = parse_entries(root, line);
+    let (entries, _) = parse_entries(dir, line);
     if entries.is_empty() {
-        return Err(format!("`{name} -Spath` classpath has no existing entries"));
+        return Err(format!("`{cmd_str}` classpath has no existing entries"));
     }
     Ok(entries)
 }
@@ -149,40 +159,18 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn alias_arg_joins_aliases() {
-        assert_eq!(
-            alias_arg(&["dev".to_string(), "test".to_string()]),
-            Some("-A:dev:test".to_string())
-        );
-        assert_eq!(
-            alias_arg(&["ci/int".to_string()]),
-            Some("-A:ci/int".to_string())
-        );
-        assert_eq!(alias_arg(&[]), None);
-    }
-
-    /// Serializes the stub-spawning tests. Writing one test's stub while
-    /// another test forks its child races into ETXTBSY: the forked child
-    /// inherits the still-open write fd for the instant before its exec, and
-    /// exec'ing a file someone holds open for writing fails.
+    /// Writes a stub shell script standing in for the classpath command and
+    /// returns the command string (`sh <script>`) that runs it.
     #[cfg(unix)]
-    static STUB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// Writes an executable stub script standing in for the `clojure` CLI.
-    #[cfg(unix)]
-    fn stub_program(dir: &Path, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let p = dir.join("clojure-stub");
+    fn stub_cmd(dir: &Path, script: &str) -> String {
+        let p = dir.join("classpath-stub.sh");
         fs::write(&p, script).unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-        p
+        format!("sh {}", p.display())
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn resolve_with_parses_last_line_and_resolves_relative_entries() {
-        let _serial = STUB_LOCK.lock().await;
+    async fn resolve_via_cmd_parses_last_line_and_resolves_relative_entries() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         fs::create_dir(root.join("src")).unwrap();
@@ -190,78 +178,72 @@ mod tests {
 
         // Progress noise above the classpath line must be ignored.
         let script = format!(
-            "#!/bin/sh\necho 'Downloading: org/foo/foo.pom'\necho 'src:{}'\n",
+            "echo 'Downloading: org/foo/foo.pom'\necho 'src:{}'\n",
             lib.path().display()
         );
-        let stub = stub_program(root, &script);
+        let cmd = stub_cmd(root, &script);
 
-        let entries = resolve_with(
-            stub.as_os_str(),
-            root,
-            &[],
-            std::time::Duration::from_secs(10),
-        )
-        .await
-        .expect("stub resolution should succeed");
+        let entries = resolve_via_cmd(&cmd, root, std::time::Duration::from_secs(10))
+            .await
+            .expect("stub resolution should succeed");
         assert_eq!(entries, vec![root.join("src"), lib.path().to_path_buf()]);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn resolve_with_reports_stderr_on_failure() {
-        let _serial = STUB_LOCK.lock().await;
+    async fn resolve_via_cmd_runs_through_the_shell_in_dir() {
+        // A raw shell one-liner (no stub file) must work, and relative output
+        // must resolve against `dir` — proving both the `sh -c` wrapping and
+        // the working directory.
         let dir = tempfile::TempDir::new().unwrap();
-        let stub = stub_program(
-            dir.path(),
-            "#!/bin/sh\necho 'boom: bad alias' >&2\nexit 1\n",
-        );
-        let err = resolve_with(
-            stub.as_os_str(),
-            dir.path(),
-            &["dev".to_string()],
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+
+        let entries = resolve_via_cmd(
+            "echo ignored && echo src",
+            root,
             std::time::Duration::from_secs(10),
         )
         .await
-        .expect_err("non-zero exit must be an error");
+        .expect("shell one-liner should succeed");
+        assert_eq!(entries, vec![root.join("src")]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_via_cmd_reports_stderr_on_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cmd = stub_cmd(dir.path(), "echo 'boom: bad alias' >&2\nexit 1\n");
+        let err = resolve_via_cmd(&cmd, dir.path(), std::time::Duration::from_secs(10))
+            .await
+            .expect_err("non-zero exit must be an error");
         assert!(err.contains("boom: bad alias"), "err: {err}");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn resolve_with_errors_on_empty_output() {
-        let _serial = STUB_LOCK.lock().await;
+    async fn resolve_via_cmd_errors_on_empty_output() {
         let dir = tempfile::TempDir::new().unwrap();
-        let stub = stub_program(dir.path(), "#!/bin/sh\nexit 0\n");
-        let err = resolve_with(
-            stub.as_os_str(),
-            dir.path(),
-            &[],
-            std::time::Duration::from_secs(10),
-        )
-        .await
-        .expect_err("empty output must be an error");
+        let cmd = stub_cmd(dir.path(), "exit 0\n");
+        let err = resolve_via_cmd(&cmd, dir.path(), std::time::Duration::from_secs(10))
+            .await
+            .expect_err("empty output must be an error");
         assert!(err.contains("no output"), "err: {err}");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn resolve_with_kills_child_on_timeout() {
-        let _serial = STUB_LOCK.lock().await;
+    async fn resolve_via_cmd_kills_child_on_timeout() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         let marker = root.join("survived");
         // If the child outlives the timeout, it leaves a marker file behind.
-        let script = format!("#!/bin/sh\nsleep 1\ntouch '{}'\n", marker.display());
-        let stub = stub_program(root, &script);
+        let script = format!("sleep 1\ntouch '{}'\n", marker.display());
+        let cmd = stub_cmd(root, &script);
 
-        let err = resolve_with(
-            stub.as_os_str(),
-            root,
-            &[],
-            std::time::Duration::from_millis(200),
-        )
-        .await
-        .expect_err("timeout must be an error");
+        let err = resolve_via_cmd(&cmd, root, std::time::Duration::from_millis(200))
+            .await
+            .expect_err("timeout must be an error");
         assert!(err.contains("timed out"), "err: {err}");
 
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;

@@ -90,20 +90,29 @@ async fn run_classpath_cli(
     cli_lock: &ClasspathCliLock,
 ) -> bool {
     let _serial = cli_lock.lock().await;
-    let cfg = settings::classpath(root);
-    if !cfg.enabled {
+    // Interim single-project read of the `:projects` config: resolve just the
+    // root project's `:enabled`/`:cmd`. The staged multi-project startup
+    // replaces this whole flow.
+    let file_cfg = std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
+        .map(|src| crate::projects::parse_edn(&src))
+        .unwrap_or_default();
+    let root_project = crate::projects::resolve(root, &[], &file_cfg, &[])
+        .into_iter()
+        .next();
+    let Some(project) = root_project else {
+        return false;
+    };
+    if !project.classpath_enabled {
         return false;
     }
-    let aliases = &cfg.aliases;
-    let cmd = match classpath::alias_arg(aliases) {
-        Some(arg) => format!("clojure {arg} -Spath"),
-        None => "clojure -Spath".to_string(),
+    let Some(cmd) = project.classpath_cmd else {
+        return false;
     };
     let msg = format!("clj-pulse: resolving classpath via '{cmd}' (may download dependencies)...");
     tracing::info!("{}", msg);
     client.log_message(MessageType::INFO, msg).await;
 
-    match classpath::resolve_via_cli(root, aliases).await {
+    match classpath::resolve_via_cmd(&cmd, root, classpath::CMD_TIMEOUT).await {
         Ok(entries) => {
             let set: std::collections::HashSet<std::path::PathBuf> =
                 entries.iter().cloned().collect();

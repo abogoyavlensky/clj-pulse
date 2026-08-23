@@ -3254,9 +3254,9 @@ fn test_e2e_gitlib_directory_dependency() {
     assert_eq!(result["range"]["start"]["line"], json!(def_line));
 }
 
-/// `{:classpath {:enabled false}}` must fully suppress stage-3 resolution:
-/// no "resolving classpath" attempt, just the stage-2 outcome (here the
-/// no-classpath warning, since the fixture has no `.cpcache`).
+/// A `:projects` entry disabling the root project must fully suppress stage-3
+/// resolution: no "resolving classpath" attempt, just the stage-2 outcome
+/// (here the no-classpath warning, since the fixture has no `.cpcache`).
 #[test]
 fn test_e2e_classpath_cli_disabled_by_config() {
     let project = tempfile::TempDir::new().unwrap();
@@ -3266,7 +3266,7 @@ fn test_e2e_classpath_cli_disabled_by_config() {
     std::fs::write(root.join("deps.edn"), "{:paths [\"src\"]}\n").unwrap();
     std::fs::write(
         root.join(".clj-pulse/config.edn"),
-        "{:classpath {:enabled false}}\n",
+        "{:projects [{:path \".\" :classpath {:enabled false}}]}\n",
     )
     .unwrap();
     std::fs::write(root.join("src/app.clj"), "(ns app)\n\n(defn go [] 1)\n").unwrap();
