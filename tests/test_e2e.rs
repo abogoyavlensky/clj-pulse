@@ -4325,3 +4325,108 @@ fn test_e2e_monorepo_projects_request() {
         "no stage 3 ran: {status}"
     );
 }
+
+/// Live project toggles: `workspace/didChangeConfiguration` enabling a
+/// subproject with a stub command drives a stage-3 run (status `resolved`,
+/// stubbed library indexed); disabling it again reverts the project to its
+/// stage-2 state and drops the stage-3-only library from the union.
+#[test]
+fn test_e2e_did_change_configuration_toggles_stage3() {
+    let (_project, root) = setup_monorepo();
+    // Disable the root project's stage 3 in the file config — this test runs
+    // without the harness kill-switch, and the root would otherwise spawn a
+    // real `clojure`.
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:projects [{:path \".\" :classpath {:enabled false}}]}\n",
+    )
+    .unwrap();
+
+    // A fake library dir the stub command reports as the classpath.
+    let libdir = tempfile::TempDir::new().unwrap();
+    let lib_src = libdir.path().join("stub-lib/src");
+    std::fs::create_dir_all(lib_src.join("stub")).unwrap();
+    std::fs::write(
+        lib_src.join("stub/util.clj"),
+        "(ns stub.util)\n\n(defn stubbed [x] x)\n",
+    )
+    .unwrap();
+    let stub = root.join("stub-classpath.sh");
+    std::fs::write(&stub, format!("echo '{}'\n", lib_src.display())).unwrap();
+    let cmd = format!("sh {}", stub.display());
+
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize(&root);
+
+    // Enable apps/a with the stub command.
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "clojurePulse": {
+                    "projects": [
+                        {"path": ".", "classpath": {"enabled": false}},
+                        {"path": "apps/a", "classpath": {"enabled": true, "cmd": cmd}}
+                    ]
+                }
+            }
+        }),
+    );
+    client.wait_for_log("full classpath indexed");
+
+    let list = client.request("clojurePulse/projects", json!(null));
+    let a = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == "apps/a")
+        .expect("apps/a present")
+        .clone();
+    assert_eq!(a["classpath"]["enabled"], json!(true));
+    assert_eq!(a["classpath"]["status"], "resolved");
+    let libs = a["libraries"].as_array().unwrap();
+    assert!(
+        libs.iter()
+            .any(|l| l["path"].as_str().unwrap().contains("stub-lib")),
+        "stubbed library must appear: {libs:?}"
+    );
+
+    // Disable apps/a again: it must revert to its stage-2 state (no .cpcache
+    // → unresolved) and the stage-3-only library must drop from the union.
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "clojurePulse": {
+                    "projects": [
+                        {"path": ".", "classpath": {"enabled": false}},
+                        {"path": "apps/a", "classpath": {"enabled": false}}
+                    ]
+                }
+            }
+        }),
+    );
+
+    // The revert is asynchronous with no distinctive log line; poll.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let list = client.request("clojurePulse/projects", json!(null));
+        let a = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["path"] == "apps/a")
+            .expect("apps/a present")
+            .clone();
+        let status = a["classpath"]["status"].as_str().unwrap().to_string();
+        let libs = a["libraries"].as_array().unwrap().clone();
+        if a["classpath"]["enabled"] == json!(false) && status == "unresolved" && libs.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "apps/a did not revert to stage-2 state: status={status}, libs={libs:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

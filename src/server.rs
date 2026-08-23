@@ -1041,6 +1041,105 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // The settings envelope wraps the bare config object in its section:
+        // {"clojurePulse": {"projects": [...]}}. No section → not for us.
+        let Some(section) = params.settings.get("clojurePulse") else {
+            return;
+        };
+        let entries = projects::parse_json(section);
+        *self.editor_config.lock().unwrap() = entries;
+        let Some(root) = self.root.lock().unwrap().clone() else {
+            return;
+        };
+
+        let index = self.index.clone();
+        let client = self.client.clone();
+        let projects_arc = self.projects.clone();
+        let state_arc = self.project_state.clone();
+        let editor_config = self.editor_config.clone();
+        let generation = self.config_generation.clone();
+        let cli_lock = self.classpath_cli_lock.clone();
+        tokio::spawn(async move {
+            let old = projects_arc.lock().unwrap().clone();
+            let (resolved, pruned_any, list_changed) = refresh_projects(
+                &root,
+                &projects_arc,
+                &editor_config,
+                &state_arc,
+                &generation,
+            );
+
+            // Diff old vs new resolved config per project.
+            let mut stage3_runs: Vec<String> = Vec::new();
+            let mut added: Vec<projects::Project> = Vec::new();
+            for p in &resolved {
+                let old_p = old.iter().find(|o| o.rel_path == p.rel_path);
+                if old_p.is_none() {
+                    added.push(p.clone());
+                }
+                let was_active =
+                    old_p.is_some_and(|o| o.classpath_enabled && o.classpath_cmd.is_some());
+                let cmd_changed = old_p.is_none_or(|o| o.classpath_cmd != p.classpath_cmd);
+                if p.classpath_enabled && p.classpath_cmd.is_some() && (!was_active || cmd_changed)
+                {
+                    stage3_runs.push(p.rel_path.clone());
+                }
+            }
+
+            // A project newly added by the editor config (a gitignored dir
+            // listed live): index its sources and cached classpath so the
+            // panel entry isn't an empty shell.
+            if !added.is_empty() {
+                let scan_roots: Vec<scanner::ScanRoot> = added
+                    .iter()
+                    .flat_map(|p| {
+                        let dir = p.dir.clone();
+                        config::source_paths(&p.dir).into_iter().map(move |path| {
+                            scanner::ScanRoot {
+                                project_dir: dir.clone(),
+                                path,
+                            }
+                        })
+                    })
+                    .collect();
+                match scanner::build_index_scoped(&scan_roots, &index.extract_config()) {
+                    Ok(new_index) => {
+                        Self::warn_ns_collisions(&index, &new_index);
+                        // Keep every existing file: this scan covers only the
+                        // added projects, not the whole workspace.
+                        let keep: std::collections::HashSet<std::path::PathBuf> =
+                            index.occurrences.iter().map(|e| e.key().clone()).collect();
+                        index.merge_project_from(new_index, &keep);
+                    }
+                    Err(e) => tracing::error!("added-project index failed: {}", e),
+                }
+                run_stage2_all(&root, &added, &state_arc, &index);
+            }
+
+            // Newly disabled projects revert to stage-2 truth (their stage-2
+            // libraries stay indexed — disabling only gates stage 3).
+            let rebuilt = reconcile_projects(&root, &resolved, &state_arc, &index, pruned_any);
+            if rebuilt || list_changed || !added.is_empty() {
+                client.send_notification::<LibrariesChanged>(()).await;
+            }
+
+            for rel_path in stage3_runs {
+                run_stage3_project(
+                    &root,
+                    &rel_path,
+                    &index,
+                    &client,
+                    &projects_arc,
+                    &state_arc,
+                    &generation,
+                    &cli_lock,
+                )
+                .await;
+            }
+        });
+    }
+
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("clj-pulse shutting down");
         Ok(())
