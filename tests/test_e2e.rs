@@ -4494,9 +4494,10 @@ fn test_e2e_own_dirs_filtered_from_library_lists() {
 
     let cpcache = root.join(".cpcache");
     std::fs::create_dir_all(&cpcache).unwrap();
+    let sep = if cfg!(windows) { ";" } else { ":" };
     std::fs::write(
         cpcache.join("1.cp"),
-        format!("{}:{}", root.join("dev").display(), dep_src.display()),
+        format!("{}{sep}{}", root.join("dev").display(), dep_src.display()),
     )
     .unwrap();
 
