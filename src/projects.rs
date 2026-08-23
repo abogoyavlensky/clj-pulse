@@ -164,6 +164,13 @@ fn resolve_with_disable(
         if rel == "." || rels.contains(rel) {
             continue;
         }
+        if !is_workspace_relative(rel) {
+            tracing::warn!(
+                "projects config: {} escapes the workspace root — entry ignored",
+                rel
+            );
+            continue;
+        }
         if kind_of(&root.join(rel)).is_some() {
             rels.insert(rel.clone());
         } else {
@@ -206,7 +213,13 @@ fn build_project(
     };
     let over = overrides.get(rel);
     let enabled = over.and_then(|o| o.enabled).unwrap_or(is_root);
-    let cmd = over.and_then(|o| o.cmd.clone()).or(default_cmd);
+    // lgx projects never run a stage-3 command (`lgx::resolve` is internal);
+    // a configured `:cmd` cannot override that.
+    let cmd = if kind == ProjectKindTag::Lgx {
+        None
+    } else {
+        over.and_then(|o| o.cmd.clone()).or(default_cmd)
+    };
     Project {
         rel_path: rel.to_string(),
         dir,
@@ -229,6 +242,18 @@ fn kind_of(dir: &Path) -> Option<ProjectKindTag> {
     } else {
         None
     }
+}
+
+/// Whether a normalized project path stays inside the workspace: relative,
+/// with no `..` components. Configured paths are workspace-relative by
+/// contract; anything else must not index external sources or run commands
+/// in unintended directories.
+fn is_workspace_relative(rel: &str) -> bool {
+    let path = Path::new(rel);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 /// Normalizes a configured project path so `""`, `"."`, and `"./"` all mean
@@ -536,6 +561,40 @@ mod tests {
         assert!(
             projects.iter().all(|p| !p.classpath_enabled),
             "kill-switch must win over config: {projects:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_paths_escaping_the_workspace() {
+        // A sibling dir outside the workspace with a real manifest: neither a
+        // `..` path nor an absolute path may pull it in.
+        let outer = tempfile::TempDir::new().unwrap();
+        let root = outer.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("deps.edn"), "{}").unwrap();
+        mk_project(outer.path(), "sibling", "deps.edn");
+
+        let abs = outer.path().join("sibling").display().to_string();
+        let file = vec![entry("../sibling", None, None), entry(&abs, None, None)];
+        let projects = resolve_plain(&root, &[], &file, &[]);
+
+        let rels: Vec<&str> = projects.iter().map(|p| p.rel_path.as_str()).collect();
+        assert_eq!(rels, vec!["."], "escaping entries dropped: {projects:?}");
+    }
+
+    #[test]
+    fn resolve_lgx_project_never_gets_a_cmd_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        mk_project(root, "c", "lgx.edn");
+
+        let file = vec![entry("c", Some(true), Some("evil -Spath"))];
+        let projects = resolve_plain(root, &detect(root), &file, &[]);
+
+        let c = find(&projects, "c");
+        assert_eq!(
+            c.classpath_cmd, None,
+            "lgx projects must ignore :cmd overrides"
         );
     }
 
