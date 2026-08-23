@@ -4430,3 +4430,49 @@ fn test_e2e_did_change_configuration_toggles_stage3() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// The monorepo headline: goto-definition from `apps/a` into `libs/common`
+/// (cross-project, no file from `common` ever opened), and sources of the
+/// gitignored `repos/b` — present only via the config entry — indexed and
+/// findable through workspace-symbol search.
+#[test]
+fn test_e2e_monorepo_cross_project_definition() {
+    let (_project, root) = setup_monorepo();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let consumer = root.join("apps/a/src/a/core.clj");
+    client.did_open(&consumer);
+    let (line, ch) = position_of(&consumer, "u/helper");
+    let result = client.goto_definition(&consumer, line, ch);
+    assert!(
+        !result.is_null(),
+        "cross-project goto-definition returned null"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/libs/common/src/common/util.clj"),
+        "definition must land in the common lib: {uri}"
+    );
+    let def_file = root.join("libs/common/src/common/util.clj");
+    let (def_line, _) = position_of(&def_file, "defn helper");
+    assert_eq!(result["range"]["start"]["line"], json!(def_line));
+
+    // repos/b is workspace-gitignored; only the explicit config entry makes
+    // it a project — and its sources must be indexed despite the gitignore.
+    let symbols = client.workspace_symbols("vendored-helper");
+    let found = symbols
+        .as_array()
+        .map(|arr| {
+            arr.iter().any(|s| {
+                s["location"]["uri"]
+                    .as_str()
+                    .is_some_and(|u| u.ends_with("/repos/b/src/b/core.clj"))
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        found,
+        "workspace-symbol must find repos/b's sources: {symbols}"
+    );
+}
