@@ -15,122 +15,147 @@ use crate::jar_content;
 use crate::leiningen;
 use crate::lgx;
 use crate::libraries;
+use crate::projects;
 use crate::settings;
 
-/// What [`resolve_and_index_libs`] indexed: the classpath entries / dep dirs,
-/// plus library sources indexed outside them (let-go's pinned core stdlib —
-/// a pinned project with no deps of its own must still count as indexed).
-struct ResolvedLibs {
-    entries: Vec<std::path::PathBuf>,
-    extra: usize,
+/// Per-project classpath resolution status, as reported to the editor over
+/// `clojurePulse/projects` (serialized lowercase).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClasspathStatus {
+    /// Stage 3 is off for this project and stage 2 hasn't produced anything yet.
+    Disabled,
+    /// Stage 2 found a cached classpath (`.cpcache` / lgx / lein heuristic).
+    Cached,
+    /// A stage-3 command is running.
+    Resolving,
+    /// Stage 3 produced the authoritative classpath.
+    Resolved,
+    /// Nothing resolved (no cache, no successful command).
+    Unresolved,
+    /// The stage-3 command failed; stage-2 entries are kept.
+    Error(String),
 }
 
-impl ResolvedLibs {
-    fn indexed_any(&self) -> bool {
-        !self.entries.is_empty() || self.extra > 0
-    }
+/// One project's library state: the classpath entries its libraries were last
+/// derived from, plus the resolution status. Stage 3 compares against
+/// `entries` to skip no-op re-indexing; re-reading `.cpcache` instead would
+/// observe the `.cp` file `clojure -Spath` itself just wrote and always
+/// conclude "no change".
+#[derive(Debug, Clone)]
+struct ProjectState {
+    entries: std::collections::HashSet<std::path::PathBuf>,
+    status: ClasspathStatus,
+    /// Whether stage 2 indexed library sources *outside* the entries (let-go's
+    /// pinned core). A project can contribute libraries with zero entries;
+    /// removing it must still trigger a union rebuild.
+    extra_indexed: bool,
 }
 
-/// Resolves and indexes a project's libraries: lgx git/local deps (indexed as
-/// source dirs, including in-workspace `:local/root` deps) for let-go projects,
-/// or the `.cpcache` classpath (JARs + dirs) for Clojure projects. When there
-/// is no usable `.cpcache` but a Leiningen `project.clj` is present, falls back
-/// to resolving its direct deps to `~/.m2` JARs.
-fn resolve_and_index_libs(root: &std::path::Path, index: &Index) -> ResolvedLibs {
-    match config::project_kind(root) {
-        config::ProjectKind::LetGo => {
-            let dirs = lgx::resolve(root);
-            scanner::index_dir_libs(&dirs, index);
-            // Also index let-go's built-in core/stdlib from the source `lgx
-            // install` fetched (only when `:lg-version` is pinned).
-            let extra = lgx::index_letgo_core(root, index);
-            ResolvedLibs {
-                entries: dirs,
-                extra,
-            }
-        }
-        config::ProjectKind::Clojure => {
-            let classpath = clojure_classpath(root);
-            if !classpath.is_empty() {
-                scanner::index_classpath_libs(root, classpath.clone(), index);
-            }
-            ResolvedLibs {
-                entries: classpath,
-                extra: 0,
-            }
+impl ProjectState {
+    fn empty(status: ClasspathStatus) -> Self {
+        ProjectState {
+            entries: std::collections::HashSet::new(),
+            status,
+            extra_indexed: false,
         }
     }
 }
 
-/// Shared record of the classpath entries the library index was last built
-/// from. Stage 3 and the config-watcher rerun compare against it to skip
-/// no-op re-indexing; re-reading `.cpcache` instead would observe the `.cp`
-/// file `clojure -Spath` itself just wrote and always conclude "no change".
-type LibEntries = Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>;
+type SharedProjects = Arc<std::sync::Mutex<Vec<projects::Project>>>;
+type SharedState = Arc<std::sync::Mutex<std::collections::HashMap<String, ProjectState>>>;
+type SharedEditorConfig = Arc<std::sync::Mutex<Vec<projects::ProjectEntry>>>;
+/// Bumped on every project-list re-resolve; a stage-3 run snapshots it at
+/// launch and discards its result if the config changed mid-run.
+type ConfigGeneration = Arc<std::sync::atomic::AtomicU64>;
 
 /// Serializes stage-3 runs. Startup resolution and a config-watcher rerun can
 /// overlap (a cold resolve may download for minutes); without the lock the
-/// slower run — possibly carrying obsolete aliases — would clear and rebuild
-/// the index last, overwriting the newer result.
+/// slower run — possibly carrying an obsolete command — would clear and
+/// rebuild the index last, overwriting the newer result.
 type ClasspathCliLock = Arc<tokio::sync::Mutex<()>>;
 
-/// Stage 3: resolves the authoritative classpath by running the clojure CLI
-/// (`clojure -A:dev:test -Spath` by default) and re-indexes libraries when the
-/// result differs from what is already indexed. Returns whether resolution
-/// succeeded; every failure — including `:enabled false` — only logs at most,
-/// keeping the stage-2 index intact.
-///
-/// The `:classpath` config is read *under the lock*, so a run queued behind a
-/// slow one always applies the freshest alias selection.
-async fn run_classpath_cli(
-    root: &std::path::Path,
-    index: &Index,
-    client: &Client,
-    lib_entries: &LibEntries,
-    cli_lock: &ClasspathCliLock,
-) -> bool {
-    let _serial = cli_lock.lock().await;
-    let cfg = settings::classpath(root);
-    if !cfg.enabled {
-        return false;
-    }
-    let aliases = &cfg.aliases;
-    let cmd = match classpath::alias_arg(aliases) {
-        Some(arg) => format!("clojure {arg} -Spath"),
-        None => "clojure -Spath".to_string(),
-    };
-    let msg = format!("clj-pulse: resolving classpath via '{cmd}' (may download dependencies)...");
-    tracing::info!("{}", msg);
-    client.log_message(MessageType::INFO, msg).await;
+/// Work-done progress reporting state: whether the client advertised
+/// `window.workDoneProgress`, plus the counter making each run's token unique
+/// (`clj-pulse/classpath/<rel_path>/<n>` — rescans repeat runs for the same
+/// project, and the spec requires per-operation tokens).
+#[derive(Clone, Default)]
+struct ProgressState {
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+    counter: Arc<std::sync::atomic::AtomicU64>,
+}
 
-    match classpath::resolve_via_cli(root, aliases).await {
-        Ok(entries) => {
-            let set: std::collections::HashSet<std::path::PathBuf> =
-                entries.iter().cloned().collect();
-            let changed = *lib_entries.lock().unwrap() != set;
-            if changed {
-                index.clear_libs();
-                scanner::index_classpath_libs(root, entries.clone(), index);
-                *lib_entries.lock().unwrap() = set;
-            }
-            let msg = format!(
-                "clj-pulse: full classpath indexed ({} entries)",
-                entries.len()
-            );
-            tracing::info!("{}", msg);
-            client.log_message(MessageType::INFO, msg).await;
-            if changed {
-                client.send_notification::<LibrariesChanged>(()).await;
-            }
-            true
+impl ProgressState {
+    /// Creates a progress token for one stage-3 run, or `None` when the
+    /// client lacks the capability or rejects the create request (progress
+    /// then downgrades to silence, never an error).
+    async fn begin_token(&self, client: &Client, rel_path: &str) -> Option<NumberOrString> {
+        use std::sync::atomic::Ordering;
+        if !self.enabled.load(Ordering::Relaxed) {
+            return None;
         }
-        Err(reason) => {
-            let msg = format!("clj-pulse: classpath resolution failed: {reason}");
-            tracing::warn!("{}", msg);
-            client.log_message(MessageType::WARNING, msg).await;
-            false
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        let token = NumberOrString::String(format!("clj-pulse/classpath/{rel_path}/{n}"));
+        match client
+            .send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+                token: token.clone(),
+            })
+            .await
+        {
+            Ok(()) => Some(token),
+            Err(e) => {
+                tracing::debug!("workDoneProgress/create failed: {e}");
+                None
+            }
         }
     }
+}
+
+/// Sends one `$/progress` value for `token`; no-op when progress is off.
+async fn send_progress(client: &Client, token: &Option<NumberOrString>, value: WorkDoneProgress) {
+    if let Some(token) = token {
+        client
+            .send_notification::<notification::Progress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(value),
+            })
+            .await;
+    }
+}
+
+/// Serializes whole config-application tasks (`didChangeConfiguration`,
+/// watched-file reruns, the startup library task). Without it two
+/// back-to-back config notifications interleave their refresh/rescan/stage
+/// work and the slower, staler task can apply last. Always acquired *before*
+/// [`ClasspathCliLock`] (stage 3 runs inside an application task).
+type ConfigApplyLock = Arc<tokio::sync::Mutex<()>>;
+
+/// Stage-1 scan over the union of every project's source paths, merged into
+/// the shared index; files no longer covered by any project are pruned by the
+/// merge (open buffers kept). Returns the scan's (symbols, namespaces) counts.
+fn rescan_all_sources(
+    project_list: &[projects::Project],
+    index: &Index,
+    documents: &DocumentStore,
+) -> anyhow::Result<(usize, usize)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut scan_roots = Vec::new();
+    for p in project_list {
+        let paths = config::source_paths(&p.dir);
+        tracing::info!("project {}: source paths: {:?}", p.rel_path, paths);
+        for path in paths {
+            if seen.insert(path.clone()) {
+                scan_roots.push(scanner::ScanRoot {
+                    project_dir: p.dir.clone(),
+                    path,
+                });
+            }
+        }
+    }
+    let new_index = scanner::build_index_scoped(&scan_roots, &index.extract_config())?;
+    let counts = (new_index.symbols.len(), new_index.namespaces.len());
+    Backend::warn_ns_collisions(index, &new_index);
+    index.merge_project_from(new_index, &Backend::open_paths(documents));
+    Ok(counts)
 }
 
 /// A Clojure project's classpath: deps.edn's `.cpcache` is authoritative (full
@@ -144,15 +169,597 @@ fn clojure_classpath(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     classpath
 }
 
-/// The library classpath entries for the External Libraries panel, derived the
-/// same way `resolve_and_index_libs` does but without indexing. For let-go this
-/// is the resolved dependency source dirs; the built-in core stdlib is
-/// intentionally excluded (mirroring JDK being out of the panel's scope).
-fn resolve_lib_entries(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    match config::project_kind(root) {
-        config::ProjectKind::LetGo => lgx::resolve(root),
-        config::ProjectKind::Clojure => clojure_classpath(root),
+/// Whether the project's manifest actually exists on disk — the gate for
+/// running its stage-3 command (a root project with no manifest resolves with
+/// deps defaults but must not spawn `clojure`).
+fn has_manifest(p: &projects::Project) -> bool {
+    match p.kind {
+        projects::ProjectKindTag::Deps => p.dir.join("deps.edn").exists(),
+        projects::ProjectKindTag::Lein => p.dir.join("project.clj").exists(),
+        projects::ProjectKindTag::Lgx => false,
     }
+}
+
+/// Stage 2 for one project: discovers its cached classpath / dep dirs and
+/// indexes them into the shared index. Returns the entries plus the count of
+/// library sources indexed outside them (let-go's pinned core stdlib — a
+/// pinned project with no deps of its own must still count as indexed).
+fn stage2_index_project(
+    workspace_root: &std::path::Path,
+    p: &projects::Project,
+    index: &Index,
+) -> (Vec<std::path::PathBuf>, usize) {
+    match p.kind {
+        projects::ProjectKindTag::Lgx => {
+            let dirs = lgx::resolve(&p.dir);
+            scanner::index_dir_libs(&dirs, index);
+            // Also index let-go's built-in core/stdlib from the source `lgx
+            // install` fetched (only when `:lg-version` is pinned).
+            let extra = lgx::index_letgo_core(&p.dir, index);
+            (dirs, extra)
+        }
+        _ => {
+            let classpath = clojure_classpath(&p.dir);
+            if !classpath.is_empty() {
+                // The under-root skip uses the *workspace* root: in-root
+                // classpath dirs are another project's sources (indexed in
+                // stage 1) or picked up lazily on didOpen.
+                scanner::index_classpath_libs(workspace_root, classpath.clone(), index);
+            }
+            (classpath, 0)
+        }
+    }
+}
+
+/// The deduplicated union of every project's current lib entries.
+fn lib_union(state: &std::collections::HashMap<String, ProjectState>) -> Vec<std::path::PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for ps in state.values() {
+        for entry in &ps.entries {
+            if seen.insert(entry.clone()) {
+                out.push(entry.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Rebuilds the library index from every project's current entries — per
+/// project, per kind. A flat classpath scan over the union would wrongly skip
+/// in-workspace lgx `:local/root` dirs and lose let-go core (which
+/// `clear_libs` drops and only `index_letgo_core` re-sets).
+fn rebuild_libs(
+    workspace_root: &std::path::Path,
+    project_list: &[projects::Project],
+    state: &mut std::collections::HashMap<String, ProjectState>,
+    index: &Index,
+) {
+    index.clear_libs();
+    for p in project_list {
+        let entries: Vec<std::path::PathBuf> = state
+            .get(&p.rel_path)
+            .map(|ps| ps.entries.iter().cloned().collect())
+            .unwrap_or_default();
+        match p.kind {
+            projects::ProjectKindTag::Lgx => {
+                scanner::index_dir_libs(&entries, index);
+                // Even with no dep dirs: pinned core is indexed outside the
+                // entries, and `clear_libs` dropped its marker. Track the
+                // outcome so removing a core-only project later still forces
+                // a union rebuild.
+                let extra = lgx::index_letgo_core(&p.dir, index);
+                if let Some(ps) = state.get_mut(&p.rel_path) {
+                    ps.extra_indexed = extra > 0;
+                }
+            }
+            _ if !entries.is_empty() => {
+                scanner::index_classpath_libs(workspace_root, entries, index)
+            }
+            _ => {
+                if let Some(ps) = state.get_mut(&p.rel_path) {
+                    ps.extra_indexed = false;
+                }
+            }
+        }
+    }
+}
+
+/// Sets one project's status, creating the state entry if needed.
+fn set_status(state_arc: &SharedState, rel_path: &str, status: ClasspathStatus) {
+    let mut state = state_arc.lock().unwrap();
+    state
+        .entry(rel_path.to_string())
+        .or_insert_with(|| ProjectState::empty(ClasspathStatus::Unresolved))
+        .status = status;
+}
+
+/// Re-detects and re-resolves the project list from the current config layers,
+/// bumping the config generation (the stale-result guard for in-flight stage-3
+/// runs) and pruning state of removed projects. Returns the new list, whether
+/// any pruned project had contributed libraries, and whether the list changed
+/// (so callers can notify the panel).
+fn refresh_projects(
+    root: &std::path::Path,
+    projects_arc: &SharedProjects,
+    editor_config: &SharedEditorConfig,
+    state_arc: &SharedState,
+    generation: &ConfigGeneration,
+) -> (Vec<projects::Project>, bool, bool) {
+    let detected = projects::detect(root);
+    let file = std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
+        .map(|src| projects::parse_edn(&src))
+        .unwrap_or_default();
+    let editor = editor_config.lock().unwrap().clone();
+    let resolved = projects::resolve(root, &detected, &file, &editor);
+    generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let list_changed = {
+        let mut projects = projects_arc.lock().unwrap();
+        let changed = *projects != resolved;
+        *projects = resolved.clone();
+        changed
+    };
+    let mut state = state_arc.lock().unwrap();
+    let mut pruned_any = false;
+    state.retain(|rel, ps| {
+        let keep = resolved.iter().any(|p| p.rel_path == *rel);
+        // A pruned project only forces a union rebuild when it actually
+        // contributed libraries (entries, or let-go core outside them).
+        if !keep && (!ps.entries.is_empty() || ps.extra_indexed) {
+            pruned_any = true;
+        }
+        keep
+    });
+    (resolved, pruned_any, list_changed)
+}
+
+/// Reverts projects whose stage 3 is no longer active (disabled by a config
+/// change) to their stage-2 truth, and rebuilds the library union when any
+/// entry set changed — including entries dropped by removed projects
+/// (`pruned_any`). Stage-2 libraries stay indexed: disabling only gates
+/// stage 3. `force_revert` names projects to revert even while enabled — a
+/// changed command must not keep the old command's entries indexed if the new
+/// one fails. Returns whether the union was rebuilt.
+fn reconcile_projects(
+    workspace_root: &std::path::Path,
+    resolved: &[projects::Project],
+    state_arc: &SharedState,
+    index: &Index,
+    pruned_any: bool,
+    force_revert: &[String],
+) -> bool {
+    let mut changed = pruned_any;
+    for p in resolved
+        .iter()
+        .filter(|p| !p.classpath_enabled || force_revert.contains(&p.rel_path))
+    {
+        // Only projects still carrying stage-3 state need reverting.
+        let had_stage3 = {
+            let state = state_arc.lock().unwrap();
+            state.get(&p.rel_path).is_some_and(|ps| {
+                matches!(
+                    ps.status,
+                    ClasspathStatus::Resolving
+                        | ClasspathStatus::Resolved
+                        | ClasspathStatus::Error(_)
+                )
+            })
+        };
+        if !had_stage3 {
+            continue;
+        }
+        // Fresh stage-2 discovery, without indexing (the rebuild below does it).
+        let entries: std::collections::HashSet<std::path::PathBuf> =
+            stage2_discover(p).into_iter().collect();
+        let status = if entries.is_empty() {
+            ClasspathStatus::Unresolved
+        } else {
+            ClasspathStatus::Cached
+        };
+        let mut state = state_arc.lock().unwrap();
+        let entry = state
+            .entry(p.rel_path.clone())
+            .or_insert_with(|| ProjectState::empty(ClasspathStatus::Unresolved));
+        if entry.entries != entries {
+            entry.entries = entries;
+            changed = true;
+        }
+        entry.status = status;
+    }
+    if changed {
+        let mut state = state_arc.lock().unwrap();
+        rebuild_libs(workspace_root, resolved, &mut state, index);
+    }
+    changed
+}
+
+/// A project's stage-2 classpath discovery, without indexing.
+fn stage2_discover(p: &projects::Project) -> Vec<std::path::PathBuf> {
+    match p.kind {
+        projects::ProjectKindTag::Lgx => lgx::resolve(&p.dir),
+        _ => clojure_classpath(&p.dir),
+    }
+}
+
+/// The project whose own dir directly contains this manifest file. Manifests
+/// live at project roots, so exact-parent matching is precise — and a deleted
+/// subproject's manifest (its project already pruned from the list) resolves
+/// to `None` instead of being misattributed to a surviving ancestor.
+fn manifest_owner<'a>(
+    project_list: &'a [projects::Project],
+    manifest: &std::path::Path,
+) -> Option<&'a projects::Project> {
+    let dir = manifest.parent()?;
+    project_list.iter().find(|p| p.dir == dir)
+}
+
+/// The project owning `path`: the one with the longest dir prefix.
+fn owning_project<'a>(
+    project_list: &'a [projects::Project],
+    path: &std::path::Path,
+) -> Option<&'a projects::Project> {
+    project_list
+        .iter()
+        .filter(|p| path.starts_with(&p.dir))
+        .max_by_key(|p| p.dir.components().count())
+}
+
+/// Re-runs stage-2 discovery for the given projects and rebuilds the library
+/// union when any entry set changed. A project whose entries are unchanged
+/// keeps its status untouched — the `.cpcache` write being reacted to may be
+/// stage 3's own `-Spath` output, and downgrading `resolved` → `cached` on it
+/// would misreport. Returns whether the union was rebuilt.
+fn stage2_refresh(
+    workspace_root: &std::path::Path,
+    affected: &[projects::Project],
+    all_projects: &[projects::Project],
+    state_arc: &SharedState,
+    index: &Index,
+) -> bool {
+    let mut changed = false;
+    for p in affected {
+        let entries: std::collections::HashSet<std::path::PathBuf> =
+            stage2_discover(p).into_iter().collect();
+        let mut state = state_arc.lock().unwrap();
+        let entry = state
+            .entry(p.rel_path.clone())
+            .or_insert_with(|| ProjectState::empty(ClasspathStatus::Unresolved));
+        if entry.entries != entries {
+            entry.status = if entries.is_empty() {
+                ClasspathStatus::Unresolved
+            } else {
+                ClasspathStatus::Cached
+            };
+            entry.entries = entries;
+            changed = true;
+        }
+    }
+    if changed {
+        let mut state = state_arc.lock().unwrap();
+        rebuild_libs(workspace_root, all_projects, &mut state, index);
+    }
+    changed
+}
+
+/// Stage 2 across the given projects: indexes every project's cached
+/// classpath and records per-project entries + status. Returns whether
+/// anything was indexed. Callers log completion and notify.
+fn run_stage2_all(
+    workspace_root: &std::path::Path,
+    project_list: &[projects::Project],
+    state_arc: &SharedState,
+    index: &Index,
+) -> bool {
+    let mut any = false;
+    for p in project_list {
+        let (entries, extra) = stage2_index_project(workspace_root, p, index);
+        any |= !entries.is_empty() || extra > 0;
+        let status = if entries.is_empty() {
+            ClasspathStatus::Unresolved
+        } else {
+            ClasspathStatus::Cached
+        };
+        state_arc.lock().unwrap().insert(
+            p.rel_path.clone(),
+            ProjectState {
+                entries: entries.into_iter().collect(),
+                status,
+                extra_indexed: extra > 0,
+            },
+        );
+    }
+    any
+}
+
+/// Stage 3 for one project: runs its classpath command (serialized on the CLI
+/// lock) and, on a changed entry set, rebuilds the library union. The config
+/// is re-read under the lock so a run queued behind a slow one applies the
+/// freshest enablement/command; the generation snapshot guards against a
+/// config change happening *during* the run (disable does not take the lock).
+#[allow(clippy::too_many_arguments)]
+async fn run_stage3_project(
+    workspace_root: &std::path::Path,
+    rel_path: &str,
+    index: &Index,
+    client: &Client,
+    projects_arc: &SharedProjects,
+    state_arc: &SharedState,
+    generation: &ConfigGeneration,
+    cli_lock: &ClasspathCliLock,
+    progress: &ProgressState,
+) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let _serial = cli_lock.lock().await;
+
+    let project = projects_arc
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.rel_path == rel_path)
+        .cloned();
+    let Some(project) = project else {
+        return false;
+    };
+    if !project.classpath_enabled || !has_manifest(&project) {
+        return false;
+    }
+    let Some(cmd) = project.classpath_cmd.clone() else {
+        return false;
+    };
+    let gen = generation.load(Ordering::SeqCst);
+
+    set_status(state_arc, rel_path, ClasspathStatus::Resolving);
+    client.send_notification::<LibrariesChanged>(()).await;
+    let msg = format!(
+        "clj-pulse: resolving classpath via '{cmd}' in {rel_path} (may download dependencies)..."
+    );
+    tracing::info!("{}", msg);
+    client.log_message(MessageType::INFO, msg).await;
+
+    let progress_token = progress.begin_token(client, rel_path).await;
+    send_progress(
+        client,
+        &progress_token,
+        WorkDoneProgress::Begin(WorkDoneProgressBegin {
+            title: format!("Resolving classpath: {rel_path}"),
+            ..Default::default()
+        }),
+    )
+    .await;
+
+    let result = classpath::resolve_via_cmd(&cmd, &project.dir, classpath::CMD_TIMEOUT).await;
+
+    // Stale-result guard: apply nothing (entries, status, rebuild) if the
+    // config changed while the command ran.
+    let fresh = generation.load(Ordering::SeqCst) == gen
+        && projects_arc.lock().unwrap().iter().any(|p| {
+            p.rel_path == rel_path
+                && p.classpath_enabled
+                && p.classpath_cmd.as_deref() == Some(cmd.as_str())
+        });
+    if !fresh {
+        tracing::info!(
+            "stage-3 result for {} discarded (config changed mid-run)",
+            rel_path
+        );
+        send_progress(
+            client,
+            &progress_token,
+            WorkDoneProgress::End(WorkDoneProgressEnd::default()),
+        )
+        .await;
+        return false;
+    }
+
+    match result {
+        Ok(entries) => {
+            let set: std::collections::HashSet<std::path::PathBuf> =
+                entries.iter().cloned().collect();
+            let project_list = projects_arc.lock().unwrap().clone();
+            {
+                let mut state = state_arc.lock().unwrap();
+                let changed = state
+                    .get(rel_path)
+                    .map(|s| s.entries != set)
+                    .unwrap_or(true);
+                let entry = state
+                    .entry(rel_path.to_string())
+                    .or_insert_with(|| ProjectState::empty(ClasspathStatus::Unresolved));
+                entry.entries = set;
+                entry.status = ClasspathStatus::Resolved;
+                if changed {
+                    rebuild_libs(workspace_root, &project_list, &mut state, index);
+                }
+            }
+            let msg = format!(
+                "clj-pulse: full classpath indexed ({} entries)",
+                entries.len()
+            );
+            send_progress(
+                client,
+                &progress_token,
+                WorkDoneProgress::End(WorkDoneProgressEnd::default()),
+            )
+            .await;
+            tracing::info!("{}", msg);
+            client.log_message(MessageType::INFO, msg).await;
+            client.send_notification::<LibrariesChanged>(()).await;
+            true
+        }
+        Err(reason) => {
+            // Keep stage-2 entries; only the status records the failure.
+            set_status(state_arc, rel_path, ClasspathStatus::Error(reason.clone()));
+            let msg = format!("clj-pulse: classpath resolution failed: {reason}");
+            send_progress(
+                client,
+                &progress_token,
+                WorkDoneProgress::End(WorkDoneProgressEnd::default()),
+            )
+            .await;
+            tracing::warn!("{}", msg);
+            client.log_message(MessageType::WARNING, msg).await;
+            client.send_notification::<LibrariesChanged>(()).await;
+            false
+        }
+    }
+}
+
+/// Stage 3 across every enabled project with a command and a manifest.
+/// Notifies progressively (per project) via [`run_stage3_project`].
+#[allow(clippy::too_many_arguments)]
+async fn run_stage3_all(
+    workspace_root: &std::path::Path,
+    index: &Index,
+    client: &Client,
+    projects_arc: &SharedProjects,
+    state_arc: &SharedState,
+    generation: &ConfigGeneration,
+    cli_lock: &ClasspathCliLock,
+    progress: &ProgressState,
+) -> bool {
+    let candidates: Vec<String> = projects_arc
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.classpath_enabled && p.classpath_cmd.is_some() && has_manifest(p))
+        .map(|p| p.rel_path.clone())
+        .collect();
+    let mut any_ok = false;
+    for rel_path in candidates {
+        any_ok |= run_stage3_project(
+            workspace_root,
+            &rel_path,
+            index,
+            client,
+            projects_arc,
+            state_arc,
+            generation,
+            cli_lock,
+            progress,
+        )
+        .await;
+    }
+    any_ok
+}
+
+/// Applies the difference between the previous and freshly resolved project
+/// lists: indexes added projects (sources + stage 2) — or rescans the whole
+/// source union when projects were removed, unless the caller already did —
+/// reverts disabled / command-changed projects to stage-2 truth, notifies the
+/// panel, and runs stage 3 for newly enabled (or command-changed) projects.
+/// Returns the rel_paths stage 3 was run for. Call with the
+/// [`ConfigApplyLock`] held.
+#[allow(clippy::too_many_arguments)]
+async fn apply_project_diff(
+    root: &std::path::Path,
+    old: &[projects::Project],
+    resolved: &[projects::Project],
+    pruned_any: bool,
+    list_changed: bool,
+    sources_rescanned: bool,
+    index: &Index,
+    client: &Client,
+    documents: &DocumentStore,
+    projects_arc: &SharedProjects,
+    state_arc: &SharedState,
+    generation: &ConfigGeneration,
+    cli_lock: &ClasspathCliLock,
+    progress: &ProgressState,
+) -> Vec<String> {
+    // Diff old vs new resolved config per project.
+    let mut stage3_runs: Vec<String> = Vec::new();
+    let mut force_revert: Vec<String> = Vec::new();
+    let mut added: Vec<projects::Project> = Vec::new();
+    let mut kind_changed = false;
+    for p in resolved {
+        let old_p = old.iter().find(|o| o.rel_path == p.rel_path);
+        if old_p.is_none() {
+            added.push(p.clone());
+        }
+        kind_changed |= old_p.is_some_and(|o| o.kind != p.kind);
+        let was_active = old_p.is_some_and(|o| o.classpath_enabled && o.classpath_cmd.is_some());
+        let cmd_changed = old_p.is_none_or(|o| o.classpath_cmd != p.classpath_cmd);
+        if p.classpath_enabled && p.classpath_cmd.is_some() && (!was_active || cmd_changed) {
+            stage3_runs.push(p.rel_path.clone());
+            // A changed command reverts to stage-2 truth first: if the new
+            // command fails, the old command's entries must not stay indexed
+            // behind the error status.
+            if was_active && cmd_changed {
+                force_revert.push(p.rel_path.clone());
+            }
+        }
+    }
+    let removed_any = old
+        .iter()
+        .any(|o| !resolved.iter().any(|p| p.rel_path == o.rel_path));
+
+    if removed_any && !sources_rescanned {
+        // A removed project's sources must leave the index: rescan the whole
+        // union (the merge prunes files no longer covered).
+        if let Err(e) = rescan_all_sources(resolved, index, documents) {
+            tracing::error!("project re-index failed: {}", e);
+        }
+    } else if !added.is_empty() && !sources_rescanned {
+        // A project newly added by config (a gitignored dir listed live):
+        // index its sources so the panel entry isn't an empty shell.
+        let scan_roots: Vec<scanner::ScanRoot> = added
+            .iter()
+            .flat_map(|p| {
+                let dir = p.dir.clone();
+                config::source_paths(&p.dir)
+                    .into_iter()
+                    .map(move |path| scanner::ScanRoot {
+                        project_dir: dir.clone(),
+                        path,
+                    })
+            })
+            .collect();
+        match scanner::build_index_scoped(&scan_roots, &index.extract_config()) {
+            Ok(new_index) => {
+                Backend::warn_ns_collisions(index, &new_index);
+                // Keep every existing file: this scan covers only the added
+                // projects, not the whole workspace.
+                let keep: std::collections::HashSet<std::path::PathBuf> =
+                    index.occurrences.iter().map(|e| e.key().clone()).collect();
+                index.merge_project_from(new_index, &keep);
+            }
+            Err(e) => tracing::error!("added-project index failed: {}", e),
+        }
+    }
+    if !added.is_empty() {
+        run_stage2_all(root, &added, state_arc, index);
+    }
+
+    // Newly disabled projects revert to stage-2 truth (their stage-2
+    // libraries stay indexed — disabling only gates stage 3).
+    let rebuilt = reconcile_projects(root, resolved, state_arc, index, pruned_any, &force_revert);
+    if kind_changed && !rebuilt {
+        // Per-kind indexing differs even with identical entries (lgx dirs vs
+        // classpath, let-go core): a kind flip forces the union rebuild that
+        // the entry-set comparison would skip.
+        let mut state = state_arc.lock().unwrap();
+        rebuild_libs(root, resolved, &mut state, index);
+    }
+    if rebuilt || kind_changed || list_changed || !added.is_empty() {
+        client.send_notification::<LibrariesChanged>(()).await;
+    }
+
+    for rel_path in &stage3_runs {
+        run_stage3_project(
+            root,
+            rel_path,
+            index,
+            client,
+            projects_arc,
+            state_arc,
+            generation,
+            cli_lock,
+            progress,
+        )
+        .await;
+    }
+    stage3_runs
 }
 
 #[derive(serde::Deserialize)]
@@ -189,11 +796,23 @@ pub struct Backend {
     pub client: Client,
     pub index: Arc<Index>,
     pub documents: Arc<DocumentStore>,
+    /// The workspace root (log dir, config location, watched-file routing).
     root: std::sync::Mutex<Option<std::path::PathBuf>>,
-    /// See [`LibEntries`].
-    lib_entries: LibEntries,
+    /// The resolved project list (root + detected/configured subprojects).
+    projects: SharedProjects,
+    /// Per-project lib entries + status, keyed by `rel_path`.
+    project_state: SharedState,
+    /// The editor config layer (`initializationOptions` /
+    /// `didChangeConfiguration`), kept so file-config reloads re-merge it.
+    editor_config: SharedEditorConfig,
+    /// See [`ConfigGeneration`].
+    config_generation: ConfigGeneration,
     /// See [`ClasspathCliLock`].
     classpath_cli_lock: ClasspathCliLock,
+    /// See [`ConfigApplyLock`].
+    config_apply_lock: ConfigApplyLock,
+    /// See [`ProgressState`].
+    progress: ProgressState,
 }
 
 impl Backend {
@@ -203,8 +822,13 @@ impl Backend {
             index: Arc::new(Index::new_with_core()),
             documents: Arc::new(DocumentStore::new()),
             root: std::sync::Mutex::new(None),
-            lib_entries: LibEntries::default(),
+            projects: SharedProjects::default(),
+            project_state: SharedState::default(),
+            editor_config: SharedEditorConfig::default(),
+            config_generation: ConfigGeneration::default(),
             classpath_cli_lock: ClasspathCliLock::default(),
+            config_apply_lock: ConfigApplyLock::default(),
+            progress: ProgressState::default(),
         }
     }
 
@@ -216,6 +840,25 @@ impl Backend {
             .into_iter()
             .filter_map(|uri| uri.to_file_path().ok())
             .collect()
+    }
+
+    /// Warns about namespaces the new scan defines in a *different* file than
+    /// the existing index (last one wins on merge). Intra-scan duplicates are
+    /// warned by the scanner itself; lib-owned namespaces are skipped — a
+    /// project ns shadowing a library ns is normal and resolved by precedence.
+    fn warn_ns_collisions(index: &Index, new_index: &Index) {
+        for entry in new_index.namespaces.iter() {
+            if let Some(existing) = index.namespaces.get(entry.key()) {
+                if existing.file != entry.value().file && index.is_project_path(&existing.file) {
+                    tracing::warn!(
+                        "namespace {} defined in both {} and {}; last one wins",
+                        entry.key(),
+                        existing.file.display(),
+                        entry.value().file.display()
+                    );
+                }
+            }
+        }
     }
 
     /// Reads the text of a `jar:` URI entry. Shared by the LSP 3.17
@@ -285,28 +928,204 @@ impl Backend {
     }
 
     /// clj-pulse custom `clojurePulse/externalLibraries`: the resolved external
-    /// libraries for the panel. Re-derives from disk per request (reading
-    /// `.cpcache`/lgx is cheap) so it survives server restarts without new
-    /// state. No project root yet → empty list, never an error.
+    /// libraries for the panel — the flat deduped union across all projects
+    /// (older editors keep working against the multi-project server). No
+    /// project list yet → empty list, never an error.
     pub async fn external_libraries(
         &self,
         _params: Option<serde_json::Value>,
     ) -> tower_lsp::jsonrpc::Result<Vec<libraries::Library>> {
-        let Some(root) = self.root.lock().unwrap().clone() else {
+        let project_list = self.projects.lock().unwrap().clone();
+        if project_list.is_empty() {
             return Ok(Vec::new());
-        };
-        // Re-derivation reads `.cpcache`/lgx/source-paths from disk; keep it off
-        // the LSP executor so it can't stall hover/completion/definition.
+        }
+        let entries = lib_union(&self.project_state.lock().unwrap());
+        // source_paths reads manifests from disk; keep it off the LSP executor
+        // so it can't stall hover/completion/definition.
         tokio::task::spawn_blocking(move || {
-            let entries = resolve_lib_entries(&root);
-            let own_paths = config::source_paths(&root);
-            libraries::from_entries(&own_paths, &entries)
+            let own_paths: Vec<std::path::PathBuf> = project_list
+                .iter()
+                .flat_map(|p| config::source_paths(&p.dir))
+                .collect();
+            let project_dirs: Vec<std::path::PathBuf> =
+                project_list.iter().map(|p| p.dir.clone()).collect();
+            libraries::from_entries(&own_paths, &project_dirs, &entries)
         })
         .await
         .map_err(|e| {
             tracing::error!("externalLibraries task panicked: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
+    }
+
+    /// clj-pulse custom `clojurePulse/projects`: the grouped per-project view —
+    /// each project's kind, classpath resolution config + status, and its own
+    /// libraries. Root first, then rel_path-sorted (the resolve order). No
+    /// project list yet → empty list, never an error.
+    pub async fn projects_info(
+        &self,
+        _params: Option<serde_json::Value>,
+    ) -> tower_lsp::jsonrpc::Result<Vec<serde_json::Value>> {
+        let project_list = self.projects.lock().unwrap().clone();
+        let state = self.project_state.lock().unwrap().clone();
+        // source_paths reads manifests from disk; keep it off the LSP executor.
+        tokio::task::spawn_blocking(move || {
+            // Every project's dir, not just the current one: the root's
+            // resolved classpath lists subproject source dirs too.
+            let project_dirs: Vec<std::path::PathBuf> =
+                project_list.iter().map(|p| p.dir.clone()).collect();
+            project_list
+                .iter()
+                .map(|p| {
+                    let project_state = state.get(&p.rel_path);
+                    let entries: Vec<std::path::PathBuf> = project_state
+                        .map(|s| s.entries.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let own_paths = config::source_paths(&p.dir);
+                    let libs = libraries::from_entries(&own_paths, &project_dirs, &entries);
+
+                    let kind = match p.kind {
+                        projects::ProjectKindTag::Deps => "deps",
+                        projects::ProjectKindTag::Lein => "lein",
+                        projects::ProjectKindTag::Lgx => "lgx",
+                    };
+                    let status =
+                        project_state
+                            .map(|s| &s.status)
+                            .unwrap_or(if p.classpath_enabled {
+                                &ClasspathStatus::Unresolved
+                            } else {
+                                &ClasspathStatus::Disabled
+                            });
+                    let mut classpath = serde_json::json!({
+                        "enabled": p.classpath_enabled,
+                        "status": match status {
+                            ClasspathStatus::Disabled => "disabled",
+                            ClasspathStatus::Cached => "cached",
+                            ClasspathStatus::Resolving => "resolving",
+                            ClasspathStatus::Resolved => "resolved",
+                            ClasspathStatus::Unresolved => "unresolved",
+                            ClasspathStatus::Error(_) => "error",
+                        },
+                    });
+                    if let Some(cmd) = &p.classpath_cmd {
+                        classpath["cmd"] = serde_json::json!(cmd);
+                    }
+                    if let ClasspathStatus::Error(message) = status {
+                        classpath["message"] = serde_json::json!(message);
+                    }
+                    serde_json::json!({
+                        "path": p.rel_path,
+                        "kind": kind,
+                        "classpath": classpath,
+                        "libraries": libs,
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("projects task panicked: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
+    /// clj-pulse custom `clojurePulse/rescan`: forces re-detection and
+    /// re-resolution of every project — the retry path for `error`-status
+    /// projects and the only way to pick up a new gitignored subproject
+    /// (ignored dirs fire no file watchers). Returns null immediately; the
+    /// work runs in the background and completion is conveyed by `$/progress`
+    /// and one final, unconditional `librariesChanged`.
+    pub async fn rescan(
+        &self,
+        _params: Option<serde_json::Value>,
+    ) -> tower_lsp::jsonrpc::Result<serde_json::Value> {
+        let Some(root) = self.root.lock().unwrap().clone() else {
+            return Ok(serde_json::Value::Null);
+        };
+
+        let index = self.index.clone();
+        let client = self.client.clone();
+        let documents = self.documents.clone();
+        let projects_arc = self.projects.clone();
+        let state_arc = self.project_state.clone();
+        let editor_config = self.editor_config.clone();
+        let generation = self.config_generation.clone();
+        let cli_lock = self.classpath_cli_lock.clone();
+        let apply_lock = self.config_apply_lock.clone();
+        let progress = self.progress.clone();
+        tokio::spawn(async move {
+            let _serial = apply_lock.lock().await;
+
+            let old = projects_arc.lock().unwrap().clone();
+            // Re-detects, re-reads the file config, and bumps the config
+            // generation — correctly discarding in-flight stage-3 results.
+            let (resolved, pruned_any, list_changed) = refresh_projects(
+                &root,
+                &projects_arc,
+                &editor_config,
+                &state_arc,
+                &generation,
+            );
+            let stage3_ran = apply_project_diff(
+                &root,
+                &old,
+                &resolved,
+                pruned_any,
+                list_changed,
+                false,
+                &index,
+                &client,
+                &documents,
+                &projects_arc,
+                &state_arc,
+                &generation,
+                &cli_lock,
+                &progress,
+            )
+            .await;
+
+            // Force stage 3 for every eligible project the diff skipped
+            // (unchanged config) — this is what retries `error` projects.
+            let ran: std::collections::HashSet<String> = stage3_ran.into_iter().collect();
+            let forced: Vec<String> = resolved
+                .iter()
+                .filter(|p| {
+                    p.classpath_enabled
+                        && p.classpath_cmd.is_some()
+                        && has_manifest(p)
+                        && !ran.contains(&p.rel_path)
+                })
+                .map(|p| p.rel_path.clone())
+                .collect();
+            // Revert forced projects to stage-2 truth first: if a rerun's
+            // command now fails, its error path must leave stage-2 data
+            // behind, not the previous run's stage-3 entries.
+            if reconcile_projects(&root, &resolved, &state_arc, &index, false, &forced) {
+                client.send_notification::<LibrariesChanged>(()).await;
+            }
+            for rel_path in forced {
+                run_stage3_project(
+                    &root,
+                    &rel_path,
+                    &index,
+                    &client,
+                    &projects_arc,
+                    &state_arc,
+                    &generation,
+                    &cli_lock,
+                    &progress,
+                )
+                .await;
+            }
+
+            // Unconditional completion signal: on a fully unchanged workspace
+            // nothing above notifies, and the client would never know the
+            // rescan finished.
+            client.send_notification::<LibrariesChanged>(()).await;
+        });
+
+        Ok(serde_json::Value::Null)
     }
 
     /// clj-pulse custom `clojurePulse/libraryEntries`: the file entries of a jar
@@ -378,30 +1197,145 @@ fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // `$/progress` reporting is capability-gated; clients without
+        // `window.workDoneProgress` get nothing.
+        self.progress.enabled.store(
+            params
+                .capabilities
+                .window
+                .as_ref()
+                .and_then(|w| w.work_done_progress)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         if let Some(root_path) = initialize_root(&params) {
             {
                 *self.root.lock().unwrap() = Some(root_path.clone());
+                // The editor config layer arrives in initializationOptions as
+                // the bare `{"projects": [...]}` object. Anything else (Calva's
+                // clojure-lsp settings) parses to no entries.
+                let editor_entries = params
+                    .initialization_options
+                    .as_ref()
+                    .map(projects::parse_json)
+                    .unwrap_or_default();
+                *self.editor_config.lock().unwrap() = editor_entries.clone();
+
                 let index = self.index.clone();
                 let client = self.client.clone();
                 let documents = self.documents.clone();
-                let root_path_jars = root_path.clone();
+                let projects_arc = self.projects.clone();
+                let state_arc = self.project_state.clone();
+                let generation = self.config_generation.clone();
+                let cli_lock = self.classpath_cli_lock.clone();
+                let apply_lock = self.config_apply_lock.clone();
+                let progress = self.progress.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
-                    let source_paths = config::source_paths(&root_path);
+
+                    // Resolve the project list: detection + config layers.
+                    let detected = projects::detect(&root_path);
+                    let file_entries =
+                        std::fs::read_to_string(root_path.join(".clj-pulse").join("config.edn"))
+                            .map(|src| projects::parse_edn(&src))
+                            .unwrap_or_default();
+                    let resolved =
+                        projects::resolve(&root_path, &detected, &file_entries, &editor_entries);
                     tracing::info!(
-                        "project root: {}, source paths: {:?}",
+                        "workspace root: {}, projects: {:?}",
                         root_path.display(),
-                        source_paths
+                        resolved.iter().map(|p| &p.rel_path).collect::<Vec<_>>()
                     );
+                    *projects_arc.lock().unwrap() = resolved.clone();
+                    {
+                        let mut state = state_arc.lock().unwrap();
+                        for p in &resolved {
+                            state.insert(
+                                p.rel_path.clone(),
+                                ProjectState::empty(if p.classpath_enabled {
+                                    ClasspathStatus::Unresolved
+                                } else {
+                                    ClasspathStatus::Disabled
+                                }),
+                            );
+                        }
+                    }
+                    // The project list is now available: tell the panel even
+                    // when no libraries will ever be indexed (all disabled /
+                    // empty classpaths), so it doesn't stay permanently empty.
+                    client.send_notification::<LibrariesChanged>(()).await;
+
+                    // Background task: index libraries from each project's
+                    // classpath, concurrent with the source scan below.
+                    // Graduated: stage 2 indexes whatever `.cpcache` already
+                    // holds (instant), then stage 3 resolves the authoritative
+                    // classpath per enabled project and re-indexes on change.
+                    {
+                        let index = index.clone();
+                        let client = client.clone();
+                        let projects_arc = projects_arc.clone();
+                        let state_arc = state_arc.clone();
+                        let generation = generation.clone();
+                        let cli_lock = cli_lock.clone();
+                        let apply_lock = apply_lock.clone();
+                        let progress = progress.clone();
+                        let root = root_path.clone();
+                        let resolved = resolved.clone();
+                        tokio::spawn(async move {
+                            // Serialize with config-application tasks (see
+                            // `ConfigApplyLock`).
+                            let _serial = apply_lock.lock().await;
+                            let stage2_ok = run_stage2_all(&root, &resolved, &state_arc, &index);
+                            if stage2_ok {
+                                let msg = format!(
+                                    "clj-pulse: library indexing complete ({} total symbols)",
+                                    index.symbols.len()
+                                );
+                                tracing::info!("{}", msg);
+                                client.log_message(MessageType::INFO, msg).await;
+                                client.send_notification::<LibrariesChanged>(()).await;
+                            }
+
+                            let stage3_ok = run_stage3_all(
+                                &root,
+                                &index,
+                                &client,
+                                &projects_arc,
+                                &state_arc,
+                                &generation,
+                                &cli_lock,
+                                &progress,
+                            )
+                            .await;
+
+                            if !stage2_ok && !stage3_ok {
+                                let msg = match config::project_kind(&root) {
+                                    config::ProjectKind::LetGo => {
+                                        "clj-pulse: no lgx deps resolved (no ~/.lgx/gitlibs, or \
+                                         deps not fetched — run `lgx run`/`lgx build` once) — \
+                                         library symbols will not be indexed."
+                                    }
+                                    config::ProjectKind::Clojure => {
+                                        "clj-pulse: no classpath found (no .cpcache/ in project \
+                                         root?) — library symbols will not be indexed. Run \
+                                         `clojure -A:dev:test -Spath` or start a REPL once to \
+                                         generate it."
+                                    }
+                                };
+                                tracing::warn!("{}", msg);
+                                client.log_message(MessageType::WARNING, msg).await;
+                                client.send_notification::<LibrariesChanged>(()).await;
+                            }
+                        });
+                    }
+
+                    // Stage 1: one scan over the union of every project's own
+                    // source paths (first project wins a shared path — the
+                    // root is first).
                     index.set_extract_config(settings::load(&root_path));
-
-                    match scanner::build_index(&root_path, &source_paths, &index.extract_config()) {
-                        Ok(new_index) => {
-                            let sym_count = new_index.symbols.len();
-                            let ns_count = new_index.namespaces.len();
-
-                            index.merge_project_from(new_index, &Self::open_paths(&documents));
-
+                    match rescan_all_sources(&resolved, &index, &documents) {
+                        Ok((sym_count, ns_count)) => {
                             let elapsed = start.elapsed();
                             let msg = format!(
                                 "Indexed {} symbols in {} namespaces in {:?}",
@@ -419,62 +1353,6 @@ impl LanguageServer for Backend {
                                 )
                                 .await;
                         }
-                    }
-                });
-
-                // Background task: index library JARs from the classpath.
-                // Graduated: stage 2 indexes whatever `.cpcache` already holds
-                // (instant), then stage 3 resolves the authoritative classpath
-                // via the clojure CLI and re-indexes on change.
-                let index_jars = self.index.clone();
-                let client_jars = self.client.clone();
-                let lib_entries = self.lib_entries.clone();
-                let cli_lock = self.classpath_cli_lock.clone();
-                tokio::spawn(async move {
-                    let resolved = resolve_and_index_libs(&root_path_jars, &index_jars);
-                    let stage2_ok = resolved.indexed_any();
-                    *lib_entries.lock().unwrap() = resolved.entries.into_iter().collect();
-                    if stage2_ok {
-                        let msg = format!(
-                            "clj-pulse: library indexing complete ({} total symbols)",
-                            index_jars.symbols.len()
-                        );
-                        tracing::info!("{}", msg);
-                        client_jars.log_message(MessageType::INFO, msg).await;
-                        client_jars.send_notification::<LibrariesChanged>(()).await;
-                    }
-
-                    // Stage 3 applies only to deps.edn projects; let-go and
-                    // Leiningen resolution has no CLI-backed refinement.
-                    let is_deps_project = config::project_kind(&root_path_jars)
-                        == config::ProjectKind::Clojure
-                        && root_path_jars.join("deps.edn").exists();
-                    let stage3_ok = is_deps_project
-                        && run_classpath_cli(
-                            &root_path_jars,
-                            &index_jars,
-                            &client_jars,
-                            &lib_entries,
-                            &cli_lock,
-                        )
-                        .await;
-
-                    if !stage2_ok && !stage3_ok {
-                        let msg = match config::project_kind(&root_path_jars) {
-                            config::ProjectKind::LetGo => {
-                                "clj-pulse: no lgx deps resolved (no ~/.lgx/gitlibs, or deps not \
-                                 fetched — run `lgx run`/`lgx build` once) — library symbols \
-                                 will not be indexed."
-                            }
-                            config::ProjectKind::Clojure => {
-                                "clj-pulse: no classpath found (no .cpcache/ in project root?) \
-                                 — library symbols will not be indexed. Run \
-                                 `clojure -A:dev:test -Spath` or start a REPL once to generate it."
-                            }
-                        };
-                        tracing::warn!("{}", msg);
-                        client_jars.log_message(MessageType::WARNING, msg).await;
-                        client_jars.send_notification::<LibrariesChanged>(()).await;
                     }
                 });
 
@@ -587,6 +1465,64 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // The settings envelope wraps the bare config object in its section:
+        // {"clojurePulse": {"projects": [...]}}. No section → not for us.
+        let Some(section) = params.settings.get("clojurePulse") else {
+            return;
+        };
+        let entries = projects::parse_json(section);
+        *self.editor_config.lock().unwrap() = entries;
+        let Some(root) = self.root.lock().unwrap().clone() else {
+            return;
+        };
+
+        let index = self.index.clone();
+        let client = self.client.clone();
+        let documents = self.documents.clone();
+        let projects_arc = self.projects.clone();
+        let state_arc = self.project_state.clone();
+        let editor_config = self.editor_config.clone();
+        let generation = self.config_generation.clone();
+        let cli_lock = self.classpath_cli_lock.clone();
+        let apply_lock = self.config_apply_lock.clone();
+        let progress = self.progress.clone();
+        tokio::spawn(async move {
+            // Serialize whole applications: a slower, staler task must not
+            // finish after — and overwrite — a newer one. (The editor layer
+            // was stored synchronously above, so even the older queued task
+            // resolves against the newest config.)
+            let _serial = apply_lock.lock().await;
+
+            let old = projects_arc.lock().unwrap().clone();
+            let (resolved, pruned_any, list_changed) = refresh_projects(
+                &root,
+                &projects_arc,
+                &editor_config,
+                &state_arc,
+                &generation,
+            );
+
+            apply_project_diff(
+                &root,
+                &old,
+                &resolved,
+                pruned_any,
+                list_changed,
+                false,
+                &index,
+                &client,
+                &documents,
+                &projects_arc,
+                &state_arc,
+                &generation,
+                &cli_lock,
+                &progress,
+            )
+            .await;
+        });
+    }
+
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("clj-pulse shutting down");
         Ok(())
@@ -678,11 +1614,13 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        let mut classpath_changed = false;
-        let mut source_paths_changed = false;
+        // Manifest / `.cpcache` events are routed to their owning project (by
+        // longest project-dir prefix) after the project list is re-resolved.
+        let mut manifest_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut cpcache_paths: Vec<std::path::PathBuf> = Vec::new();
         let mut config_changed = false;
-        // `.clj-pulse/config.edn` specifically: only it carries `:classpath`,
-        // so only it triggers a CLI re-resolution (`.clj-kondo` does not).
+        // `.clj-pulse/config.edn` specifically: only it carries `:projects`,
+        // so only it triggers a stage-3 re-resolution (`.clj-kondo` does not).
         let mut pulse_config_changed = false;
         for event in params.changes {
             let Ok(path) = event.uri.to_file_path() else {
@@ -690,18 +1628,19 @@ impl LanguageServer for Backend {
             };
 
             // deps.edn / lgx.edn / project.clj affect both the classpath/deps
-            // and the project's own :paths; .cpcache only the classpath.
+            // and the owning project's own :paths; .cpcache only the classpath.
+            // A created or deleted manifest also changes the project *list* —
+            // covered by the unconditional re-detection below.
             let manifest = path
                 .file_name()
                 .map(|n| n == "deps.edn" || n == "lgx.edn" || n == "project.clj")
                 .unwrap_or(false);
             if manifest {
-                classpath_changed = true;
-                source_paths_changed = true;
+                manifest_paths.push(path);
                 continue;
             }
             if path.components().any(|c| c.as_os_str() == ".cpcache") {
-                classpath_changed = true;
+                cpcache_paths.push(path);
                 continue;
             }
 
@@ -768,30 +1707,51 @@ impl LanguageServer for Backend {
             }
         }
 
+        let classpath_changed = !manifest_paths.is_empty() || !cpcache_paths.is_empty();
+        let source_paths_changed = !manifest_paths.is_empty();
         if classpath_changed || config_changed {
             let root = self.root.lock().unwrap().clone();
             if let Some(root) = root {
                 let index = self.index.clone();
                 let client = self.client.clone();
                 let documents = self.documents.clone();
-                let lib_entries = self.lib_entries.clone();
+                let projects_arc = self.projects.clone();
+                let state_arc = self.project_state.clone();
+                let editor_config = self.editor_config.clone();
+                let generation = self.config_generation.clone();
                 let cli_lock = self.classpath_cli_lock.clone();
+                let apply_lock = self.config_apply_lock.clone();
+                let progress = self.progress.clone();
                 tokio::spawn(async move {
+                    // Serialize with other config-application tasks (see
+                    // `ConfigApplyLock`).
+                    let _serial = apply_lock.lock().await;
+
                     // A config change reloads `:lint-as` before re-indexing, so
                     // the rebuild extracts project files with the new mapping.
                     if config_changed {
                         index.set_extract_config(settings::load(&root));
                     }
 
-                    // Rebuild project sources when :paths changed or the config
+                    // A manifest or config change can add/remove projects or
+                    // retoggle their classpath resolution: re-resolve the list
+                    // (this also bumps the stage-3 stale-result generation).
+                    let old = projects_arc.lock().unwrap().clone();
+                    let (resolved, pruned_any, list_changed) = refresh_projects(
+                        &root,
+                        &projects_arc,
+                        &editor_config,
+                        &state_arc,
+                        &generation,
+                    );
+
+                    // Rebuild project sources when :paths changed, the project
+                    // list changed (created/deleted manifest), or the config
                     // changed (lint-as affects how every project file extracts).
-                    if source_paths_changed || config_changed {
-                        let source_paths = config::source_paths(&root);
-                        match scanner::build_index(&root, &source_paths, &index.extract_config()) {
-                            Ok(new_index) => {
-                                index.merge_project_from(new_index, &Self::open_paths(&documents))
-                            }
-                            Err(e) => tracing::error!("project re-index failed: {}", e),
+                    let sources_rescanned = source_paths_changed || config_changed || list_changed;
+                    if sources_rescanned {
+                        if let Err(e) = rescan_all_sources(&resolved, &index, &documents) {
+                            tracing::error!("project re-index failed: {}", e);
                         }
                     }
 
@@ -827,12 +1787,52 @@ impl LanguageServer for Backend {
                             .await;
                     }
 
+                    // Project list / config toggles: index added projects,
+                    // prune removed ones, revert disabled or command-changed
+                    // ones, and run stage 3 for newly enabled ones.
+                    let stage3_ran = if pulse_config_changed || list_changed {
+                        apply_project_diff(
+                            &root,
+                            &old,
+                            &resolved,
+                            pruned_any,
+                            list_changed,
+                            sources_rescanned,
+                            &index,
+                            &client,
+                            &documents,
+                            &projects_arc,
+                            &state_arc,
+                            &generation,
+                            &cli_lock,
+                            &progress,
+                        )
+                        .await
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Routed stage 2: re-discover only the projects owning the
+                    // changed manifest / `.cpcache` paths; rebuild the union
+                    // when any entry set changed.
+                    let affected: Vec<projects::Project> = {
+                        let mut seen = std::collections::HashSet::new();
+                        manifest_paths
+                            .iter()
+                            .filter_map(|path| manifest_owner(&resolved, path))
+                            .chain(
+                                cpcache_paths
+                                    .iter()
+                                    .filter_map(|path| owning_project(&resolved, path)),
+                            )
+                            .filter(|p| seen.insert(p.rel_path.clone()))
+                            .cloned()
+                            .collect()
+                    };
                     if classpath_changed {
-                        // Drop symbols of removed/replaced dependencies first
-                        index.clear_libs();
-                        let resolved = resolve_and_index_libs(&root, &index);
-                        *lib_entries.lock().unwrap() = resolved.entries.iter().cloned().collect();
-                        if resolved.indexed_any() {
+                        let stage2_changed =
+                            stage2_refresh(&root, &affected, &resolved, &state_arc, &index);
+                        if stage2_changed {
                             let msg = "clj-pulse: library re-indexing complete";
                             tracing::info!("{}", msg);
                             client.log_message(MessageType::INFO, msg).await;
@@ -842,18 +1842,31 @@ impl LanguageServer for Backend {
                         client.send_notification::<LibrariesChanged>(()).await;
                     }
 
-                    // `:classpath` (aliases / enabled) may have changed — e.g.
-                    // an editor UI writing the alias selection — so re-resolve
-                    // via the CLI. Comparing against `lib_entries` skips the
-                    // re-index when the classpath is unchanged.
-                    if pulse_config_changed {
-                        let is_deps_project = config::project_kind(&root)
-                            == config::ProjectKind::Clojure
-                            && root.join("deps.edn").exists();
-                        if is_deps_project {
-                            run_classpath_cli(&root, &index, &client, &lib_entries, &cli_lock)
-                                .await;
+                    // A changed manifest re-runs stage 3 for its (enabled)
+                    // owning project — unless the diff above already did.
+                    let mut ran: std::collections::HashSet<String> =
+                        stage3_ran.into_iter().collect();
+                    for path in &manifest_paths {
+                        let Some(rel_path) =
+                            manifest_owner(&resolved, path).map(|p| p.rel_path.clone())
+                        else {
+                            continue;
+                        };
+                        if !ran.insert(rel_path.clone()) {
+                            continue;
                         }
+                        run_stage3_project(
+                            &root,
+                            &rel_path,
+                            &index,
+                            &client,
+                            &projects_arc,
+                            &state_arc,
+                            &generation,
+                            &cli_lock,
+                            &progress,
+                        )
+                        .await;
                     }
                 });
             }

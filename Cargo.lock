@@ -161,6 +161,7 @@ dependencies = [
  "dashmap",
  "edn-format",
  "ignore",
+ "libc",
  "percent-encoding",
  "rayon",
  "ropey",

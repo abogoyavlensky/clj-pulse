@@ -47,13 +47,29 @@ protocol changes should also pass `bb e2e-nvim`.
 - Project symbols always win over library symbols with the same fqn; project
   and library indexing run concurrently, so library insertion uses
   `Index::insert_lib_file` (never plain `insert_file`).
-- deps.edn classpath indexing is graduated: stage 2 reads `.cpcache` instantly,
-  then stage 3 runs `clojure -A:dev:test -Spath` in the background (config:
-  `.clj-pulse/config.edn` `{:classpath {:enabled … :aliases […]}}`) and
-  re-indexes when the authoritative classpath differs. Stage-3 runs are
-  serialized (`ClasspathCliLock`) and compare against the server's last-indexed
-  entry set — never re-read `.cpcache` to detect change, `-Spath` just wrote it.
-  Any stage-3 failure degrades to the stage-2 result.
+- The workspace is multi-project: `projects::detect` finds every dir holding a
+  `deps.edn` / `project.clj` / `lgx.edn` (gitignore-respecting, max depth 4),
+  and `.clj-pulse/config.edn` `{:projects [{:path "apps/a" :classpath
+  {:enabled … :cmd "…"}}]}` entries override per path — or add a project
+  detection skipped (gitignored dirs). The old top-level `:classpath
+  {:enabled … :aliases […]}` syntax is gone; there is no back-compat parsing.
+- Classpath indexing is graduated *per project*: stage 1 scans every project's
+  own `:paths` into one shared index; stage 2 reads each project's `.cpcache`
+  instantly; stage 3 runs the project's verbatim `:cmd` in the project dir
+  (`clojure -A:dev:test -Spath` for deps.edn, `lein classpath` for Leiningen,
+  none for lgx) — enabled by default only for the workspace root. Stage-3 runs
+  are serialized (`ClasspathCliLock`) and compare against that project's
+  last-indexed entry set — never re-read `.cpcache` to detect change,
+  `-Spath` just wrote it. Any stage-3 failure degrades to the stage-2 result.
+- The library index is rebuilt per project, per kind (`rebuild_libs`), never
+  as one flat scan — a flat `index_classpath_libs` over the union would skip
+  in-workspace lgx `:local/root` dirs and lose let-go core. Disabling a
+  project only stops stage 3; its stage-2 libraries stay indexed.
+- Source scans stop gitignore ancestry at the project dir
+  (`scanner::ScanRoot`): a configured project inside a gitignored dir still
+  scans, while gitignores at or below the project dir keep applying.
+- `CLJ_PULSE_DISABLE_CLASSPATH_CLI` (non-empty) forces `:enabled false` for
+  every project (the e2e harness depends on this).
 - Classpath libraries come in two shapes: JARs (`SymbolSource::Jar`, navigated
   via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).

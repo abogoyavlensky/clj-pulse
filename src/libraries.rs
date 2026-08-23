@@ -1,10 +1,11 @@
 //! Maps resolved classpath entries to the external-library list the editor's
 //! "External Libraries" panel renders.
 //!
-//! Pure path logic — no filesystem access — so it is fully unit-testable with
-//! fabricated paths. The handler feeds it the same entries `resolve_and_index_libs`
-//! derives (deps.edn `.cpcache` classpath, Leiningen direct-dep JARs, or lgx
-//! source dirs) and serializes the result over the custom LSP request.
+//! Mostly pure path logic; the one filesystem touch is the ownership rule's
+//! manifest probe (which dir "owns" an in-workspace classpath entry). The
+//! handler feeds it the same entries stage 2/3 derive (deps.edn `.cpcache`
+//! classpath, Leiningen direct-dep JARs, or lgx source dirs) and serializes
+//! the result over the custom LSP request.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -35,14 +36,30 @@ pub enum LibraryKind {
 /// classpath entry for the project's own source is always exactly a declared
 /// root, whereas an in-workspace `:local/root` dependency is a *deeper* path —
 /// even one nested under `test/` (which `source_paths` always unions in) — so
-/// exact matching keeps it. Duplicate absolute paths collapse to one library,
-/// and the result is sorted by name, then version, then path (a total order,
-/// so the panel is deterministic).
-pub fn from_entries(own_paths: &[PathBuf], entries: &[PathBuf]) -> Vec<Library> {
+/// exact matching keeps it.
+///
+/// Non-jar entries *owned* by one of `project_dirs` are also excluded: a
+/// resolved classpath lists alias `:extra-paths` (`dev`, `src/cljc`) and, in
+/// a monorepo, other projects' source dirs — none of which are external
+/// libraries. See [`owned_by_project`] for the ownership rule; jars are never
+/// ownership-filtered (a jar built into `target/` is a real artifact).
+///
+/// Duplicate absolute paths collapse to one library, and the result is sorted
+/// by name, then version, then path (a total order, so the panel is
+/// deterministic).
+pub fn from_entries(
+    own_paths: &[PathBuf],
+    project_dirs: &[PathBuf],
+    entries: &[PathBuf],
+) -> Vec<Library> {
     let mut seen: HashSet<&PathBuf> = HashSet::new();
     let mut libs: Vec<Library> = Vec::new();
     for entry in entries {
         if own_paths.iter().any(|p| entry == p) {
+            continue;
+        }
+        let is_jar = entry.extension().and_then(|e| e.to_str()) == Some("jar");
+        if !is_jar && owned_by_project(entry, project_dirs) {
             continue;
         }
         // Resolved classpaths can repeat entries; keep the first.
@@ -58,6 +75,55 @@ pub fn from_entries(own_paths: &[PathBuf], entries: &[PathBuf]) -> Vec<Library> 
             .then_with(|| a.path.cmp(&b.path))
     });
     libs
+}
+
+/// Whether a directory entry belongs to one of the workspace's resolved
+/// projects. Walking up from the entry toward (and including) its outermost
+/// enclosing project dir, the **nearest ancestor holding a manifest**
+/// (`deps.edn`/`project.clj`/`lgx.edn`) decides: the entry is owned iff that
+/// ancestor is itself one of `project_dirs`, or no manifest ancestor exists at
+/// all (a manifest-less root still owns its bare source dirs). A vendored
+/// in-workspace checkout (manifest present, but not a resolved project) is
+/// therefore *not* owned and stays listed — the panel is the only way to
+/// browse it.
+fn owned_by_project(entry: &Path, project_dirs: &[PathBuf]) -> bool {
+    // Lexical `..`/`.` defeat prefix and equality checks (`lgx::resolve`
+    // keeps a sibling `:local/root "../common"` verbatim): compare clean
+    // paths only.
+    let entry = crate::index::scanner::normalize_lexically(entry);
+    let project_dirs: Vec<PathBuf> = project_dirs
+        .iter()
+        .map(|d| crate::index::scanner::normalize_lexically(d))
+        .collect();
+
+    // Outermost enclosing project dir; entries outside every project dir are
+    // never owned (gitlibs/m2 checkouts).
+    let Some(outermost) = project_dirs
+        .iter()
+        .filter(|dir| entry.starts_with(dir))
+        .min_by_key(|dir| dir.components().count())
+    else {
+        return false;
+    };
+
+    let mut dir = entry.as_path();
+    loop {
+        let has_manifest = ["deps.edn", "project.clj", "lgx.edn"]
+            .iter()
+            .any(|m| dir.join(m).is_file());
+        if has_manifest {
+            return project_dirs.iter().any(|p| p == dir);
+        }
+        if dir == outermost.as_path() {
+            // No manifest between the entry and its project root: the
+            // (manifest-less) project still owns the dir.
+            return true;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return true,
+        }
+    }
 }
 
 fn classify(path: &Path) -> Library {
@@ -214,10 +280,130 @@ mod tests {
     const SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const SHORT: &str = "a1b2c3d";
 
+    /// Writes a manifest so a dir counts as a project root for the ownership
+    /// rule.
+    fn mk_manifest(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("deps.edn"), "{}").unwrap();
+    }
+
+    #[test]
+    fn own_alias_dirs_under_the_root_project_are_excluded() {
+        // Alias :extra-paths (dev, src/cljc) leak into resolved classpaths;
+        // their nearest manifest ancestor is the root project → excluded.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        mk_manifest(ws);
+        std::fs::create_dir_all(ws.join("dev")).unwrap();
+        std::fs::create_dir_all(ws.join("src/cljc")).unwrap();
+
+        let out = from_entries(
+            &[],
+            &[ws.to_path_buf()],
+            &[ws.join("dev"), ws.join("src/cljc")],
+        );
+        assert!(out.is_empty(), "own dirs must be excluded: {out:?}");
+    }
+
+    #[test]
+    fn detected_subproject_dirs_are_excluded() {
+        // A subproject's source dir on the root's classpath: nearest manifest
+        // ancestor is libs/x, a known project → excluded (it has its own node).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        mk_manifest(ws);
+        mk_manifest(&ws.join("libs/x"));
+        std::fs::create_dir_all(ws.join("libs/x/src")).unwrap();
+
+        let out = from_entries(
+            &[],
+            &[ws.to_path_buf(), ws.join("libs/x")],
+            &[ws.join("libs/x/src")],
+        );
+        assert!(out.is_empty(), "subproject dirs must be excluded: {out:?}");
+    }
+
+    #[test]
+    fn vendored_non_project_checkout_is_kept() {
+        // A gitignored in-workspace :local/root checkout: vendor/y has a
+        // manifest but is NOT a resolved project → its dir stays listed (the
+        // panel is the only way to browse it).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        mk_manifest(ws);
+        mk_manifest(&ws.join("vendor/y"));
+        std::fs::create_dir_all(ws.join("vendor/y/src")).unwrap();
+
+        let out = from_entries(&[], &[ws.to_path_buf()], &[ws.join("vendor/y/src")]);
+        assert_eq!(out.len(), 1, "vendored checkout must be kept: {out:?}");
+        assert_eq!(out[0].path, ws.join("vendor/y/src").display().to_string());
+    }
+
+    #[test]
+    fn parent_relative_sibling_project_entry_is_excluded() {
+        // lgx keeps `:local/root "../common"` verbatim: the entry arrives as
+        // `<ws>/app/../common/src` and must still resolve to the sibling
+        // project `common` (a resolved project → excluded).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        mk_manifest(&ws.join("app"));
+        mk_manifest(&ws.join("common"));
+        std::fs::create_dir_all(ws.join("common/src")).unwrap();
+
+        let out = from_entries(
+            &[],
+            &[ws.join("app"), ws.join("common")],
+            &[ws.join("app/../common/src")],
+        );
+        assert!(
+            out.is_empty(),
+            "parent-relative sibling project entry must be excluded: {out:?}"
+        );
+    }
+
+    #[test]
+    fn jar_inside_a_project_dir_is_kept() {
+        // A jar built into target/ is a real dependency artifact; jars are
+        // never ownership-filtered.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        mk_manifest(ws);
+        std::fs::create_dir_all(ws.join("target")).unwrap();
+        std::fs::write(ws.join("target/lib.jar"), b"").unwrap();
+
+        let out = from_entries(&[], &[ws.to_path_buf()], &[ws.join("target/lib.jar")]);
+        assert_eq!(out.len(), 1, "in-project jars must be kept: {out:?}");
+    }
+
+    #[test]
+    fn dir_outside_every_project_dir_is_kept() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        mk_manifest(ws);
+        let gitlib = tempfile::TempDir::new().unwrap();
+        let dep = gitlib.path().join(".gitlibs/libs/g/a/abc");
+        std::fs::create_dir_all(&dep).unwrap();
+
+        let out = from_entries(&[], &[ws.to_path_buf()], std::slice::from_ref(&dep));
+        assert_eq!(out.len(), 1, "out-of-workspace dirs must be kept: {out:?}");
+    }
+
+    #[test]
+    fn manifest_less_root_still_owns_its_bare_dirs() {
+        // The root project exists even with no manifest at the root; its bare
+        // source dirs (no manifest ancestor at all) are still its own.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+
+        let out = from_entries(&[], &[ws.to_path_buf()], &[ws.join("src")]);
+        assert!(out.is_empty(), "manifest-less root owns its dirs: {out:?}");
+    }
+
     #[test]
     fn maven_jar_parses_group_artifact_version() {
         let p = "/home/u/.m2/repository/babashka/fs/0.5.30/fs-0.5.30.jar";
-        let out = from_entries(&[], &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p)]);
         assert_eq!(
             out,
             vec![lib("babashka/fs", Some("0.5.30"), p, LibraryKind::Jar)]
@@ -227,14 +413,14 @@ mod tests {
     #[test]
     fn maven_jar_collapses_group_equal_artifact() {
         let p = "/home/u/.m2/repository/aero/aero/1.1.6/aero-1.1.6.jar";
-        let out = from_entries(&[], &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p)]);
         assert_eq!(out, vec![lib("aero", Some("1.1.6"), p, LibraryKind::Jar)]);
     }
 
     #[test]
     fn maven_jar_joins_multi_segment_group_with_dots() {
         let p = "/home/u/.m2/repository/org/clojure/clojure/1.11.1/clojure-1.11.1.jar";
-        let out = from_entries(&[], &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p)]);
         assert_eq!(
             out,
             vec![lib(
@@ -249,7 +435,7 @@ mod tests {
     #[test]
     fn non_maven_jar_falls_back_to_file_stem() {
         let p = "/opt/vendored/some-lib.jar";
-        let out = from_entries(&[], &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p)]);
         assert_eq!(out, vec![lib("some-lib", None, p, LibraryKind::Jar)]);
     }
 
@@ -258,7 +444,7 @@ mod tests {
         // The artifact dir is literally `repository`; anchoring on the m2 root
         // (not the artifact) must avoid a slice-out-of-order panic.
         let p = "/home/u/.m2/repository/com/acme/repository/1.0.0/repository-1.0.0.jar";
-        let out = from_entries(&[], &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p)]);
         assert_eq!(
             out,
             vec![lib(
@@ -273,7 +459,7 @@ mod tests {
     #[test]
     fn deps_gitlib_dir_yields_group_artifact_and_short_sha() {
         let p = format!("/home/u/.gitlibs/libs/io.github.foo/bar/{SHA}");
-        let out = from_entries(&[], &[PathBuf::from(&p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(&p)]);
         assert_eq!(
             out,
             vec![lib("io.github.foo/bar", Some(SHORT), &p, LibraryKind::Dir)]
@@ -283,7 +469,7 @@ mod tests {
     #[test]
     fn lgx_gitlib_dir_yields_repo_and_short_ref_ignoring_src_subdir() {
         let p = format!("/home/u/.lgx/gitlibs/github.com/some/cool-lib/{SHA}/src");
-        let out = from_entries(&[], &[PathBuf::from(&p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(&p)]);
         assert_eq!(
             out,
             vec![lib("cool-lib", Some(SHORT), &p, LibraryKind::Dir)]
@@ -293,7 +479,7 @@ mod tests {
     #[test]
     fn unrecognized_dir_yields_basename_no_version() {
         let p = "/home/u/checkouts/my-local-lib";
-        let out = from_entries(&[], &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p)]);
         assert_eq!(out, vec![lib("my-local-lib", None, p, LibraryKind::Dir)]);
     }
 
@@ -302,7 +488,7 @@ mod tests {
         // An ordinary local dir that merely contains a `gitlibs` component (no
         // `.lgx` parent, no host-like segment) must not be parsed as a checkout.
         let p = "/repo/vendor/gitlibs/foo/bar";
-        let out = from_entries(&[], &[PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p)]);
         assert_eq!(out, vec![lib("bar", None, p, LibraryKind::Dir)]);
     }
 
@@ -311,7 +497,7 @@ mod tests {
         // A custom `$LGX_HOME` (no `.lgx` parent) is still recognized because
         // the first segment after `gitlibs` is a git host.
         let p = format!("/opt/cache/gitlibs/github.com/some/cool-lib/{SHA}/src");
-        let out = from_entries(&[], &[PathBuf::from(&p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(&p)]);
         assert_eq!(
             out,
             vec![lib("cool-lib", Some(SHORT), &p, LibraryKind::Dir)]
@@ -332,7 +518,7 @@ mod tests {
             PathBuf::from("/home/u/project/vendored-lib"), // in-workspace local dep
             PathBuf::from("/home/u/.m2/repository/aero/aero/1.1.6/aero-1.1.6.jar"),
         ];
-        let out = from_entries(&own_paths, &entries);
+        let out = from_entries(&own_paths, &[], &entries);
         let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
         // `src`/`resources` dropped; the local dep under the workspace is kept.
         assert_eq!(names, vec!["aero", "vendored-lib"]);
@@ -350,7 +536,7 @@ mod tests {
             PathBuf::from("/home/u/project/test"), // own test root → excluded
             PathBuf::from("/home/u/project/test/fixtures/my-lib/src"), // local dep → kept
         ];
-        let out = from_entries(&own_paths, &entries);
+        let out = from_entries(&own_paths, &[], &entries);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "src"); // basename fallback for a bare local dir
     }
@@ -358,7 +544,7 @@ mod tests {
     #[test]
     fn duplicate_paths_collapse_to_one_library() {
         let p = "/home/u/.m2/repository/aero/aero/1.1.6/aero-1.1.6.jar";
-        let out = from_entries(&[], &[PathBuf::from(p), PathBuf::from(p)]);
+        let out = from_entries(&[], &[], &[PathBuf::from(p), PathBuf::from(p)]);
         assert_eq!(out.len(), 1);
     }
 
@@ -369,6 +555,7 @@ mod tests {
         let c1 = "/home/u/.m2/repository/org/clojure/clojure/1.10.0/clojure-1.10.0.jar";
         let c2 = "/home/u/.m2/repository/org/clojure/clojure/1.11.1/clojure-1.11.1.jar";
         let out = from_entries(
+            &[],
             &[],
             &[
                 PathBuf::from(c2),

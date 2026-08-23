@@ -221,6 +221,28 @@ impl LspClient {
         result
     }
 
+    /// Like [`initialize`] but advertising `window.workDoneProgress`, so the
+    /// server may report `$/progress`.
+    fn initialize_with_progress(&mut self, root: &Path) -> Value {
+        let root_uri = format!("file://{}", root.display());
+        let result = self.request(
+            "initialize",
+            json!({
+                "processId": std::process::id(),
+                "rootUri": root_uri,
+                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
+                "capabilities": {
+                    "textDocument": { "definition": { "linkSupport": true } },
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "window": { "workDoneProgress": true }
+                }
+            }),
+        );
+        self.notify("initialized", json!({}));
+        self.wait_for_log("Indexed");
+        result
+    }
+
     /// Zed-shaped startup: only `workspaceFolders` (no deprecated `rootUri`),
     /// offering UTF-8 then UTF-16 position encodings — what Zed's LSP client
     /// sends. Exercises the same indexing path real Zed users hit.
@@ -3254,9 +3276,9 @@ fn test_e2e_gitlib_directory_dependency() {
     assert_eq!(result["range"]["start"]["line"], json!(def_line));
 }
 
-/// `{:classpath {:enabled false}}` must fully suppress stage-3 resolution:
-/// no "resolving classpath" attempt, just the stage-2 outcome (here the
-/// no-classpath warning, since the fixture has no `.cpcache`).
+/// A `:projects` entry disabling the root project must fully suppress stage-3
+/// resolution: no "resolving classpath" attempt, just the stage-2 outcome
+/// (here the no-classpath warning, since the fixture has no `.cpcache`).
 #[test]
 fn test_e2e_classpath_cli_disabled_by_config() {
     let project = tempfile::TempDir::new().unwrap();
@@ -3266,7 +3288,7 @@ fn test_e2e_classpath_cli_disabled_by_config() {
     std::fs::write(root.join("deps.edn"), "{:paths [\"src\"]}\n").unwrap();
     std::fs::write(
         root.join(".clj-pulse/config.edn"),
-        "{:classpath {:enabled false}}\n",
+        "{:projects [{:path \".\" :classpath {:enabled false}}]}\n",
     )
     .unwrap();
     std::fs::write(root.join("src/app.clj"), "(ns app)\n\n(defn go [] 1)\n").unwrap();
@@ -4267,4 +4289,481 @@ fn test_e2e_zed_client_cross_file_references() {
     let uris: Vec<&str> = locs.iter().filter_map(|l| l["uri"].as_str()).collect();
     assert!(uris.iter().any(|u| u.ends_with("/src/core.clj")));
     assert!(uris.iter().any(|u| u.ends_with("/src/utils.clj")));
+}
+
+/// Prepares a temp copy of the monorepo fixture: the workspace `.gitignore`
+/// (excluding `repos/`) and the `.clj-pulse/config.edn` adding the gitignored
+/// `repos/b` project are written at runtime — committed into the fixture they
+/// would be swallowed by this repo's own gitignore rules.
+fn setup_monorepo() -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_named("monorepo");
+    let root = project.path().canonicalize().unwrap();
+    std::fs::write(root.join(".gitignore"), "repos/\n").unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:projects [{:path \"repos/b\"}]}\n",
+    )
+    .unwrap();
+    (project, root)
+}
+
+/// Multi-project workspace: `clojurePulse/projects` lists the root and every
+/// subproject — detected ones plus a gitignored one added via config — with
+/// per-project kind, enablement, command, and status.
+#[test]
+fn test_e2e_monorepo_projects_request() {
+    let (_project, root) = setup_monorepo();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let result = client.request("clojurePulse/projects", json!(null));
+    let list = result.as_array().expect("array of projects");
+    let paths: Vec<&str> = list
+        .iter()
+        .map(|p| p["path"].as_str().expect("path string"))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![".", "apps/a", "libs/common", "repos/b"],
+        "root first, then rel_path-sorted; repos/b only via the config entry"
+    );
+
+    for project in list {
+        // The harness kill-switch (CLJ_PULSE_DISABLE_CLASSPATH_CLI) forces
+        // every project's classpath resolution off.
+        assert_eq!(project["classpath"]["enabled"], json!(false));
+        assert_eq!(project["kind"], "deps");
+    }
+    let a = list.iter().find(|p| p["path"] == "apps/a").unwrap();
+    assert_eq!(
+        a["classpath"]["cmd"],
+        json!("clojure -A:dev:test -Spath"),
+        "deps projects carry the default command"
+    );
+    let status = a["classpath"]["status"].as_str().unwrap();
+    assert!(
+        ["disabled", "cached", "unresolved"].contains(&status),
+        "no stage 3 ran: {status}"
+    );
+}
+
+/// Live project toggles: `workspace/didChangeConfiguration` enabling a
+/// subproject with a stub command drives a stage-3 run (status `resolved`,
+/// stubbed library indexed); disabling it again reverts the project to its
+/// stage-2 state and drops the stage-3-only library from the union.
+#[test]
+fn test_e2e_did_change_configuration_toggles_stage3() {
+    let (_project, root) = setup_monorepo();
+    // Disable the root project's stage 3 in the file config — this test runs
+    // without the harness kill-switch, and the root would otherwise spawn a
+    // real `clojure`.
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:projects [{:path \".\" :classpath {:enabled false}}]}\n",
+    )
+    .unwrap();
+
+    // A fake library dir the stub command reports as the classpath.
+    let libdir = tempfile::TempDir::new().unwrap();
+    let lib_src = libdir.path().join("stub-lib/src");
+    std::fs::create_dir_all(lib_src.join("stub")).unwrap();
+    std::fs::write(
+        lib_src.join("stub/util.clj"),
+        "(ns stub.util)\n\n(defn stubbed [x] x)\n",
+    )
+    .unwrap();
+    let stub = root.join("stub-classpath.sh");
+    std::fs::write(&stub, format!("echo '{}'\n", lib_src.display())).unwrap();
+    let cmd = format!("sh {}", stub.display());
+
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize(&root);
+
+    // Enable apps/a with the stub command.
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "clojurePulse": {
+                    "projects": [
+                        {"path": ".", "classpath": {"enabled": false}},
+                        {"path": "apps/a", "classpath": {"enabled": true, "cmd": cmd}}
+                    ]
+                }
+            }
+        }),
+    );
+    client.wait_for_log("full classpath indexed");
+
+    let list = client.request("clojurePulse/projects", json!(null));
+    let a = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == "apps/a")
+        .expect("apps/a present")
+        .clone();
+    assert_eq!(a["classpath"]["enabled"], json!(true));
+    assert_eq!(a["classpath"]["status"], "resolved");
+    let libs = a["libraries"].as_array().unwrap();
+    assert!(
+        libs.iter()
+            .any(|l| l["path"].as_str().unwrap().contains("stub-lib")),
+        "stubbed library must appear: {libs:?}"
+    );
+
+    // Disable apps/a again: it must revert to its stage-2 state (no .cpcache
+    // → unresolved) and the stage-3-only library must drop from the union.
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "clojurePulse": {
+                    "projects": [
+                        {"path": ".", "classpath": {"enabled": false}},
+                        {"path": "apps/a", "classpath": {"enabled": false}}
+                    ]
+                }
+            }
+        }),
+    );
+
+    // The revert is asynchronous with no distinctive log line; poll.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let list = client.request("clojurePulse/projects", json!(null));
+        let a = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["path"] == "apps/a")
+            .expect("apps/a present")
+            .clone();
+        let status = a["classpath"]["status"].as_str().unwrap().to_string();
+        let libs = a["libraries"].as_array().unwrap().clone();
+        if a["classpath"]["enabled"] == json!(false) && status == "unresolved" && libs.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "apps/a did not revert to stage-2 state: status={status}, libs={libs:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The monorepo headline: goto-definition from `apps/a` into `libs/common`
+/// (cross-project, no file from `common` ever opened), and sources of the
+/// gitignored `repos/b` — present only via the config entry — indexed and
+/// findable through workspace-symbol search.
+#[test]
+fn test_e2e_monorepo_cross_project_definition() {
+    let (_project, root) = setup_monorepo();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let consumer = root.join("apps/a/src/a/core.clj");
+    client.did_open(&consumer);
+    let (line, ch) = position_of(&consumer, "u/helper");
+    let result = client.goto_definition(&consumer, line, ch);
+    assert!(
+        !result.is_null(),
+        "cross-project goto-definition returned null"
+    );
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/libs/common/src/common/util.clj"),
+        "definition must land in the common lib: {uri}"
+    );
+    let def_file = root.join("libs/common/src/common/util.clj");
+    let (def_line, _) = position_of(&def_file, "defn helper");
+    assert_eq!(result["range"]["start"]["line"], json!(def_line));
+
+    // repos/b is workspace-gitignored; only the explicit config entry makes
+    // it a project — and its sources must be indexed despite the gitignore.
+    let symbols = client.workspace_symbols("vendored-helper");
+    let found = symbols
+        .as_array()
+        .map(|arr| {
+            arr.iter().any(|s| {
+                s["location"]["uri"]
+                    .as_str()
+                    .is_some_and(|u| u.ends_with("/repos/b/src/b/core.clj"))
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        found,
+        "workspace-symbol must find repos/b's sources: {symbols}"
+    );
+}
+
+/// A resolved classpath lists the project's own alias dirs (`dev`) alongside
+/// real dependencies; the library lists must show only the latter.
+#[test]
+fn test_e2e_own_dirs_filtered_from_library_lists() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // Own alias-style dir, present on disk and on the classpath.
+    std::fs::create_dir_all(root.join("dev")).unwrap();
+    // An out-of-project dependency dir with a real namespace.
+    let libdir = tempfile::TempDir::new().unwrap();
+    let dep_src = libdir.path().join("dep/src");
+    std::fs::create_dir_all(dep_src.join("dep")).unwrap();
+    std::fs::write(dep_src.join("dep/core.clj"), "(ns dep.core)\n").unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    std::fs::write(
+        cpcache.join("1.cp"),
+        format!("{}{sep}{}", root.join("dev").display(), dep_src.display()),
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let flat = client.request("clojurePulse/externalLibraries", json!(null));
+    let flat_paths: Vec<&str> = flat
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        !flat_paths.iter().any(|p| p.ends_with("/dev")),
+        "own dir leaked into externalLibraries: {flat_paths:?}"
+    );
+    assert!(
+        flat_paths.iter().any(|p| p.ends_with("/dep/src")),
+        "dependency dir missing from externalLibraries: {flat_paths:?}"
+    );
+
+    let grouped = client.request("clojurePulse/projects", json!(null));
+    let root_libs = grouped
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == ".")
+        .expect("root project present")["libraries"]
+        .clone();
+    let lib_paths: Vec<&str> = root_libs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        !lib_paths.iter().any(|p| p.ends_with("/dev")),
+        "own dir leaked into projects response: {lib_paths:?}"
+    );
+    assert!(
+        lib_paths.iter().any(|p| p.ends_with("/dep/src")),
+        "dependency dir missing from projects response: {lib_paths:?}"
+    );
+}
+
+/// Prepares a project whose root stage-3 command is a stub echoing an
+/// existing dir, so classpath resolution runs without a real `clojure`.
+fn setup_stub_stage3() -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let stub = root.join("stub-classpath.sh");
+    std::fs::write(&stub, format!("echo '{}'\n", root.join("src").display())).unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        format!(
+            "{{:projects [{{:path \".\" :classpath {{:cmd \"sh {}\"}}}}]}}\n",
+            stub.display()
+        ),
+    )
+    .unwrap();
+    (project, root)
+}
+
+/// Stage-3 resolution reports LSP work-done progress when the client
+/// advertises `window.workDoneProgress`: a `workDoneProgress/create` request,
+/// then `$/progress` Begin and End on a per-run token.
+#[test]
+fn test_e2e_stage3_reports_work_done_progress() {
+    let (_project, root) = setup_stub_stage3();
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize_with_progress(&root);
+    client.wait_for_log("full classpath indexed");
+
+    let progress: Vec<Value> = client
+        .notifications
+        .iter()
+        .filter(|m| m["method"] == "$/progress")
+        .cloned()
+        .collect();
+    let token_of = |m: &Value| m["params"]["token"].as_str().unwrap_or("").to_string();
+    let begin = progress
+        .iter()
+        .find(|m| m["params"]["value"]["kind"] == "begin")
+        .unwrap_or_else(|| panic!("no $/progress begin: {progress:?}"));
+    assert!(
+        token_of(begin).starts_with("clj-pulse/classpath/./"),
+        "unexpected token: {}",
+        token_of(begin)
+    );
+    assert_eq!(
+        begin["params"]["value"]["title"], "Resolving classpath: .",
+        "unexpected begin: {begin}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|m| m["params"]["value"]["kind"] == "end" && token_of(m) == token_of(begin)),
+        "no matching $/progress end: {progress:?}"
+    );
+    let create = client
+        .notifications
+        .iter()
+        .any(|m| m["method"] == "window/workDoneProgress/create");
+    assert!(create, "workDoneProgress/create request not sent");
+}
+
+/// Without the capability, stage 3 must stay silent — no `$/progress`, no
+/// `workDoneProgress/create`.
+#[test]
+fn test_e2e_stage3_no_progress_without_capability() {
+    let (_project, root) = setup_stub_stage3();
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize(&root);
+    client.wait_for_log("full classpath indexed");
+
+    let noisy = client
+        .notifications
+        .iter()
+        .any(|m| m["method"] == "$/progress" || m["method"] == "window/workDoneProgress/create");
+    assert!(!noisy, "progress sent without the capability");
+}
+
+impl LspClient {
+    /// Counts stashed notifications matching `pred`.
+    fn count_notifications(&self, pred: impl Fn(&Value) -> bool) -> usize {
+        self.notifications.iter().filter(|m| pred(m)).count()
+    }
+
+    /// Waits until more than `prior` stashed notifications match `pred`.
+    fn wait_for_notification_beyond(&mut self, prior: usize, pred: impl Fn(&Value) -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.count_notifications(&pred) <= prior {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for notification"));
+            let msg = self
+                .incoming
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("timed out waiting for notification"));
+            self.stash(msg);
+        }
+    }
+}
+
+/// `clojurePulse/rescan` returns null immediately and always finishes with a
+/// `librariesChanged` — even on a fully unchanged workspace with nothing to
+/// resolve, so clients get a completion signal.
+#[test]
+fn test_e2e_rescan_notifies_even_when_nothing_changed() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let changed = |m: &Value| m["method"] == "clojurePulse/librariesChanged";
+    let prior = client.count_notifications(changed);
+    let result = client.request("clojurePulse/rescan", json!(null));
+    assert!(result.is_null(), "rescan must return null: {result}");
+    client.wait_for_notification_beyond(prior, changed);
+}
+
+/// A second rescan re-runs the classpath command for an already-resolved
+/// project, with a fresh progress token per run.
+#[test]
+fn test_e2e_rescan_reruns_resolved_project() {
+    let (_project, root) = setup_stub_stage3();
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize_with_progress(&root);
+    client.wait_for_log("full classpath indexed");
+
+    let begin = |m: &Value| m["method"] == "$/progress" && m["params"]["value"]["kind"] == "begin";
+    let prior = client.count_notifications(begin);
+    assert!(prior >= 1, "startup resolution must have reported progress");
+    client.request("clojurePulse/rescan", json!(null));
+    client.wait_for_notification_beyond(prior, begin);
+
+    let tokens: std::collections::HashSet<String> = client
+        .notifications
+        .iter()
+        .filter(|m| begin(m))
+        .map(|m| m["params"]["token"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        tokens.len() > prior,
+        "each run needs its own token: {tokens:?}"
+    );
+}
+
+/// The target scenario: a gitignored subproject created *after* initialize
+/// (ignored dirs fire no watchers) appears in `clojurePulse/projects` after a
+/// rescan, because the config lists it.
+#[test]
+fn test_e2e_rescan_picks_up_new_gitignored_subproject() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::write(root.join(".gitignore"), "vend/\n").unwrap();
+    // Listed up front; the dir does not exist yet, so the entry is ignored
+    // with a warning at startup.
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:projects [{:path \"vend/x\"}]}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    let list = client.request("clojurePulse/projects", json!(null));
+    assert!(
+        !list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["path"] == "vend/x"),
+        "vend/x must not exist before creation: {list}"
+    );
+
+    // Created after initialize; gitignored, so no watcher will ever fire.
+    std::fs::create_dir_all(root.join("vend/x/src/vx")).unwrap();
+    std::fs::write(root.join("vend/x/deps.edn"), "{:paths [\"src\"]}\n").unwrap();
+    std::fs::write(root.join("vend/x/src/vx/core.clj"), "(ns vx.core)\n").unwrap();
+
+    client.request("clojurePulse/rescan", json!(null));
+
+    // Startup's own librariesChanged can still be in flight, so poll the
+    // projects request instead of counting notifications.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let list = client.request("clojurePulse/projects", json!(null));
+        if list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["path"] == "vend/x")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rescan must pick up the new gitignored subproject: {list}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

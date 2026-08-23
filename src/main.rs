@@ -15,6 +15,7 @@ mod kondo;
 mod leiningen;
 mod lgx;
 mod libraries;
+mod projects;
 mod server;
 mod settings;
 mod uri;
@@ -75,6 +76,12 @@ async fn main() {
             Backend::external_libraries,
         )
         .custom_method("clojurePulse/libraryEntries", Backend::library_entries)
+        // clj-pulse custom: the grouped per-project view (kind, classpath
+        // status, per-project libraries) for multi-project workspaces.
+        .custom_method("clojurePulse/projects", Backend::projects_info)
+        // clj-pulse custom: force re-detection + re-resolution (retries
+        // error projects, picks up new gitignored subprojects).
+        .custom_method("clojurePulse/rescan", Backend::rescan)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

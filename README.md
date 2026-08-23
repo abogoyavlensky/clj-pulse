@@ -127,27 +127,59 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 
 ## Configuration
 
-clj-pulse reads an optional `.clj-pulse/config.edn` at the project root and falls
-back to `.clj-kondo/config.edn` where the keys overlap. It understands two keys.
+clj-pulse reads an optional `.clj-pulse/config.edn` at the workspace root and
+falls back to `.clj-kondo/config.edn` where the keys overlap. It understands
+two keys.
 
-`:classpath` controls automatic classpath resolution for deps.edn projects.
-After indexing whatever `.cpcache` already holds, clj-pulse runs
-`clojure -A:dev:test -Spath` in the background so dependencies declared under
-aliases (`:test`, `:dev`, …) are indexed and navigable too. The clojure CLI
-skips the JVM entirely when its cache is warm; on the first resolve — or after
-a deps.edn change — it may download dependencies. Defaults shown:
+`:projects` controls per-project classpath resolution. clj-pulse detects every
+directory holding a `deps.edn`, `project.clj`, or `lgx.edn` (up to four levels
+deep, honoring `.gitignore`) and automatically indexes the sources and cached
+classpath (`.cpcache`) of all of them — a monorepo needs no configuration at
+all. On top of that, each deps.edn or Leiningen project can run a shell
+command that resolves its full classpath, so dependencies declared under
+aliases (`:test`, `:dev`, …) are indexed and navigable too (lgx projects
+resolve their dependencies internally and never run a command). The command
+runs in the project's directory
+and its last stdout line is taken as the classpath; with a warm `.cpcache`
+the clojure CLI skips the JVM entirely, and on the first resolve — or after a
+deps.edn change — it may download dependencies. By default the command is
+enabled only for the workspace root:
 
 ```clojure
-;; .clj-pulse/config.edn
-{:classpath {:enabled true
-             :aliases [:dev :test]}}
+;; .clj-pulse/config.edn — defaults made explicit
+{:projects [{:path "."             ; "." is the workspace root
+             :classpath {:enabled true
+                         :cmd "clojure -A:dev:test -Spath"}}
+            {:path "apps/backend"  ; subprojects default to :enabled false
+             :classpath {:enabled false
+                         :cmd "clojure -A:dev:test -Spath"}}]}
 ```
 
-Set `:aliases` to your own list (an empty vector `[]` means plain
-`clojure -Spath` with no aliases), or `:enabled false` to opt out of the CLI
-run entirely — clj-pulse then indexes only the classpath your last `clojure`
-invocation left in `.cpcache`. Editing the config re-resolves live, no restart
-needed.
+Entries are overrides: every detected project exists whether or not it is
+listed, and an entry changes only the keys it names. The default `:cmd` is
+`clojure -A:dev:test -Spath` for deps.edn projects and `lein classpath` for
+Leiningen ones; change it to select other aliases or a different tool. Set
+`:enabled true` on a subproject to resolve its full classpath too, or
+`:enabled false` on the root to opt out — a deps.edn project then indexes
+only what `.cpcache` already holds (a Leiningen project falls back to the
+direct dependency JARs named in `project.clj`; lgx resolution is unaffected).
+Listing a path detection skipped (for example a
+gitignored checkout with its own `deps.edn`) adds it as a project. Editing
+the config applies live, no restart needed.
+
+Editors can also force a full refresh with the custom `clojurePulse/rescan`
+request: it re-runs project detection, re-reads the config, and re-resolves
+every enabled project's classpath — the way to retry a failed resolution or
+pick up a subproject created inside a gitignored directory, where no file
+watcher ever fires. The request returns null immediately and the work runs in
+the background, emitting `clojurePulse/librariesChanged` as it progresses —
+clients should simply re-request on each notification (one is guaranteed at
+the end even when nothing changed, so the panel never waits forever). While a
+classpath command
+runs, clj-pulse reports standard LSP work-done progress
+("Resolving classpath: …") to clients that advertise the
+`window.workDoneProgress` capability, so the editor shows why library
+navigation isn't ready yet.
 
 `:lint-as` (also read from `.clj-kondo/config.edn`) tells clj-pulse to treat a
 custom macro like a built-in `def` form so the name it introduces becomes
