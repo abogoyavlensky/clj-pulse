@@ -1030,6 +1030,98 @@ impl Backend {
         })
     }
 
+    /// clj-pulse custom `clojurePulse/rescan`: forces re-detection and
+    /// re-resolution of every project — the retry path for `error`-status
+    /// projects and the only way to pick up a new gitignored subproject
+    /// (ignored dirs fire no file watchers). Returns null immediately; the
+    /// work runs in the background and completion is conveyed by `$/progress`
+    /// and one final, unconditional `librariesChanged`.
+    pub async fn rescan(
+        &self,
+        _params: Option<serde_json::Value>,
+    ) -> tower_lsp::jsonrpc::Result<serde_json::Value> {
+        let Some(root) = self.root.lock().unwrap().clone() else {
+            return Ok(serde_json::Value::Null);
+        };
+
+        let index = self.index.clone();
+        let client = self.client.clone();
+        let documents = self.documents.clone();
+        let projects_arc = self.projects.clone();
+        let state_arc = self.project_state.clone();
+        let editor_config = self.editor_config.clone();
+        let generation = self.config_generation.clone();
+        let cli_lock = self.classpath_cli_lock.clone();
+        let apply_lock = self.config_apply_lock.clone();
+        let progress = self.progress.clone();
+        tokio::spawn(async move {
+            let _serial = apply_lock.lock().await;
+
+            let old = projects_arc.lock().unwrap().clone();
+            // Re-detects, re-reads the file config, and bumps the config
+            // generation — correctly discarding in-flight stage-3 results.
+            let (resolved, pruned_any, list_changed) = refresh_projects(
+                &root,
+                &projects_arc,
+                &editor_config,
+                &state_arc,
+                &generation,
+            );
+            let stage3_ran = apply_project_diff(
+                &root,
+                &old,
+                &resolved,
+                pruned_any,
+                list_changed,
+                false,
+                &index,
+                &client,
+                &documents,
+                &projects_arc,
+                &state_arc,
+                &generation,
+                &cli_lock,
+                &progress,
+            )
+            .await;
+
+            // Force stage 3 for every eligible project the diff skipped
+            // (unchanged config) — this is what retries `error` projects.
+            let ran: std::collections::HashSet<String> = stage3_ran.into_iter().collect();
+            let forced: Vec<String> = resolved
+                .iter()
+                .filter(|p| {
+                    p.classpath_enabled
+                        && p.classpath_cmd.is_some()
+                        && has_manifest(p)
+                        && !ran.contains(&p.rel_path)
+                })
+                .map(|p| p.rel_path.clone())
+                .collect();
+            for rel_path in forced {
+                run_stage3_project(
+                    &root,
+                    &rel_path,
+                    &index,
+                    &client,
+                    &projects_arc,
+                    &state_arc,
+                    &generation,
+                    &cli_lock,
+                    &progress,
+                )
+                .await;
+            }
+
+            // Unconditional completion signal: on a fully unchanged workspace
+            // nothing above notifies, and the client would never know the
+            // rescan finished.
+            client.send_notification::<LibrariesChanged>(()).await;
+        });
+
+        Ok(serde_json::Value::Null)
+    }
+
     /// clj-pulse custom `clojurePulse/libraryEntries`: the file entries of a jar
     /// library, for the panel to fold into a browsable tree. Rejects anything
     /// that is not an existing `.jar` file with `invalid_params`.

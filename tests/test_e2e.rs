@@ -4644,3 +4644,126 @@ fn test_e2e_stage3_no_progress_without_capability() {
         .any(|m| m["method"] == "$/progress" || m["method"] == "window/workDoneProgress/create");
     assert!(!noisy, "progress sent without the capability");
 }
+
+impl LspClient {
+    /// Counts stashed notifications matching `pred`.
+    fn count_notifications(&self, pred: impl Fn(&Value) -> bool) -> usize {
+        self.notifications.iter().filter(|m| pred(m)).count()
+    }
+
+    /// Waits until more than `prior` stashed notifications match `pred`.
+    fn wait_for_notification_beyond(&mut self, prior: usize, pred: impl Fn(&Value) -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.count_notifications(&pred) <= prior {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for notification"));
+            let msg = self
+                .incoming
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("timed out waiting for notification"));
+            self.stash(msg);
+        }
+    }
+}
+
+/// `clojurePulse/rescan` returns null immediately and always finishes with a
+/// `librariesChanged` — even on a fully unchanged workspace with nothing to
+/// resolve, so clients get a completion signal.
+#[test]
+fn test_e2e_rescan_notifies_even_when_nothing_changed() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let changed = |m: &Value| m["method"] == "clojurePulse/librariesChanged";
+    let prior = client.count_notifications(changed);
+    let result = client.request("clojurePulse/rescan", json!(null));
+    assert!(result.is_null(), "rescan must return null: {result}");
+    client.wait_for_notification_beyond(prior, changed);
+}
+
+/// A second rescan re-runs the classpath command for an already-resolved
+/// project, with a fresh progress token per run.
+#[test]
+fn test_e2e_rescan_reruns_resolved_project() {
+    let (_project, root) = setup_stub_stage3();
+    let mut client = LspClient::start_with_classpath_cli(&root);
+    client.initialize_with_progress(&root);
+    client.wait_for_log("full classpath indexed");
+
+    let begin = |m: &Value| m["method"] == "$/progress" && m["params"]["value"]["kind"] == "begin";
+    let prior = client.count_notifications(begin);
+    assert!(prior >= 1, "startup resolution must have reported progress");
+    client.request("clojurePulse/rescan", json!(null));
+    client.wait_for_notification_beyond(prior, begin);
+
+    let tokens: std::collections::HashSet<String> = client
+        .notifications
+        .iter()
+        .filter(|m| begin(m))
+        .map(|m| m["params"]["token"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        tokens.len() > prior,
+        "each run needs its own token: {tokens:?}"
+    );
+}
+
+/// The target scenario: a gitignored subproject created *after* initialize
+/// (ignored dirs fire no watchers) appears in `clojurePulse/projects` after a
+/// rescan, because the config lists it.
+#[test]
+fn test_e2e_rescan_picks_up_new_gitignored_subproject() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::write(root.join(".gitignore"), "vend/\n").unwrap();
+    // Listed up front; the dir does not exist yet, so the entry is ignored
+    // with a warning at startup.
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:projects [{:path \"vend/x\"}]}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    let list = client.request("clojurePulse/projects", json!(null));
+    assert!(
+        !list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["path"] == "vend/x"),
+        "vend/x must not exist before creation: {list}"
+    );
+
+    // Created after initialize; gitignored, so no watcher will ever fire.
+    std::fs::create_dir_all(root.join("vend/x/src/vx")).unwrap();
+    std::fs::write(root.join("vend/x/deps.edn"), "{:paths [\"src\"]}\n").unwrap();
+    std::fs::write(root.join("vend/x/src/vx/core.clj"), "(ns vx.core)\n").unwrap();
+
+    client.request("clojurePulse/rescan", json!(null));
+
+    // Startup's own librariesChanged can still be in flight, so poll the
+    // projects request instead of counting notifications.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let list = client.request("clojurePulse/projects", json!(null));
+        if list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["path"] == "vend/x")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rescan must pick up the new gitignored subproject: {list}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
