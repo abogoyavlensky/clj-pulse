@@ -15,6 +15,7 @@ mod kondo;
 mod leiningen;
 mod lgx;
 mod libraries;
+mod projects;
 mod server;
 mod settings;
 mod uri;
