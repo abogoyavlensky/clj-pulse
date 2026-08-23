@@ -64,17 +64,26 @@ pub async fn resolve_via_cmd(
     let child = cmd
         .spawn()
         .map_err(|e| format!("failed to run `{cmd_str}`: {e}"))?;
-    #[cfg(unix)]
-    let pgid = child.id();
+    let pid = child.id();
 
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(result) => result.map_err(|e| format!("failed to run `{cmd_str}`: {e}"))?,
         Err(_elapsed) => {
             // The child future was dropped (kill_on_drop reaps the shell);
-            // also kill its process group so the command itself dies too.
-            #[cfg(unix)]
-            if let Some(pgid) = pgid {
-                unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+            // also kill its descendants so the command itself dies too.
+            if let Some(pid) = pid {
+                // Unix: SIGKILL the process group created above.
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL)
+                };
+                // Windows: no process groups — taskkill the whole tree.
+                #[cfg(windows)]
+                {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &pid.to_string()])
+                        .output();
+                }
             }
             return Err(format!("`{cmd_str}` timed out after {timeout:?}"));
         }
