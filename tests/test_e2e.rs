@@ -4476,3 +4476,70 @@ fn test_e2e_monorepo_cross_project_definition() {
         "workspace-symbol must find repos/b's sources: {symbols}"
     );
 }
+
+/// A resolved classpath lists the project's own alias dirs (`dev`) alongside
+/// real dependencies; the library lists must show only the latter.
+#[test]
+fn test_e2e_own_dirs_filtered_from_library_lists() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // Own alias-style dir, present on disk and on the classpath.
+    std::fs::create_dir_all(root.join("dev")).unwrap();
+    // An out-of-project dependency dir with a real namespace.
+    let libdir = tempfile::TempDir::new().unwrap();
+    let dep_src = libdir.path().join("dep/src");
+    std::fs::create_dir_all(dep_src.join("dep")).unwrap();
+    std::fs::write(dep_src.join("dep/core.clj"), "(ns dep.core)\n").unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(
+        cpcache.join("1.cp"),
+        format!("{}:{}", root.join("dev").display(), dep_src.display()),
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let flat = client.request("clojurePulse/externalLibraries", json!(null));
+    let flat_paths: Vec<&str> = flat
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        !flat_paths.iter().any(|p| p.ends_with("/dev")),
+        "own dir leaked into externalLibraries: {flat_paths:?}"
+    );
+    assert!(
+        flat_paths.iter().any(|p| p.ends_with("/dep/src")),
+        "dependency dir missing from externalLibraries: {flat_paths:?}"
+    );
+
+    let grouped = client.request("clojurePulse/projects", json!(null));
+    let root_libs = grouped
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == ".")
+        .expect("root project present")["libraries"]
+        .clone();
+    let lib_paths: Vec<&str> = root_libs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        !lib_paths.iter().any(|p| p.ends_with("/dev")),
+        "own dir leaked into projects response: {lib_paths:?}"
+    );
+    assert!(
+        lib_paths.iter().any(|p| p.ends_with("/dep/src")),
+        "dependency dir missing from projects response: {lib_paths:?}"
+    );
+}
