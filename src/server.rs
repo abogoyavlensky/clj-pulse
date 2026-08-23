@@ -861,7 +861,9 @@ impl Backend {
                 .iter()
                 .flat_map(|p| config::source_paths(&p.dir))
                 .collect();
-            libraries::from_entries(&own_paths, &entries)
+            let project_dirs: Vec<std::path::PathBuf> =
+                project_list.iter().map(|p| p.dir.clone()).collect();
+            libraries::from_entries(&own_paths, &project_dirs, &entries)
         })
         .await
         .map_err(|e| {
@@ -882,6 +884,10 @@ impl Backend {
         let state = self.project_state.lock().unwrap().clone();
         // source_paths reads manifests from disk; keep it off the LSP executor.
         tokio::task::spawn_blocking(move || {
+            // Every project's dir, not just the current one: the root's
+            // resolved classpath lists subproject source dirs too.
+            let project_dirs: Vec<std::path::PathBuf> =
+                project_list.iter().map(|p| p.dir.clone()).collect();
             project_list
                 .iter()
                 .map(|p| {
@@ -890,7 +896,7 @@ impl Backend {
                         .map(|s| s.entries.iter().cloned().collect())
                         .unwrap_or_default();
                     let own_paths = config::source_paths(&p.dir);
-                    let libs = libraries::from_entries(&own_paths, &entries);
+                    let libs = libraries::from_entries(&own_paths, &project_dirs, &entries);
 
                     let kind = match p.kind {
                         projects::ProjectKindTag::Deps => "deps",
