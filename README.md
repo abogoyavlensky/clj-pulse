@@ -135,9 +135,11 @@ two keys.
 directory holding a `deps.edn`, `project.clj`, or `lgx.edn` (up to four levels
 deep, honoring `.gitignore`) and automatically indexes the sources and cached
 classpath (`.cpcache`) of all of them — a monorepo needs no configuration at
-all. On top of that, each project can run a shell command that resolves its
-full classpath, so dependencies declared under aliases (`:test`, `:dev`, …)
-are indexed and navigable too. The command runs in the project's directory
+all. On top of that, each deps.edn or Leiningen project can run a shell
+command that resolves its full classpath, so dependencies declared under
+aliases (`:test`, `:dev`, …) are indexed and navigable too (lgx projects
+resolve their dependencies internally and never run a command). The command
+runs in the project's directory
 and its last stdout line is taken as the classpath; with a warm `.cpcache`
 the clojure CLI skips the JVM entirely, and on the first resolve — or after a
 deps.edn change — it may download dependencies. By default the command is
@@ -158,8 +160,10 @@ listed, and an entry changes only the keys it names. The default `:cmd` is
 `clojure -A:dev:test -Spath` for deps.edn projects and `lein classpath` for
 Leiningen ones; change it to select other aliases or a different tool. Set
 `:enabled true` on a subproject to resolve its full classpath too, or
-`:enabled false` on the root to opt out — clj-pulse then indexes only what
-`.cpcache` already holds. Listing a path detection skipped (for example a
+`:enabled false` on the root to opt out — a deps.edn project then indexes
+only what `.cpcache` already holds (a Leiningen project falls back to the
+direct dependency JARs named in `project.clj`; lgx resolution is unaffected).
+Listing a path detection skipped (for example a
 gitignored checkout with its own `deps.edn`) adds it as a project. Editing
 the config applies live, no restart needed.
 
