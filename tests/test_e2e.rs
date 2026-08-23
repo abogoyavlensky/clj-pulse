@@ -4268,3 +4268,60 @@ fn test_e2e_zed_client_cross_file_references() {
     assert!(uris.iter().any(|u| u.ends_with("/src/core.clj")));
     assert!(uris.iter().any(|u| u.ends_with("/src/utils.clj")));
 }
+
+/// Prepares a temp copy of the monorepo fixture: the workspace `.gitignore`
+/// (excluding `repos/`) and the `.clj-pulse/config.edn` adding the gitignored
+/// `repos/b` project are written at runtime — committed into the fixture they
+/// would be swallowed by this repo's own gitignore rules.
+fn setup_monorepo() -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_named("monorepo");
+    let root = project.path().canonicalize().unwrap();
+    std::fs::write(root.join(".gitignore"), "repos/\n").unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:projects [{:path \"repos/b\"}]}\n",
+    )
+    .unwrap();
+    (project, root)
+}
+
+/// Multi-project workspace: `clojurePulse/projects` lists the root and every
+/// subproject — detected ones plus a gitignored one added via config — with
+/// per-project kind, enablement, command, and status.
+#[test]
+fn test_e2e_monorepo_projects_request() {
+    let (_project, root) = setup_monorepo();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let result = client.request("clojurePulse/projects", json!(null));
+    let list = result.as_array().expect("array of projects");
+    let paths: Vec<&str> = list
+        .iter()
+        .map(|p| p["path"].as_str().expect("path string"))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![".", "apps/a", "libs/common", "repos/b"],
+        "root first, then rel_path-sorted; repos/b only via the config entry"
+    );
+
+    for project in list {
+        // The harness kill-switch (CLJ_PULSE_DISABLE_CLASSPATH_CLI) forces
+        // every project's classpath resolution off.
+        assert_eq!(project["classpath"]["enabled"], json!(false));
+        assert_eq!(project["kind"], "deps");
+    }
+    let a = list.iter().find(|p| p["path"] == "apps/a").unwrap();
+    assert_eq!(
+        a["classpath"]["cmd"],
+        json!("clojure -A:dev:test -Spath"),
+        "deps projects carry the default command"
+    );
+    let status = a["classpath"]["status"].as_str().unwrap();
+    assert!(
+        ["disabled", "cached", "unresolved"].contains(&status),
+        "no stage 3 ran: {status}"
+    );
+}

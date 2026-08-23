@@ -628,6 +628,74 @@ impl Backend {
         })
     }
 
+    /// clj-pulse custom `clojurePulse/projects`: the grouped per-project view —
+    /// each project's kind, classpath resolution config + status, and its own
+    /// libraries. Root first, then rel_path-sorted (the resolve order). No
+    /// project list yet → empty list, never an error.
+    pub async fn projects_info(
+        &self,
+        _params: Option<serde_json::Value>,
+    ) -> tower_lsp::jsonrpc::Result<Vec<serde_json::Value>> {
+        let project_list = self.projects.lock().unwrap().clone();
+        let state = self.project_state.lock().unwrap().clone();
+        // source_paths reads manifests from disk; keep it off the LSP executor.
+        tokio::task::spawn_blocking(move || {
+            project_list
+                .iter()
+                .map(|p| {
+                    let project_state = state.get(&p.rel_path);
+                    let entries: Vec<std::path::PathBuf> = project_state
+                        .map(|s| s.entries.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let own_paths = config::source_paths(&p.dir);
+                    let libs = libraries::from_entries(&own_paths, &entries);
+
+                    let kind = match p.kind {
+                        projects::ProjectKindTag::Deps => "deps",
+                        projects::ProjectKindTag::Lein => "lein",
+                        projects::ProjectKindTag::Lgx => "lgx",
+                    };
+                    let status =
+                        project_state
+                            .map(|s| &s.status)
+                            .unwrap_or(if p.classpath_enabled {
+                                &ClasspathStatus::Unresolved
+                            } else {
+                                &ClasspathStatus::Disabled
+                            });
+                    let mut classpath = serde_json::json!({
+                        "enabled": p.classpath_enabled,
+                        "status": match status {
+                            ClasspathStatus::Disabled => "disabled",
+                            ClasspathStatus::Cached => "cached",
+                            ClasspathStatus::Resolving => "resolving",
+                            ClasspathStatus::Resolved => "resolved",
+                            ClasspathStatus::Unresolved => "unresolved",
+                            ClasspathStatus::Error(_) => "error",
+                        },
+                    });
+                    if let Some(cmd) = &p.classpath_cmd {
+                        classpath["cmd"] = serde_json::json!(cmd);
+                    }
+                    if let ClasspathStatus::Error(message) = status {
+                        classpath["message"] = serde_json::json!(message);
+                    }
+                    serde_json::json!({
+                        "path": p.rel_path,
+                        "kind": kind,
+                        "classpath": classpath,
+                        "libraries": libs,
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("projects task panicked: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
     /// clj-pulse custom `clojurePulse/libraryEntries`: the file entries of a jar
     /// library, for the panel to fold into a browsable tree. Rejects anything
     /// that is not an existing `.jar` file with `invalid_params`.

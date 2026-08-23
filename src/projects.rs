@@ -277,7 +277,12 @@ pub fn detect(root: &Path) -> Vec<PathBuf> {
     const MANIFESTS: [&str; 3] = ["deps.edn", "project.clj", "lgx.edn"];
 
     let mut found: Vec<PathBuf> = Vec::new();
-    for entry in ignore::WalkBuilder::new(root).max_depth(Some(4)).build() {
+    // `require_git(false)`: gitignore rules apply whether or not a `.git`
+    // exists, matching the scanner's scoped walks — pruning `target/`,
+    // `node_modules/`, vendored checkouts is the desired default everywhere.
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder.max_depth(Some(4)).require_git(false);
+    for entry in builder.build() {
         let Ok(entry) = entry else {
             continue;
         };
