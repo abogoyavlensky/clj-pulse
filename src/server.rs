@@ -74,6 +74,42 @@ type ConfigGeneration = Arc<std::sync::atomic::AtomicU64>;
 /// rebuild the index last, overwriting the newer result.
 type ClasspathCliLock = Arc<tokio::sync::Mutex<()>>;
 
+/// Serializes whole config-application tasks (`didChangeConfiguration`,
+/// watched-file reruns, the startup library task). Without it two
+/// back-to-back config notifications interleave their refresh/rescan/stage
+/// work and the slower, staler task can apply last. Always acquired *before*
+/// [`ClasspathCliLock`] (stage 3 runs inside an application task).
+type ConfigApplyLock = Arc<tokio::sync::Mutex<()>>;
+
+/// Stage-1 scan over the union of every project's source paths, merged into
+/// the shared index; files no longer covered by any project are pruned by the
+/// merge (open buffers kept). Returns the scan's (symbols, namespaces) counts.
+fn rescan_all_sources(
+    project_list: &[projects::Project],
+    index: &Index,
+    documents: &DocumentStore,
+) -> anyhow::Result<(usize, usize)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut scan_roots = Vec::new();
+    for p in project_list {
+        let paths = config::source_paths(&p.dir);
+        tracing::info!("project {}: source paths: {:?}", p.rel_path, paths);
+        for path in paths {
+            if seen.insert(path.clone()) {
+                scan_roots.push(scanner::ScanRoot {
+                    project_dir: p.dir.clone(),
+                    path,
+                });
+            }
+        }
+    }
+    let new_index = scanner::build_index_scoped(&scan_roots, &index.extract_config())?;
+    let counts = (new_index.symbols.len(), new_index.namespaces.len());
+    Backend::warn_ns_collisions(index, &new_index);
+    index.merge_project_from(new_index, &Backend::open_paths(documents));
+    Ok(counts)
+}
+
 /// A Clojure project's classpath: deps.edn's `.cpcache` is authoritative (full
 /// transitive classpath); only when it is empty do we consult a Leiningen
 /// `project.clj` for its direct dependencies.
@@ -224,16 +260,22 @@ fn refresh_projects(
 /// change) to their stage-2 truth, and rebuilds the library union when any
 /// entry set changed — including entries dropped by removed projects
 /// (`pruned_any`). Stage-2 libraries stay indexed: disabling only gates
-/// stage 3. Returns whether the union was rebuilt.
+/// stage 3. `force_revert` names projects to revert even while enabled — a
+/// changed command must not keep the old command's entries indexed if the new
+/// one fails. Returns whether the union was rebuilt.
 fn reconcile_projects(
     workspace_root: &std::path::Path,
     resolved: &[projects::Project],
     state_arc: &SharedState,
     index: &Index,
     pruned_any: bool,
+    force_revert: &[String],
 ) -> bool {
     let mut changed = pruned_any;
-    for p in resolved.iter().filter(|p| !p.classpath_enabled) {
+    for p in resolved
+        .iter()
+        .filter(|p| !p.classpath_enabled || force_revert.contains(&p.rel_path))
+    {
         // Only projects still carrying stage-3 state need reverting.
         let had_stage3 = {
             let state = state_arc.lock().unwrap();
@@ -494,6 +536,8 @@ pub struct Backend {
     config_generation: ConfigGeneration,
     /// See [`ClasspathCliLock`].
     classpath_cli_lock: ClasspathCliLock,
+    /// See [`ConfigApplyLock`].
+    config_apply_lock: ConfigApplyLock,
 }
 
 impl Backend {
@@ -508,6 +552,7 @@ impl Backend {
             editor_config: SharedEditorConfig::default(),
             config_generation: ConfigGeneration::default(),
             classpath_cli_lock: ClasspathCliLock::default(),
+            config_apply_lock: ConfigApplyLock::default(),
         }
     }
 
@@ -792,6 +837,7 @@ impl LanguageServer for Backend {
                 let state_arc = self.project_state.clone();
                 let generation = self.config_generation.clone();
                 let cli_lock = self.classpath_cli_lock.clone();
+                let apply_lock = self.config_apply_lock.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
 
@@ -839,9 +885,13 @@ impl LanguageServer for Backend {
                         let state_arc = state_arc.clone();
                         let generation = generation.clone();
                         let cli_lock = cli_lock.clone();
+                        let apply_lock = apply_lock.clone();
                         let root = root_path.clone();
                         let resolved = resolved.clone();
                         tokio::spawn(async move {
+                            // Serialize with config-application tasks (see
+                            // `ConfigApplyLock`).
+                            let _serial = apply_lock.lock().await;
                             let stage2_ok = run_stage2_all(&root, &resolved, &state_arc, &index);
                             if stage2_ok {
                                 let msg = format!(
@@ -889,29 +939,8 @@ impl LanguageServer for Backend {
                     // source paths (first project wins a shared path — the
                     // root is first).
                     index.set_extract_config(settings::load(&root_path));
-                    let mut seen = std::collections::HashSet::new();
-                    let mut scan_roots = Vec::new();
-                    for p in &resolved {
-                        let paths = config::source_paths(&p.dir);
-                        tracing::info!("project {}: source paths: {:?}", p.rel_path, paths);
-                        for path in paths {
-                            if seen.insert(path.clone()) {
-                                scan_roots.push(scanner::ScanRoot {
-                                    project_dir: p.dir.clone(),
-                                    path,
-                                });
-                            }
-                        }
-                    }
-
-                    match scanner::build_index_scoped(&scan_roots, &index.extract_config()) {
-                        Ok(new_index) => {
-                            let sym_count = new_index.symbols.len();
-                            let ns_count = new_index.namespaces.len();
-
-                            Self::warn_ns_collisions(&index, &new_index);
-                            index.merge_project_from(new_index, &Self::open_paths(&documents));
-
+                    match rescan_all_sources(&resolved, &index, &documents) {
+                        Ok((sym_count, ns_count)) => {
                             let elapsed = start.elapsed();
                             let msg = format!(
                                 "Indexed {} symbols in {} namespaces in {:?}",
@@ -1055,12 +1084,20 @@ impl LanguageServer for Backend {
 
         let index = self.index.clone();
         let client = self.client.clone();
+        let documents = self.documents.clone();
         let projects_arc = self.projects.clone();
         let state_arc = self.project_state.clone();
         let editor_config = self.editor_config.clone();
         let generation = self.config_generation.clone();
         let cli_lock = self.classpath_cli_lock.clone();
+        let apply_lock = self.config_apply_lock.clone();
         tokio::spawn(async move {
+            // Serialize whole applications: a slower, staler task must not
+            // finish after — and overwrite — a newer one. (The editor layer
+            // was stored synchronously above, so even the older queued task
+            // resolves against the newest config.)
+            let _serial = apply_lock.lock().await;
+
             let old = projects_arc.lock().unwrap().clone();
             let (resolved, pruned_any, list_changed) = refresh_projects(
                 &root,
@@ -1072,6 +1109,7 @@ impl LanguageServer for Backend {
 
             // Diff old vs new resolved config per project.
             let mut stage3_runs: Vec<String> = Vec::new();
+            let mut force_revert: Vec<String> = Vec::new();
             let mut added: Vec<projects::Project> = Vec::new();
             for p in &resolved {
                 let old_p = old.iter().find(|o| o.rel_path == p.rel_path);
@@ -1084,13 +1122,28 @@ impl LanguageServer for Backend {
                 if p.classpath_enabled && p.classpath_cmd.is_some() && (!was_active || cmd_changed)
                 {
                     stage3_runs.push(p.rel_path.clone());
+                    // A changed command reverts to stage-2 truth first: if the
+                    // new command fails, the old command's entries must not
+                    // stay indexed behind the error status.
+                    if was_active && cmd_changed {
+                        force_revert.push(p.rel_path.clone());
+                    }
                 }
             }
+            let removed_any = old
+                .iter()
+                .any(|o| !resolved.iter().any(|p| p.rel_path == o.rel_path));
 
-            // A project newly added by the editor config (a gitignored dir
-            // listed live): index its sources and cached classpath so the
-            // panel entry isn't an empty shell.
-            if !added.is_empty() {
+            if removed_any {
+                // A removed project's sources must leave the index: rescan the
+                // whole union (the merge prunes files no longer covered).
+                if let Err(e) = rescan_all_sources(&resolved, &index, &documents) {
+                    tracing::error!("project re-index failed: {}", e);
+                }
+            } else if !added.is_empty() {
+                // A project newly added by the editor config (a gitignored dir
+                // listed live): index its sources so the panel entry isn't an
+                // empty shell.
                 let scan_roots: Vec<scanner::ScanRoot> = added
                     .iter()
                     .flat_map(|p| {
@@ -1114,12 +1167,21 @@ impl LanguageServer for Backend {
                     }
                     Err(e) => tracing::error!("added-project index failed: {}", e),
                 }
+            }
+            if !added.is_empty() {
                 run_stage2_all(&root, &added, &state_arc, &index);
             }
 
             // Newly disabled projects revert to stage-2 truth (their stage-2
             // libraries stay indexed — disabling only gates stage 3).
-            let rebuilt = reconcile_projects(&root, &resolved, &state_arc, &index, pruned_any);
+            let rebuilt = reconcile_projects(
+                &root,
+                &resolved,
+                &state_arc,
+                &index,
+                pruned_any,
+                &force_revert,
+            );
             if rebuilt || list_changed || !added.is_empty() {
                 client.send_notification::<LibrariesChanged>(()).await;
             }
@@ -1332,7 +1394,12 @@ impl LanguageServer for Backend {
                 let editor_config = self.editor_config.clone();
                 let generation = self.config_generation.clone();
                 let cli_lock = self.classpath_cli_lock.clone();
+                let apply_lock = self.config_apply_lock.clone();
                 tokio::spawn(async move {
+                    // Serialize with other config-application tasks (see
+                    // `ConfigApplyLock`).
+                    let _serial = apply_lock.lock().await;
+
                     // A config change reloads `:lint-as` before re-indexing, so
                     // the rebuild extracts project files with the new mapping.
                     if config_changed {
@@ -1357,24 +1424,8 @@ impl LanguageServer for Backend {
                     // Rebuild project sources when :paths changed or the config
                     // changed (lint-as affects how every project file extracts).
                     if source_paths_changed || config_changed {
-                        let mut seen = std::collections::HashSet::new();
-                        let mut scan_roots = Vec::new();
-                        for p in &resolved {
-                            for path in config::source_paths(&p.dir) {
-                                if seen.insert(path.clone()) {
-                                    scan_roots.push(scanner::ScanRoot {
-                                        project_dir: p.dir.clone(),
-                                        path,
-                                    });
-                                }
-                            }
-                        }
-                        match scanner::build_index_scoped(&scan_roots, &index.extract_config()) {
-                            Ok(new_index) => {
-                                Self::warn_ns_collisions(&index, &new_index);
-                                index.merge_project_from(new_index, &Self::open_paths(&documents))
-                            }
-                            Err(e) => tracing::error!("project re-index failed: {}", e),
+                        if let Err(e) = rescan_all_sources(&resolved, &index, &documents) {
+                            tracing::error!("project re-index failed: {}", e);
                         }
                     }
 
@@ -1432,7 +1483,14 @@ impl LanguageServer for Backend {
                     if pulse_config_changed {
                         // Skip when the stage-2 pass above already rebuilt.
                         if !classpath_changed
-                            && reconcile_projects(&root, &resolved, &state_arc, &index, pruned_any)
+                            && reconcile_projects(
+                                &root,
+                                &resolved,
+                                &state_arc,
+                                &index,
+                                pruned_any,
+                                &[],
+                            )
                         {
                             client.send_notification::<LibrariesChanged>(()).await;
                         }
