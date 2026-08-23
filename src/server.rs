@@ -148,19 +148,21 @@ fn rebuild_libs(
 ) {
     index.clear_libs();
     for p in project_list {
-        let Some(ps) = state.get(&p.rel_path) else {
-            continue;
-        };
-        if ps.entries.is_empty() {
-            continue;
-        }
-        let entries: Vec<std::path::PathBuf> = ps.entries.iter().cloned().collect();
+        let entries: Vec<std::path::PathBuf> = state
+            .get(&p.rel_path)
+            .map(|ps| ps.entries.iter().cloned().collect())
+            .unwrap_or_default();
         match p.kind {
             projects::ProjectKindTag::Lgx => {
                 scanner::index_dir_libs(&entries, index);
+                // Even with no dep dirs: pinned core is indexed outside the
+                // entries, and `clear_libs` dropped its marker.
                 lgx::index_letgo_core(&p.dir, index);
             }
-            _ => scanner::index_classpath_libs(workspace_root, entries, index),
+            _ if !entries.is_empty() => {
+                scanner::index_classpath_libs(workspace_root, entries, index)
+            }
+            _ => {}
         }
     }
 }
@@ -183,7 +185,7 @@ fn refresh_projects(
     editor_config: &SharedEditorConfig,
     state_arc: &SharedState,
     generation: &ConfigGeneration,
-) -> Vec<projects::Project> {
+) -> (Vec<projects::Project>, bool) {
     let detected = projects::detect(root);
     let file = std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
         .map(|src| projects::parse_edn(&src))
@@ -193,8 +195,75 @@ fn refresh_projects(
     generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     *projects_arc.lock().unwrap() = resolved.clone();
     let mut state = state_arc.lock().unwrap();
-    state.retain(|rel, _| resolved.iter().any(|p| p.rel_path == *rel));
-    resolved
+    let mut pruned_any = false;
+    state.retain(|rel, ps| {
+        let keep = resolved.iter().any(|p| p.rel_path == *rel);
+        // A pruned project only forces a union rebuild when it actually
+        // contributed libraries.
+        if !keep && !ps.entries.is_empty() {
+            pruned_any = true;
+        }
+        keep
+    });
+    (resolved, pruned_any)
+}
+
+/// Reverts projects whose stage 3 is no longer active (disabled by a config
+/// change) to their stage-2 truth, and rebuilds the library union when any
+/// entry set changed — including entries dropped by removed projects
+/// (`pruned_any`). Stage-2 libraries stay indexed: disabling only gates
+/// stage 3. Returns whether the union was rebuilt.
+fn reconcile_projects(
+    workspace_root: &std::path::Path,
+    resolved: &[projects::Project],
+    state_arc: &SharedState,
+    index: &Index,
+    pruned_any: bool,
+) -> bool {
+    let mut changed = pruned_any;
+    for p in resolved.iter().filter(|p| !p.classpath_enabled) {
+        // Only projects still carrying stage-3 state need reverting.
+        let had_stage3 = {
+            let state = state_arc.lock().unwrap();
+            state.get(&p.rel_path).is_some_and(|ps| {
+                matches!(
+                    ps.status,
+                    ClasspathStatus::Resolving
+                        | ClasspathStatus::Resolved
+                        | ClasspathStatus::Error(_)
+                )
+            })
+        };
+        if !had_stage3 {
+            continue;
+        }
+        // Fresh stage-2 discovery, without indexing (the rebuild below does it).
+        let entries: std::collections::HashSet<std::path::PathBuf> = match p.kind {
+            projects::ProjectKindTag::Lgx => lgx::resolve(&p.dir),
+            _ => clojure_classpath(&p.dir),
+        }
+        .into_iter()
+        .collect();
+        let status = if entries.is_empty() {
+            ClasspathStatus::Unresolved
+        } else {
+            ClasspathStatus::Cached
+        };
+        let mut state = state_arc.lock().unwrap();
+        let entry = state
+            .entry(p.rel_path.clone())
+            .or_insert_with(|| ProjectState::empty(ClasspathStatus::Unresolved));
+        if entry.entries != entries {
+            entry.entries = entries;
+            changed = true;
+        }
+        entry.status = status;
+    }
+    if changed {
+        let state = state_arc.lock().unwrap();
+        rebuild_libs(workspace_root, resolved, &state, index);
+    }
+    changed
 }
 
 /// Stage 2 across the given projects: indexes every project's cached
@@ -1089,7 +1158,7 @@ impl LanguageServer for Backend {
                     // A manifest or config change can add/remove projects or
                     // retoggle their classpath resolution: re-resolve the list
                     // (this also bumps the stage-3 stale-result generation).
-                    let resolved = refresh_projects(
+                    let (resolved, pruned_any) = refresh_projects(
                         &root,
                         &projects_arc,
                         &editor_config,
@@ -1169,9 +1238,16 @@ impl LanguageServer for Backend {
 
                     // `:projects` (per-project enablement / command) may have
                     // changed — e.g. an editor UI writing the config — so
-                    // re-run stage 3. Per-project entry comparison skips the
-                    // re-index when a classpath is unchanged.
+                    // reconcile disabled/removed projects back to stage-2
+                    // truth, then re-run stage 3. Per-project entry comparison
+                    // skips the re-index when a classpath is unchanged.
                     if pulse_config_changed {
+                        // Skip when the stage-2 pass above already rebuilt.
+                        if !classpath_changed
+                            && reconcile_projects(&root, &resolved, &state_arc, &index, pruned_any)
+                        {
+                            client.send_notification::<LibrariesChanged>(()).await;
+                        }
                         run_stage3_all(
                             &root,
                             &index,

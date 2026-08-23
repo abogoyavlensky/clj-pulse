@@ -114,36 +114,27 @@ fn collect_edn_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
 
 /// The walker for one project source root: gitignore rules from the project
 /// dir down apply (whether or not a `.git` exists), rules from above it do
-/// not. `parents(false)` cuts the ancestry discovery; the gitignores strictly
-/// *between* the project dir and the walk root are re-applied as explicit
-/// matchers anchored at their own directory (`WalkBuilder::add_ignore` can't
-/// do this — it anchors patterns at the walk root). Gitignores at or below
-/// the walk root are handled natively by the walker.
+/// not. The walk starts at the *project dir* — so the native walker chains
+/// every gitignore from there down with real git precedence, negations
+/// included — and prunes everything off the path to the source root.
+/// `parents(false)` cuts the ancestry discovery above the project dir.
 fn scoped_walker(root: &ScanRoot) -> ignore::Walk {
-    let mut matchers: Vec<ignore::gitignore::Gitignore> = Vec::new();
-    let mut dir = root.path.as_path();
-    while dir != root.project_dir {
-        let Some(parent) = dir.parent() else { break };
-        dir = parent;
-        let gitignore = dir.join(".gitignore");
-        if gitignore.is_file() {
-            let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
-            builder.add(&gitignore);
-            match builder.build() {
-                Ok(matcher) => matchers.push(matcher),
-                Err(e) => tracing::warn!("unreadable {}: {}", gitignore.display(), e),
-            }
-        }
-    }
-
-    let mut builder = ignore::WalkBuilder::new(&root.path);
+    // A source path outside the project dir (never produced by
+    // `config::source_paths`, but be safe) degrades to a plain scoped walk of
+    // itself.
+    let walk_from = if root.path.starts_with(&root.project_dir) {
+        root.project_dir.clone()
+    } else {
+        root.path.clone()
+    };
+    let mut builder = ignore::WalkBuilder::new(&walk_from);
     builder.parents(false).require_git(false);
-    if !matchers.is_empty() {
+    if walk_from != root.path {
+        let target = root.path.clone();
+        // Keep only the target subtree and the dirs leading down to it.
         builder.filter_entry(move |entry| {
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            !matchers
-                .iter()
-                .any(|m| m.matched(entry.path(), is_dir).is_ignore())
+            let path = entry.path();
+            path.starts_with(&target) || target.starts_with(path)
         });
     }
     builder.build()
@@ -374,6 +365,34 @@ mod tests {
         assert!(
             !index.namespaces.contains_key("skipme.x"),
             "project-root .gitignore must apply when walking src directly"
+        );
+    }
+
+    /// Gitignore negations chain with git precedence across levels: a deeper
+    /// `.gitignore` re-including what the project-level one excluded wins.
+    #[test]
+    fn scoped_scan_honors_nested_gitignore_negations() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path();
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join(".gitignore"), "keep.clj\ngone.clj\n").unwrap();
+        fs::write(project.join("src/.gitignore"), "!keep.clj\n").unwrap();
+        fs::write(project.join("src/keep.clj"), "(ns keep)\n").unwrap();
+        fs::write(project.join("src/gone.clj"), "(ns gone)\n").unwrap();
+
+        let roots = [ScanRoot {
+            project_dir: project.to_path_buf(),
+            path: project.join("src"),
+        }];
+        let index = build_index_scoped(&roots, &ExtractConfig::default()).unwrap();
+
+        assert!(
+            index.namespaces.contains_key("keep"),
+            "deeper !negation must re-include the file"
+        );
+        assert!(
+            !index.namespaces.contains_key("gone"),
+            "non-negated project-level exclusion must hold"
         );
     }
 }
