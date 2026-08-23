@@ -167,6 +167,17 @@ Listing a path detection skipped (for example a
 gitignored checkout with its own `deps.edn`) adds it as a project. Editing
 the config applies live, no restart needed.
 
+Editors can also force a full refresh with the custom `clojurePulse/rescan`
+request: it re-runs project detection, re-reads the config, and re-resolves
+every enabled project's classpath — the way to retry a failed resolution or
+pick up a subproject created inside a gitignored directory, where no file
+watcher ever fires. The request returns null immediately; completion arrives
+as a `clojurePulse/librariesChanged` notification. While a classpath command
+runs, clj-pulse reports standard LSP work-done progress
+("Resolving classpath: …") to clients that advertise the
+`window.workDoneProgress` capability, so the editor shows why library
+navigation isn't ready yet.
+
 `:lint-as` (also read from `.clj-kondo/config.edn`) tells clj-pulse to treat a
 custom macro like a built-in `def` form so the name it introduces becomes
 navigable:
