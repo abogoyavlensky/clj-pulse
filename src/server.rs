@@ -839,6 +839,9 @@ impl KondoState {
 
 type SharedKondoState = Arc<std::sync::Mutex<KondoState>>;
 
+/// See [`probe_and_announce`].
+static KONDO_PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Resolves the clj-kondo settings from both config layers, probes the binary
 /// when enabled, and announces the result — one log line (which doubles as the
 /// e2e sync point) plus a `clojurePulse/lintStatus` notification.
@@ -852,6 +855,14 @@ async fn probe_and_announce(
     editor_kondo: &SharedEditorKondo,
     kondo_state: &SharedKondoState,
 ) -> bool {
+    // Serialize probes, for the same reason `ClasspathCliLock` serializes
+    // stage-3 runs: back-to-back config changes each spawn a probe, and a
+    // slow one carrying obsolete settings must not land after — and overwrite
+    // — a newer one. Both config layers are read *inside* the lock and the
+    // editor layer is stored synchronously by the caller, so even a probe
+    // queued from an older notification resolves against the newest settings.
+    let _serial = KONDO_PROBE_LOCK.lock().await;
+
     let file = root.map(settings::load_kondo).unwrap_or_default();
     let editor = editor_kondo.lock().unwrap().clone();
     let config = kondo::resolve_config(&file, &editor);
