@@ -198,13 +198,21 @@ pub async fn lint(
     // crash writes a stack trace to stderr and nothing parseable to stdout.
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_findings(&stdout).ok_or_else(|| {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let snippet: String = stderr.trim().chars().take(500).collect();
         format!(
-            "`{bin}` produced unparseable output ({}): {snippet}",
-            output.status
+            "`{bin}` produced unparseable output ({}): {}",
+            output.status,
+            stderr_snippet(&output)
         )
     })
+}
+
+/// The head of a failed run's stderr, for a log line the user can act on.
+fn stderr_snippet(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .chars()
+        .take(500)
+        .collect()
 }
 
 /// Populates clj-kondo's cache from a resolved classpath without producing
@@ -225,7 +233,18 @@ pub async fn warm(
         .arg("--dependencies")
         .arg("--parallel")
         .current_dir(project_dir);
-    run(&mut cmd, bin, None, timeout).await.map(|_| ())
+    let output = run(&mut cmd, bin, None, timeout).await?;
+    // Unlike a buffer lint, `--dependencies` reports no findings — so here a
+    // non-zero exit really is a failure (an unreadable JAR, a bad config) and
+    // must not be reported as a warmed cache.
+    if !output.status.success() {
+        return Err(format!(
+            "`{bin} --dependencies` failed ({}): {}",
+            output.status,
+            stderr_snippet(&output)
+        ));
+    }
+    Ok(())
 }
 
 /// Runs `<bin> --version` and returns the version it reports.
@@ -238,6 +257,12 @@ pub async fn probe_version(bin: &str) -> Option<String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("--version");
     let output = run(&mut cmd, bin, None, PROBE_TIMEOUT).await.ok()?;
+    // A wrapper script that prints a version banner and then fails is not a
+    // clj-kondo we can lint with; treat it as absent rather than spawn it once
+    // per keystroke.
+    if !output.status.success() {
+        return None;
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
@@ -667,5 +692,50 @@ exit 3
             probe_version("clj-kondo-definitely-not-installed").await,
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn warm_reports_a_failed_dependency_scan() {
+        // `--dependencies` emits no findings, so unlike a buffer lint a
+        // non-zero exit here really is a failure — reporting success would
+        // leave callers believing the cache is populated.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = fake_bin(dir.path(), "echo 'could not read jar' >&2\nexit 1\n");
+        let err = warm(&bin, "/a.jar:/b.jar", dir.path(), TEST_TIMEOUT)
+            .await
+            .expect_err("a failed dependency scan must be an error");
+        assert!(err.contains("could not read jar"), "err: {err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn warm_passes_the_classpath_and_dependency_flags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let seen = dir.path().join("argv.txt");
+        let bin = fake_bin(
+            dir.path(),
+            &format!(
+                "echo \"$@\" > '{}'\npwd >> '{}'\n",
+                seen.display(),
+                seen.display()
+            ),
+        );
+        warm(&bin, "/a.jar:/b.jar", dir.path(), TEST_TIMEOUT)
+            .await
+            .unwrap();
+        let argv = std::fs::read_to_string(&seen).unwrap();
+        assert!(argv.contains("--lint /a.jar:/b.jar"), "argv: {argv}");
+        assert!(argv.contains("--dependencies"), "argv: {argv}");
+        assert!(argv.contains("--parallel"), "argv: {argv}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_version_rejects_a_binary_that_prints_a_version_then_fails() {
+        // A broken wrapper must read as "not found", not as a usable install.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = fake_bin(dir.path(), "echo 'clj-kondo v2026.08.04'\nexit 1\n");
+        assert_eq!(probe_version(&bin).await, None);
     }
 }
