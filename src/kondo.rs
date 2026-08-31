@@ -267,6 +267,18 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// directly, so it needs no shell quoting.
 const JSON_OUTPUT_CONFIG: &str = "{:output {:format :json}}";
 
+/// Whether clj-kondo should lint this buffer.
+///
+/// Its dialects only: `.lg` is let-go, whose core differs enough that
+/// clj-kondo would flag half the file, and `.edn` is data, not code. Both stay
+/// native-only.
+pub fn lints_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("clj" | "cljs" | "cljc" | "bb")
+    )
+}
+
 /// Lints `source` as if it were the contents of `abs_path`, returning the
 /// findings as LSP diagnostics.
 ///
@@ -961,5 +973,16 @@ exit 3
         let dir = tempfile::TempDir::new().unwrap();
         let bin = fake_bin(dir.path(), "echo 'clj-kondo v2026.08.04'\nexit 1\n");
         assert_eq!(probe_version(&bin).await, None);
+    }
+
+    #[test]
+    fn lints_only_clj_kondo_dialects() {
+        for ext in ["clj", "cljs", "cljc", "bb"] {
+            assert!(lints_file(Path::new(&format!("a.{ext}"))), "{ext}");
+        }
+        // let-go has a different core; clj-kondo would flag half the file.
+        assert!(!lints_file(Path::new("a.lg")));
+        assert!(!lints_file(Path::new("deps.edn")));
+        assert!(!lints_file(Path::new("Makefile")));
     }
 }

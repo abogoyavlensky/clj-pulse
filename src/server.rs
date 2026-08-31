@@ -906,26 +906,70 @@ async fn send_lint_status(client: &Client, kondo_state: &SharedKondoState, warmi
 /// Re-lints and republishes every open document. Used when the lint engine
 /// changes under the user's feet (a settings toggle, a newly installed
 /// binary), which no edit would otherwise trigger.
-async fn relint_open_documents(client: &Client, documents: &DocumentStore) {
+async fn relint_open_documents(
+    client: &Client,
+    documents: &DocumentStore,
+    kondo_state: &SharedKondoState,
+) {
     for uri in documents.open_uris() {
         let version = documents.current_version(&uri).unwrap_or(0);
-        lint_and_publish_doc(client, documents, uri, version).await;
+        lint_and_publish_doc(client, documents, kondo_state, uri, version).await;
     }
 }
+
+/// Caps concurrent clj-kondo processes. Each spawn costs ~54 MB RSS, so
+/// opening a folder full of files must not fork one per buffer at once; four
+/// keeps a multi-file burst responsive without the memory spike.
+static KONDO_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 /// Computes and publishes diagnostics for one document. The single place a
 /// `textDocument/publishDiagnostics` for a source buffer originates, so every
 /// path — didOpen, didSave, the debounced didChange, an engine change —
 /// produces the same set.
-async fn lint_and_publish_doc(client: &Client, documents: &DocumentStore, uri: Url, version: i32) {
+/// Native lints are computed first and clj-kondo is awaited second, but only
+/// one `publishDiagnostics` is sent: publishing the native set and then
+/// replacing it would flicker every squiggle on every keystroke.
+async fn lint_and_publish_doc(
+    client: &Client,
+    documents: &DocumentStore,
+    kondo_state: &SharedKondoState,
+    uri: Url,
+    version: i32,
+) {
     let Some(text) = documents.text(&uri) else {
         return;
     };
     let Ok(path) = uri.to_file_path() else {
         return;
     };
-    let diags = crate::diagnostics::compute(&text, &path);
-    client.publish_diagnostics(uri, diags, Some(version)).await;
+    let native = crate::diagnostics::compute(&text, &path);
+
+    let bin = kondo_state.lock().unwrap().bin().map(str::to_string);
+    let kondo = match bin.filter(|_| kondo::lints_file(&path)) {
+        Some(bin) => {
+            let _permit = KONDO_LIMIT.acquire().await;
+            let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
+            // Queueing behind the semaphore and then the subprocess can easily
+            // outlast the edit that started this pass; publishing now would put
+            // stale squiggles on a buffer that has already moved on.
+            if documents.current_version(&uri) != Some(version) {
+                return;
+            }
+            if let Err(e) = &result {
+                // Debug, not warn: a missing or wedged clj-kondo would
+                // otherwise log once per keystroke.
+                tracing::debug!("clj-kondo lint of {} failed: {}", path.display(), e);
+            }
+            result
+        }
+        // Not an error the user should see — just "clj-kondo has no say in this
+        // pass", which `merge` reads as "keep the native set".
+        None => Err("clj-kondo not in use".to_string()),
+    };
+
+    client
+        .publish_diagnostics(uri, crate::diagnostics::merge(native, kondo), Some(version))
+        .await;
 }
 
 pub struct Backend {
@@ -1300,7 +1344,14 @@ impl Backend {
 
     /// Computes diagnostics from the live buffer and publishes them for `uri`.
     async fn lint_and_publish(&self, uri: Url, version: i32) {
-        lint_and_publish_doc(&self.client, &self.documents, uri, version).await;
+        lint_and_publish_doc(
+            &self.client,
+            &self.documents,
+            &self.kondo_state,
+            uri,
+            version,
+        )
+        .await;
     }
 }
 
@@ -1376,7 +1427,7 @@ impl LanguageServer for Backend {
                         )
                         .await
                         {
-                            relint_open_documents(&client, &documents).await;
+                            relint_open_documents(&client, &documents, &kondo_state).await;
                         }
                     });
                 }
@@ -1647,7 +1698,7 @@ impl LanguageServer for Backend {
             let documents = self.documents.clone();
             tokio::spawn(async move {
                 if probe_and_announce(&client, Some(&root), &editor_kondo, &kondo_state).await {
-                    relint_open_documents(&client, &documents).await;
+                    relint_open_documents(&client, &documents, &kondo_state).await;
                 }
             });
         }
@@ -1896,7 +1947,7 @@ impl LanguageServer for Backend {
                 let documents = self.documents.clone();
                 tokio::spawn(async move {
                     if probe_and_announce(&client, Some(&root), &editor_kondo, &kondo_state).await {
-                        relint_open_documents(&client, &documents).await;
+                        relint_open_documents(&client, &documents, &kondo_state).await;
                     }
                 });
             }
@@ -2078,19 +2129,13 @@ impl LanguageServer for Backend {
         // the sleep, so bursts of keystrokes collapse to one diagnostic pass.
         let documents = self.documents.clone();
         let client = self.client.clone();
+        let kondo_state = self.kondo_state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS)).await;
             if documents.current_version(&uri) != Some(version) {
                 return;
             }
-            let Some(text) = documents.text(&uri) else {
-                return;
-            };
-            let Ok(path) = uri.to_file_path() else {
-                return;
-            };
-            let diags = crate::diagnostics::compute(&text, &path);
-            client.publish_diagnostics(uri, diags, Some(version)).await;
+            lint_and_publish_doc(&client, &documents, &kondo_state, uri, version).await;
         });
     }
 
