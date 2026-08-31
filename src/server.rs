@@ -1001,16 +1001,20 @@ async fn warm_kondo_caches(
             continue;
         }
         let entries = project_entries(state_arc, &project.rel_path);
-        let already_warmed = warmer.warmed.lock().unwrap().get(&project.rel_path) == Some(&entries);
-        if entries.is_empty() || already_warmed {
+        if entries.is_empty() || is_warmed(warmer, &project.rel_path, &entries) {
             continue;
         }
 
         let gen = generation.load(Ordering::SeqCst);
         let _serial = KONDO_WARM_LOCK.lock().await;
-        // Queueing behind another warm can take minutes; re-check that this
-        // project's classpath is still the one we set out to scan.
-        if project_entries(state_arc, &project.rel_path) != entries {
+        // Queueing behind another warm can take minutes, so re-check both
+        // guards now that we hold the lock: the classpath may have moved on,
+        // and the warm we queued behind may have been this very scan. The two
+        // triggers (indexing finished, engine changed) race by design, and
+        // without this they would each run the same minutes-long scan.
+        if project_entries(state_arc, &project.rel_path) != entries
+            || is_warmed(warmer, &project.rel_path, &entries)
+        {
             continue;
         }
         let Ok(classpath) = std::env::join_paths(&entries) else {
@@ -1083,6 +1087,12 @@ async fn warm_kondo_caches(
             }
         }
     }
+}
+
+/// Whether clj-kondo's cache has already been warmed from exactly this
+/// classpath.
+fn is_warmed(warmer: &KondoWarmer, rel_path: &str, entries: &ClasspathEntries) -> bool {
+    warmer.warmed.lock().unwrap().get(rel_path) == Some(entries)
 }
 
 /// One project's current classpath entry set.
