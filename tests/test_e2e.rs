@@ -11,6 +11,17 @@ use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Which `clj-kondo`, if any, the server under test may find.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kondo {
+    /// Kill-switch on: the bridge is inert, as for every non-kondo test.
+    Off,
+    /// The committed fake, first on PATH.
+    Fake,
+    /// Whatever the host has installed (ignored tests only).
+    Real,
+}
+
 struct LspClient {
     child: Child,
     stdin: ChildStdin,
@@ -29,13 +40,13 @@ impl LspClient {
     /// Like [`start`] but with stage-3 classpath resolution left enabled —
     /// only for tests that exercise the `clojure -Spath` flow.
     fn start_with_classpath_cli(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], false, false)
+        Self::spawn(project_root, &[], false, Kondo::Off)
     }
 
     /// Like [`start`] but sets extra environment variables on the server
     /// process (e.g. `LGX_HOME` for hermetic lgx dep resolution).
     fn start_with_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
-        Self::spawn(project_root, envs, true, false)
+        Self::spawn(project_root, envs, true, Kondo::Off)
     }
 
     /// Like [`start`] but with the clj-kondo bridge live, answered by the
@@ -43,13 +54,19 @@ impl LspClient {
     /// installed — so these tests assert on fixed findings and never wait on
     /// a JVM.
     fn start_with_kondo(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], true, true)
+        Self::spawn(project_root, &[], true, Kondo::Fake)
     }
 
     /// [`start_with_kondo`] with extra environment variables — `FAKE_KONDO_LOG`,
     /// the file the fake records its cache-warming invocations in.
     fn start_with_kondo_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
-        Self::spawn(project_root, envs, true, true)
+        Self::spawn(project_root, envs, true, Kondo::Fake)
+    }
+
+    /// Like [`start_with_kondo`] but resolving `clj-kondo` from the host's own
+    /// PATH — the real binary, for the ignored smoke test.
+    fn start_with_real_kondo(project_root: &Path) -> Self {
+        Self::spawn(project_root, &[], true, Kondo::Real)
     }
 
     /// The directory holding the fake `clj-kondo`, prepended to the server's
@@ -62,7 +79,7 @@ impl LspClient {
         project_root: &Path,
         envs: &[(&str, &Path)],
         disable_classpath_cli: bool,
-        enable_kondo: bool,
+        kondo: Kondo,
     ) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
         cmd.current_dir(project_root)
@@ -78,18 +95,25 @@ impl LspClient {
             // be silently neutered by the parent environment.
             cmd.env_remove("CLJ_PULSE_DISABLE_CLASSPATH_CLI");
         }
-        if enable_kondo {
-            // Discovery goes through PATH, so putting the fake first is all it
-            // takes — the server has no test-only code path.
-            cmd.env_remove("CLJ_PULSE_DISABLE_KONDO");
-            let inherited = std::env::var_os("PATH").unwrap_or_default();
-            let mut dirs = vec![Self::fake_kondo_dir()];
-            dirs.extend(std::env::split_paths(&inherited));
-            cmd.env("PATH", std::env::join_paths(dirs).unwrap());
-        } else {
+        match kondo {
             // No fixture may depend on a clj-kondo installed on the host: the
             // whole suite would then behave differently per machine.
-            cmd.env("CLJ_PULSE_DISABLE_KONDO", "1");
+            Kondo::Off => {
+                cmd.env("CLJ_PULSE_DISABLE_KONDO", "1");
+            }
+            // Discovery goes through PATH, so putting the fake first is all it
+            // takes — the server has no test-only code path.
+            Kondo::Fake => {
+                cmd.env_remove("CLJ_PULSE_DISABLE_KONDO");
+                let inherited = std::env::var_os("PATH").unwrap_or_default();
+                let mut dirs = vec![Self::fake_kondo_dir()];
+                dirs.extend(std::env::split_paths(&inherited));
+                cmd.env("PATH", std::env::join_paths(dirs).unwrap());
+            }
+            // The host's own binary, inherited PATH untouched.
+            Kondo::Real => {
+                cmd.env_remove("CLJ_PULSE_DISABLE_KONDO");
+            }
         }
         for (key, value) in envs {
             cmd.env(key, value);
@@ -5079,5 +5103,59 @@ fn test_e2e_kondo_cache_not_warmed_without_a_clj_kondo_dir() {
         !log.exists(),
         "no .clj-kondo dir means no dependency scan, got: {}",
         std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+/// Whether the host has a usable `clj-kondo` for the real-binary smoke test.
+fn real_clj_kondo_available() -> bool {
+    std::process::Command::new("clj-kondo")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// The bridge end to end against a real clj-kondo, not the fake: proves the
+/// argv, the stdin feed, the exit codes, and the JSON shape still match what a
+/// released clj-kondo actually does. Requires the binary, so it is ignored by
+/// default: `bb e2e-real-kondo`.
+#[test]
+#[ignore = "requires a real clj-kondo binary on PATH"]
+fn test_e2e_real_kondo_publishes_findings() {
+    if !real_clj_kondo_available() {
+        eprintln!("SKIP: no clj-kondo on PATH — install it to run this test");
+        return;
+    }
+
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // An unresolved *symbol*: no native lint reports this, so seeing it proves
+    // the finding came from clj-kondo and not from clj-pulse's own analysis.
+    let smoke = root.join("src/smoke.clj");
+    std::fs::write(
+        &smoke,
+        "(ns smoke)\n\n(defn run []\n  (definitely-not-defined 1))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_real_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("linting: clj-kondo + native");
+    client.did_open(&smoke);
+
+    let params = client.wait_for_diagnostics("/src/smoke.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+    let finding = diags
+        .iter()
+        .find(|d| d["code"] == json!("unresolved-symbol"))
+        .unwrap_or_else(|| panic!("no unresolved-symbol from clj-kondo: {params}"));
+    assert_eq!(finding["source"], json!("clj-kondo"));
+    assert!(
+        finding["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("definitely-not-defined"),
+        "unexpected message: {finding}"
     );
 }
