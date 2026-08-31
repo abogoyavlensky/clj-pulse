@@ -34,7 +34,9 @@ protocol changes should also pass `bb e2e-nvim`.
   stage-3 CLI resolution.
 - The harness sets `CLJ_PULSE_DISABLE_CLASSPATH_CLI=1` so regular e2e tests
   (whose fixtures contain a deps.edn) never spawn `clojure`; tests that
-  exercise stage 3 use `LspClient::start_with_classpath_cli`.
+  exercise stage 3 use `LspClient::start_with_classpath_cli`. It sets
+  `CLJ_PULSE_DISABLE_KONDO=1` for the same reason: the suite must behave
+  identically on a machine with clj-kondo installed and one without.
 - Test realistic Clojure, not just toy snippets: real libraries use ns/def
   metadata (`(ns ^{:doc "…"} foo)`), reader conditionals, multi-arity fns.
   The extractor must handle them (see `test_extractor.rs`).
@@ -70,6 +72,16 @@ protocol changes should also pass `bb e2e-nvim`.
   scans, while gitignores at or below the project dir keep applying.
 - `CLJ_PULSE_DISABLE_CLASSPATH_CLI` (non-empty) forces `:enabled false` for
   every project (the e2e harness depends on this).
+- Diagnostics come from two tiers: the native lints (`unresolved-namespace`,
+  `unused-namespace`, `duplicate-require`) and clj-kondo, spawned per lint pass
+  when found. A successful kondo run owns those three codes and the native
+  copies are dropped for that pass; any failure publishes the native set
+  unchanged. One publish per pass, never two.
+- `CLJ_PULSE_DISABLE_KONDO` (non-empty) forces `:kondo {:enabled false}`, the
+  twin of `CLJ_PULSE_DISABLE_CLASSPATH_CLI`. `LspClient::start` sets it, so no
+  test depends on a host clj-kondo; kondo tests opt in with
+  `start_with_kondo` / `start_with_kondo_env`, which put the committed fake
+  (`tests/fixtures/fake-clj-kondo/clj-kondo`) first on the child's PATH.
 - Classpath libraries come in two shapes: JARs (`SymbolSource::Jar`, navigated
   via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
