@@ -2,6 +2,8 @@
 
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status: COMPLETE** (all 12 tasks; see the summary at the end).
+
 **Goal:** Publish clj-kondo's full diagnostic set alongside clj-pulse's native lints by spawning a `clj-kondo` binary per lint pass, with clear ownership rules, live-reloadable settings, status transparency in the VS Code extension, and background classpath cache warming.
 
 **Tech Stack:** Rust (tower-lsp, tokio, serde_json), clj-kondo CLI (external binary, verified against v2026.08.04), TypeScript (vscode-languageclient 9.x) for `../clojure-pulse-vscode`.
@@ -254,7 +256,7 @@ the repo).
 
 ### Task 4: Probe, log lines, `lintStatus` notification (`src/server.rs`)
 
-- [ ] **Step 1: Implement** `KondoState { config: KondoConfig, found: Option<String /*version*/> }`
+- [x] **Step 1: Implement** `KondoState { config: KondoConfig, found: Option<String /*version*/> }`
   behind a mutex on `Backend`. A `probe_and_announce` fn: resolve config
   (file + editor + kill-switch), run `probe_version` when enabled, store,
   emit exactly one of the three log lines from the design, and send
@@ -267,45 +269,60 @@ the repo).
   changes the effective engine (enabled/found transition either way), re-lint
   every open document so the toggle applies immediately, and hand the
   transition to the warming scheduler (Task 7).
-- [ ] **Step 2: Verify** `bb check` passes (unit-level behavior is covered in
+- [x] **Step 2: Verify** `bb check` passes (unit-level behavior is covered in
   Task 6's e2e; keep this task wiring-only).
-- [ ] **Step 3: Commit** `git commit -m "Probe clj-kondo and announce lint engine via log + lintStatus"`
+- [x] **Step 3: Commit** `git commit -m "Probe clj-kondo and announce lint engine via log + lintStatus"`
+
+> Deviation: this commit also carries Task 3's `server.rs` editor-layer
+> plumbing (see Task 3's note).
+> Codex review: one must-fix, real and fixed in `1e26fd9` — overlapping config
+> changes each spawned an independent probe, so a slow one carrying obsolete
+> settings could land last. Probes are now serialized under a lock, the way
+> `ClasspathCliLock` serializes stage-3 runs.
 
 ### Task 5: Lint pipeline integration (ownership merge)
 
 **Files:** Modify: `src/diagnostics.rs` (merge fn + tests), `src/server.rs` (`lint_and_publish`, did_change debounce closure)
 
-- [ ] **Step 1: Write failing unit tests** for
+- [x] **Step 1: Write failing unit tests** for
   `merge(native: Vec<Diagnostic>, kondo: Result<Vec<Diagnostic>, String>) -> Vec<Diagnostic>`:
   kondo `Ok` → kondo findings + native minus codes
   {`unresolved-namespace`, `unused-namespace`, `duplicate-require`}; kondo
   `Err` → native unchanged.
-- [ ] **Step 2: Run** `cargo test diagnostics` — expect FAIL.
-- [ ] **Step 3: Implement** the merge; then in `server.rs` extend both publish
+- [x] **Step 2: Run** `cargo test diagnostics` — expect FAIL.
+- [x] **Step 3: Implement** the merge; then in `server.rs` extend both publish
   paths (`lint_and_publish` and the debounce closure): compute native; if
   kondo enabled+found and the file qualifies (`.clj`/`.cljs`/`.cljc`/`.bb` —
   not `.lg`/`.edn`), `kondo::lint` with a 2 s timeout under a global
   `tokio::sync::Semaphore(4)`; after the await re-check
   `documents.current_version(&uri)` and abort if superseded; merge; publish
   once with `Some(version)`.
-- [ ] **Step 4: Run** `cargo test` and `bb check` — expect PASS.
-- [ ] **Step 5: Commit** `git commit -m "Publish merged native + clj-kondo diagnostics"`
+- [x] **Step 4: Run** `cargo test` and `bb check` — expect PASS.
+- [x] **Step 5: Commit** `git commit -m "Publish merged native + clj-kondo diagnostics"`
+
+> Codex review: three must-fix findings, all real and fixed in `66a0556` —
+> (1) a `.clj-kondo/config.edn` change altered what clj-kondo reports but never
+> re-linted open buffers; (2) a lint queued against a since-retired engine could
+> publish over the current one, which the document-version check alone misses
+> because a settings-triggered re-lint reuses the same version; (3)
+> `probe_and_announce` compared only active-vs-inactive, so swapping `:path`
+> between two working binaries skipped the re-lint.
 
 ### Task 6: e2e coverage with a fake clj-kondo
 
 **Files:** Create: `tests/fixtures/fake-clj-kondo/clj-kondo`, `tests/fixtures/kondo_project/`; Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the fake** (committed executable, `#!/bin/sh`):
+- [x] **Step 1: Write the fake** (committed executable, `#!/bin/sh`):
   `--version` → print `clj-kondo v0.0.0-fake`; `--dependencies` present →
   append `"$@"` to `$FAKE_KONDO_LOG` (when set) and exit 0; otherwise read
   stdin and, if it contains the marker `kondo-finding-here`, print a canned
   finding JSON (fixed row/col, `"type":"unresolved-symbol"`,
   `"level":"error"`) and exit 3, else print `{"findings":[]}` and exit 0.
-- [ ] **Step 2: Harness:** `LspClient::start` sets `CLJ_PULSE_DISABLE_KONDO=1`
+- [x] **Step 2: Harness:** `LspClient::start` sets `CLJ_PULSE_DISABLE_KONDO=1`
   (mirroring the classpath kill-switch) so every existing test is untouched;
   add `start_with_kondo(project_root)` that clears it and prepends
   `tests/fixtures/fake-clj-kondo` to the child's `PATH`.
-- [ ] **Step 3: Write failing e2e tests:**
+- [x] **Step 3: Write failing e2e tests:**
   (a) open a file containing the marker → `wait_for_log("clj-kondo v0.0.0-fake found")`,
   then a `publishDiagnostics` with one `source: "clj-kondo"` finding and **no**
   native `unresolved-namespace` duplicates;
@@ -318,14 +335,24 @@ the repo).
   (e) live toggle: overwrite the fixture's `.clj-pulse/config.edn` with
   `{:kondo {:enabled false}}` (didChangeWatchedFiles) → `wait_for_log`
   (`clj-kondo disabled`) and the re-lint publishes native-only diagnostics.
-- [ ] **Step 4: Run** `bb e2e` — expect the new tests PASS, all old tests PASS.
-- [ ] **Step 5: Commit** `git commit -m "e2e: clj-kondo bridge via fake binary on PATH"`
+- [x] **Step 4: Run** `bb e2e` — expect the new tests PASS, all old tests PASS.
+- [x] **Step 5: Commit** `git commit -m "e2e: clj-kondo bridge via fake binary on PATH"`
+
+> Deviation: `.clj-kondo/` and `.clj-pulse/` are created inside the copied temp
+> fixture at test time rather than committed — the repo's `.gitignore` excludes
+> `.clj-kondo`, and re-including it would have meant gitignore surgery for two
+> empty-ish files. The fake grew a second marker (`kondo-unresolved-ns-here`)
+> so test (d) gets an `unresolved-namespace` finding, and it exits 2 for
+> warnings and 3 for errors so both success codes are exercised.
+> Codex review: one finding, fixed in the Task 7 commit — `clear_notifications`
+> dropped only the stash, leaving in-flight messages able to satisfy the next
+> wait. It now drains the channel first.
 
 ### Task 7: Classpath cache warming
 
 **Files:** Modify: `src/server.rs`, `src/kondo.rs`; Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Implement** `kondo::warm(bin, classpath: &str, project_dir, timeout)`
+- [x] **Step 1: Implement** `kondo::warm(bin, classpath: &str, project_dir, timeout)`
   spawning `--lint <classpath> --dependencies --parallel` (10 min timeout,
   same kill pattern). In `server.rs`, after a project's library entries are
   applied (the `rebuild_libs` call sites for stage-2/stage-3 results): gate on
@@ -340,38 +367,48 @@ the repo).
   (re)built, and (2) a probe transition to enabled+found (Task 4) — which
   walks the already-resolved projects and schedules any whose entry set is
   unwarmed, so enabling kondo live doesn't require a re-index to warm.
-- [ ] **Step 2: Write failing e2e test:** kondo-enabled client on a fixture
+- [x] **Step 2: Write failing e2e test:** kondo-enabled client on a fixture
   with a fake `.cpcache` (reuse the stage-2 fixture pattern) and
   `FAKE_KONDO_LOG` set → `wait_for_log("clj-kondo cache warm complete")`,
   then assert the log file contains `--dependencies` and the classpath.
-- [ ] **Step 3: Run** `bb e2e` — expect PASS.
-- [ ] **Step 4: Commit** `git commit -m "Warm clj-kondo cache from resolved classpath in background"`
+- [x] **Step 3: Run** `bb e2e` — expect PASS.
+- [x] **Step 4: Commit** `git commit -m "Warm clj-kondo cache from resolved classpath in background"`
+
+> Deviation: warming hangs off `apply_project_diff` and the startup indexing
+> task rather than each individual `rebuild_libs` call site — several of those
+> are sync functions holding a `std::sync::Mutex` and cannot await. The
+> warmed-set guard makes the call idempotent, so the coarser placement covers
+> the same triggers. A second e2e test was added for the `.clj-kondo`-absent
+> case, which is the gate most likely to regress silently.
+> Codex review: one must-fix, real and fixed in `3880e97` — the two triggers
+> race by design and the post-lock re-check covered only the classpath, so both
+> could run the same minutes-long scan.
 
 ### Task 8: Server docs & roadmap
 
 **Files:** Modify: `README.md`, `docs/ROADMAP2.md`, `CLAUDE.md`
 
-- [ ] **Step 1:** README: a **Linting** section — the two tiers (native
+- [x] **Step 1:** README: a **Linting** section — the two tiers (native
   always-on: `unresolved-namespace`/`unused-namespace`/`duplicate-require`;
   clj-kondo when present: its full linter set + the user's
   `.clj-kondo/config.edn`), the ownership rule, `:kondo {:enabled :path}`
   config, and the `mkdir .clj-kondo` note for cross-file lints. Use
   /writing-clearly.
-- [ ] **Step 2:** ROADMAP2 §1.1: mark the bridge done, note warming shipped and
+- [x] **Step 2:** ROADMAP2 §1.1: mark the bridge done, note warming shipped and
   `--copy-configs` deliberately deferred. CLAUDE.md: add
   `CLJ_PULSE_DISABLE_KONDO` to the invariants (harness sets it; kondo tests
   opt in via `start_with_kondo`).
-- [ ] **Step 3: Commit** `git commit -m "Document clj-kondo linting bridge"`
+- [x] **Step 3: Commit** `git commit -m "Document clj-kondo linting bridge"`
 
 ### Task 9: Extension settings + initializationOptions
 
 **Files (in `../clojure-pulse-vscode`):** Modify: `package.json`, `src/extension.ts`; Test: existing suite location under `src/test/`
 
-- [ ] **Step 1:** Declare `clojurePulse.kondo.enabled` (boolean, default
+- [x] **Step 1:** Declare `clojurePulse.kondo.enabled` (boolean, default
   `true`, description: "Use clj-kondo for diagnostics when the binary is
   found") and `clojurePulse.kondo.path` (string, default `"clj-kondo"`; bare
   name = resolved from PATH by the server, or an absolute path).
-- [ ] **Step 2:** A `kondoServerConfig()` beside `projectsServerConfig()`;
+- [x] **Step 2:** A `kondoServerConfig()` beside `projectsServerConfig()`;
   include `kondo` in `initializationOptions` (`{projects, kondo}`). Merge the
   two existing change triggers into one: when
   `event.affectsConfiguration("clojurePulse.projects")` **or**
@@ -379,55 +416,69 @@ the repo).
   in the `{clojurePulse: {...}}` envelope (`extension.ts:646`) — the server
   replaces its whole editor layer per push, so partial payloads would erase
   the other key.
-- [ ] **Step 3: Run** `make check` — expect PASS.
-- [ ] **Step 4: Commit** `git commit -m "Add clojurePulse.kondo settings, plumb to server"`
+- [x] **Step 3: Run** `make check` — expect PASS.
+- [x] **Step 4: Commit** `git commit -m "Add clojurePulse.kondo settings, plumb to server"`
+
+> Codex review: one must-fix, real and fixed in `574a5cd` — `get()` returns the
+> contributed default for an untouched setting, so the extension sent
+> `{enabled: true, path: "clj-kondo"}` as explicit editor overrides and
+> silently beat a project's own `.clj-pulse/config.edn` `:kondo`. Now only
+> user-set values are sent (`src/configValue.ts`). Also dropped
+> `scope: "resource"` from both keys: the server holds one editor layer for the
+> whole workspace, so folder-scoped values were never resolvable.
 
 ### Task 10: Extension lintStatus → status-bar tooltip
 
 **Files (in `../clojure-pulse-vscode`):** Modify: `src/statusBar.ts`, `src/extension.ts`, `README.md`, `CHANGELOG.md`; Test: statusPresentation unit tests
 
-- [ ] **Step 1: Write failing tests** for `statusPresentation` with a new
+- [x] **Step 1: Write failing tests** for `statusPresentation` with a new
   `StatusDetail.lint?: {engine: "kondo+native" | "native", version?: string, warming?: boolean}`:
   running-state tooltip gains one line —
   `Linting: clj-kondo + native (v2026.08.04)`, `Linting: native lints only`,
   and the warming suffix `— warming dependency cache…`; absent `lint` (older
   server) → tooltip unchanged. The item's icon/state never changes for
   warming.
-- [ ] **Step 2: Run** `make test` — expect FAIL.
-- [ ] **Step 3: Implement:** subscribe to `clojurePulse/lintStatus` next to
+- [x] **Step 2: Run** `make test` — expect FAIL.
+- [x] **Step 3: Implement:** subscribe to `clojurePulse/lintStatus` next to
   the `librariesChanged` subscription (`extension.ts:457`), cache the last
   payload, re-render the status bar on receipt and on state changes.
-- [ ] **Step 4:** README **Linting** section (mirror of the server's, plus the
+- [x] **Step 4:** README **Linting** section (mirror of the server's, plus the
   settings) and a CHANGELOG entry under Unreleased, noting older servers
   simply never send `lintStatus`.
-- [ ] **Step 5: Run** `make check` — expect PASS.
-- [ ] **Step 6: Commit** `git commit -m "Show lint engine status from clojurePulse/lintStatus"`
+- [x] **Step 5: Run** `make check` — expect PASS.
+- [x] **Step 6: Commit** `git commit -m "Show lint engine status from clojurePulse/lintStatus"`
 
 ### Task 11: Real-binary smoke test (optional, ignored)
 
 **Files:** Modify: `tests/test_e2e.rs`, `bb.edn`
 
-- [ ] **Step 1:** An `#[ignore]`d e2e test (pattern: `e2e-real`) that skips
+- [x] **Step 1:** An `#[ignore]`d e2e test (pattern: `e2e-real`) that skips
   with a message unless a real `clj-kondo` is on PATH: open a fixture file
   with a genuine unresolved symbol, assert a `source: "clj-kondo"` diagnostic
   arrives. Add `bb e2e-real-kondo` running
   `cargo test --test test_e2e real_kondo -- --ignored`.
-- [ ] **Step 2: Run it** on a machine with clj-kondo installed (CI box or
+- [x] **Step 2: Run it** on a machine with clj-kondo installed (CI box or
   maintainer's laptop): `bb e2e-real-kondo` — expect PASS (or SKIP w/o binary).
-- [ ] **Step 3: Commit** `git commit -m "Ignored e2e against a real clj-kondo binary"`
+- [x] **Step 3: Commit** `git commit -m "Ignored e2e against a real clj-kondo binary"`
+
+> Deviation: the harness's `enable_kondo: bool` became a three-way `Kondo`
+> enum (`Off` / `Fake` / `Real`), since the real-binary test must leave PATH
+> alone rather than prepend the fake. The test asserts on `unresolved-symbol`,
+> a code no native lint can produce, so a skipped or inert clj-kondo fails it
+> rather than passing vacuously.
 
 ### Task 12: Final cross-repo verification
 
 Run everything, in this order, and fix regressions before calling the work done:
 
-- [ ] **Step 1 (server):** `bb check` — fmt + clippy `-D warnings` + all unit
+- [x] **Step 1 (server):** `bb check` — fmt + clippy `-D warnings` + all unit
   tests PASS.
-- [ ] **Step 2 (server):** `bb e2e` — all e2e including Tasks 6/7 tests PASS.
-- [ ] **Step 3 (server):** `bb e2e-nvim` — a real editor client tolerates the
+- [x] **Step 2 (server):** `bb e2e` — all e2e including Tasks 6/7 tests PASS.
+- [x] **Step 3 (server):** `bb e2e-nvim` — a real editor client tolerates the
   new `lintStatus` notification; definition/diagnostics still work.
-- [ ] **Step 4 (extension):** in `../clojure-pulse-vscode`: `make check`
+- [x] **Step 4 (extension):** in `../clojure-pulse-vscode`: `make check`
   (lint + compile + tests, including the new statusPresentation cases) PASS.
-- [ ] **Step 5 (integrated, real kondo):** with a real `clj-kondo` on PATH:
+- [x] **Step 5 (integrated, real kondo):** with a real `clj-kondo` on PATH:
   `bb e2e-real-kondo` PASS; then `bb e2e-calva` (real VS Code + Calva under
   Xvfb) still green. If the environment lacks Xvfb/clj-kondo, record which
   steps were skipped and note the manual check for the maintainer's Calva
@@ -435,4 +486,75 @@ Run everything, in this order, and fix regressions before calling the work done:
   squiggles, the status-bar tooltip's `Linting:` line, `mkdir .clj-kondo` →
   cross-file arity warnings appear, and `clojurePulse.kondo.enabled: false`
   reverting to native-only live.
-- [ ] **Step 6: Commit** any fixes; both repos' working trees clean.
+- [x] **Step 6: Commit** any fixes; both repos' working trees clean.
+
+---
+
+## Completion summary
+
+All 12 tasks are implemented, reviewed, and verified. 12 commits in `clj-pulse`
+and 3 in `clojure-pulse-vscode`, both on branch `clj-kondo-diagnostics`, both
+working trees clean.
+
+**What shipped.** clj-pulse spawns a `clj-kondo` binary once per lint pass on
+the didOpen, didSave, and 300 ms-debounced didChange paths, feeding it the
+unsaved buffer on stdin and publishing its findings as LSP diagnostics with
+`source: "clj-kondo"`. A successful run owns the three codes the native lints
+also emit, so nothing is squiggled twice; every failure mode (absent, disabled,
+timed out, crashed, unparseable output) degrades to the native set unchanged,
+and each pass publishes exactly once. `:kondo {:enabled :path}` rides the
+existing two-layer merge from `.clj-pulse/config.edn` and the new
+`clojurePulse.kondo.*` VS Code settings, live-reloaded, with
+`CLJ_PULSE_DISABLE_KONDO` as the harness kill-switch. The engine is announced
+by a log line and a new `clojurePulse/lintStatus` notification, which the
+extension renders as a `Linting:` line in the status-bar tooltip. When a
+`.clj-kondo` directory exists, the resolved classpath is scanned with
+`--dependencies --parallel` in the background so the cross-file linters work
+before the user has opened enough files to fill the cache by hand.
+
+**Verification.** `bb check`, `bb e2e` (97 tests, 9 of them new), `bb e2e-nvim`,
+`bb e2e-real-kondo`, and `bb e2e-calva` all pass, as does the extension's
+`make check` (677 tests, 9 new). `nvim`, a JDK, and the `clojure` CLI were not
+installed on this box; they were added via mise so that every Task 12 step could
+actually run rather than be recorded as skipped. `bb e2e-nvim` and `bb e2e-calva`
+both ran with a real clj-kondo on PATH, so the new notification was exercised
+against two real editor clients.
+
+**Deviations** are noted inline under their tasks. In brief: `kondo::warm`
+landed in Task 2 rather than Task 7 (same `run` helper); Task 3's `server.rs`
+plumbing moved into Task 4's commit so no commit trips clippy's `dead_code`;
+fixture `.clj-kondo`/`.clj-pulse` directories are created at test time because
+`.gitignore` excludes `.clj-kondo`; warming hangs off `apply_project_diff` and
+the startup task rather than each `rebuild_libs` call site, several of which
+are sync functions that cannot await; and the harness's kondo flag became a
+three-way enum for the real-binary test.
+
+**Codex review** ran after every task. Seven must-fix findings across Tasks 2,
+4, 5, 6, 7, and 9 were real and fixed in their own commits: non-zero exits
+treated as success in `warm`/`probe_version`; unserialized probes letting a
+stale one win; `.clj-kondo/config.edn` changes not re-linting; stale-engine
+results publishing over current ones; an engine-changed check too narrow to
+catch a `:path` swap; a test helper that cleared only the stash and not the
+channel; a warm double-scan race; and the extension sending contributed
+defaults as explicit overrides. One finding was **rejected**: codex claimed
+clj-kondo resolves `.clj-kondo` from cwd, so lints needed the owning project as
+cwd. Tested directly against clj-kondo v2026.05.25 — with cwd set to a parent
+project whose config disables a linter, both the config *and* the cache dir
+still resolved by walking up from `--filename`. The plan's stated fact was
+right.
+
+**What the plan could have specified better.** Two things.
+
+The plan pinned its verified clj-kondo facts to v2026.08.04, but named no way to
+re-confirm them. The box had v2026.05.25, so every fact had to be re-derived by
+hand before Task 1, and again mid-Task-2 to settle a review dispute. A tiny
+"paste this shell snippet to re-verify" block would have made that a
+thirty-second check instead of an investigation.
+
+More substantively, Task 7 said to hook warming into "the `rebuild_libs` call
+sites", but several of those are synchronous functions holding a
+`std::sync::Mutex`, so they cannot await a subprocess. The instruction was
+unimplementable as literally written and had to be re-aimed at the two async
+boundaries that actually bracket them. A plan step that names a specific call
+site is worth checking against that site's async-ness while writing the plan.
+
