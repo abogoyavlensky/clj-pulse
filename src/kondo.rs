@@ -146,6 +146,112 @@ fn tags(code: &str) -> Option<Vec<DiagnosticTag>> {
     }
 }
 
+/// The default `clj-kondo` command: a bare name, so `Command` resolves it
+/// through PATH exactly as a shell would. Users override it with an absolute
+/// path when the binary lives somewhere PATH does not reach.
+pub const DEFAULT_BIN: &str = "clj-kondo";
+
+/// Per-key `:kondo` overrides from one config layer. `None` = not specified,
+/// keep the value from the layer below (file config, then the defaults) —
+/// the same shape and merge rule as [`crate::projects::ClasspathOverride`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KondoOverride {
+    pub enabled: Option<bool>,
+    pub path: Option<String>,
+}
+
+/// The resolved clj-kondo settings: both layers merged over the defaults.
+///
+/// `enabled` means *use it when found*, not *require it* — a machine without
+/// clj-kondo installed is the default configuration, and behaves exactly as
+/// before the bridge existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KondoConfig {
+    pub enabled: bool,
+    pub path: String,
+}
+
+impl Default for KondoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: DEFAULT_BIN.to_string(),
+        }
+    }
+}
+
+/// Parses `{:kondo {...}}` from `.clj-pulse/config.edn` contents. Tolerant:
+/// malformed EDN, a missing `:kondo` key, or values of the wrong type all
+/// yield "no override", never a panic.
+pub fn parse_config_edn(contents: &str) -> KondoOverride {
+    let Ok(Value::Map(top)) = edn_format::parse_str(contents) else {
+        return KondoOverride::default();
+    };
+    let Some(Value::Map(spec)) = get(&top, kw("kondo")) else {
+        return KondoOverride::default();
+    };
+    KondoOverride {
+        enabled: match get(spec, kw("enabled")) {
+            Some(Value::Boolean(b)) => Some(*b),
+            _ => None,
+        },
+        path: match get(spec, kw("path")) {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        },
+    }
+}
+
+/// Parses `{"kondo": {...}}` from a JSON settings value.
+///
+/// Accepts both shapes the extension sends: the bare object from
+/// `initializationOptions` and the `{"clojurePulse": {...}}` envelope from
+/// `didChangeConfiguration`. Anything else (Calva's clojure-lsp options, a
+/// non-object) yields no override.
+pub fn parse_config_json(v: &serde_json::Value) -> KondoOverride {
+    let section = v.get("clojurePulse").unwrap_or(v);
+    let Some(spec) = section.get("kondo").and_then(|k| k.as_object()) else {
+        return KondoOverride::default();
+    };
+    KondoOverride {
+        enabled: spec.get("enabled").and_then(|v| v.as_bool()),
+        path: spec
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    }
+}
+
+/// Merges the two config layers over the defaults: file first, editor over it,
+/// per key. A non-empty `CLJ_PULSE_DISABLE_KONDO` forces `enabled = false`
+/// whatever the layers say — the twin of `CLJ_PULSE_DISABLE_CLASSPATH_CLI`,
+/// and what keeps the e2e harness from ever spawning a host clj-kondo.
+pub fn resolve_config(file: &KondoOverride, editor: &KondoOverride) -> KondoConfig {
+    let disable = std::env::var("CLJ_PULSE_DISABLE_KONDO").is_ok_and(|v| !v.is_empty());
+    resolve_config_with_disable(file, editor, disable)
+}
+
+/// [`resolve_config`] with the env kill-switch injectable for tests.
+fn resolve_config_with_disable(
+    file: &KondoOverride,
+    editor: &KondoOverride,
+    disable: bool,
+) -> KondoConfig {
+    let mut cfg = KondoConfig::default();
+    for layer in [file, editor] {
+        if let Some(enabled) = layer.enabled {
+            cfg.enabled = enabled;
+        }
+        if let Some(path) = &layer.path {
+            cfg.path = path.clone();
+        }
+    }
+    if disable {
+        cfg.enabled = false;
+    }
+    cfg
+}
+
 /// How long one buffer lint may take before it is abandoned. Normal files
 /// finish in 20-70 ms and a 4000-line file in ~0.5 s, so 2 s is slack for a
 /// cold JVM-less start under load — and short enough that a wedged binary
@@ -691,6 +797,124 @@ exit 3
         assert_eq!(
             probe_version("clj-kondo-definitely-not-installed").await,
             None
+        );
+    }
+
+    // --- :kondo settings -------------------------------------------------
+
+    fn over(enabled: Option<bool>, path: Option<&str>) -> KondoOverride {
+        KondoOverride {
+            enabled,
+            path: path.map(str::to_string),
+        }
+    }
+
+    fn resolved(file: KondoOverride, editor: KondoOverride) -> KondoConfig {
+        resolve_config_with_disable(&file, &editor, false)
+    }
+
+    #[test]
+    fn config_defaults_to_enabled_on_the_bare_binary_name() {
+        // "Enabled" means *use when found* — a bare name so `Command` resolves
+        // it through PATH.
+        let cfg = resolved(KondoOverride::default(), KondoOverride::default());
+        assert!(cfg.enabled);
+        assert_eq!(cfg.path, "clj-kondo");
+    }
+
+    #[test]
+    fn editor_layer_wins_per_key_over_the_file_layer() {
+        // The editor overrides only `:enabled`; the file's `:path` survives.
+        let cfg = resolved(
+            over(Some(true), Some("/opt/kondo")),
+            over(Some(false), None),
+        );
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.path, "/opt/kondo");
+    }
+
+    #[test]
+    fn file_layer_applies_when_the_editor_says_nothing() {
+        let cfg = resolved(
+            over(Some(false), Some("/opt/kondo")),
+            KondoOverride::default(),
+        );
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.path, "/opt/kondo");
+    }
+
+    #[test]
+    fn kill_switch_forces_disabled_over_every_layer() {
+        // The e2e harness depends on this: no fixture may spawn a host
+        // clj-kondo, however the config layers are written.
+        let cfg = resolve_config_with_disable(
+            &over(Some(true), None),
+            &over(Some(true), Some("/opt/kondo")),
+            true,
+        );
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn parses_kondo_from_edn_config() {
+        let o = parse_config_edn(
+            r#"{:projects [{:path "apps/a"}]
+                                     :kondo {:enabled false :path "/opt/clj-kondo"}}"#,
+        );
+        assert_eq!(o, over(Some(false), Some("/opt/clj-kondo")));
+    }
+
+    #[test]
+    fn parses_partial_and_missing_edn_kondo_maps() {
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:enabled true}}"#),
+            over(Some(true), None)
+        );
+        assert_eq!(
+            parse_config_edn(r#"{:lint-as {a b}}"#),
+            KondoOverride::default()
+        );
+        assert_eq!(
+            parse_config_edn(r#"{:kondo :nope}"#),
+            KondoOverride::default()
+        );
+        assert_eq!(parse_config_edn("not edn ((("), KondoOverride::default());
+    }
+
+    #[test]
+    fn edn_kondo_keys_of_the_wrong_type_are_ignored() {
+        // A typo must fall back to the default, never crash the config load.
+        let o = parse_config_edn(r#"{:kondo {:enabled "yes" :path 42}}"#);
+        assert_eq!(o, KondoOverride::default());
+    }
+
+    #[test]
+    fn parses_kondo_from_a_bare_json_object() {
+        // The `initializationOptions` shape.
+        let v = serde_json::json!({"projects": [], "kondo": {"enabled": false, "path": "k"}});
+        assert_eq!(parse_config_json(&v), over(Some(false), Some("k")));
+    }
+
+    #[test]
+    fn parses_kondo_from_the_settings_envelope() {
+        // The `didChangeConfiguration` shape.
+        let v = serde_json::json!({"clojurePulse": {"kondo": {"enabled": true}}});
+        assert_eq!(parse_config_json(&v), over(Some(true), None));
+    }
+
+    #[test]
+    fn json_without_kondo_yields_no_overrides() {
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"dependency-scheme": "jar"})),
+            KondoOverride::default()
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"kondo": "nope"})),
+            KondoOverride::default()
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!([1, 2, 3])),
+            KondoOverride::default()
         );
     }
 
