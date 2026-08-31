@@ -186,30 +186,30 @@ the repo).
 
 **Files:** Modify: `src/kondo.rs`
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
   `parse_findings(json: &str) -> Option<Vec<Diagnostic>>` per the mapping
   table: severity, string code, `source: "clj-kondo"`, 1-based→0-based, the
   `other/thing` col 6/end-col 17 → chars 5..16 example, missing
   `end-row`/`end-col` → one-char range, `unused-namespace` → UNNECESSARY tag,
   `deprecated-var` → DEPRECATED tag, unparseable/empty input → `None`,
   `{"findings":[]}` → `Some(vec![])`.
-- [ ] **Step 2: Run** `cargo test kondo` — expect FAIL.
-- [ ] **Step 3: Implement** with serde_json (already a dependency). Pure, no IO.
-- [ ] **Step 4: Run** `cargo test kondo` — expect PASS.
-- [ ] **Step 5: Commit** `git commit -m "Parse clj-kondo JSON findings into LSP diagnostics"`
+- [x] **Step 2: Run** `cargo test kondo` — expect FAIL.
+- [x] **Step 3: Implement** with serde_json (already a dependency). Pure, no IO.
+- [x] **Step 4: Run** `cargo test kondo` — expect PASS.
+- [x] **Step 5: Commit** `git commit -m "Parse clj-kondo JSON findings into LSP diagnostics"`
 
 ### Task 2: Subprocess runner + version probe (`src/kondo.rs`)
 
 **Files:** Modify: `src/kondo.rs`
 
-- [ ] **Step 1: Write failing tests** (tokio tests, like `classpath.rs`'s)
+- [x] **Step 1: Write failing tests** (tokio tests, like `classpath.rs`'s)
   using shell-script fakes in tempdirs: success with exit 3 + JSON on stdout →
   `Ok(diags)`; exit 1/empty stdout → `Err`; sleeping child → timeout `Err`
   and the child killed (marker-file assertion, copy
   `resolve_via_cmd_kills_child_on_timeout`); `probe_version` parses
   `clj-kondo v2026.08.04` → `Some("v2026.08.04")`, missing binary → `None`.
-- [ ] **Step 2: Run** `cargo test kondo` — expect FAIL.
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Run** `cargo test kondo` — expect FAIL.
+- [x] **Step 3: Implement**
   `lint(bin: &str, source: &str, abs_path: &Path, timeout: Duration) -> Result<Vec<Diagnostic>, String>`:
   spawn `<bin> --lint - --filename <abs_path> --config '{:output {:format :json}}'`
   (append `--lang clj` for `.bb`), write source to stdin, close it, await with
@@ -218,25 +218,39 @@ the repo).
   shared helper only if it stays clean — a small duplicate is acceptable; the
   stdin feed is the difference). Treat exit 0/2/3 + parseable JSON as success.
   `probe_version(bin) -> Option<String>` runs `--version` with a 2 s timeout.
-- [ ] **Step 4: Run** `cargo test kondo` — expect PASS.
-- [ ] **Step 5: Commit** `git commit -m "Spawn clj-kondo per lint with timeout and group kill"`
+- [x] **Step 4: Run** `cargo test kondo` — expect PASS.
+- [x] **Step 5: Commit** `git commit -m "Spawn clj-kondo per lint with timeout and group kill"`
+
+> Deviation: `kondo::warm` (Task 7's spawner) landed here rather than in Task 7 —
+> it is three lines over the same `run` helper, and splitting it would have
+> duplicated the process-group/timeout plumbing.
+> Codex review: two must-fix findings, both real and fixed in `b523457` — `warm`
+> and `probe_version` treated a non-zero child exit as success. Its third
+> finding (lint must run with cwd = the owning project dir, because clj-kondo
+> resolves `.clj-kondo` from cwd) was **wrong**: verified empirically against
+> clj-kondo v2026.05.25 that both the config *and* the cache dir resolve by
+> walking up from `--filename`, even when cwd is a different project. No change.
 
 ### Task 3: `:kondo` settings, two layers + kill-switch
 
 **Files:** Modify: `src/kondo.rs` (EDN+JSON parse), `src/settings.rs` (file load), `src/server.rs` (editor layer plumb)
 
-- [ ] **Step 1: Write failing tests** for
+- [x] **Step 1: Write failing tests** for
   `KondoOverride { enabled: Option<bool>, path: Option<String> }`: EDN parse
   from `{:kondo {...}}`, JSON parse from `{"kondo": {...}}` (both the bare
   initializationOptions object and the `{"clojurePulse": {...}}` envelope —
   mirror `projects::parse_json`'s tolerance), merge (file first, editor wins
   per key, defaults `enabled: true`, `path: "clj-kondo"`), kill-switch forces
   disabled (injectable like `resolve_with_disable`).
-- [ ] **Step 2: Run** `cargo test` — expect FAIL.
-- [ ] **Step 3: Implement.** Resolution result:
+- [x] **Step 2: Run** `cargo test` — expect FAIL.
+- [x] **Step 3: Implement.** Resolution result:
   `KondoConfig { enabled: bool, path: String }`.
-- [ ] **Step 4: Run** `cargo test` — expect PASS.
-- [ ] **Step 5: Commit** `git commit -m "Add :kondo config (file + editor layers, env kill-switch)"`
+- [x] **Step 4: Run** `cargo test` — expect PASS.
+- [x] **Step 5: Commit** `git commit -m "Add :kondo config (file + editor layers, env kill-switch)"`
+
+> Deviation: the `src/server.rs` editor-layer plumbing moved into Task 4's
+> commit. Stored but never read, the field trips `dead_code` under clippy
+> `-D warnings`; landing it beside its first reader keeps every commit green.
 
 ### Task 4: Probe, log lines, `lintStatus` notification (`src/server.rs`)
 
