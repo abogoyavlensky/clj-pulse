@@ -46,6 +46,12 @@ impl LspClient {
         Self::spawn(project_root, &[], true, true)
     }
 
+    /// [`start_with_kondo`] with extra environment variables — `FAKE_KONDO_LOG`,
+    /// the file the fake records its cache-warming invocations in.
+    fn start_with_kondo_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
+        Self::spawn(project_root, envs, true, true)
+    }
+
     /// The directory holding the fake `clj-kondo`, prepended to the server's
     /// PATH by [`start_with_kondo`].
     fn fake_kondo_dir() -> std::path::PathBuf {
@@ -456,6 +462,13 @@ impl LspClient {
     /// test asserts on a *second* publish for a document it already saw one
     /// for — otherwise the stash answers instantly with the stale one.
     fn clear_notifications(&mut self) {
+        // Drain what is already in flight before dropping the stash: a message
+        // sitting unread in the channel is exactly as stale as one already
+        // stashed, and would otherwise satisfy the next `wait_for_*`. Draining
+        // through `stash` keeps answering server→client requests.
+        while let Ok(msg) = self.incoming.try_recv() {
+            self.stash(msg);
+        }
         self.notifications.clear();
     }
 
@@ -4991,5 +5004,80 @@ fn test_e2e_disabling_kondo_live_relints_open_documents() {
         diagnostic_codes(&params),
         vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())],
         "the native set must come back once clj-kondo is switched off"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_cache_warmed_from_the_resolved_classpath() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // A stage-2 classpath: a `.cpcache` naming one existing absolute entry
+    // (an absolute path is what `discover` treats as a live cache).
+    let lib = root.join("libs/some-lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(root.join(".cpcache")).unwrap();
+    std::fs::write(
+        root.join(".cpcache/fixture.cp"),
+        format!("src:{}", lib.display()),
+    )
+    .unwrap();
+
+    // The fake records every `--dependencies` invocation here.
+    let log = root.join("kondo-warm.log");
+    let mut client = LspClient::start_with_kondo_env(&root, &[("FAKE_KONDO_LOG", log.as_path())]);
+    client.initialize(&root);
+
+    client.wait_for_log("clj-kondo cache warm complete");
+
+    let recorded = std::fs::read_to_string(&log).expect("the fake should have logged a warm run");
+    assert!(
+        recorded.contains("--dependencies"),
+        "warming must populate the cache without reporting findings: {recorded}"
+    );
+    assert!(
+        recorded.contains("--parallel"),
+        "warming should scan in parallel: {recorded}"
+    );
+    assert!(
+        recorded.contains(&lib.display().to_string()),
+        "the resolved classpath must be what gets scanned: {recorded}"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_cache_not_warmed_without_a_clj_kondo_dir() {
+    // clj-kondo never creates `.clj-kondo`, and without it a dependency scan
+    // runs for minutes and persists nothing — so it must not run at all.
+    let project = setup_named("kondo_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let lib = root.join("libs/some-lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(root.join(".cpcache")).unwrap();
+    std::fs::write(
+        root.join(".cpcache/fixture.cp"),
+        format!("src:{}", lib.display()),
+    )
+    .unwrap();
+
+    let log = root.join("kondo-warm.log");
+    let mut client = LspClient::start_with_kondo_env(&root, &[("FAKE_KONDO_LOG", log.as_path())]);
+    client.initialize(&root);
+    // Sync on something that necessarily follows the indexing task, then
+    // assert the warm never happened.
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+    client.wait_for_log("library indexing complete");
+
+    // A buffer lint still works — only warming is gated on the directory.
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(params["diagnostics"][0]["source"], json!("clj-kondo"));
+
+    assert!(
+        !log.exists(),
+        "no .clj-kondo dir means no dependency scan, got: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
     );
 }
