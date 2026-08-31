@@ -824,7 +824,7 @@ type SharedEditorKondo = Arc<std::sync::Mutex<kondo::KondoOverride>>;
 /// version found, if any. `found: Some(_)` is the single condition for
 /// spawning clj-kondo — it implies `config.enabled`, since a disabled config
 /// is never probed.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct KondoState {
     config: kondo::KondoConfig,
     found: Option<String>,
@@ -846,9 +846,9 @@ static KONDO_PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 /// when enabled, and announces the result — one log line (which doubles as the
 /// e2e sync point) plus a `clojurePulse/lintStatus` notification.
 ///
-/// Returns whether the *effective* engine flipped, either way: enabling a
-/// configured-off kondo, installing the binary, or losing it. Callers re-lint
-/// open documents on a flip so the change is visible without an edit.
+/// Returns whether the resolved engine changed at all — gained, lost, or
+/// swapped for a different binary or version. Callers re-lint open documents
+/// on a change, so it becomes visible without waiting for the next edit.
 async fn probe_and_announce(
     client: &Client,
     root: Option<&std::path::Path>,
@@ -873,14 +873,18 @@ async fn probe_and_announce(
         false => None,
     };
 
-    let was_active = {
+    let engine_changed = {
         let mut state = kondo_state.lock().unwrap();
-        let was_active = state.found.is_some();
-        *state = KondoState {
+        let next = KondoState {
             config: config.clone(),
             found: found.clone(),
         };
-        was_active
+        // Compare the whole resolved state, not just "is clj-kondo active":
+        // switching `:path` from one working binary to another, or picking up
+        // a newly installed version, changes what the findings say.
+        let changed = *state != next;
+        *state = next;
+        changed
     };
 
     let msg = match (&found, config.enabled) {
@@ -895,7 +899,7 @@ async fn probe_and_announce(
     client.log_message(MessageType::INFO, msg).await;
     send_lint_status(client, kondo_state, false).await;
 
-    found.is_some() != was_active
+    engine_changed
 }
 
 /// Pushes the current lint engine to the client. `warming` is passed in rather
@@ -955,15 +959,24 @@ async fn lint_and_publish_doc(
     };
     let native = crate::diagnostics::compute(&text, &path);
 
-    let bin = kondo_state.lock().unwrap().bin().map(str::to_string);
-    let kondo = match bin.filter(|_| kondo::lints_file(&path)) {
+    let engine = kondo_state.lock().unwrap().clone();
+    let bin = engine
+        .bin()
+        .filter(|_| kondo::lints_file(&path))
+        .map(str::to_string);
+    let kondo = match bin {
         Some(bin) => {
             let _permit = KONDO_LIMIT.acquire().await;
             let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
             // Queueing behind the semaphore and then the subprocess can easily
-            // outlast the edit that started this pass; publishing now would put
-            // stale squiggles on a buffer that has already moved on.
-            if documents.current_version(&uri) != Some(version) {
+            // outlast the edit that started this pass — or the settings change
+            // that retired this engine. Either way the result is stale, and
+            // the re-lint that follows an engine change will publish the
+            // current one; the document version alone would not catch that,
+            // since a settings-triggered re-lint reuses the same version.
+            if documents.current_version(&uri) != Some(version)
+                || *kondo_state.lock().unwrap() != engine
+            {
                 return;
             }
             if let Err(e) = &result {
@@ -1947,19 +1960,24 @@ impl LanguageServer for Backend {
         let classpath_changed = !manifest_paths.is_empty() || !cpcache_paths.is_empty();
         let source_paths_changed = !manifest_paths.is_empty();
 
-        // `:kondo` lives only in `.clj-pulse/config.edn`, so only that file
-        // re-probes. Independent of the re-index below: enabling clj-kondo
-        // changes what gets published, not what is indexed.
-        if pulse_config_changed {
+        // Either config file changes what gets published, independently of the
+        // re-index below. They differ in how: `:kondo` lives only in
+        // `.clj-pulse/config.edn`, so only that file re-probes — but
+        // `.clj-kondo/config.edn` sets linter levels and `:lint-as`, which
+        // change what clj-kondo *reports* on the next spawn. So either file
+        // re-lints every open buffer, or squiggles stay stale until the user
+        // happens to type in the file.
+        if config_changed {
             if let Some(root) = self.root.lock().unwrap().clone() {
                 let client = self.client.clone();
                 let editor_kondo = self.editor_kondo.clone();
                 let kondo_state = self.kondo_state.clone();
                 let documents = self.documents.clone();
                 tokio::spawn(async move {
-                    if probe_and_announce(&client, Some(&root), &editor_kondo, &kondo_state).await {
-                        relint_open_documents(&client, &documents, &kondo_state).await;
+                    if pulse_config_changed {
+                        probe_and_announce(&client, Some(&root), &editor_kondo, &kondo_state).await;
                     }
+                    relint_open_documents(&client, &documents, &kondo_state).await;
                 });
             }
         }
