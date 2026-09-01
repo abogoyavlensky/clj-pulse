@@ -628,9 +628,89 @@ mod tests {
     fn fake_bin(dir: &Path, script: &str) -> String {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("clj-kondo");
-        std::fs::write(&p, format!("#!/bin/sh\n{script}")).unwrap();
+        // `--exec-probe` short-circuits every fake: `wait_until_executable`
+        // runs it once, and must not trip whatever the caller's script does
+        // (sleep, record argv, drain stdin).
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\n[ \"$1\" = --exec-probe ] && exit 0\n{script}"),
+        )
+        .unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&p);
         p.display().to_string()
+    }
+
+    /// Blocks until `bin` can actually be exec'd.
+    ///
+    /// Writing an executable and immediately running it races in a
+    /// multithreaded test binary. `Command::spawn` forks, and until the child
+    /// reaches `execve` it holds an inherited copy of every descriptor this
+    /// process had open - including the one another test thread is still
+    /// writing this very file through. Linux refuses to exec a file that is
+    /// open for writing, so the spawn fails with ETXTBSY (seen on CI, where
+    /// the fork/exec window is wider than on a developer machine).
+    ///
+    /// The window is short and self-clearing: once our own descriptor is
+    /// closed and one exec has succeeded, no process holds a writer, and the
+    /// file can never go busy again. So exec'ing once up front until it takes
+    /// is enough. This belongs in the harness, not in `lint` - production
+    /// never writes the binary it runs.
+    #[cfg(unix)]
+    fn wait_until_executable(bin: &Path) {
+        for _ in 0..200 {
+            let result = std::process::Command::new(bin)
+                .arg("--exec-probe")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match result {
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("fake clj-kondo {} is not runnable: {e}", bin.display()),
+            }
+        }
+        panic!("fake clj-kondo {} stayed busy", bin.display());
+    }
+
+    /// The barrier above, exercised deterministically: a held write
+    /// descriptor puts the file in exactly the state a concurrent test's
+    /// pre-exec fork leaves it in, and releasing it stands in for that fork
+    /// reaching `execve`.
+    #[cfg(unix)]
+    #[test]
+    fn wait_until_executable_waits_out_a_busy_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("clj-kondo");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let writer = std::fs::OpenOptions::new().append(true).open(&bin).unwrap();
+        assert_eq!(
+            std::process::Command::new(&bin)
+                .status()
+                .expect_err("a binary with an open writer must not exec")
+                .raw_os_error(),
+            Some(libc::ETXTBSY),
+            "the setup must actually make the binary busy"
+        );
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(writer);
+        });
+
+        let start = std::time::Instant::now();
+        wait_until_executable(&bin);
+        assert!(
+            start.elapsed() >= Duration::from_millis(100),
+            "returned before the writer let go"
+        );
+        assert!(std::process::Command::new(&bin).status().unwrap().success());
     }
 
     #[cfg(unix)]
