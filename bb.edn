@@ -19,6 +19,9 @@
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}
 
+  e2e-real-kondo {:doc "E2E against a real clj-kondo binary (skips when not installed)"
+                  :task (shell "cargo test --test test_e2e real_kondo -- --ignored")}
+
   e2e-nvim {:doc "Real-editor-client e2e via headless Neovim"
             :task (do (shell "cargo build")
                       (shell "nvim --headless -l scripts/e2e_nvim.lua tests/fixtures/simple_project target/debug/clj-pulse"))}

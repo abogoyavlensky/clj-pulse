@@ -38,11 +38,28 @@ Main gaps vs clojure-lsp, in descending practical impact:
 
 The things users notice as *broken*, not as missing.
 
-### 1.1 clj-kondo diagnostics bridge
+### 1.1 clj-kondo diagnostics bridge - DONE
 
-The single biggest gap. Without unresolved-symbol, arity, and syntax-error
-squiggles the server feels incomplete regardless of navigation quality.
-Carried over from ROADMAP.md Phase 4.
+Shipped: clj-pulse spawns a `clj-kondo` binary per lint pass on the didOpen,
+didSave, and debounced didChange paths, and publishes its findings with
+`source: "clj-kondo"`. A successful run owns the three codes the native lints
+also emit, so nothing is reported twice; any failure degrades to the native set
+unchanged. Configured by `:kondo {:enabled :path}` in `.clj-pulse/config.edn`
+or the matching VS Code settings, both live-reloaded, with
+`CLJ_PULSE_DISABLE_KONDO` as the test kill-switch. The extension shows the
+active tier in its status-bar tooltip via a `clojurePulse/lintStatus`
+notification.
+
+Classpath cache warming shipped too: when a `.clj-kondo` directory exists,
+clj-pulse runs `clj-kondo --lint <classpath> --dependencies --parallel` in the
+background after a project's classpath resolves, so the cross-file linters work
+before the user has opened enough files to populate the cache by hand.
+
+Deliberately deferred: `--copy-configs`, which writes JAR-exported clj-kondo
+configs into the repo. clj-pulse should not modify a user's working tree
+without being asked.
+
+The original plan, for reference:
 
 - Shell out to a `clj-kondo` binary when present on `PATH` (or configured
   path), `clj-kondo --lint - --filename <path> --config ...`, feeding the

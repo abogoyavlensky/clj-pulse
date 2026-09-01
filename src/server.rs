@@ -12,6 +12,7 @@ use crate::index::extractor;
 use crate::index::scanner;
 use crate::index::Index;
 use crate::jar_content;
+use crate::kondo;
 use crate::leiningen;
 use crate::lgx;
 use crate::libraries;
@@ -76,7 +77,7 @@ type ClasspathCliLock = Arc<tokio::sync::Mutex<()>>;
 
 /// Work-done progress reporting state: whether the client advertised
 /// `window.workDoneProgress`, plus the counter making each run's token unique
-/// (`clj-pulse/classpath/<rel_path>/<n>` — rescans repeat runs for the same
+/// (`clj-pulse/<kind>/<rel_path>/<n>` — rescans repeat runs for the same
 /// project, and the spec requires per-operation tokens).
 #[derive(Clone, Default)]
 struct ProgressState {
@@ -88,13 +89,18 @@ impl ProgressState {
     /// Creates a progress token for one stage-3 run, or `None` when the
     /// client lacks the capability or rejects the create request (progress
     /// then downgrades to silence, never an error).
-    async fn begin_token(&self, client: &Client, rel_path: &str) -> Option<NumberOrString> {
+    async fn begin_token(
+        &self,
+        client: &Client,
+        kind: &str,
+        rel_path: &str,
+    ) -> Option<NumberOrString> {
         use std::sync::atomic::Ordering;
         if !self.enabled.load(Ordering::Relaxed) {
             return None;
         }
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        let token = NumberOrString::String(format!("clj-pulse/classpath/{rel_path}/{n}"));
+        let token = NumberOrString::String(format!("clj-pulse/{kind}/{rel_path}/{n}"));
         match client
             .send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
                 token: token.clone(),
@@ -517,7 +523,7 @@ async fn run_stage3_project(
     tracing::info!("{}", msg);
     client.log_message(MessageType::INFO, msg).await;
 
-    let progress_token = progress.begin_token(client, rel_path).await;
+    let progress_token = progress.begin_token(client, "classpath", rel_path).await;
     send_progress(
         client,
         &progress_token,
@@ -666,6 +672,7 @@ async fn apply_project_diff(
     generation: &ConfigGeneration,
     cli_lock: &ClasspathCliLock,
     progress: &ProgressState,
+    warmer: &KondoWarmer,
 ) -> Vec<String> {
     // Diff old vs new resolved config per project.
     let mut stage3_runs: Vec<String> = Vec::new();
@@ -759,6 +766,20 @@ async fn apply_project_diff(
         )
         .await;
     }
+
+    // Every path into here ends with the library entries settled, which is
+    // exactly when clj-kondo's cache is worth (re)warming.
+    warm_kondo_caches(
+        client,
+        root,
+        projects_arc,
+        state_arc,
+        warmer,
+        generation,
+        progress,
+    )
+    .await;
+
     stage3_runs
 }
 
@@ -792,6 +813,376 @@ impl tower_lsp::lsp_types::notification::Notification for LibrariesChanged {
     const METHOD: &'static str = "clojurePulse/librariesChanged";
 }
 
+/// clj-pulse custom notification describing which lint engine is live, pushed
+/// after every clj-kondo probe and around cache warming. Purely informational:
+/// the extension renders it as a tooltip line, and a client that ignores it
+/// (or an older one that never receives it) loses nothing.
+enum LintStatus {}
+
+impl tower_lsp::lsp_types::notification::Notification for LintStatus {
+    type Params = LintStatusParams;
+    const METHOD: &'static str = "clojurePulse/lintStatus";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LintStatusParams {
+    /// `"kondo+native"` or `"native"`.
+    engine: String,
+    /// The clj-kondo version, when one was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    /// Whether a dependency-cache warm is running right now.
+    warming: bool,
+}
+
+/// The editor layer's `:kondo` overrides (`initializationOptions` /
+/// `didChangeConfiguration`), kept so file-config reloads re-merge it — the
+/// `SharedEditorConfig` pattern, for the other half of the settings.
+type SharedEditorKondo = Arc<std::sync::Mutex<kondo::KondoOverride>>;
+
+/// What the last clj-kondo probe established: the resolved config plus the
+/// version found, if any. `found: Some(_)` is the single condition for
+/// spawning clj-kondo — it implies `config.enabled`, since a disabled config
+/// is never probed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct KondoState {
+    config: kondo::KondoConfig,
+    found: Option<String>,
+}
+
+impl KondoState {
+    /// The binary to spawn, or `None` when clj-kondo is disabled or absent.
+    fn bin(&self) -> Option<&str> {
+        self.found.is_some().then_some(self.config.path.as_str())
+    }
+}
+
+type SharedKondoState = Arc<std::sync::Mutex<KondoState>>;
+
+/// See [`probe_and_announce`].
+static KONDO_PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Resolves the clj-kondo settings from both config layers, probes the binary
+/// when enabled, and announces the result — one log line (which doubles as the
+/// e2e sync point) plus a `clojurePulse/lintStatus` notification.
+///
+/// Returns whether the resolved engine changed at all — gained, lost, or
+/// swapped for a different binary or version. Callers re-lint open documents
+/// on a change, so it becomes visible without waiting for the next edit.
+async fn probe_and_announce(
+    client: &Client,
+    root: Option<&std::path::Path>,
+    editor_kondo: &SharedEditorKondo,
+    kondo_state: &SharedKondoState,
+) -> bool {
+    // Serialize probes, for the same reason `ClasspathCliLock` serializes
+    // stage-3 runs: back-to-back config changes each spawn a probe, and a
+    // slow one carrying obsolete settings must not land after — and overwrite
+    // — a newer one. Both config layers are read *inside* the lock and the
+    // editor layer is stored synchronously by the caller, so even a probe
+    // queued from an older notification resolves against the newest settings.
+    let _serial = KONDO_PROBE_LOCK.lock().await;
+
+    let file = root.map(settings::load_kondo).unwrap_or_default();
+    let editor = editor_kondo.lock().unwrap().clone();
+    let config = kondo::resolve_config(&file, &editor);
+
+    // A disabled kondo is never probed — no spawn, no PATH lookup, nothing.
+    let found = match config.enabled {
+        true => kondo::probe_version(&config.path).await,
+        false => None,
+    };
+
+    let engine_changed = {
+        let mut state = kondo_state.lock().unwrap();
+        let next = KondoState {
+            config: config.clone(),
+            found: found.clone(),
+        };
+        // Compare the whole resolved state, not just "is clj-kondo active":
+        // switching `:path` from one working binary to another, or picking up
+        // a newly installed version, changes what the findings say.
+        let changed = *state != next;
+        *state = next;
+        changed
+    };
+
+    let msg = match (&found, config.enabled) {
+        (Some(version), _) => format!(
+            "clj-kondo {version} found ({}) — linting: clj-kondo + native",
+            config.path
+        ),
+        (None, true) => "clj-kondo not found — linting: native lints only".to_string(),
+        (None, false) => "clj-kondo disabled — linting: native lints only".to_string(),
+    };
+    tracing::info!("{}", msg);
+    client.log_message(MessageType::INFO, msg).await;
+    send_lint_status(client, kondo_state, false).await;
+
+    engine_changed
+}
+
+/// Pushes the current lint engine to the client. `warming` is passed in rather
+/// than stored: it is a property of the moment, not of the probe.
+async fn send_lint_status(client: &Client, kondo_state: &SharedKondoState, warming: bool) {
+    let version = kondo_state.lock().unwrap().found.clone();
+    client
+        .send_notification::<LintStatus>(LintStatusParams {
+            engine: match version {
+                Some(_) => "kondo+native".to_string(),
+                None => "native".to_string(),
+            },
+            version,
+            warming,
+        })
+        .await;
+}
+
+/// Per-project record of the classpath entry set clj-kondo's cache was last
+/// warmed from. A dependency scan is minutes of work on a cold cache, so an
+/// unchanged classpath must never be scanned twice.
+type WarmedSets = Arc<std::sync::Mutex<std::collections::HashMap<String, ClasspathEntries>>>;
+
+type ClasspathEntries = std::collections::HashSet<std::path::PathBuf>;
+
+/// The clj-kondo cache warmer's state, bundled so it rides the already
+/// long-argumented classpath pipeline as a single parameter.
+#[derive(Clone, Default)]
+struct KondoWarmer {
+    state: SharedKondoState,
+    warmed: WarmedSets,
+}
+
+/// Serializes cache warms. Each one is a full dependency scan of a classpath;
+/// running several at once in a monorepo would swamp the machine for no gain,
+/// since they contend on the same `~/.m2` JARs anyway.
+static KONDO_WARM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A cold scan of a large classpath is slow but bounded; past ten minutes
+/// something is wrong and the process should not linger.
+const KONDO_WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Whether clj-kondo has a config/cache directory it can write to for this
+/// project: `.clj-kondo` at the project dir or any ancestor up to the
+/// workspace root. clj-kondo never creates one, so without it a dependency
+/// scan would run for minutes and persist nothing.
+fn has_kondo_dir(project_dir: &std::path::Path, workspace_root: &std::path::Path) -> bool {
+    project_dir
+        .ancestors()
+        .take_while(|dir| dir.starts_with(workspace_root))
+        .any(|dir| dir.join(".clj-kondo").is_dir())
+}
+
+/// Warms clj-kondo's dependency cache for every project whose resolved
+/// classpath it has not already been warmed from.
+///
+/// Without this, the cross-file linters (`invalid-arity`, `unresolved-var`)
+/// stay silent about library calls until the user happens to open enough files
+/// to populate the cache one buffer at a time. Entirely best-effort: any
+/// failure logs a warning and leaves buffer linting exactly as it was.
+async fn warm_kondo_caches(
+    client: &Client,
+    workspace_root: &std::path::Path,
+    projects_arc: &SharedProjects,
+    state_arc: &SharedState,
+    warmer: &KondoWarmer,
+    generation: &ConfigGeneration,
+    progress: &ProgressState,
+) {
+    use std::sync::atomic::Ordering;
+
+    let Some(bin) = warmer.state.lock().unwrap().bin().map(str::to_string) else {
+        return;
+    };
+    let project_list = projects_arc.lock().unwrap().clone();
+
+    for project in project_list {
+        if !has_kondo_dir(&project.dir, workspace_root) {
+            continue;
+        }
+        let entries = project_entries(state_arc, &project.rel_path);
+        if entries.is_empty() || is_warmed(warmer, &project.rel_path, &entries) {
+            continue;
+        }
+
+        let gen = generation.load(Ordering::SeqCst);
+        let _serial = KONDO_WARM_LOCK.lock().await;
+        // Queueing behind another warm can take minutes, so re-check both
+        // guards now that we hold the lock: the classpath may have moved on,
+        // and the warm we queued behind may have been this very scan. The two
+        // triggers (indexing finished, engine changed) race by design, and
+        // without this they would each run the same minutes-long scan.
+        if project_entries(state_arc, &project.rel_path) != entries
+            || is_warmed(warmer, &project.rel_path, &entries)
+        {
+            continue;
+        }
+        let Ok(classpath) = std::env::join_paths(&entries) else {
+            tracing::warn!(
+                "clj-kondo cache warm skipped for {}: classpath has an unrepresentable entry",
+                project.rel_path
+            );
+            continue;
+        };
+
+        let token = progress
+            .begin_token(client, "kondo-warm", &project.rel_path)
+            .await;
+        send_progress(
+            client,
+            &token,
+            WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: format!("Linting classpath (clj-kondo): {}", project.rel_path),
+                ..Default::default()
+            }),
+        )
+        .await;
+        send_lint_status(client, &warmer.state, true).await;
+
+        let result = kondo::warm(
+            &bin,
+            &classpath.to_string_lossy(),
+            &project.dir,
+            KONDO_WARM_TIMEOUT,
+        )
+        .await;
+
+        send_progress(
+            client,
+            &token,
+            WorkDoneProgress::End(WorkDoneProgressEnd::default()),
+        )
+        .await;
+        send_lint_status(client, &warmer.state, false).await;
+
+        match result {
+            // Only a run whose config still applies may be recorded as warmed;
+            // otherwise a later, correct classpath would be skipped forever.
+            Ok(()) if generation.load(Ordering::SeqCst) == gen => {
+                warmer
+                    .warmed
+                    .lock()
+                    .unwrap()
+                    .insert(project.rel_path.clone(), entries);
+                let msg = format!(
+                    "clj-pulse: clj-kondo cache warm complete: {}",
+                    project.rel_path
+                );
+                tracing::info!("{}", msg);
+                client.log_message(MessageType::INFO, msg).await;
+            }
+            Ok(()) => tracing::info!(
+                "clj-kondo cache warm for {} discarded (config changed mid-run)",
+                project.rel_path
+            ),
+            Err(reason) => {
+                // Best-effort: buffer lints keep working, just without library
+                // signatures behind the cross-file linters.
+                let msg = format!(
+                    "clj-pulse: clj-kondo cache warm failed for {}: {reason}",
+                    project.rel_path
+                );
+                tracing::warn!("{}", msg);
+                client.log_message(MessageType::WARNING, msg).await;
+            }
+        }
+    }
+}
+
+/// Whether clj-kondo's cache has already been warmed from exactly this
+/// classpath.
+fn is_warmed(warmer: &KondoWarmer, rel_path: &str, entries: &ClasspathEntries) -> bool {
+    warmer.warmed.lock().unwrap().get(rel_path) == Some(entries)
+}
+
+/// One project's current classpath entry set.
+fn project_entries(state_arc: &SharedState, rel_path: &str) -> ClasspathEntries {
+    state_arc
+        .lock()
+        .unwrap()
+        .get(rel_path)
+        .map(|ps| ps.entries.clone())
+        .unwrap_or_default()
+}
+
+/// Re-lints and republishes every open document. Used when the lint engine
+/// changes under the user's feet (a settings toggle, a newly installed
+/// binary), which no edit would otherwise trigger.
+async fn relint_open_documents(
+    client: &Client,
+    documents: &DocumentStore,
+    kondo_state: &SharedKondoState,
+) {
+    for uri in documents.open_uris() {
+        let version = documents.current_version(&uri).unwrap_or(0);
+        lint_and_publish_doc(client, documents, kondo_state, uri, version).await;
+    }
+}
+
+/// Caps concurrent clj-kondo processes. Each spawn costs ~54 MB RSS, so
+/// opening a folder full of files must not fork one per buffer at once; four
+/// keeps a multi-file burst responsive without the memory spike.
+static KONDO_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// Computes and publishes diagnostics for one document. The single place a
+/// `textDocument/publishDiagnostics` for a source buffer originates, so every
+/// path — didOpen, didSave, the debounced didChange, an engine change —
+/// produces the same set.
+/// Native lints are computed first and clj-kondo is awaited second, but only
+/// one `publishDiagnostics` is sent: publishing the native set and then
+/// replacing it would flicker every squiggle on every keystroke.
+async fn lint_and_publish_doc(
+    client: &Client,
+    documents: &DocumentStore,
+    kondo_state: &SharedKondoState,
+    uri: Url,
+    version: i32,
+) {
+    let Some(text) = documents.text(&uri) else {
+        return;
+    };
+    let Ok(path) = uri.to_file_path() else {
+        return;
+    };
+    let native = crate::diagnostics::compute(&text, &path);
+
+    let engine = kondo_state.lock().unwrap().clone();
+    let bin = engine
+        .bin()
+        .filter(|_| kondo::lints_file(&path))
+        .map(str::to_string);
+    let kondo = match bin {
+        Some(bin) => {
+            let _permit = KONDO_LIMIT.acquire().await;
+            let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
+            // Queueing behind the semaphore and then the subprocess can easily
+            // outlast the edit that started this pass — or the settings change
+            // that retired this engine. Either way the result is stale, and
+            // the re-lint that follows an engine change will publish the
+            // current one; the document version alone would not catch that,
+            // since a settings-triggered re-lint reuses the same version.
+            if documents.current_version(&uri) != Some(version)
+                || *kondo_state.lock().unwrap() != engine
+            {
+                return;
+            }
+            if let Err(e) = &result {
+                // Debug, not warn: a missing or wedged clj-kondo would
+                // otherwise log once per keystroke.
+                tracing::debug!("clj-kondo lint of {} failed: {}", path.display(), e);
+            }
+            result
+        }
+        // Not an error the user should see — just "clj-kondo has no say in this
+        // pass", which `merge` reads as "keep the native set".
+        None => Err("clj-kondo not in use".to_string()),
+    };
+
+    client
+        .publish_diagnostics(uri, crate::diagnostics::merge(native, kondo), Some(version))
+        .await;
+}
+
 pub struct Backend {
     pub client: Client,
     pub index: Arc<Index>,
@@ -813,6 +1204,11 @@ pub struct Backend {
     config_apply_lock: ConfigApplyLock,
     /// See [`ProgressState`].
     progress: ProgressState,
+    /// See [`SharedEditorKondo`].
+    editor_kondo: SharedEditorKondo,
+    /// See [`KondoState`] and [`KondoWarmer`]; `warmer.state` is the live
+    /// clj-kondo engine every lint pass reads.
+    kondo: KondoWarmer,
 }
 
 impl Backend {
@@ -829,6 +1225,8 @@ impl Backend {
             classpath_cli_lock: ClasspathCliLock::default(),
             config_apply_lock: ConfigApplyLock::default(),
             progress: ProgressState::default(),
+            editor_kondo: SharedEditorKondo::default(),
+            kondo: KondoWarmer::default(),
         }
     }
 
@@ -1054,6 +1452,7 @@ impl Backend {
         let cli_lock = self.classpath_cli_lock.clone();
         let apply_lock = self.config_apply_lock.clone();
         let progress = self.progress.clone();
+        let warmer = self.kondo.clone();
         tokio::spawn(async move {
             let _serial = apply_lock.lock().await;
 
@@ -1082,6 +1481,7 @@ impl Backend {
                 &generation,
                 &cli_lock,
                 &progress,
+                &warmer,
             )
             .await;
 
@@ -1156,19 +1556,59 @@ impl Backend {
             })
     }
 
-    /// Computes unresolved-namespace diagnostics from the live buffer and
-    /// publishes them for `uri`.
+    /// Re-resolves the clj-kondo engine and applies the consequences, off the
+    /// caller's critical path.
+    ///
+    /// `reprobe` re-runs discovery — only `.clj-pulse/config.edn` and the
+    /// editor layer carry `:kondo`, so a `.clj-kondo/config.edn` change skips
+    /// it. `force_relint` re-lints open buffers even when the engine is
+    /// unchanged, which is exactly that case: `.clj-kondo/config.edn` changes
+    /// what clj-kondo *reports* without changing which binary we run.
+    fn spawn_kondo_reload(&self, root: std::path::PathBuf, reprobe: bool, force_relint: bool) {
+        let client = self.client.clone();
+        let documents = self.documents.clone();
+        let editor_kondo = self.editor_kondo.clone();
+        let warmer = self.kondo.clone();
+        let projects_arc = self.projects.clone();
+        let state_arc = self.project_state.clone();
+        let generation = self.config_generation.clone();
+        let progress = self.progress.clone();
+        tokio::spawn(async move {
+            let engine_changed = reprobe
+                && probe_and_announce(&client, Some(&root), &editor_kondo, &warmer.state).await;
+            if engine_changed || force_relint {
+                relint_open_documents(&client, &documents, &warmer.state).await;
+            }
+            if engine_changed {
+                // Gaining clj-kondo mid-session must not require a re-index to
+                // warm: walk the already-resolved projects now. Idempotent —
+                // the warmed-set guard skips anything already scanned. At
+                // startup this may find no projects yet, which is why the
+                // indexing task warms too; whichever finishes last wins.
+                warm_kondo_caches(
+                    &client,
+                    &root,
+                    &projects_arc,
+                    &state_arc,
+                    &warmer,
+                    &generation,
+                    &progress,
+                )
+                .await;
+            }
+        });
+    }
+
+    /// Computes diagnostics from the live buffer and publishes them for `uri`.
     async fn lint_and_publish(&self, uri: Url, version: i32) {
-        let Some(text) = self.documents.text(&uri) else {
-            return;
-        };
-        let Ok(path) = uri.to_file_path() else {
-            return;
-        };
-        let diags = crate::diagnostics::compute(&text, &path);
-        self.client
-            .publish_diagnostics(uri, diags, Some(version))
-            .await;
+        lint_and_publish_doc(
+            &self.client,
+            &self.documents,
+            &self.kondo.state,
+            uri,
+            version,
+        )
+        .await;
     }
 }
 
@@ -1221,6 +1661,15 @@ impl LanguageServer for Backend {
                     .map(projects::parse_json)
                     .unwrap_or_default();
                 *self.editor_config.lock().unwrap() = editor_entries.clone();
+                *self.editor_kondo.lock().unwrap() = params
+                    .initialization_options
+                    .as_ref()
+                    .map(kondo::parse_config_json)
+                    .unwrap_or_default();
+
+                // Probe clj-kondo off the critical path: discovery spawns a
+                // process, and `initialize` must answer the editor promptly.
+                self.spawn_kondo_reload(root_path.clone(), true, false);
 
                 let index = self.index.clone();
                 let client = self.client.clone();
@@ -1231,6 +1680,7 @@ impl LanguageServer for Backend {
                 let cli_lock = self.classpath_cli_lock.clone();
                 let apply_lock = self.config_apply_lock.clone();
                 let progress = self.progress.clone();
+                let warmer = self.kondo.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
 
@@ -1280,6 +1730,7 @@ impl LanguageServer for Backend {
                         let cli_lock = cli_lock.clone();
                         let apply_lock = apply_lock.clone();
                         let progress = progress.clone();
+                        let warmer = warmer.clone();
                         let root = root_path.clone();
                         let resolved = resolved.clone();
                         tokio::spawn(async move {
@@ -1327,6 +1778,21 @@ impl LanguageServer for Backend {
                                 client.log_message(MessageType::WARNING, msg).await;
                                 client.send_notification::<LibrariesChanged>(()).await;
                             }
+
+                            // The classpath is now as resolved as it will get:
+                            // warm clj-kondo's cache from it. Paired with the
+                            // probe's own warm, so whichever of the two
+                            // finishes last does the work.
+                            warm_kondo_caches(
+                                &client,
+                                &root,
+                                &projects_arc,
+                                &state_arc,
+                                &warmer,
+                                &generation,
+                                &progress,
+                            )
+                            .await;
                         });
                     }
 
@@ -1473,9 +1939,14 @@ impl LanguageServer for Backend {
         };
         let entries = projects::parse_json(section);
         *self.editor_config.lock().unwrap() = entries;
+        // The push replaces the whole editor layer, so both keys are read from
+        // every payload — a `{projects}`-only push would erase `:kondo`.
+        *self.editor_kondo.lock().unwrap() = kondo::parse_config_json(section);
         let Some(root) = self.root.lock().unwrap().clone() else {
             return;
         };
+
+        self.spawn_kondo_reload(root.clone(), true, false);
 
         let index = self.index.clone();
         let client = self.client.clone();
@@ -1487,6 +1958,7 @@ impl LanguageServer for Backend {
         let cli_lock = self.classpath_cli_lock.clone();
         let apply_lock = self.config_apply_lock.clone();
         let progress = self.progress.clone();
+        let warmer = self.kondo.clone();
         tokio::spawn(async move {
             // Serialize whole applications: a slower, staler task must not
             // finish after — and overwrite — a newer one. (The editor layer
@@ -1518,6 +1990,7 @@ impl LanguageServer for Backend {
                 &generation,
                 &cli_lock,
                 &progress,
+                &warmer,
             )
             .await;
         });
@@ -1709,6 +2182,19 @@ impl LanguageServer for Backend {
 
         let classpath_changed = !manifest_paths.is_empty() || !cpcache_paths.is_empty();
         let source_paths_changed = !manifest_paths.is_empty();
+
+        // Either config file changes what gets published, independently of the
+        // re-index below. They differ in how: `:kondo` lives only in
+        // `.clj-pulse/config.edn`, so only that file re-probes — but
+        // `.clj-kondo/config.edn` sets linter levels and `:lint-as`, which
+        // change what clj-kondo *reports* on the next spawn. So either file
+        // re-lints every open buffer, or squiggles stay stale until the user
+        // happens to type in the file.
+        if config_changed {
+            if let Some(root) = self.root.lock().unwrap().clone() {
+                self.spawn_kondo_reload(root, pulse_config_changed, true);
+            }
+        }
         if classpath_changed || config_changed {
             let root = self.root.lock().unwrap().clone();
             if let Some(root) = root {
@@ -1722,6 +2208,7 @@ impl LanguageServer for Backend {
                 let cli_lock = self.classpath_cli_lock.clone();
                 let apply_lock = self.config_apply_lock.clone();
                 let progress = self.progress.clone();
+                let warmer = self.kondo.clone();
                 tokio::spawn(async move {
                     // Serialize with other config-application tasks (see
                     // `ConfigApplyLock`).
@@ -1806,6 +2293,7 @@ impl LanguageServer for Backend {
                             &generation,
                             &cli_lock,
                             &progress,
+                            &warmer,
                         )
                         .await
                     } else {
@@ -1886,19 +2374,13 @@ impl LanguageServer for Backend {
         // the sleep, so bursts of keystrokes collapse to one diagnostic pass.
         let documents = self.documents.clone();
         let client = self.client.clone();
+        let kondo_state = self.kondo.state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS)).await;
             if documents.current_version(&uri) != Some(version) {
                 return;
             }
-            let Some(text) = documents.text(&uri) else {
-                return;
-            };
-            let Ok(path) = uri.to_file_path() else {
-                return;
-            };
-            let diags = crate::diagnostics::compute(&text, &path);
-            client.publish_diagnostics(uri, diags, Some(version)).await;
+            lint_and_publish_doc(&client, &documents, &kondo_state, uri, version).await;
         });
     }
 

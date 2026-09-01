@@ -61,6 +61,16 @@ pub fn load(root: &Path) -> ExtractConfig {
     merge(kondo_pairs, pulse_pairs)
 }
 
+/// Loads the `:kondo` overrides from the project's `.clj-pulse/config.edn`.
+/// Missing or unparseable files contribute nothing, so the editor layer and
+/// the defaults decide on their own.
+pub fn load_kondo(root: &Path) -> kondo::KondoOverride {
+    std::fs::read_to_string(root.join(".clj-pulse").join("config.edn"))
+        .ok()
+        .map(|src| kondo::parse_config_edn(&src))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

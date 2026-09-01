@@ -1,0 +1,50 @@
+#!/bin/sh
+# A stand-in for the real clj-kondo binary, put on the server's PATH by the
+# e2e harness (`LspClient::start_with_kondo`). The suite must never depend on
+# a clj-kondo being installed on the host, and must never wait on a real JVM.
+#
+# It answers the three shapes clj-pulse invokes:
+#   --version       the discovery probe
+#   --dependencies  classpath cache warming; records argv for the test
+#   --lint -        a buffer lint, answered from markers found on stdin
+#
+# Findings are pinned to row 4, cols 4..17 — the `helpers/greet` call on the
+# fourth line of the kondo_project fixture files.
+
+for arg in "$@"; do
+  case "$arg" in
+    --version)
+      echo "clj-kondo v0.0.0-fake"
+      exit 0
+      ;;
+    --dependencies)
+      # Cache warming produces no findings; record the invocation instead so
+      # the test can assert on the flags and the classpath it was handed.
+      if [ -n "$FAKE_KONDO_LOG" ]; then
+        echo "$@" >> "$FAKE_KONDO_LOG"
+      fi
+      exit 0
+      ;;
+  esac
+done
+
+# A buffer lint: the live text arrives on stdin, and a marker in it selects
+# the canned response. Draining stdin also proves clj-pulse closed it.
+source=$(cat)
+
+case "$source" in
+  *kondo-unresolved-ns-here*)
+    # Exit 2: warnings found. A success code, like 0 and 3.
+    printf '%s\n' '{"findings":[{"type":"unresolved-namespace","level":"warning","filename":"-","row":4,"col":4,"end-row":4,"end-col":17,"langs":[],"message":"Unresolved namespace helpers. Are you missing a require?"}],"summary":{"error":0,"warning":1,"info":0}}'
+    exit 2
+    ;;
+  *kondo-finding-here*)
+    # Exit 3: errors found. Also a success code.
+    printf '%s\n' '{"findings":[{"type":"unresolved-symbol","level":"error","filename":"-","row":4,"col":4,"end-row":4,"end-col":17,"langs":[],"message":"Unresolved symbol: helpers/greet"}],"summary":{"error":1,"warning":0,"info":0}}'
+    exit 3
+    ;;
+  *)
+    printf '%s\n' '{"findings":[],"summary":{"error":0,"warning":0,"info":0}}'
+    exit 0
+    ;;
+esac

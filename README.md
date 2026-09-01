@@ -33,7 +33,9 @@ Language features:
 - **Workspace symbols** - fuzzy symbol search across the whole project.
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
   namespace isn't required yet.
-- **Diagnostics** - unresolved-namespace warnings, updated live as you type.
+- **Diagnostics** - unresolved-namespace, unused-namespace, and
+  duplicate-require warnings, updated live as you type; clj-kondo's full
+  linter set as well when the binary is installed (see [Linting](#linting)).
 - **Indent-on-Enter** - pressing Enter indents the new line to the structurally
   correct column (`textDocument/onTypeFormatting`): vectors, maps, and
   non-symbol-headed lists align to their first element; symbol-headed lists get
@@ -65,6 +67,68 @@ Clojure & project support:
 > projects index only direct dependencies that declare an explicit version and
 > already live in `~/.m2`; transitive deps and parent-inherited versions are not
 > indexed yet. See [docs/MEMORY.md](docs/MEMORY.md).
+
+## Linting
+
+clj-pulse lints in two tiers.
+
+The **native** tier always runs. It is built into the server, needs nothing
+installed, and reports three things: `unresolved-namespace`,
+`unused-namespace`, and `duplicate-require`. It is instant, index-free, and it
+powers the "Add require" and "Clean namespace" quickfixes.
+
+The **clj-kondo** tier runs when a `clj-kondo` binary is on your `PATH`. Then
+clj-pulse spawns it once per lint pass, feeds it the unsaved buffer, and
+publishes its findings alongside the native ones with `source: "clj-kondo"`.
+That buys you clj-kondo's whole linter set (unresolved symbols, arities, syntax
+errors, unused bindings, and the rest) and your existing
+`.clj-kondo/config.edn`: linter levels, `:lint-as`, and excludes all apply
+exactly as they do on the command line. The config is resolved from the file
+being linted, so in a monorepo each subproject's own `.clj-kondo/config.edn`
+wins over the workspace root's.
+
+When a clj-kondo run succeeds it owns the three codes above, and the native
+copies are dropped for that pass so no squiggle appears twice. When clj-kondo
+is missing, disabled, slow, or broken, the native diagnostics are published
+unchanged. Losing the binary never loses your diagnostics.
+
+Install clj-kondo from [its own instructions](https://github.com/clj-kondo/clj-kondo/blob/master/doc/install.md),
+then restart nothing: clj-pulse re-checks on every config change.
+
+### Cross-file linters need a `.clj-kondo` directory
+
+clj-kondo's cross-file linters (`invalid-arity`, `unresolved-var`) read a cache
+of the signatures your project and its dependencies define. It writes that
+cache into a `.clj-kondo` directory, and it never creates one itself. So run
+this once per project:
+
+```bash
+mkdir .clj-kondo
+```
+
+With the directory present, clj-pulse scans your resolved classpath in the
+background the first time it indexes the project, so library arities are known
+without opening a single file. Editors that support work-done progress show
+this as "Linting classpath (clj-kondo)". Without the directory, buffer linting
+still works; only the cross-file linters stay quiet.
+
+### Settings
+
+```clojure
+;; .clj-pulse/config.edn - defaults made explicit
+{:kondo {:enabled true
+         :path "clj-kondo"}}
+```
+
+`:enabled` means "use clj-kondo when it is found", not "require it". Set it to
+`false` to stay on native lints only; clj-pulse then never probes for the
+binary or spawns it. `:path` is passed to the OS as-is, so a bare name is
+resolved through `PATH` and an absolute path is used verbatim. Both keys apply
+live, with no restart.
+
+The VS Code extension exposes the same two settings as
+`clojurePulse.kondo.enabled` and `clojurePulse.kondo.path`, and shows which
+tier is active in its status-bar tooltip.
 
 ## Installation
 
@@ -129,7 +193,8 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 
 clj-pulse reads an optional `.clj-pulse/config.edn` at the workspace root and
 falls back to `.clj-kondo/config.edn` where the keys overlap. It understands
-two keys.
+three keys: `:projects` and `:lint-as`, below, and `:kondo`, documented under
+[Linting](#settings).
 
 `:projects` controls per-project classpath resolution. clj-pulse detects every
 directory holding a `deps.edn`, `project.clj`, or `lgx.edn` (up to four levels

@@ -11,6 +11,17 @@ use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Which `clj-kondo`, if any, the server under test may find.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kondo {
+    /// Kill-switch on: the bridge is inert, as for every non-kondo test.
+    Off,
+    /// The committed fake, first on PATH.
+    Fake,
+    /// Whatever the host has installed (ignored tests only).
+    Real,
+}
+
 struct LspClient {
     child: Child,
     stdin: ChildStdin,
@@ -29,16 +40,47 @@ impl LspClient {
     /// Like [`start`] but with stage-3 classpath resolution left enabled —
     /// only for tests that exercise the `clojure -Spath` flow.
     fn start_with_classpath_cli(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], false)
+        Self::spawn(project_root, &[], false, Kondo::Off)
     }
 
     /// Like [`start`] but sets extra environment variables on the server
     /// process (e.g. `LGX_HOME` for hermetic lgx dep resolution).
     fn start_with_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
-        Self::spawn(project_root, envs, true)
+        Self::spawn(project_root, envs, true, Kondo::Off)
     }
 
-    fn spawn(project_root: &Path, envs: &[(&str, &Path)], disable_classpath_cli: bool) -> Self {
+    /// Like [`start`] but with the clj-kondo bridge live, answered by the
+    /// committed fake binary rather than whatever the host happens to have
+    /// installed — so these tests assert on fixed findings and never wait on
+    /// a JVM.
+    fn start_with_kondo(project_root: &Path) -> Self {
+        Self::spawn(project_root, &[], true, Kondo::Fake)
+    }
+
+    /// [`start_with_kondo`] with extra environment variables — `FAKE_KONDO_LOG`,
+    /// the file the fake records its cache-warming invocations in.
+    fn start_with_kondo_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
+        Self::spawn(project_root, envs, true, Kondo::Fake)
+    }
+
+    /// Like [`start_with_kondo`] but resolving `clj-kondo` from the host's own
+    /// PATH — the real binary, for the ignored smoke test.
+    fn start_with_real_kondo(project_root: &Path) -> Self {
+        Self::spawn(project_root, &[], true, Kondo::Real)
+    }
+
+    /// The directory holding the fake `clj-kondo`, prepended to the server's
+    /// PATH by [`start_with_kondo`].
+    fn fake_kondo_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-clj-kondo")
+    }
+
+    fn spawn(
+        project_root: &Path,
+        envs: &[(&str, &Path)],
+        disable_classpath_cli: bool,
+        kondo: Kondo,
+    ) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
         cmd.current_dir(project_root)
             .stdin(Stdio::piped())
@@ -52,6 +94,26 @@ impl LspClient {
             // Strip an inherited kill-switch too — the stage-3 tests must not
             // be silently neutered by the parent environment.
             cmd.env_remove("CLJ_PULSE_DISABLE_CLASSPATH_CLI");
+        }
+        match kondo {
+            // No fixture may depend on a clj-kondo installed on the host: the
+            // whole suite would then behave differently per machine.
+            Kondo::Off => {
+                cmd.env("CLJ_PULSE_DISABLE_KONDO", "1");
+            }
+            // Discovery goes through PATH, so putting the fake first is all it
+            // takes — the server has no test-only code path.
+            Kondo::Fake => {
+                cmd.env_remove("CLJ_PULSE_DISABLE_KONDO");
+                let inherited = std::env::var_os("PATH").unwrap_or_default();
+                let mut dirs = vec![Self::fake_kondo_dir()];
+                dirs.extend(std::env::split_paths(&inherited));
+                cmd.env("PATH", std::env::join_paths(dirs).unwrap());
+            }
+            // The host's own binary, inherited PATH untouched.
+            Kondo::Real => {
+                cmd.env_remove("CLJ_PULSE_DISABLE_KONDO");
+            }
         }
         for (key, value) in envs {
             cmd.env(key, value);
@@ -417,6 +479,21 @@ impl LspClient {
                 "context": { "diagnostics": [diagnostic.clone()] }
             }),
         )
+    }
+
+    /// Drops every stashed server message, so a following `wait_for_*` can
+    /// only be satisfied by something that arrives afterwards. Needed when a
+    /// test asserts on a *second* publish for a document it already saw one
+    /// for — otherwise the stash answers instantly with the stale one.
+    fn clear_notifications(&mut self) {
+        // Drain what is already in flight before dropping the stash: a message
+        // sitting unread in the channel is exactly as stale as one already
+        // stashed, and would otherwise satisfy the next `wait_for_*`. Draining
+        // through `stash` keeps answering server→client requests.
+        while let Ok(msg) = self.incoming.try_recv() {
+            self.stash(msg);
+        }
+        self.notifications.clear();
     }
 
     /// Waits for a `textDocument/publishDiagnostics` whose uri ends with
@@ -4766,4 +4843,319 @@ fn test_e2e_rescan_picks_up_new_gitignored_subproject() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+// --- clj-kondo diagnostics bridge -------------------------------------------
+//
+// These drive the committed fake `clj-kondo` (tests/fixtures/fake-clj-kondo),
+// put on the server's PATH by `start_with_kondo`. The `kondo_project` fixture's
+// source files each carry a marker the fake recognises, and its findings are
+// pinned to the `helpers/greet` call on line 4 of each file.
+
+/// The kondo fixture, plus the `.clj-kondo` directory clj-kondo requires
+/// before it will read a config or write a cache. It is created here rather
+/// than committed because the repo's `.gitignore` excludes `.clj-kondo`.
+fn setup_kondo_project() -> tempfile::TempDir {
+    let tmp = setup_named("kondo_project");
+    std::fs::create_dir_all(tmp.path().join(".clj-kondo")).unwrap();
+    std::fs::write(tmp.path().join(".clj-kondo/config.edn"), "{}\n").unwrap();
+    tmp
+}
+
+/// The diagnostics of the first publish for `uri_suffix`, as (code, source)
+/// pairs — what these tests actually assert on.
+fn diagnostic_codes(params: &Value) -> Vec<(String, String)> {
+    params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|d| {
+            (
+                d["code"].as_str().unwrap_or_default().to_string(),
+                d["source"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn test_e2e_kondo_findings_published_and_native_codes_ceded() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    // The probe runs off the initialize critical path, so wait for it — a
+    // didOpen that beats it would legitimately publish native-only.
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    // app.clj carries the marker AND an unresolved `helpers/greet` usage, so
+    // both engines have something to say about it.
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "clj-kondo owns unresolved-namespace, so the native one must not \
+         appear beside its finding"
+    );
+
+    // The finding maps to the `helpers/greet` call: line 4 (0-based 3),
+    // characters 3..16.
+    let range = &params["diagnostics"][0]["range"];
+    assert_eq!(range["start"], json!({ "line": 3, "character": 3 }));
+    assert_eq!(range["end"], json!({ "line": 3, "character": 16 }));
+    assert_eq!(params["diagnostics"][0]["severity"], json!(1)); // ERROR
+}
+
+#[test]
+fn test_e2e_without_kondo_publishes_native_lints_only() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // Plain `start`: the harness kill-switch is on, exactly as for every other
+    // test in this file — behavior must be what it was before the bridge.
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("linting: native lints only");
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())]
+    );
+}
+
+#[test]
+fn test_e2e_kondo_disabled_by_config_publishes_native_only() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // The fake is on PATH, but the project turns clj-kondo off — it must never
+    // be probed or spawned.
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:enabled false}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo disabled — linting: native lints only");
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())]
+    );
+}
+
+#[test]
+fn test_e2e_add_require_action_binds_to_a_kondo_diagnostic() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    // consumer.clj's marker makes the fake emit `unresolved-namespace` — the
+    // code the add-require lightbulb keys on. It matches by code, not source,
+    // so the fix must still be offered for a clj-kondo-sourced diagnostic.
+    let consumer = root.join("src/consumer.clj");
+    client.did_open(&consumer);
+
+    let params = client.wait_for_diagnostics("/src/consumer.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+    let unresolved = diags
+        .iter()
+        .find(|d| d["source"] == json!("clj-kondo"))
+        .expect("expected a clj-kondo diagnostic");
+    assert_eq!(unresolved["code"], json!("unresolved-namespace"));
+
+    let result = client.code_action_for_diagnostic(&consumer, unresolved);
+    let actions = result.as_array().expect("code action array");
+    let action = actions
+        .iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .map(|t| t.contains("[kondo.helpers :as helpers]"))
+                .unwrap_or(false)
+        })
+        .expect("expected the add-require action for a clj-kondo diagnostic");
+    assert_eq!(action["kind"], json!("quickfix"));
+    assert_eq!(action["diagnostics"][0]["source"], json!("clj-kondo"));
+}
+
+#[test]
+fn test_e2e_disabling_kondo_live_relints_open_documents() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(params["diagnostics"][0]["source"], json!("clj-kondo"));
+
+    // Turning clj-kondo off must take effect without an edit or a restart:
+    // the toggle re-probes and re-lints every open buffer.
+    client.clear_notifications();
+    let config = root.join(".clj-pulse/config.edn");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "{:kondo {:enabled false}}\n").unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", config.display()), "type": 1 }] }),
+    );
+    client.wait_for_log("clj-kondo disabled");
+
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())],
+        "the native set must come back once clj-kondo is switched off"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_cache_warmed_from_the_resolved_classpath() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // A stage-2 classpath: a `.cpcache` naming one existing absolute entry
+    // (an absolute path is what `discover` treats as a live cache).
+    let lib = root.join("libs/some-lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(root.join(".cpcache")).unwrap();
+    std::fs::write(
+        root.join(".cpcache/fixture.cp"),
+        format!("src:{}", lib.display()),
+    )
+    .unwrap();
+
+    // The fake records every `--dependencies` invocation here.
+    let log = root.join("kondo-warm.log");
+    let mut client = LspClient::start_with_kondo_env(&root, &[("FAKE_KONDO_LOG", log.as_path())]);
+    client.initialize(&root);
+
+    client.wait_for_log("clj-kondo cache warm complete");
+
+    let recorded = std::fs::read_to_string(&log).expect("the fake should have logged a warm run");
+    assert!(
+        recorded.contains("--dependencies"),
+        "warming must populate the cache without reporting findings: {recorded}"
+    );
+    assert!(
+        recorded.contains("--parallel"),
+        "warming should scan in parallel: {recorded}"
+    );
+    assert!(
+        recorded.contains(&lib.display().to_string()),
+        "the resolved classpath must be what gets scanned: {recorded}"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_cache_not_warmed_without_a_clj_kondo_dir() {
+    // clj-kondo never creates `.clj-kondo`, and without it a dependency scan
+    // runs for minutes and persists nothing — so it must not run at all.
+    let project = setup_named("kondo_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let lib = root.join("libs/some-lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(root.join(".cpcache")).unwrap();
+    std::fs::write(
+        root.join(".cpcache/fixture.cp"),
+        format!("src:{}", lib.display()),
+    )
+    .unwrap();
+
+    let log = root.join("kondo-warm.log");
+    let mut client = LspClient::start_with_kondo_env(&root, &[("FAKE_KONDO_LOG", log.as_path())]);
+    client.initialize(&root);
+    // Sync on something that necessarily follows the indexing task, then
+    // assert the warm never happened.
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+    client.wait_for_log("library indexing complete");
+
+    // A buffer lint still works — only warming is gated on the directory.
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(params["diagnostics"][0]["source"], json!("clj-kondo"));
+
+    assert!(
+        !log.exists(),
+        "no .clj-kondo dir means no dependency scan, got: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+/// Whether the host has a usable `clj-kondo` for the real-binary smoke test.
+fn real_clj_kondo_available() -> bool {
+    std::process::Command::new("clj-kondo")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// The bridge end to end against a real clj-kondo, not the fake: proves the
+/// argv, the stdin feed, the exit codes, and the JSON shape still match what a
+/// released clj-kondo actually does. Requires the binary, so it is ignored by
+/// default: `bb e2e-real-kondo`.
+#[test]
+#[ignore = "requires a real clj-kondo binary on PATH"]
+fn test_e2e_real_kondo_publishes_findings() {
+    if !real_clj_kondo_available() {
+        eprintln!("SKIP: no clj-kondo on PATH — install it to run this test");
+        return;
+    }
+
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // An unresolved *symbol*: no native lint reports this, so seeing it proves
+    // the finding came from clj-kondo and not from clj-pulse's own analysis.
+    let smoke = root.join("src/smoke.clj");
+    std::fs::write(
+        &smoke,
+        "(ns smoke)\n\n(defn run []\n  (definitely-not-defined 1))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_real_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("linting: clj-kondo + native");
+    client.did_open(&smoke);
+
+    let params = client.wait_for_diagnostics("/src/smoke.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+    let finding = diags
+        .iter()
+        .find(|d| d["code"] == json!("unresolved-symbol"))
+        .unwrap_or_else(|| panic!("no unresolved-symbol from clj-kondo: {params}"));
+    assert_eq!(finding["source"], json!("clj-kondo"));
+    assert!(
+        finding["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("definitely-not-defined"),
+        "unexpected message: {finding}"
+    );
 }

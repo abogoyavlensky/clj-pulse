@@ -77,6 +77,43 @@ pub fn compute(source: &str, path: &Path) -> Vec<Diagnostic> {
     diags
 }
 
+/// The native codes clj-kondo also emits. When a clj-kondo run succeeds it
+/// owns these — publishing both sets would double every squiggle, with two
+/// slightly different messages.
+const KONDO_OWNED_CODES: [&str; 3] = [
+    "unresolved-namespace",
+    "unused-namespace",
+    "duplicate-require",
+];
+
+/// Combines this pass's native diagnostics with clj-kondo's.
+///
+/// A successful clj-kondo run (`Ok`, including a clean `Ok(vec![])`) takes
+/// ownership of every code it can emit, so the native diagnostics carrying
+/// those codes are dropped for this pass. The rule is stated per-code rather
+/// than "drop everything native" so a future native lint clj-kondo has no
+/// equivalent for keeps showing up beside its findings.
+///
+/// Any failure — kondo absent, disabled, timed out, crashed — is `Err`, and
+/// the native set is published unchanged. Diagnostics never silently vanish
+/// because a subprocess had a bad day.
+pub fn merge(native: Vec<Diagnostic>, kondo: Result<Vec<Diagnostic>, String>) -> Vec<Diagnostic> {
+    let Ok(kondo) = kondo else {
+        return native;
+    };
+    let mut merged = kondo;
+    merged.extend(native.into_iter().filter(|d| !is_kondo_owned(d)));
+    merged
+}
+
+/// Whether a native diagnostic carries a code clj-kondo also reports.
+fn is_kondo_owned(diagnostic: &Diagnostic) -> bool {
+    matches!(
+        &diagnostic.code,
+        Some(NumberOrString::String(code)) if KONDO_OWNED_CODES.contains(&code.as_str())
+    )
+}
+
 /// Java classes (`Math`, `java.util.Date`, `clojure.lang.RT`) and the cljs
 /// `js` global are not namespaces and never need a require. Clojure namespaces
 /// are lowercase by convention, so an uppercase final segment marks a class.
@@ -436,5 +473,94 @@ mod tests {
     #[test]
     fn no_duplicate_for_single_require() {
         assert!(dups("(ns my.app\n  (:require [c.d :as d]))\n(d/x)\n").is_empty());
+    }
+
+    // --- native / clj-kondo ownership merge -------------------------------
+
+    fn diag(code: &str, source: &str) -> Diagnostic {
+        Diagnostic {
+            code: Some(NumberOrString::String(code.to_string())),
+            source: Some(source.to_string()),
+            message: format!("{source}: {code}"),
+            ..Default::default()
+        }
+    }
+
+    fn merged_codes(
+        native: Vec<Diagnostic>,
+        kondo: Result<Vec<Diagnostic>, String>,
+    ) -> Vec<String> {
+        merge(native, kondo)
+            .into_iter()
+            .map(|d| match d.code {
+                Some(NumberOrString::String(c)) => c,
+                other => panic!("unexpected code {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn successful_kondo_run_cedes_the_codes_it_owns() {
+        // Every native code today is one clj-kondo also emits, so a successful
+        // run publishes clj-kondo's findings alone — no doubled squiggles.
+        let native = vec![
+            diag("unresolved-namespace", "clj-pulse"),
+            diag("unused-namespace", "clj-pulse"),
+            diag("duplicate-require", "clj-pulse"),
+        ];
+        let kondo = vec![diag("unresolved-namespace", "clj-kondo")];
+        assert_eq!(
+            merged_codes(native, Ok(kondo)),
+            vec!["unresolved-namespace".to_string()]
+        );
+    }
+
+    #[test]
+    fn native_codes_kondo_does_not_cover_survive_a_successful_run() {
+        // The rule is per-code, so a future native-only lint keeps showing up.
+        let native = vec![
+            diag("unresolved-namespace", "clj-pulse"),
+            diag("some-future-native-lint", "clj-pulse"),
+        ];
+        assert_eq!(
+            merged_codes(native, Ok(vec![diag("invalid-arity", "clj-kondo")])),
+            vec![
+                "invalid-arity".to_string(),
+                "some-future-native-lint".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clean_kondo_run_still_cedes_ownership() {
+        // `Ok(vec![])` means clj-kondo looked and found nothing — the native
+        // squiggle it disagrees with must go, or the user can never clear it.
+        assert!(
+            merged_codes(vec![diag("unresolved-namespace", "clj-pulse")], Ok(vec![])).is_empty()
+        );
+    }
+
+    #[test]
+    fn a_failed_kondo_run_leaves_the_native_set_alone() {
+        // Absent, disabled, timed out, crashed: all the same here. Losing
+        // diagnostics because a subprocess failed would be worse than nothing.
+        let native = vec![
+            diag("unresolved-namespace", "clj-pulse"),
+            diag("unused-namespace", "clj-pulse"),
+        ];
+        assert_eq!(
+            merged_codes(native, Err("clj-kondo timed out".to_string())),
+            vec![
+                "unresolved-namespace".to_string(),
+                "unused-namespace".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_native_diagnostic_without_a_code_is_never_dropped() {
+        let mut bare = diag("x", "clj-pulse");
+        bare.code = None;
+        assert_eq!(merge(vec![bare], Ok(vec![])).len(), 1);
     }
 }
