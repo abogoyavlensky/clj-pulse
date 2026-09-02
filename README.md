@@ -208,8 +208,9 @@ Clojure Pulse bundles a stripped copy and sends this automatically. Any other
 client can download the official export from
 <https://clojuredocs.org/clojuredocs-export.json> and point at it: the server
 reads the export's own shape, every field optional. The file is read on the
-first request, and without a configured path the request answers with an
-error rather than an empty entry. Notes are never served — ClojureDocs states
+first request that resolves or names a var; without a configured path such a
+request answers with an error rather than an empty entry (a position with no
+symbol under it still answers `{"symbol": null, "entry": null}`). Notes are never served — ClojureDocs states
 a license for examples (CC0) but none for notes.
 
 ## Configuration
