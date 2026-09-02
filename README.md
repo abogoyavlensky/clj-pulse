@@ -20,6 +20,12 @@ Language features:
   and source-directory deps (git deps in `~/.gitlibs`, `:local/root`).
 - **Autocomplete** - project symbols and `clojure.core` builtins.
 - **Hover** - docstrings and signatures for the symbol under the cursor.
+- **ClojureDocs** - the `clojurePulse/clojureDocs` request returns the
+  [ClojureDocs](https://clojuredocs.org) entry (docstring, arglists, community
+  examples, see-alsos) for the symbol at a position, resolved through the same
+  alias-aware lookup as hover, or for a given `ns/name`. Served from a local
+  export file the editor points at, never the network — see
+  [ClojureDocs data](#clojuredocs-data).
 - **Signature help** - argument hints while typing a call (after `(` and spaces).
 - **Find references** - locate every usage of a symbol across the project.
 - **Rename** - rename a project symbol and all of its references.
@@ -188,6 +194,23 @@ Install [Clojure](https://zed.dev/extensions/clojure#details) extension, then ad
 
 > [!NOTE]
 > Currently, Zed editor, `clj-pulse` works only with project's own files, no libs inspection yet.
+
+### ClojureDocs data
+
+`clojurePulse/clojureDocs` reads a local copy of the ClojureDocs export. The
+editor passes its path at startup:
+
+```json
+{ "initializationOptions": { "clojuredocs": { "path": "/path/to/clojuredocs-export.json" } } }
+```
+
+Clojure Pulse bundles a stripped copy and sends this automatically. Any other
+client can download the official export from
+<https://clojuredocs.org/clojuredocs-export.json> and point at it: the server
+reads the export's own shape, every field optional. The file is read on the
+first request, and without a configured path the request answers with an
+error rather than an empty entry. Notes are never served — ClojureDocs states
+a license for examples (CC0) but none for notes.
 
 ## Configuration
 
