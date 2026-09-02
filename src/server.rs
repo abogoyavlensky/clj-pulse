@@ -5,6 +5,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::classpath;
+use crate::clojuredocs;
 use crate::config;
 use crate::document::DocumentStore;
 use crate::handlers;
@@ -798,6 +799,19 @@ pub(crate) struct IgnoredFormsParams {
     uri: String,
 }
 
+/// `clojurePulse/clojureDocs` params: the word at a position (resolved like
+/// hover), or a `symbol` (`ns/name`) as the panel's see-also links send.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClojureDocsParams {
+    #[serde(default)]
+    text_document: Option<TextDocumentIdentifier>,
+    #[serde(default)]
+    position: Option<Position>,
+    #[serde(default)]
+    symbol: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct LibraryEntriesParams {
     path: String,
@@ -839,6 +853,19 @@ pub(crate) struct LintStatusParams {
 /// `didChangeConfiguration`), kept so file-config reloads re-merge it — the
 /// `SharedEditorConfig` pattern, for the other half of the settings.
 type SharedEditorKondo = Arc<std::sync::Mutex<kondo::KondoOverride>>;
+
+/// The ClojureDocs export the editor pointed at
+/// (`initializationOptions.clojuredocs.path`), loaded on the first
+/// `clojurePulse/clojureDocs` request rather than at startup. `failed` keeps a
+/// broken file from being re-read and re-logged on every request; the error
+/// itself still reaches the editor each time.
+#[derive(Default)]
+struct ClojureDocsState {
+    path: Option<std::path::PathBuf>,
+    loaded: Option<Arc<clojuredocs::ClojureDocs>>,
+    failed: bool,
+}
+type SharedClojureDocs = Arc<std::sync::Mutex<ClojureDocsState>>;
 
 /// What the last clj-kondo probe established: the resolved config plus the
 /// version found, if any. `found: Some(_)` is the single condition for
@@ -1209,6 +1236,8 @@ pub struct Backend {
     /// See [`KondoState`] and [`KondoWarmer`]; `warmer.state` is the live
     /// clj-kondo engine every lint pass reads.
     kondo: KondoWarmer,
+    /// See [`ClojureDocsState`].
+    clojuredocs: SharedClojureDocs,
 }
 
 impl Backend {
@@ -1227,6 +1256,7 @@ impl Backend {
             progress: ProgressState::default(),
             editor_kondo: SharedEditorKondo::default(),
             kondo: KondoWarmer::default(),
+            clojuredocs: SharedClojureDocs::default(),
         }
     }
 
@@ -1323,6 +1353,82 @@ impl Backend {
             return Ok(Vec::new());
         };
         Ok(handlers::ignored_forms::ignored_form_ranges(&text))
+    }
+
+    /// clj-pulse custom `clojurePulse/clojureDocs`: the ClojureDocs entry for
+    /// the word at a position (resolved like hover) or for a given `ns/name`.
+    /// Nothing under the cursor → `{symbol: null, entry: null}`; a var without
+    /// an entry → `{symbol, entry: null}`. Errors only when no data file is
+    /// configured or it cannot be read, so the editor can say why.
+    pub async fn clojure_docs(
+        &self,
+        params: ClojureDocsParams,
+    ) -> Result<handlers::clojuredocs::DocsResult> {
+        let fqn = match params.symbol {
+            Some(symbol) => Some(symbol),
+            None => self.clojure_docs_var_at(params.text_document, params.position),
+        };
+        let Some(fqn) = fqn else {
+            return Ok(handlers::clojuredocs::DocsResult {
+                symbol: None,
+                entry: None,
+            });
+        };
+        let docs = self
+            .clojure_docs_data()
+            .map_err(|message| tower_lsp::jsonrpc::Error {
+                code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                message: message.into(),
+                data: None,
+            })?;
+        Ok(handlers::clojuredocs::lookup(&docs, &fqn))
+    }
+
+    /// The `ns/name` the word at `position` means, from the open document
+    /// and the file's namespace — the hover resolution path.
+    fn clojure_docs_var_at(
+        &self,
+        text_document: Option<TextDocumentIdentifier>,
+        position: Option<Position>,
+    ) -> Option<String> {
+        let uri = text_document?.uri;
+        let word = self.documents.word_at(&uri, position?)?;
+        let path = crate::uri::to_index_path(&uri)?;
+        let current_ns = self.index.file_ns(&path).unwrap_or_default();
+        handlers::clojuredocs::resolve_var(&self.index, &word, &current_ns)
+    }
+
+    /// The loaded export, reading the configured file on first use.
+    fn clojure_docs_data(&self) -> std::result::Result<Arc<clojuredocs::ClojureDocs>, String> {
+        let mut state = self.clojuredocs.lock().unwrap();
+        if let Some(docs) = &state.loaded {
+            return Ok(docs.clone());
+        }
+        let Some(path) = state.path.clone() else {
+            return Err(
+                "ClojureDocs data not configured (initializationOptions.clojuredocs.path)"
+                    .to_string(),
+            );
+        };
+        match clojuredocs::load(&path) {
+            Ok(docs) => {
+                tracing::info!(
+                    "clojuredocs: loaded {} vars from {}",
+                    docs.len(),
+                    path.display()
+                );
+                let docs = Arc::new(docs);
+                state.loaded = Some(docs.clone());
+                Ok(docs)
+            }
+            Err(e) => {
+                if !state.failed {
+                    tracing::warn!("clojuredocs: {:#}", e);
+                    state.failed = true;
+                }
+                Err(format!("ClojureDocs data could not be loaded: {:#}", e))
+            }
+        }
     }
 
     /// clj-pulse custom `clojurePulse/externalLibraries`: the resolved external
@@ -1648,6 +1754,16 @@ impl LanguageServer for Backend {
                 .unwrap_or(false),
             std::sync::atomic::Ordering::Relaxed,
         );
+
+        // The ClojureDocs file is read lazily, so only its path is kept here;
+        // it needs no workspace root.
+        *self.clojuredocs.lock().unwrap() = ClojureDocsState {
+            path: params
+                .initialization_options
+                .as_ref()
+                .and_then(clojuredocs::path_from_init_options),
+            ..Default::default()
+        };
 
         if let Some(root_path) = initialize_root(&params) {
             {
