@@ -54,11 +54,22 @@ impl ClojureDocs {
 }
 
 // The export's shape. Everything defaults so a stripped copy, the raw
-// download, and future fields all parse; unknown fields are ignored.
+// download, and future fields all parse; unknown fields are ignored. The raw
+// export writes `null` (not an absent key) for empty collections on hundreds
+// of vars, which `#[serde(default)]` alone does not cover — hence `null_vec`.
+
+fn null_vec<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Export {
+    #[serde(deserialize_with = "null_vec")]
     vars: Vec<RawVar>,
 }
 
@@ -68,11 +79,13 @@ struct RawVar {
     ns: Option<String>,
     name: Option<String>,
     doc: Option<String>,
+    #[serde(deserialize_with = "null_vec")]
     arglists: Vec<String>,
     added: Option<String>,
     href: Option<String>,
+    #[serde(deserialize_with = "null_vec")]
     examples: Vec<RawExample>,
-    #[serde(rename = "see-alsos")]
+    #[serde(rename = "see-alsos", deserialize_with = "null_vec")]
     see_alsos: Vec<RawSeeAlso>,
 }
 
@@ -177,6 +190,8 @@ mod tests {
          "see-alsos": [{"to-var": {"ns": "clojure.core", "name": "mapv", "library-url": "u"}, "_id": "2"}]},
         {"ns": "clojure.string", "name": "join",
          "doc": "Joins.", "notes": [{"body": "n"}]},
+        {"ns": "clojure.core", "name": "nulls", "doc": null, "added": null, "href": null,
+         "arglists": null, "examples": null, "see-alsos": null, "notes": null},
         {"name": "orphan", "doc": "no ns"},
         {"ns": "clojure.core", "doc": "no name"}
       ]
@@ -185,7 +200,7 @@ mod tests {
     #[test]
     fn parses_entries_with_normalized_fields() {
         let docs = parse(EXPORT).unwrap();
-        assert_eq!(docs.len(), 2);
+        assert_eq!(docs.len(), 3);
         let map = docs.get("clojure.core/map").unwrap();
         assert_eq!(map.ns, "clojure.core");
         assert_eq!(map.name, "map");
@@ -206,6 +221,35 @@ mod tests {
         assert!(join.see_alsos.is_empty());
         assert_eq!(join.added, None);
         assert_eq!(join.url, "https://clojuredocs.org/clojure.string/join");
+    }
+
+    #[test]
+    fn null_fields_read_as_empty() {
+        // The raw export writes `null` for empty collections and unknown
+        // scalars; each must read as empty rather than fail the whole file.
+        let docs = parse(EXPORT).unwrap();
+        let nulls = docs.get("clojure.core/nulls").unwrap();
+        assert!(nulls.arglists.is_empty());
+        assert!(nulls.examples.is_empty());
+        assert!(nulls.see_alsos.is_empty());
+        assert_eq!(nulls.doc, None);
+        assert_eq!(nulls.added, None);
+        assert_eq!(nulls.url, "https://clojuredocs.org/clojure.core/nulls");
+        assert!(parse(r#"{"vars": null}"#).unwrap().is_empty());
+    }
+
+    /// Against a real download: `CLJ_PULSE_CLOJUREDOCS_EXPORT=/path/to/clojuredocs-export.json
+    /// cargo test clojuredocs -- --ignored`.
+    #[test]
+    #[ignore]
+    fn loads_real_export_from_env() {
+        let path = std::env::var("CLJ_PULSE_CLOJUREDOCS_EXPORT")
+            .expect("set CLJ_PULSE_CLOJUREDOCS_EXPORT");
+        let docs = load(Path::new(&path)).unwrap();
+        assert!(docs.len() > 1000, "only {} vars", docs.len());
+        let map = docs.get("clojure.core/map").unwrap();
+        assert!(map.arglists.iter().all(|a| a.starts_with('[')));
+        assert!(!map.examples.is_empty());
     }
 
     #[test]
