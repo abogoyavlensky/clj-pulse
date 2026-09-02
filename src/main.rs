@@ -4,6 +4,7 @@
 use tower_lsp::{LspService, Server};
 
 mod classpath;
+mod clojuredocs;
 mod config;
 mod diagnostics;
 mod document;
