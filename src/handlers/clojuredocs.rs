@@ -77,11 +77,11 @@ pub fn resolve_var(index: &Index, word: &str, current_ns: &str) -> Option<String
         });
     }
 
+    let meta = index.ns_meta(current_ns);
     match word.split_once('/') {
         // `str/join` with the alias known, or a literal `clojure.set/union`.
         Some((alias, name)) if !alias.is_empty() && !name.is_empty() => {
-            let ns = index
-                .ns_meta(current_ns)
+            let ns = meta
                 .and_then(|meta| meta.aliases.get(alias).cloned())
                 .unwrap_or_else(|| alias.to_string());
             Some(format!("{ns}/{name}"))
@@ -89,7 +89,13 @@ pub fn resolve_var(index: &Index, word: &str, current_ns: &str) -> Option<String
         // `foo/` names nothing; a bare `/` is clojure.core's division.
         Some((_, name)) if !name.is_empty() || word == "/" => Some(format!("clojure.core/{word}")),
         Some(_) => None,
-        None => Some(format!("clojure.core/{word}")),
+        // A referred var (`:refer [join]`) whose namespace is not indexed yet
+        // — library indexing is asynchronous — is still known from the ns
+        // form; only an unreferred bare word is tried in clojure.core.
+        None => Some(
+            meta.and_then(|meta| meta.refers.get(word).cloned())
+                .unwrap_or_else(|| format!("clojure.core/{word}")),
+        ),
     }
 }
 
@@ -160,6 +166,21 @@ mod tests {
         let index = aliased_index();
         assert_eq!(
             resolve_var(&index, "str/join", "demo").as_deref(),
+            Some("clojure.string/join")
+        );
+    }
+
+    #[test]
+    fn referred_var_resolves_without_an_indexed_namespace() {
+        let index = Index::new_with_core();
+        let (meta, symbols) = extractor::extract(
+            "(ns demo (:require [clojure.string :refer [join]]))\n(join \",\" [1])\n",
+            Path::new("demo.clj"),
+        )
+        .unwrap();
+        index.insert_file(meta, symbols, vec![]);
+        assert_eq!(
+            resolve_var(&index, "join", "demo").as_deref(),
             Some("clojure.string/join")
         );
     }
