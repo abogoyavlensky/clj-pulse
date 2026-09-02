@@ -856,14 +856,15 @@ type SharedEditorKondo = Arc<std::sync::Mutex<kondo::KondoOverride>>;
 
 /// The ClojureDocs export the editor pointed at
 /// (`initializationOptions.clojuredocs.path`), loaded on the first
-/// `clojurePulse/clojureDocs` request rather than at startup. `failed` keeps a
-/// broken file from being re-read and re-logged on every request; the error
-/// itself still reaches the editor each time.
+/// `clojurePulse/clojureDocs` request rather than at startup. `failed` holds
+/// the load error once it happened, so a broken file is read, parsed, and
+/// logged once; every later request gets the same message without touching
+/// the file again (a restart re-tries, as it re-reads the init options).
 #[derive(Default)]
 struct ClojureDocsState {
     path: Option<std::path::PathBuf>,
     loaded: Option<Arc<clojuredocs::ClojureDocs>>,
-    failed: bool,
+    failed: Option<String>,
 }
 type SharedClojureDocs = Arc<std::sync::Mutex<ClojureDocsState>>;
 
@@ -1404,6 +1405,9 @@ impl Backend {
         if let Some(docs) = &state.loaded {
             return Ok(docs.clone());
         }
+        if let Some(message) = &state.failed {
+            return Err(message.clone());
+        }
         let Some(path) = state.path.clone() else {
             return Err(
                 "ClojureDocs data not configured (initializationOptions.clojuredocs.path)"
@@ -1422,11 +1426,10 @@ impl Backend {
                 Ok(docs)
             }
             Err(e) => {
-                if !state.failed {
-                    tracing::warn!("clojuredocs: {:#}", e);
-                    state.failed = true;
-                }
-                Err(format!("ClojureDocs data could not be loaded: {:#}", e))
+                tracing::warn!("clojuredocs: {:#}", e);
+                let message = format!("ClojureDocs data could not be loaded: {:#}", e);
+                state.failed = Some(message.clone());
+                Err(message)
             }
         }
     }

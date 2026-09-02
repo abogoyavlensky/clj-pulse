@@ -5314,3 +5314,31 @@ fn test_e2e_clojuredocs_not_configured() {
         "{err}"
     );
 }
+
+#[test]
+fn test_e2e_clojuredocs_unreadable_file() {
+    // A configured path that cannot be read errors with a message naming
+    // the problem, and keeps answering the same way without re-reading.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    let missing = root.join("no-such-clojuredocs.json");
+    client.initialize_with_options(
+        &root,
+        json!({ "clojuredocs": { "path": missing.to_str().unwrap() } }),
+    );
+
+    for _ in 0..2 {
+        let msg = client.clojure_docs(json!({ "symbol": "clojure.core/map" }));
+        let err = msg
+            .get("error")
+            .unwrap_or_else(|| panic!("expected an error, got {msg}"));
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("could not be loaded"),
+            "{err}"
+        );
+    }
+}
