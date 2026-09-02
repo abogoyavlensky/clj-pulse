@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod clojuredocs;
 pub mod code_action;
 pub mod completion;
 pub mod definition;
