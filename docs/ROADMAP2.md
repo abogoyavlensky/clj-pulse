@@ -245,9 +245,10 @@ The ~20% of clojure-lsp's refactor surface that gets ~80% of real use.
 - [ ] **CLI mode** — `clj-pulse clean-ns|format|lint` over files/globs for
       CI. Cheap once the features exist; it's how clojure-lsp got CI
       adoption. Exit non-zero on findings/diffs.
-- [ ] **Clojuredocs for built-ins** (carried from ROADMAP.md Phase 5) —
-      enrich hover for clojure.core with examples/see-also; bundled or
-      cached download, never a blocking network call.
+- [x] **Clojuredocs for built-ins** (carried from ROADMAP.md Phase 5) —
+      served over `clojurePulse/clojureDocs` from an editor-supplied export
+      file (`initializationOptions.clojuredocs.path`), never the network;
+      hover enrichment with examples/see-also still open.
 - [ ] **Custom macro definitions beyond `:lint-as`** (carried from
       ROADMAP.md Phase 5) — e.g. `defcomponent`-style macros that define
       more than one name; consider honoring clj-kondo hooks metadata as a

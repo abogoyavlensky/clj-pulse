@@ -1,4 +1,5 @@
 pub mod classpath;
+pub mod clojuredocs;
 pub mod config;
 pub mod diagnostics;
 pub mod document;

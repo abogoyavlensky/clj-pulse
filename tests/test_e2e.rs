@@ -283,6 +283,34 @@ impl LspClient {
         result
     }
 
+    /// Like [`initialize`] but with the given `initializationOptions` — what
+    /// Clojure Pulse sends (`{"projects": …, "kondo": …, "clojuredocs": …}`).
+    fn initialize_with_options(&mut self, root: &Path, options: Value) -> Value {
+        let root_uri = format!("file://{}", root.display());
+        let result = self.request(
+            "initialize",
+            json!({
+                "processId": std::process::id(),
+                "rootUri": root_uri,
+                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
+                "capabilities": {
+                    "textDocument": { "definition": { "linkSupport": true } },
+                    "general": { "positionEncodings": ["utf-16"] }
+                },
+                "initializationOptions": options
+            }),
+        );
+        self.notify("initialized", json!({}));
+        self.wait_for_log("Indexed");
+        result
+    }
+
+    /// `clojurePulse/clojureDocs`, returning the raw JSON-RPC message so a
+    /// test can assert on either `result` or `error`.
+    fn clojure_docs(&mut self, params: Value) -> Value {
+        self.request_full("clojurePulse/clojureDocs", params)
+    }
+
     /// Like [`initialize`] but advertising `window.workDoneProgress`, so the
     /// server may report `$/progress`.
     fn initialize_with_progress(&mut self, root: &Path) -> Value {
@@ -5158,4 +5186,159 @@ fn test_e2e_real_kondo_publishes_findings() {
             .contains("definitely-not-defined"),
         "unexpected message: {finding}"
     );
+}
+
+/// `initializationOptions` pointing the server at the committed fixture
+/// export (`tests/fixtures/clojuredocs/export.json`, official shape).
+fn clojuredocs_options() -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/clojuredocs/export.json");
+    json!({ "clojuredocs": { "path": path.to_str().unwrap() } })
+}
+
+fn clojure_docs_at(client: &mut LspClient, file: &Path, needle: &str) -> Value {
+    let (line, ch) = position_of(file, needle);
+    client.clojure_docs(json!({
+        "textDocument": { "uri": format!("file://{}", file.display()) },
+        "position": { "line": line, "character": ch }
+    }))
+}
+
+#[test]
+fn test_e2e_clojuredocs_bare_core_symbol() {
+    // `map` under the cursor: the clojure.core entry, examples and see-alsos
+    // included, notes and contributor metadata stripped.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let f = root.join("src/docs_demo.clj");
+    std::fs::write(&f, "(ns simple.docs-demo)\n(map inc [1 2 3])\n").unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize_with_options(&root, clojuredocs_options());
+    client.did_open(&f);
+
+    let msg = clojure_docs_at(&mut client, &f, "map ");
+    assert!(msg.get("error").is_none(), "unexpected error: {msg}");
+    let result = &msg["result"];
+    assert_eq!(result["symbol"], "clojure.core/map", "{result}");
+    let entry = &result["entry"];
+    assert_eq!(entry["ns"], "clojure.core");
+    assert_eq!(entry["name"], "map");
+    assert_eq!(entry["added"], "1.0");
+    assert_eq!(entry["arglists"], json!(["[f]", "[f coll]", "[f c1 c2]"]));
+    assert_eq!(
+        entry["examples"].as_array().map(Vec::len),
+        Some(2),
+        "{entry}"
+    );
+    assert_eq!(entry["examples"][0], "(map inc [1 2 3])\n;;=> (2 3 4)");
+    assert_eq!(
+        entry["seeAlsos"],
+        json!(["clojure.core/mapv", "clojure.core/pmap"])
+    );
+    assert_eq!(entry["url"], "https://clojuredocs.org/clojure.core/map");
+    assert!(
+        entry.get("notes").is_none(),
+        "notes must not be served: {entry}"
+    );
+    assert!(
+        !msg.to_string().contains("avatar"),
+        "contributor metadata leaked: {msg}"
+    );
+}
+
+#[test]
+fn test_e2e_clojuredocs_aliased_symbol() {
+    // `str/join` resolves through the ns form's alias even though nothing
+    // from clojure.string is indexed (no jar on this fixture's classpath).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let f = root.join("src/docs_alias.clj");
+    std::fs::write(
+        &f,
+        "(ns simple.docs-alias (:require [clojure.string :as str]))\n(str/join \",\" [1 2])\n",
+    )
+    .unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize_with_options(&root, clojuredocs_options());
+    client.did_open(&f);
+
+    let msg = clojure_docs_at(&mut client, &f, "str/join");
+    assert!(msg.get("error").is_none(), "unexpected error: {msg}");
+    let result = &msg["result"];
+    assert_eq!(result["symbol"], "clojure.string/join", "{result}");
+    assert_eq!(
+        result["entry"]["examples"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        result["entry"]["arglists"],
+        json!(["[coll]", "[separator coll]"])
+    );
+}
+
+#[test]
+fn test_e2e_clojuredocs_direct_symbol_lookup() {
+    // See-also links look a var up by name; a var ClojureDocs has no entry for
+    // still echoes the symbol so the editor can say what it looked for.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize_with_options(&root, clojuredocs_options());
+
+    let msg = client.clojure_docs(json!({ "symbol": "clojure.core/pmap" }));
+    assert!(msg.get("error").is_none(), "unexpected error: {msg}");
+    assert_eq!(msg["result"]["symbol"], "clojure.core/pmap");
+    assert!(msg["result"]["entry"].is_null(), "{msg}");
+
+    let msg = client.clojure_docs(json!({ "symbol": "clojure.string/join" }));
+    assert_eq!(msg["result"]["entry"]["name"], "join", "{msg}");
+}
+
+#[test]
+fn test_e2e_clojuredocs_not_configured() {
+    // Without `initializationOptions.clojuredocs.path` the request errors
+    // with a message the editor can show, rather than answering "no entry".
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let msg = client.clojure_docs(json!({ "symbol": "clojure.core/map" }));
+    let err = msg
+        .get("error")
+        .unwrap_or_else(|| panic!("expected an error, got {msg}"));
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not configured"),
+        "{err}"
+    );
+}
+
+#[test]
+fn test_e2e_clojuredocs_unreadable_file() {
+    // A configured path that cannot be read errors with a message naming
+    // the problem, and keeps answering the same way without re-reading.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    let missing = root.join("no-such-clojuredocs.json");
+    client.initialize_with_options(
+        &root,
+        json!({ "clojuredocs": { "path": missing.to_str().unwrap() } }),
+    );
+
+    for _ in 0..2 {
+        let msg = client.clojure_docs(json!({ "symbol": "clojure.core/map" }));
+        let err = msg
+            .get("error")
+            .unwrap_or_else(|| panic!("expected an error, got {msg}"));
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("could not be loaded"),
+            "{err}"
+        );
+    }
 }

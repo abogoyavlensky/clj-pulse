@@ -4,6 +4,7 @@
 use tower_lsp::{LspService, Server};
 
 mod classpath;
+mod clojuredocs;
 mod config;
 mod diagnostics;
 mod document;
@@ -82,6 +83,10 @@ async fn main() {
         // clj-pulse custom: force re-detection + re-resolution (retries
         // error projects, picks up new gitignored subprojects).
         .custom_method("clojurePulse/rescan", Backend::rescan)
+        // clj-pulse custom: the ClojureDocs entry (examples, see-alsos) for the
+        // symbol at a position or a given `ns/name`, from the export file the
+        // editor pointed at in initializationOptions — never the network.
+        .custom_method("clojurePulse/clojureDocs", Backend::clojure_docs)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

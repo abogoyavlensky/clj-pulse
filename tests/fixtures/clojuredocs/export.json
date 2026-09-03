@@ -1,0 +1,44 @@
+{
+  "created-at": 1788243505643,
+  "description": "ClojureDocs Data Export (test fixture in the official shape)",
+  "vars": [
+    {
+      "ns": "clojure.core",
+      "name": "map",
+      "type": "function",
+      "added": "1.0",
+      "file": "clojure/core.clj",
+      "href": "/clojure.core/map",
+      "library-url": "https://github.com/clojure/clojure",
+      "doc": "Returns a lazy sequence consisting of the result of applying f to the set of first items of each coll.",
+      "arglists": ["f", "f coll", "f c1 c2"],
+      "examples": [
+        {
+          "body": "(map inc [1 2 3])\n;;=> (2 3 4)",
+          "author": {"login": "someone", "account-source": "github", "avatar-url": "https://example.invalid/a.png"},
+          "created-at": 1318598944000,
+          "updated-at": 1318598944000,
+          "_id": "e1"
+        },
+        {"body": "(map + [1 2] [3 4])\n;;=> (4 6)", "_id": "e2"}
+      ],
+      "notes": [{"body": "A note that must never be served", "_id": "n1"}],
+      "see-alsos": [
+        {"to-var": {"ns": "clojure.core", "name": "mapv", "library-url": "https://github.com/clojure/clojure"}, "_id": "s1"},
+        {"to-var": {"ns": "clojure.core", "name": "pmap"}, "_id": "s2"}
+      ]
+    },
+    {
+      "ns": "clojure.string",
+      "name": "join",
+      "type": "function",
+      "added": "1.2",
+      "href": "/clojure.string/join",
+      "doc": "Returns a string of all elements in coll, as returned by (seq coll), separated by an optional separator.",
+      "arglists": ["coll", "separator coll"],
+      "examples": [{"body": "(clojure.string/join \", \" [1 2 3])\n;;=> \"1, 2, 3\""}],
+      "notes": null,
+      "see-alsos": null
+    }
+  ]
+}
