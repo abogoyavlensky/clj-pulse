@@ -168,7 +168,7 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
 - Modify: `src/handlers/completion.rs` (kind mapping only)
 - Modify: `src/index/extractor.rs` (only the `NsMeta` literal in `extract_full_with`)
 
-- [ ] **Step 1: Add the variant and the fqn table**
+- [x] **Step 1: Add the variant and the fqn table**
   In `src/index/mod.rs` add `Deftest` to `DefKind` (after `Deftype`, before
   `IntegrantKey`) with a doc comment: a `clojure.test/deftest` var, no params.
   Add beside `from_def_symbol`:
@@ -181,7 +181,7 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   ```
   Matching `"clojure.test/deftest" | "clojure.test/deftest-" | "cljs.test/deftest"` → `Deftest`.
 
-- [ ] **Step 2: Add `refer_all` to `NsMeta`**
+- [x] **Step 2: Add `refer_all` to `NsMeta`**
   Field `pub refer_all: Vec<String>` with `#[serde(default)]` and a doc
   comment: namespaces whose every public var is referred, from
   `[ns :refer :all]` or `(:use ns)`. Fix the one construction site in
@@ -189,33 +189,37 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   any other struct literal (there is one in `src/handlers/completion.rs`
   tests, `meta()`).
 
-- [ ] **Step 3: Exhaustive matches**
+- [x] **Step 3: Exhaustive matches**
   `src/handlers/symbols.rs` `defkind_to_symbol_kind`: `Deftest => SymbolKind::FUNCTION`.
   `src/handlers/hover.rs` `defkind_str`: `Deftest => "deftest"`.
   `src/handlers/completion.rs` `defkind_to_completion_kind`: add `Deftest` to
   the `FUNCTION` arm.
 
-- [ ] **Step 4: Bump the jar cache format**
+- [x] **Step 4: Bump the jar cache format**
   `src/index/jar_cache.rs`: `CACHE_FORMAT_VERSION` → `11`; append a
   doc-comment line `11: DefKind::Deftest + NsMeta.refer_all (layout change).`
   matching the existing list.
 
-- [ ] **Step 5: Verify it compiles and existing tests pass**
+- [x] **Step 5: Verify it compiles and existing tests pass**
   Run: `cargo build && cargo test --lib`
   Expected: PASS (the `test_cache_miss_wrong_format_version` test uses
   `CACHE_FORMAT_VERSION - 1`, so it needs no edit).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -am "Add DefKind::Deftest, built-in macro fqn table, NsMeta.refer_all"`
 
 ### Task 2: Parse `:refer :all` and `(:use …)`
+
+> Deviation: `use_spec_ns` became a recursive `collect_use_namespaces` so a
+> `:use` inside a reader conditional (`#?`/`#?@`) records every branch, matching
+> how `:require` already behaves. Found by the codex checkpoint.
 
 **Files:**
 - Modify: `src/index/extractor.rs` (`parse_require_vector`, `extract_ns`)
 - Create: `tests/fixtures/snippets/deftest_styles.cljc`
 - Modify: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the fixture**
+- [x] **Step 1: Write the fixture**
   `tests/fixtures/snippets/deftest_styles.cljc`, realistic content:
 
   ```clojure
@@ -236,7 +240,7 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   Keep the `:use` on `clojure.set` so the `:use` path is tested without
   changing which namespace provides `deftest`.
 
-- [ ] **Step 2: Write the failing ns-meta test**
+- [x] **Step 2: Write the failing ns-meta test**
   In `tests/test_extractor.rs`, `test_ns_refer_all_and_use_recorded`: extract
   the fixture; assert `meta.refer_all` contains `"clojure.test"` and
   `"clojure.set"`, `meta.requires` contains both, and
@@ -244,11 +248,11 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   records every branch, so `cljs.test` also lands in aliases via the last
   write; assert only that `t` resolves to one of the two).
 
-- [ ] **Step 3: Run it to verify it fails**
+- [x] **Step 3: Run it to verify it fails**
   Run: `cargo test --test test_extractor refer_all`
   Expected: FAIL, `refer_all` is empty.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
   `parse_require_vector`: in the `":refer"` arm, when the next item is a
   `kwd_lit` with text `:all`, push `ns_name` to `ns_meta.refer_all`.
   `extract_ns`: add a `":use"` arm that handles each spec like `:require`
@@ -257,20 +261,27 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   the requires side rather than re-parsing, then add the `refer_all` push
   for the resolved ns name. `:use` with `:only` is not expanded (YAGNI).
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
   Run: `cargo test --test test_extractor`
   Expected: PASS, no other extractor test changes.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git add tests/fixtures/snippets/deftest_styles.cljc && git commit -am "Record :refer :all and :use namespaces in NsMeta"`
 
 ### Task 3: Extract `deftest` forms as symbols
+
+> Deviation: the fixture's `t` alias is written by both branches of the reader
+> conditional and the last one wins, so `t/deftest` resolves to `cljs.test`, not
+> `clojure.test`. `test_deftest_occurrences` asserts three `clojure.test/deftest`
+> heads (the two bare refer-all ones plus the fully qualified one) and a separate
+> `cljs.test/deftest` for the aliased head, rather than the plan's "three, one
+> per style".
 
 **Files:**
 - Modify: `src/index/extractor.rs`
 - Modify: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing extraction tests**
+- [x] **Step 1: Write the failing extraction tests**
   `test_extracts_deftest_in_every_require_style`: extract the fixture from
   Task 2; assert symbols `refer-all-style`, `alias-style`,
   `qualified-style`, `private-style`, `with-body` all exist with
@@ -290,11 +301,11 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   `(ns x (:require [clojure.test :refer [deftest]]))\n(deftest foo 1)` →
   `foo` has kind `Def`.
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
   Run: `cargo test --test test_extractor deftest`
   Expected: FAIL, no symbols extracted.
 
-- [ ] **Step 3: Implement the shared helper**
+- [x] **Step 3: Implement the shared helper**
   In `src/index/extractor.rs` add:
 
   ```rust
@@ -320,7 +331,7 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   head; that candidate is harmless (nothing maps it) and keeps today's
   behavior for lint-as keys written as the current ns.
 
-- [ ] **Step 4: Use it at both call sites**
+- [x] **Step 4: Use it at both call sites**
   `process_top_level_list`: replace the `or_else(|| resolve_head_fqn(...).and_then(|fqn| cfg.lint_as.get(&fqn).cloned()))`
   with `or_else(|| macro_def_kind(first, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind))`.
   `walk_list`: replace the same two-line resolution in the lint-as block with
@@ -332,22 +343,32 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   `walk_def_form` needs no edit: `Deftest` is not in `binds_vector`, so the
   body is walked as usages from index 2.
 
-- [ ] **Step 5: Run the extractor tests**
+- [x] **Step 5: Run the extractor tests**
   Run: `cargo test --test test_extractor`
   Expected: PASS, including the existing lint-as tests in
   `src/index/extractor.rs` (`cargo test --lib extractor`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -am "Extract clojure.test deftest forms as Deftest symbols"`
 
 ### Task 4: Completion offers referred and refer-all names
+
+> Deviation: the `resolve_symbol` refer-all fallback sits *after* the current-ns
+> lookup, not before it — a local def shadows a `:use`d var in Clojure, and the
+> plan's placement would have regressed that. The fallback also skips
+> `DefnPrivate` symbols and falls back to `resolve_factory`, matching what the
+> `:refer` branch and the completion path already do (codex checkpoint).
+>
+> Not done, per the plan's explicit YAGNI: `(:use [ns :only [a b]])` is still
+> treated as an unrestricted refer-all, so completion over-offers and bare names
+> outside `:only` still navigate. Codex flagged this as P2; left as specified.
 
 **Files:**
 - Modify: `src/handlers/completion.rs`
 - Modify: `src/handlers/mod.rs`
 - Modify: `tests/test_completion.rs`
 
-- [ ] **Step 1: Write the failing completion tests**
+- [x] **Step 1: Write the failing completion tests**
   In `tests/test_completion.rs`, build an `Index::new_with_core()` and insert
   by hand (see the `meta()`/`lib_sym()` helpers in `completion.rs`'s own
   test module for shapes; `Index::insert_file` / `insert_lib_file` are the
@@ -365,11 +386,11 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   - `test_refer_all_does_not_duplicate_explicit_refers`: both `refers` and
     `refer_all` name `deftest` → exactly one `deftest` label.
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
   Run: `cargo test --test test_completion refer`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `complete_symbols`, bare-prefix branch:
   - Pool B: when `index.symbols.get(fqn)` is `None`, push a
     `CompletionItem { label: refer_name, detail: Some(format!("{} (referred)", ns)), kind: FUNCTION }`
@@ -384,20 +405,34 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   `index.lookup_in_ns(ns, word)` for each `ns` in `meta.refer_all`, returning
   the first hit. Add a sentence to the function's comment.
 
-- [ ] **Step 4: Run the completion tests**
+- [x] **Step 4: Run the completion tests**
   Run: `cargo test --test test_completion && cargo test --lib completion`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Complete referred names before indexing and :refer :all namespaces"`
 
 ### Task 5: End-to-end coverage
+
+> Deviation: `test/simple/core_test.clj` is written into the temp project copy at
+> runtime (`write_core_test`) instead of being committed into the `simple_project`
+> fixture. `test` is a conventional source root (`config::source_paths`), not a
+> didOpen-only path as the plan assumed, so a committed copy is indexed for every
+> test in the file and its `core/add` usages broke four unrelated assertions
+> (references, rename, zed references, workspace symbols). Writing it at runtime
+> follows the pattern already used by `test_e2e_rename_across_files` and leaves
+> those tests untouched.
+>
+> Deviation: with `:refer [deftest is testing]`, `deftest-` is *not* in scope, so
+> the refer-vector test asserts `deftest` alone (and that `deftest-` is absent);
+> the `deftest-` assertion moved to the `:refer :all` test, where Pool B2
+> legitimately offers it.
 
 **Files:**
 - Create: `tests/fixtures/simple_project/test/simple/core_test.clj`
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Add the fixture**
+- [x] **Step 1: Add the fixture**
   ```clojure
   (ns simple.core-test
     (:require [clojure.test :refer [deftest is testing]]
@@ -416,7 +451,7 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   `setup_project()` tests for `workspace_symbols`; adjust an assertion only
   if it enumerates every symbol).
 
-- [ ] **Step 2: Write `test_e2e_deftest_outline_and_completion`**
+- [x] **Step 2: Write `test_e2e_deftest_outline_and_completion`**
   Follow `test_e2e_completion_from_jar_library`: write a fake JAR with
   `clojure/test.clj` containing `(ns clojure.test)` and
   `(defmacro deftest "Defines a test." [name & body] …)`,
@@ -434,17 +469,17 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
     (no self-usage); use the existing `references` helper if present, else
     skip this sub-assertion and say so in the commit message.
 
-- [ ] **Step 3: Write `test_e2e_deftest_refer_all_completion`**
+- [x] **Step 3: Write `test_e2e_deftest_refer_all_completion`**
   Same JAR; overwrite the fixture text in a temp copy with
   `(:require [clojure.test :refer :all])`; `did_open`; completion of `(deft`
   contains `deftest`; hover on `is` inside a test body is non-null
   (`resolve_symbol` refer-all fallback).
 
-- [ ] **Step 4: Run the e2e suite**
+- [x] **Step 4: Run the e2e suite**
   Run: `bb e2e`
   Expected: PASS, both new tests and every existing one.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git add tests/fixtures/simple_project/test && git commit -am "e2e: deftest outline, workspace search, completion"`
 
 ### Task 6: Full check, editor run, docs
@@ -453,13 +488,13 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
 - Modify: `CLAUDE.md`
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Full verification**
+- [x] **Step 1: Full verification**
   Run: `bb check` then `bb e2e-nvim`
   Expected: fmt clean, clippy clean under `-D warnings`, all tests pass.
   If `bb e2e-nvim` is unavailable on this box (no `nvim`), state that in the
   final report rather than skipping silently.
 
-- [ ] **Step 2: Docs**
+- [x] **Step 2: Docs**
   CLAUDE.md, Invariants: one bullet after the `:lint-as` mention (or at the
   end): "Defining macros resolve by fqn: user `:lint-as` first, then the
   built-in table `DefKind::from_macro_fqn` (`clojure.test/deftest` and
@@ -467,5 +502,62 @@ after Task 1; the compiler lists them. Today those are `hover.rs` and
   head resolution, completion and `resolve_symbol` all consult it."
   `docs/ROADMAP.md`: tick or add a line for deftest outline/completion.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -am "docs: deftest symbols and refer-all resolution"`
+
+---
+
+## Completion summary
+
+**Status: complete.** All six tasks implemented and committed on
+`fix-deftest-and-ns-all` (`184f8ec` … `c429b71`).
+
+**What was built**
+
+- `DefKind::Deftest` plus `DefKind::from_macro_fqn`, a built-in table of
+  defining macros keyed by *resolved fqn* (`clojure.test/deftest`,
+  `clojure.test/deftest-`, `cljs.test/deftest`). A user `:lint-as` entry for the
+  same fqn still wins.
+- `NsMeta.refer_all` records `[ns :refer :all]` and `(:use ns)` namespaces,
+  including inside reader conditionals, de-duplicated.
+- One `macro_def_kind` helper now backs both extractor call sites
+  (`process_top_level_list`, `walk_list`), so a `deftest` head is extracted as a
+  definition and recorded as a usage of the fqn it actually matched — in every
+  require style (refer vector, `:refer :all`, `:as` alias, full qualification,
+  `:use`).
+- Completion: Pool B offers an explicitly referred name even before its library
+  is indexed; a new Pool B2 offers every public var of a refer-all namespace.
+- `resolve_symbol` falls back to refer-all namespaces (public vars and generated
+  record constructors), so `is`/`testing` hover and navigate under `:refer :all`.
+- Jar cache format bumped 10 → 11.
+
+**Verification**
+
+`bb check` (fmt + clippy `-D warnings` + 366 lib / 104 e2e / all integration
+tests) and `bb e2e-nvim` both green. Each task passed a blocking
+`review-with-codex` checkpoint; the fixups are recorded as deviation notes above.
+
+Two codex findings were dismissed rather than fixed, both artifacts of reviewing
+one commit at a time: it twice asked for a `CACHE_FORMAT_VERSION` bump that Task
+1 had already made earlier on the same branch (no released binary ever wrote a
+v11 cache), and it flagged Task 1's `from_macro_fqn` as dead code, which Task 3
+wired up.
+
+**Issues encountered**
+
+Only the four stale/incorrect plan assumptions recorded as deviations above; no
+blockers, and no change to the approved design's shape.
+
+**What the plan could have specified better**
+
+The plan's biggest miss was asserting that `test/` is outside the indexed source
+roots ("indexed on didOpen"). `config::source_paths` unions the declared
+`:paths` with the conventional `src`/`test` defaults, so the committed fixture
+was indexed at startup and silently broke four unrelated e2e tests. The plan did
+tell me to grep for exact-count assertions, which caught it — but a plan step
+that pins a fixture's *location* should verify how that location is indexed
+first. The three smaller misses (`deftest-` not being in scope under a refer
+vector, the reader-conditional alias last-write-wins, and the `resolve_symbol`
+ordering vs. current-ns shadowing) were all cases where the plan asserted a
+concrete expected value without running the code — cheap to check while writing,
+expensive to discover mid-task.
