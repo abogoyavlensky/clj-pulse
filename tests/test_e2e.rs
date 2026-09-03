@@ -1889,8 +1889,20 @@ fn test_e2e_deftest_outline_and_completion() {
     for sym in list {
         assert_eq!(sym["kind"], json!(12), "deftest is a function: {symbols}");
     }
-    let (name_line, name_col) = position_of(&test_file, "add-works");
-    assert_eq!(list[0]["selectionRange"]["start"]["line"], json!(name_line));
+    let text = std::fs::read_to_string(&test_file).unwrap();
+    let (name_line, name_col) = start_of(&text, "add-works");
+    let selection = &list[0]["selectionRange"];
+    assert_eq!(selection["start"]["line"], json!(name_line), "{symbols}");
+    assert_eq!(
+        selection["start"]["character"],
+        json!(name_col),
+        "{symbols}"
+    );
+    assert_eq!(
+        selection["end"]["character"],
+        json!(name_col + "add-works".len() as u32),
+        "{symbols}"
+    );
 
     // Workspace search (Cmd+T) finds the test by name.
     let found = client.workspace_symbols("add-works");
@@ -1899,12 +1911,11 @@ fn test_e2e_deftest_outline_and_completion() {
     assert_eq!(hits[0]["containerName"], json!("simple.core-test"));
 
     // References on the test name: the definition only, never a self-usage.
-    let refs = client.references(&test_file, name_line, name_col, true);
+    let refs = client.references(&test_file, name_line, name_col + 1, true);
     let locations = refs.as_array().expect("Location array");
     assert_eq!(locations.len(), 1, "expected only the definition: {refs}");
 
     // Completion of a fresh `(deft` offers the referred macros.
-    let text = std::fs::read_to_string(&test_file).unwrap();
     let last_line = text.lines().count() as u32;
     client.did_change_insert(&test_file, last_line, 0, "(deft");
     let result = client.completion(&test_file, last_line, 5);
@@ -1951,10 +1962,17 @@ fn test_e2e_deftest_refer_all_completion() {
         .collect();
     assert_eq!(names, vec!["add-works", "multiply-works"], "{symbols}");
 
-    // Hover on a bare `is` resolves through the refer-all fallback.
-    let (is_line, is_col) = position_of(&test_file, "(is (= 3");
+    // Hover on the bare `is` — not on the `=` beside it — resolves through the
+    // refer-all fallback to the macro in the fake clojure.test JAR.
+    let (is_line, is_col) = start_of(&text, "(is (= 3");
     let hover = client.hover(&test_file, is_line, is_col + 1);
-    assert!(!hover.is_null(), "no hover for refer-all `is`: {hover}");
+    let shown = hover["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for refer-all `is`: {hover}"));
+    assert!(
+        shown.contains("defmacro is") && shown.contains("clojure.test"),
+        "hover did not resolve `is` through :refer :all: {hover}"
+    );
 
     let last_line = text.lines().count() as u32;
     client.did_change_insert(&test_file, last_line, 0, "(deft");
