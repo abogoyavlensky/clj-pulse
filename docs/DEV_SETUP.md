@@ -17,12 +17,17 @@ environments: the maintainer's editor, and the headless CI/agent box.
 
 ## Tooling
 
+Every CLI tool is pinned in `.mise.toml`; `mise install` in the repo root
+installs all of them (CI's `mise-action` reads the same file).
+
 - **Rust** + **babashka** (`bb` tasks drive all checks).
-- **clojure CLI** for `bb e2e-real`, installed via `mise` (global pins
-  `clojure@1.12.4` + java `temurin-25`).
-- **Neovim 0.9.5** (headless) for `bb e2e-nvim`.
-- **Xvfb + real VS Code + real Calva** for `bb e2e-calva` (first run downloads
-  VS Code + Calva, ~150MB).
+- **clojure CLI** + **java** (temurin-25) for `bb e2e-real` and the
+  `bb e2e-calva` fixture classpath.
+- **clj-kondo** for `bb e2e-real-kondo`.
+- **Neovim** (headless) for `bb e2e-nvim`.
+- **Xvfb + real VS Code + real Calva** for `bb e2e-calva`: `xvfb` from the OS
+  package manager, `npm install` in `scripts/calva-e2e`; the first run
+  downloads VS Code + Calva (~150MB) into the gitignored `.vscode-test/`.
 
 ## Verifying changes headlessly
 
