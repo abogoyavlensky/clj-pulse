@@ -907,6 +907,7 @@ mod tests {
             refers: HashMap::new(),
             requires: vec![],
             imports: HashMap::new(),
+            refer_all: vec![],
         }
     }
 
@@ -931,6 +932,7 @@ mod tests {
             refers: HashMap::new(),
             requires: vec![],
             imports: HashMap::new(),
+            refer_all: vec![],
         };
         let greet = Symbol {
             name: "greet".to_string(),
@@ -956,6 +958,7 @@ mod tests {
             refers: HashMap::new(),
             requires: vec![],
             imports: HashMap::new(),
+            refer_all: vec![],
         }
     }
 

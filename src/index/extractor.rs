@@ -180,6 +180,7 @@ pub fn extract_edn(source: &str) -> Vec<Occurrence> {
         refers: HashMap::new(),
         requires: Vec::new(),
         imports: HashMap::new(),
+        refer_all: Vec::new(),
     };
     let mut out = Vec::new();
     collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
@@ -260,6 +261,7 @@ pub fn extract_full_with(
         refers: HashMap::new(),
         requires: Vec::new(),
         imports: HashMap::new(),
+        refer_all: Vec::new(),
     };
     let mut symbols = Vec::new();
 
@@ -2078,6 +2080,7 @@ mod tests {
             refers: HashMap::new(),
             requires: Vec::new(),
             imports: HashMap::new(),
+            refer_all: vec![],
         };
         keyword_fqn(kwd, &meta, source)
     }

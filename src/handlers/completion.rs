@@ -350,7 +350,9 @@ fn letgo_native_to_completion(name: &str, core: Option<&CoreSymbol>) -> Completi
 
 fn defkind_to_completion_kind(kind: &DefKind) -> CompletionItemKind {
     match kind {
-        DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro => CompletionItemKind::FUNCTION,
+        DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro | DefKind::Deftest => {
+            CompletionItemKind::FUNCTION
+        }
         DefKind::Def | DefKind::Defonce => CompletionItemKind::VARIABLE,
         DefKind::Defprotocol => CompletionItemKind::INTERFACE,
         DefKind::Defrecord | DefKind::Deftype => CompletionItemKind::CLASS,
@@ -405,6 +407,7 @@ mod tests {
             refers: HashMap::new(),
             requires: vec![],
             imports: HashMap::new(),
+            refer_all: vec![],
         }
     }
 

@@ -145,6 +145,8 @@ fn defkind_to_symbol_kind(kind: &DefKind) -> SymbolKind {
         DefKind::Defprotocol => SymbolKind::INTERFACE,
         DefKind::Defrecord | DefKind::Deftype => SymbolKind::CLASS,
         DefKind::Defmethod => SymbolKind::METHOD,
+        // A deftest defines a fn var; the editor's outline shows it as one.
+        DefKind::Deftest => SymbolKind::FUNCTION,
         DefKind::IntegrantKey => SymbolKind::KEY,
     }
 }
