@@ -794,3 +794,38 @@ fn test_is_integrant_edn_detection() {
     // A plain EDN data file with only unqualified top-level keys is not a config.
     assert!(!is_integrant_edn(Path::new("data.edn"), "{:a 1 :b 2}"));
 }
+
+#[test]
+fn test_ns_refer_all_and_use_recorded() {
+    let (meta, _) = extract(
+        include_str!("fixtures/snippets/deftest_styles.cljc"),
+        Path::new("deftest_styles.cljc"),
+    )
+    .unwrap();
+
+    // `[clojure.test :refer :all]` and `(:use [clojure.set])` both make every
+    // public var of those namespaces visible as a bare name.
+    assert!(
+        meta.refer_all.contains(&"clojure.test".to_string()),
+        "refer_all: {:?}",
+        meta.refer_all
+    );
+    assert!(
+        meta.refer_all.contains(&"clojure.set".to_string()),
+        "refer_all: {:?}",
+        meta.refer_all
+    );
+
+    // A `:use`d namespace is required, too.
+    assert!(meta.requires.contains(&"clojure.test".to_string()));
+    assert!(meta.requires.contains(&"clojure.set".to_string()));
+
+    // The reader conditional records both branches' aliases; `t` ends up at
+    // whichever was written last, so assert only that it names a test ns.
+    let t = meta.aliases.get("t").map(String::as_str);
+    assert!(
+        t == Some("clojure.test") || t == Some("cljs.test"),
+        "alias t: {:?}",
+        t
+    );
+}

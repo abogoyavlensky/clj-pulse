@@ -417,6 +417,17 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                         process_import_spec(*import_spec, source, ns_meta);
                     }
                 }
+                // `(:use ns)` refers every public var of `ns`, so it is both a
+                // require and a refer-all. `:only` is not narrowed - the whole
+                // namespace is offered, which over-offers rather than misses.
+                ":use" => {
+                    for use_spec in &inner[1..] {
+                        process_require_spec(*use_spec, source, ns_meta);
+                        if let Some(ns) = use_spec_ns(*use_spec, source) {
+                            record_refer_all(ns_meta, &ns);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -457,6 +468,30 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         _ => {}
+    }
+}
+
+/// The namespace a `(:use …)` spec names: a bare symbol (`clojure.set`) or the
+/// first symbol of a libspec vector (`[clojure.set :only [union]]`). `None` for
+/// any other shape - legacy prefix lists are no more expanded here than they
+/// are in `:require`.
+fn use_spec_ns(spec: Node, source: &str) -> Option<String> {
+    match spec.kind() {
+        "sym_lit" => Some(sym_text(spec, source).to_string()),
+        "vec_lit" => named_children(spec)
+            .first()
+            .filter(|n| n.kind() == "sym_lit")
+            .map(|n| sym_text(*n, source).to_string()),
+        _ => None,
+    }
+}
+
+/// Records `ns` as referred in full. De-duplicated: a reader conditional can
+/// name the same namespace in several branches, and a repeat would offer its
+/// vars twice in completion.
+fn record_refer_all(ns_meta: &mut NsMeta, ns: &str) {
+    if !ns_meta.refer_all.iter().any(|n| n == ns) {
+        ns_meta.refer_all.push(ns.to_string());
     }
 }
 
@@ -514,6 +549,17 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
                 ":as" if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" => {
                     let alias = node_text(items[i + 1], source).to_string();
                     ns_meta.aliases.insert(alias, ns_name.clone());
+                    i += 2;
+                    continue;
+                }
+                // `:refer :all` names no individual vars, so it lands in
+                // `refer_all` instead of `refers`.
+                ":refer"
+                    if i + 1 < items.len()
+                        && items[i + 1].kind() == "kwd_lit"
+                        && node_text(items[i + 1], source) == ":all" =>
+                {
+                    record_refer_all(ns_meta, &ns_name);
                     i += 2;
                     continue;
                 }
