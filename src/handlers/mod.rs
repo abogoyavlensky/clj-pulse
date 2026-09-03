@@ -82,7 +82,17 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
         // current namespace, which shadows them just as it does in Clojure.
         if let Some(meta) = &ns_meta {
             for ns in &meta.refer_all {
-                if let Some(sym) = index.lookup_in_ns(ns, word) {
+                // Private vars are indexed for jar navigation but are not
+                // referred, so a bare name never names one.
+                if let Some(sym) = index
+                    .lookup_in_ns(ns, word)
+                    .filter(|s| s.kind != DefKind::DefnPrivate)
+                {
+                    return Some(ResolvedSymbol::Project(sym));
+                }
+                // A record/type constructor is referred like any other public
+                // var, but is generated rather than indexed.
+                if let Some(sym) = resolve_factory(index, ns, word) {
                     return Some(ResolvedSymbol::Project(sym));
                 }
             }
@@ -305,6 +315,59 @@ mod tests {
                 Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "DB"),
                 other => panic!("referred {} did not resolve: {:?}", factory, other),
             }
+        }
+    }
+
+    #[test]
+    fn resolve_symbol_falls_back_to_refer_all_namespaces() {
+        let index = Index::new();
+        // `lib` holds a public fn, a private one, and a record.
+        index.insert_file(
+            NsMeta {
+                name: "lib".to_string(),
+                file: PathBuf::from("lib.clj"),
+                aliases: HashMap::new(),
+                refers: HashMap::new(),
+                requires: vec![],
+                imports: HashMap::new(),
+                refer_all: vec![],
+            },
+            vec![
+                sym("public-fn", "lib", DefKind::Defn),
+                sym("secret", "lib", DefKind::DefnPrivate),
+                sym("DB", "lib", DefKind::Defrecord),
+            ],
+            vec![],
+        );
+        // `app` pulls `lib` in wholesale and defines a name that collides.
+        index.insert_file(
+            NsMeta {
+                name: "app".to_string(),
+                file: PathBuf::from("app.clj"),
+                aliases: HashMap::new(),
+                refers: HashMap::new(),
+                requires: vec!["lib".to_string()],
+                imports: HashMap::new(),
+                refer_all: vec!["lib".to_string()],
+            },
+            vec![sym("public-fn", "app", DefKind::Defn)],
+            vec![],
+        );
+
+        // A bare public name resolves into the refer-all namespace, and so does
+        // its generated record constructor.
+        for (word, ns) in [("DB", "lib"), ("->DB", "lib"), ("map->DB", "lib")] {
+            match resolve_symbol(&index, word, "app") {
+                Some(ResolvedSymbol::Project(s)) => assert_eq!(s.ns, ns, "{}", word),
+                other => panic!("{} did not resolve: {:?}", word, other),
+            }
+        }
+        // Private vars are not referred, so a bare name never reaches one.
+        assert!(resolve_symbol(&index, "secret", "app").is_none());
+        // The current namespace shadows a refer-all name, as it does in Clojure.
+        match resolve_symbol(&index, "public-fn", "app") {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.fqn, "app/public-fn"),
+            other => panic!("current ns did not shadow refer-all: {:?}", other),
         }
     }
 
