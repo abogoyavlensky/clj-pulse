@@ -851,3 +851,112 @@ fn test_conditional_use_records_every_branch() {
         );
     }
 }
+
+/// The `deftest` fixture's symbols, keyed by name.
+fn deftest_symbols() -> Vec<clj_pulse::index::Symbol> {
+    let (_, syms) = extract(
+        include_str!("fixtures/snippets/deftest_styles.cljc"),
+        Path::new("deftest_styles.cljc"),
+    )
+    .unwrap();
+    syms
+}
+
+#[test]
+fn test_extracts_deftest_in_every_require_style() {
+    let syms = deftest_symbols();
+    for name in [
+        "refer-all-style",
+        "alias-style",
+        "qualified-style",
+        "private-style",
+        "with-body",
+    ] {
+        let sym = syms
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{} not extracted: {:?}", name, syms));
+        assert_eq!(sym.kind, DefKind::Deftest, "{} kind", name);
+        assert_eq!(sym.fqn, format!("my.core-test/{}", name));
+        assert!(sym.params.is_empty(), "{} params: {:?}", name, sym.params);
+        assert_eq!(sym.doc, None, "{} doc", name);
+        // The selection range covers only the test name, not the whole form.
+        assert_eq!(
+            sym.name_range.end.character - sym.name_range.start.character,
+            name.len() as u32,
+            "{} name_range",
+            name
+        );
+        assert_eq!(sym.name_range.start.line, sym.name_range.end.line);
+    }
+}
+
+#[test]
+fn test_deftest_without_clojure_test_is_not_a_symbol() {
+    // `deftest` is resolved by fqn, never by bare name: with no clojure.test
+    // require there is nothing to resolve it to.
+    let (_, syms) = extract("(ns x)\n(deftest foo (is true))\n", Path::new("x.clj")).unwrap();
+    assert!(
+        !syms.iter().any(|s| s.name == "foo"),
+        "unresolved deftest defined a symbol: {:?}",
+        syms
+    );
+}
+
+#[test]
+fn test_deftest_occurrences() {
+    let (_, _, occs) = extract_full(
+        include_str!("fixtures/snippets/deftest_styles.cljc"),
+        Path::new("deftest_styles.cljc"),
+    )
+    .unwrap();
+
+    // Every head records a usage of the macro fqn it resolved to, so `deftest`
+    // navigates in each style. The two bare (refer-all) heads and the fully
+    // qualified one land on `clojure.test`.
+    let heads: Vec<u32> = occs
+        .iter()
+        .filter(|o| o.fqn == "clojure.test/deftest")
+        .map(|o| o.name_range.start.line)
+        .collect();
+    assert_eq!(heads, vec![6, 10, 14], "deftest head lines: {:?}", occs);
+    assert!(
+        occs.iter().any(|o| o.fqn == "clojure.test/deftest-"),
+        "deftest- head occurrence missing: {:?}",
+        occs
+    );
+    // The alias `t` is written by both branches of the reader conditional and
+    // the last one wins, so `t/deftest` resolves to `cljs.test` — still a
+    // known defining macro, and still recorded as a usage of what it matched.
+    assert!(
+        occs.iter()
+            .any(|o| o.fqn == "cljs.test/deftest" && o.name_range.start.line == 8),
+        "aliased head occurrence missing: {:?}",
+        occs
+    );
+
+    // The test's own name is a definition, not a usage.
+    assert!(
+        !occs.iter().any(|o| o.fqn == "my.core-test/refer-all-style"),
+        "test name recorded as a usage: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_lint_as_overrides_builtin_deftest() {
+    use clj_pulse::index::ExtractConfig;
+    use std::collections::HashMap;
+
+    let cfg = ExtractConfig {
+        lint_as: HashMap::from([("clojure.test/deftest".to_string(), DefKind::Def)]),
+    };
+    let (_, syms, _) = clj_pulse::index::extractor::extract_full_with(
+        "(ns x (:require [clojure.test :refer [deftest]]))\n(deftest foo 1)\n",
+        Path::new("x.clj"),
+        &cfg,
+    )
+    .unwrap();
+    let foo = syms.iter().find(|s| s.name == "foo").expect("foo missing");
+    assert_eq!(foo.kind, DefKind::Def);
+}

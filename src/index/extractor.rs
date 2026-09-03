@@ -345,6 +345,44 @@ fn resolve_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String
     }
 }
 
+/// The `DefKind` a macro-headed form introduces, with the fqn that matched: the
+/// head's resolved fqn looked up in the user's `:lint-as` map, then in the
+/// built-in table ([`DefKind::from_macro_fqn`]). A bare head that is not
+/// `:refer`red is also tried against every `:refer :all` / `:use` namespace, so
+/// `deftest` resolves however `clojure.test` was pulled in. `None` for core def
+/// forms (handled by `str_to_defkind`) and for ordinary calls.
+fn macro_def_kind(
+    head: Node,
+    ns_meta: &NsMeta,
+    source: &str,
+    lint_as: &HashMap<String, DefKind>,
+) -> Option<(String, DefKind)> {
+    let mut candidates: Vec<String> = Vec::new();
+    // `resolve_head_fqn` falls back to the current namespace for a bare
+    // unreferred head; that candidate is harmless (nothing maps it) and keeps
+    // working for `:lint-as` keys written as the current ns.
+    if let Some(fqn) = resolve_head_fqn(head, ns_meta, source) {
+        candidates.push(fqn);
+    }
+    let name = node_text(sym_name_node(head), source);
+    if !name.is_empty()
+        && head.child_by_field_name("namespace").is_none()
+        && !ns_meta.refers.contains_key(name)
+    {
+        for ns in &ns_meta.refer_all {
+            candidates.push(format!("{}/{}", ns, name));
+        }
+    }
+
+    candidates.into_iter().find_map(|fqn| {
+        lint_as
+            .get(&fqn)
+            .cloned()
+            .or_else(|| DefKind::from_macro_fqn(&fqn))
+            .map(|kind| (fqn, kind))
+    })
+}
+
 fn process_top_level_list(
     node: Node,
     source: &str,
@@ -370,12 +408,12 @@ fn process_top_level_list(
         return;
     }
 
-    // A built-in def form (`defn`, `def`, …), or a `:lint-as` macro mapped to
-    // one (`defcomponent` → `def`). The mapped kind reuses the normal def
-    // extraction, so the macro's defined name becomes a real symbol.
-    let kind = str_to_defkind(first_text).or_else(|| {
-        resolve_head_fqn(first, ns_meta, source).and_then(|fqn| cfg.lint_as.get(&fqn).cloned())
-    });
+    // A built-in def form (`defn`, `def`, …), or a `:lint-as` / well-known macro
+    // mapped to one (`defcomponent` → `def`, `clojure.test/deftest` →
+    // `deftest`). The mapped kind reuses the normal def extraction, so the
+    // macro's defined name becomes a real symbol.
+    let kind = str_to_defkind(first_text)
+        .or_else(|| macro_def_kind(first, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind));
     if let Some(kind) = kind {
         let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
@@ -987,15 +1025,18 @@ fn walk_list(
     let children = named_children(node);
     let Some(head) = children.first() else { return };
 
-    // A `:lint-as` head (e.g. `defcomponent` → `def`) introduces a definition.
-    // Record the head itself as a usage (so it still navigates to the macro when
-    // that macro's namespace is indexed), then walk the form as the def-family
-    // kind it maps to — its name binds as a def, its body args are usages.
+    // A `:lint-as` or built-in defining-macro head (`defcomponent` → `def`,
+    // `deftest` → `deftest`) introduces a definition. Record the head itself as
+    // a usage of the fqn it matched — not via `record_occurrence`, which would
+    // resolve a refer-all bare head to the current namespace — then walk the
+    // form as the def-family kind it maps to: its name binds as a def, its body
+    // args are usages.
     if head.kind() == "sym_lit" {
-        if let Some(kind) = resolve_head_fqn(*head, ctx.ns_meta, ctx.source)
-            .and_then(|fqn| ctx.lint_as.get(&fqn).cloned())
-        {
-            record_occurrence(*head, ctx, scope, out);
+        if let Some((fqn, kind)) = macro_def_kind(*head, ctx.ns_meta, ctx.source, ctx.lint_as) {
+            out.push(Occurrence {
+                fqn,
+                name_range: node_to_lsp_range(sym_name_node(*head), ctx.source),
+            });
             walk_def_form(kind, &children, ctx, scope, out);
             return;
         }
