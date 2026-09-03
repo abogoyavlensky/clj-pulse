@@ -87,6 +87,12 @@ protocol changes should also pass `bb e2e-nvim`.
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
+- Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
+  first, then the built-in table `DefKind::from_macro_fqn`
+  (`clojure.test/deftest` and friends). `NsMeta.refer_all` records
+  `:refer :all` / `(:use ns)` namespaces; head resolution, completion and
+  `resolve_symbol` all consult it, so `deftest` works however `clojure.test`
+  was required.
 
 ## Releasing
 
