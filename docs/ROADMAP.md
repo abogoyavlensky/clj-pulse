@@ -35,6 +35,9 @@ roadmap is about the "understand usages and change code" half.
 - [x] `textDocument/documentSymbol` — outline view; the index already has
       names, kinds, and ranges per file.
 - [x] `workspace/symbol` — fuzzy search over the symbol index (Cmd+T).
+- [x] `clojure.test/deftest` forms indexed as symbols (outline, Cmd+T,
+      references) and completed in every require style, including
+      `:refer :all` and `(:use …)`.
 - [x] UTF-16 position handling — `word_at` treats LSP positions as char
       offsets; non-ASCII lines resolve the wrong word.
 

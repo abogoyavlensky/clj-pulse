@@ -180,6 +180,7 @@ pub fn extract_edn(source: &str) -> Vec<Occurrence> {
         refers: HashMap::new(),
         requires: Vec::new(),
         imports: HashMap::new(),
+        refer_all: Vec::new(),
     };
     let mut out = Vec::new();
     collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
@@ -260,6 +261,7 @@ pub fn extract_full_with(
         refers: HashMap::new(),
         requires: Vec::new(),
         imports: HashMap::new(),
+        refer_all: Vec::new(),
     };
     let mut symbols = Vec::new();
 
@@ -343,6 +345,44 @@ fn resolve_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String
     }
 }
 
+/// The `DefKind` a macro-headed form introduces, with the fqn that matched: the
+/// head's resolved fqn looked up in the user's `:lint-as` map, then in the
+/// built-in table ([`DefKind::from_macro_fqn`]). A bare head that is not
+/// `:refer`red is also tried against every `:refer :all` / `:use` namespace, so
+/// `deftest` resolves however `clojure.test` was pulled in. `None` for core def
+/// forms (handled by `str_to_defkind`) and for ordinary calls.
+fn macro_def_kind(
+    head: Node,
+    ns_meta: &NsMeta,
+    source: &str,
+    lint_as: &HashMap<String, DefKind>,
+) -> Option<(String, DefKind)> {
+    let mut candidates: Vec<String> = Vec::new();
+    // `resolve_head_fqn` falls back to the current namespace for a bare
+    // unreferred head; that candidate is harmless (nothing maps it) and keeps
+    // working for `:lint-as` keys written as the current ns.
+    if let Some(fqn) = resolve_head_fqn(head, ns_meta, source) {
+        candidates.push(fqn);
+    }
+    let name = node_text(sym_name_node(head), source);
+    if !name.is_empty()
+        && head.child_by_field_name("namespace").is_none()
+        && !ns_meta.refers.contains_key(name)
+    {
+        for ns in &ns_meta.refer_all {
+            candidates.push(format!("{}/{}", ns, name));
+        }
+    }
+
+    candidates.into_iter().find_map(|fqn| {
+        lint_as
+            .get(&fqn)
+            .cloned()
+            .or_else(|| DefKind::from_macro_fqn(&fqn))
+            .map(|kind| (fqn, kind))
+    })
+}
+
 fn process_top_level_list(
     node: Node,
     source: &str,
@@ -368,12 +408,12 @@ fn process_top_level_list(
         return;
     }
 
-    // A built-in def form (`defn`, `def`, …), or a `:lint-as` macro mapped to
-    // one (`defcomponent` → `def`). The mapped kind reuses the normal def
-    // extraction, so the macro's defined name becomes a real symbol.
-    let kind = str_to_defkind(first_text).or_else(|| {
-        resolve_head_fqn(first, ns_meta, source).and_then(|fqn| cfg.lint_as.get(&fqn).cloned())
-    });
+    // A built-in def form (`defn`, `def`, …), or a `:lint-as` / well-known macro
+    // mapped to one (`defcomponent` → `def`, `clojure.test/deftest` →
+    // `deftest`). The mapped kind reuses the normal def extraction, so the
+    // macro's defined name becomes a real symbol.
+    let kind = str_to_defkind(first_text)
+        .or_else(|| macro_def_kind(first, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind));
     if let Some(kind) = kind {
         let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
@@ -413,6 +453,19 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                 ":import" => {
                     for import_spec in &inner[1..] {
                         process_import_spec(*import_spec, source, ns_meta);
+                    }
+                }
+                // `(:use ns)` refers every public var of `ns`, so it is both a
+                // require and a refer-all. `:only` is not narrowed - the whole
+                // namespace is offered, which over-offers rather than misses.
+                ":use" => {
+                    for use_spec in &inner[1..] {
+                        process_require_spec(*use_spec, source, ns_meta);
+                        let mut used = Vec::new();
+                        collect_use_namespaces(*use_spec, source, &mut used);
+                        for ns in used {
+                            record_refer_all(ns_meta, &ns);
+                        }
                     }
                 }
                 _ => {}
@@ -455,6 +508,48 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         _ => {}
+    }
+}
+
+/// Every namespace a `(:use …)` spec names, pushed onto `out`: a bare symbol
+/// (`clojure.set`), the head of a libspec vector (`[clojure.set :only [union]]`),
+/// a vector of specs, or each branch of a reader conditional — the same shapes
+/// [`process_require_spec`] accepts, so a conditional `:use` refers in full on
+/// every platform. `:only` is not narrowed: the whole namespace is referred,
+/// which over-offers rather than misses. Legacy prefix lists are no more
+/// expanded here than they are in `:require`.
+fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
+    match spec.kind() {
+        "sym_lit" => out.push(sym_text(spec, source).to_string()),
+        "vec_lit" => {
+            let items = named_children(spec);
+            match items.first().map(|n| n.kind()) {
+                Some("sym_lit") => out.push(sym_text(items[0], source).to_string()),
+                Some("vec_lit") => {
+                    for item in items {
+                        collect_use_namespaces(item, source, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "read_cond_lit" | "splicing_read_cond_lit" => {
+            for child in named_children(spec) {
+                if child.kind() != "kwd_lit" {
+                    collect_use_namespaces(child, source, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Records `ns` as referred in full. De-duplicated: a reader conditional can
+/// name the same namespace in several branches, and a repeat would offer its
+/// vars twice in completion.
+fn record_refer_all(ns_meta: &mut NsMeta, ns: &str) {
+    if !ns_meta.refer_all.iter().any(|n| n == ns) {
+        ns_meta.refer_all.push(ns.to_string());
     }
 }
 
@@ -512,6 +607,17 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
                 ":as" if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" => {
                     let alias = node_text(items[i + 1], source).to_string();
                     ns_meta.aliases.insert(alias, ns_name.clone());
+                    i += 2;
+                    continue;
+                }
+                // `:refer :all` names no individual vars, so it lands in
+                // `refer_all` instead of `refers`.
+                ":refer"
+                    if i + 1 < items.len()
+                        && items[i + 1].kind() == "kwd_lit"
+                        && node_text(items[i + 1], source) == ":all" =>
+                {
+                    record_refer_all(ns_meta, &ns_name);
                     i += 2;
                     continue;
                 }
@@ -919,15 +1025,18 @@ fn walk_list(
     let children = named_children(node);
     let Some(head) = children.first() else { return };
 
-    // A `:lint-as` head (e.g. `defcomponent` → `def`) introduces a definition.
-    // Record the head itself as a usage (so it still navigates to the macro when
-    // that macro's namespace is indexed), then walk the form as the def-family
-    // kind it maps to — its name binds as a def, its body args are usages.
+    // A `:lint-as` or built-in defining-macro head (`defcomponent` → `def`,
+    // `deftest` → `deftest`) introduces a definition. Record the head itself as
+    // a usage of the fqn it matched — not via `record_occurrence`, which would
+    // resolve a refer-all bare head to the current namespace — then walk the
+    // form as the def-family kind it maps to: its name binds as a def, its body
+    // args are usages.
     if head.kind() == "sym_lit" {
-        if let Some(kind) = resolve_head_fqn(*head, ctx.ns_meta, ctx.source)
-            .and_then(|fqn| ctx.lint_as.get(&fqn).cloned())
-        {
-            record_occurrence(*head, ctx, scope, out);
+        if let Some((fqn, kind)) = macro_def_kind(*head, ctx.ns_meta, ctx.source, ctx.lint_as) {
+            out.push(Occurrence {
+                fqn,
+                name_range: node_to_lsp_range(sym_name_node(*head), ctx.source),
+            });
             walk_def_form(kind, &children, ctx, scope, out);
             return;
         }
@@ -2078,6 +2187,7 @@ mod tests {
             refers: HashMap::new(),
             requires: Vec::new(),
             imports: HashMap::new(),
+            refer_all: vec![],
         };
         keyword_fqn(kwd, &meta, source)
     }

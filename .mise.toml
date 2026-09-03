@@ -1,3 +1,11 @@
 [tools]
 rust = { version = "1.96.0", components = "rustfmt,clippy" }
 babashka = "1.12.215"
+
+# Verification-only tools (bb e2e-nvim / e2e-calva / e2e-real / e2e-real-kondo);
+# `bb check` needs only rust + babashka, and CI installs just those
+# (`install_args` in .github/workflows).
+neovim = "0.12.5"
+java = "temurin-25"
+clojure = "1.12.5.1664"
+clj-kondo = "2026.08.04"

@@ -21,6 +21,9 @@ jobs:
       # rustfmt/clippy components from .mise.toml.
       - uses: jdx/mise-action@v3.6.1
         with:
+          # Only the check toolchain; the e2e-only tools in .mise.toml
+          # (neovim, java, clojure, clj-kondo) are for local verification.
+          install_args: "rust babashka"
           cache: false
       - uses: Swatinem/rust-cache@v2
       - name: Format check
@@ -35,6 +38,9 @@ jobs:
       # cache off — see the lint-fmt job
       - uses: jdx/mise-action@v3.6.1
         with:
+          # Only the check toolchain; the e2e-only tools in .mise.toml
+          # (neovim, java, clojure, clj-kondo) are for local verification.
+          install_args: "rust babashka"
           cache: false
       - uses: Swatinem/rust-cache@v2
       - name: Tests

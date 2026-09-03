@@ -1829,6 +1829,169 @@ fn test_e2e_completion_from_jar_library() {
     );
 }
 
+/// Writes `test/simple/core_test.clj` into a temp project copy, pulling
+/// `clojure.test` in with `refer_clause`. Written at runtime rather than
+/// committed into the `simple_project` fixture: `test` is a conventional source
+/// root (see `config::source_paths`), so a committed copy would be indexed for
+/// every test in this file and its `core/add` usages would show up in the
+/// unrelated references / rename / workspace-symbol assertions.
+fn write_core_test(root: &Path, refer_clause: &str) -> std::path::PathBuf {
+    let dir = root.join("test/simple");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("core_test.clj");
+    std::fs::write(
+        &file,
+        format!(
+            "(ns simple.core-test\n  (:require [clojure.test {}]\n                         [simple.core :as core]))\n\n             (deftest add-works\n  (testing \"adds\"\n    (is (= 3 (core/add 1 2)))))\n\n             (deftest multiply-works\n  (is (= 6 (core/multiply 2 3))))\n",
+            refer_clause
+        ),
+    )
+    .unwrap();
+    file
+}
+
+/// Writes a fake `clojure.test` JAR into `root` and points `.cpcache` at it, so
+/// the library index carries the macros a test file refers.
+fn write_clojure_test_jar(root: &Path) {
+    let jar_path = root.join("clojure-test.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("clojure/test.clj", opts).unwrap();
+    zip.write_all(
+        b"(ns clojure.test)\n\n          (defmacro deftest\n  \"Defines a test.\"\n  [name & body]\n  nil)\n\n          (defmacro deftest- [name & body] nil)\n\n          (defmacro is [form] nil)\n\n          (defmacro testing [s & body] nil)\n",
+    )
+    .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(cpcache.join("1.cp"), jar_path.display().to_string()).unwrap();
+}
+
+#[test]
+fn test_e2e_deftest_outline_and_completion() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    write_clojure_test_jar(&root);
+    let test_file = write_core_test(&root, ":refer [deftest is testing]");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&test_file);
+
+    // Outline: both deftests, as functions (kind 12), selection on the name.
+    let symbols = client.document_symbols(&test_file);
+    let list = symbols.as_array().expect("DocumentSymbol array");
+    let names: Vec<&str> = list.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert_eq!(names, vec!["add-works", "multiply-works"], "{symbols}");
+    for sym in list {
+        assert_eq!(sym["kind"], json!(12), "deftest is a function: {symbols}");
+    }
+    let text = std::fs::read_to_string(&test_file).unwrap();
+    let (name_line, name_col) = start_of(&text, "add-works");
+    let selection = &list[0]["selectionRange"];
+    assert_eq!(selection["start"]["line"], json!(name_line), "{symbols}");
+    assert_eq!(
+        selection["start"]["character"],
+        json!(name_col),
+        "{symbols}"
+    );
+    assert_eq!(
+        selection["end"]["character"],
+        json!(name_col + "add-works".len() as u32),
+        "{symbols}"
+    );
+
+    // Workspace search (Cmd+T) finds the test by name.
+    let found = client.workspace_symbols("add-works");
+    let hits = found.as_array().expect("SymbolInformation array");
+    assert_eq!(hits[0]["name"], json!("add-works"), "{found}");
+    assert_eq!(hits[0]["containerName"], json!("simple.core-test"));
+
+    // References on the test name: the definition only, never a self-usage.
+    let refs = client.references(&test_file, name_line, name_col + 1, true);
+    let locations = refs.as_array().expect("Location array");
+    assert_eq!(locations.len(), 1, "expected only the definition: {refs}");
+
+    // Completion of a fresh `(deft` offers the referred macros.
+    let last_line = text.lines().count() as u32;
+    client.did_change_insert(&test_file, last_line, 0, "(deft");
+    let result = client.completion(&test_file, last_line, 5);
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    // Only what the refer vector names: `deftest-` is not in scope here.
+    assert!(
+        labels.contains(&"deftest"),
+        "expected deftest completion, got {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"deftest-"),
+        "deftest- is not referred, got {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_e2e_deftest_refer_all_completion() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    write_clojure_test_jar(&root);
+    // Same tests, pulled in with `:refer :all` instead of a refer vector.
+    let test_file = write_core_test(&root, ":refer :all");
+    let text = std::fs::read_to_string(&test_file).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&test_file);
+
+    // The deftests are still symbols, resolved through the refer-all namespace.
+    let symbols = client.document_symbols(&test_file);
+    let names: Vec<&str> = symbols
+        .as_array()
+        .expect("DocumentSymbol array")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["add-works", "multiply-works"], "{symbols}");
+
+    // Hover on the bare `is` — not on the `=` beside it — resolves through the
+    // refer-all fallback to the macro in the fake clojure.test JAR.
+    let (is_line, is_col) = start_of(&text, "(is (= 3");
+    let hover = client.hover(&test_file, is_line, is_col + 1);
+    let shown = hover["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for refer-all `is`: {hover}"));
+    assert!(
+        shown.contains("defmacro is") && shown.contains("clojure.test"),
+        "hover did not resolve `is` through :refer :all: {hover}"
+    );
+
+    let last_line = text.lines().count() as u32;
+    client.did_change_insert(&test_file, last_line, 0, "(deft");
+    let result = client.completion(&test_file, last_line, 5);
+    let labels: Vec<&str> = result
+        .as_array()
+        .expect("CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    // `:refer :all` puts every public macro of the namespace in scope, so the
+    // whole `deft…` family is offered, not just what a refer vector named.
+    assert!(
+        labels.contains(&"deftest") && labels.contains(&"deftest-"),
+        "expected deftest completions from :refer :all, got {:?}",
+        labels
+    );
+}
+
 #[test]
 fn test_e2e_no_diagnostics_on_project_clj() {
     // Opening project.clj must not flag dependency coordinates

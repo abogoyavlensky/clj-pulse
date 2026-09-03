@@ -41,6 +41,9 @@ pub enum DefKind {
     Defprotocol,
     Defrecord,
     Deftype,
+    /// A `clojure.test/deftest` var (or `deftest-`/`cljs.test/deftest`). Defines
+    /// a zero-arg test fn, so it carries no params.
+    Deftest,
     /// An Integrant component key, defined by `(defmethod ig/init-key ::x …)`.
     /// Its `fqn` is the canonical colon-prefixed keyword (`:my.ns/x`), keyed
     /// disjointly from var fqns (which never start with `:`).
@@ -67,6 +70,18 @@ impl DefKind {
             "deftype" => DefKind::Deftype,
             _ => return None,
         })
+    }
+
+    /// Maps a *resolved* list-head fqn of a well-known defining macro to the
+    /// `DefKind` it introduces. Consulted after the user's `:lint-as` map, so
+    /// a config entry for the same fqn wins.
+    pub(crate) fn from_macro_fqn(fqn: &str) -> Option<DefKind> {
+        match fqn {
+            "clojure.test/deftest" | "clojure.test/deftest-" | "cljs.test/deftest" => {
+                Some(DefKind::Deftest)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -120,6 +135,10 @@ pub struct NsMeta {
     /// Resolves interop class references (`Date`, `Instant/now`, `(File. …)`)
     /// to JDK source. Empty for files with no `:import`.
     pub imports: HashMap<String, String>,
+    /// Namespaces whose every public var is referred, from `[ns :refer :all]`
+    /// or `(:use ns)`. Bare names in this file may resolve there.
+    #[serde(default)]
+    pub refer_all: Vec<String>,
 }
 
 impl NsMeta {
@@ -495,6 +514,7 @@ mod tests {
             refers: HashMap::new(),
             requires: vec![],
             imports: HashMap::new(),
+            refer_all: vec![],
         };
 
         let index = Index::new();
