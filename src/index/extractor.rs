@@ -423,7 +423,9 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                 ":use" => {
                     for use_spec in &inner[1..] {
                         process_require_spec(*use_spec, source, ns_meta);
-                        if let Some(ns) = use_spec_ns(*use_spec, source) {
+                        let mut used = Vec::new();
+                        collect_use_namespaces(*use_spec, source, &mut used);
+                        for ns in used {
                             record_refer_all(ns_meta, &ns);
                         }
                     }
@@ -471,18 +473,36 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
     }
 }
 
-/// The namespace a `(:use …)` spec names: a bare symbol (`clojure.set`) or the
-/// first symbol of a libspec vector (`[clojure.set :only [union]]`). `None` for
-/// any other shape - legacy prefix lists are no more expanded here than they
-/// are in `:require`.
-fn use_spec_ns(spec: Node, source: &str) -> Option<String> {
+/// Every namespace a `(:use …)` spec names, pushed onto `out`: a bare symbol
+/// (`clojure.set`), the head of a libspec vector (`[clojure.set :only [union]]`),
+/// a vector of specs, or each branch of a reader conditional — the same shapes
+/// [`process_require_spec`] accepts, so a conditional `:use` refers in full on
+/// every platform. `:only` is not narrowed: the whole namespace is referred,
+/// which over-offers rather than misses. Legacy prefix lists are no more
+/// expanded here than they are in `:require`.
+fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
     match spec.kind() {
-        "sym_lit" => Some(sym_text(spec, source).to_string()),
-        "vec_lit" => named_children(spec)
-            .first()
-            .filter(|n| n.kind() == "sym_lit")
-            .map(|n| sym_text(*n, source).to_string()),
-        _ => None,
+        "sym_lit" => out.push(sym_text(spec, source).to_string()),
+        "vec_lit" => {
+            let items = named_children(spec);
+            match items.first().map(|n| n.kind()) {
+                Some("sym_lit") => out.push(sym_text(items[0], source).to_string()),
+                Some("vec_lit") => {
+                    for item in items {
+                        collect_use_namespaces(item, source, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "read_cond_lit" | "splicing_read_cond_lit" => {
+            for child in named_children(spec) {
+                if child.kind() != "kwd_lit" {
+                    collect_use_namespaces(child, source, out);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

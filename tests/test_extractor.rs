@@ -829,3 +829,25 @@ fn test_ns_refer_all_and_use_recorded() {
         t
     );
 }
+
+#[test]
+fn test_conditional_use_records_every_branch() {
+    // A `:use` inside a reader conditional refers in full on every platform,
+    // like the conditional `:require` aliases beside it.
+    let src =
+        "(ns app\n  (:use #?(:clj [foo.core] :cljs foo.cljs)\n        #?@(:clj [[bar.core]])))\n";
+    let (meta, _) = extract(src, Path::new("app.cljc")).unwrap();
+    for ns in ["foo.core", "foo.cljs", "bar.core"] {
+        assert!(
+            meta.refer_all.contains(&ns.to_string()),
+            "{} missing from refer_all: {:?}",
+            ns,
+            meta.refer_all
+        );
+        assert!(
+            meta.requires.contains(&ns.to_string()),
+            "{} not required",
+            ns
+        );
+    }
+}
