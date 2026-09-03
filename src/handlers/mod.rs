@@ -26,6 +26,10 @@ pub enum ResolvedSymbol {
     LetgoNative(CoreSymbol),
 }
 
+/// Resolves the symbol `word` names when read inside `current_ns`: a qualified
+/// name through its `:as` alias, a bare name through `:refer`, then the current
+/// namespace's own defs, then the `:refer :all` / `(:use ns)` namespaces, and
+/// finally the builtins (clojure.core, or let-go's `core` in a let-go project).
 pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<ResolvedSymbol> {
     let ns_meta = index.ns_meta(current_ns);
 
@@ -70,6 +74,18 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
         // symbol of the same name, so resolve it before the core fallback.
         if let Some(sym) = resolve_factory(index, current_ns, word) {
             return Some(ResolvedSymbol::Project(sym));
+        }
+
+        // `[ns :refer :all]` / `(:use ns)` make every public var of those
+        // namespaces a bare name here — that is how `is` and `testing` navigate
+        // in a test file that pulled clojure.test in wholesale. Tried after the
+        // current namespace, which shadows them just as it does in Clojure.
+        if let Some(meta) = &ns_meta {
+            for ns in &meta.refer_all {
+                if let Some(sym) = index.lookup_in_ns(ns, word) {
+                    return Some(ResolvedSymbol::Project(sym));
+                }
+            }
         }
 
         // In a let-go project, bare names are auto-referred from let-go's

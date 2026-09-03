@@ -116,12 +116,37 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             }
         }
 
-        // Pool B: referred symbols
         if let Some(meta) = &ns_meta {
+            // Pool B: referred symbols. An explicitly referred name is valid
+            // whether or not its namespace is indexed yet — the clojure JAR may
+            // still be loading — so offer it bare when the fqn misses.
             for (refer_name, fqn) in &meta.refers {
-                if refer_name.starts_with(prefix) {
+                if !refer_name.starts_with(prefix) {
+                    continue;
+                }
+                match index.symbols.get(fqn) {
+                    Some(sym) => items.push(symbol_to_completion(&sym, None)),
+                    None => items.push(referred_completion(refer_name, fqn)),
+                }
+            }
+
+            // Pool B2: `:refer :all` / `(:use ns)` namespaces — every public var
+            // of those is a bare name here. Needs the namespace indexed (unlike
+            // Pool B, only the names of explicit refers are known up front).
+            // Explicit refers are already offered above, and private vars are
+            // indexed for jar navigation but are not referable.
+            for ns in &meta.refer_all {
+                let Some(fqns) = index.ns_symbols.get(ns) else {
+                    continue;
+                };
+                for fqn in fqns.iter() {
                     if let Some(sym) = index.symbols.get(fqn) {
-                        items.push(symbol_to_completion(&sym, None));
+                        if sym.kind != DefKind::DefnPrivate
+                            && sym.name.starts_with(prefix)
+                            && !meta.refers.contains_key(&sym.name)
+                        {
+                            items.push(symbol_to_completion(&sym, None));
+                        }
                     }
                 }
             }
@@ -290,6 +315,19 @@ fn symbol_to_completion(sym: &crate::index::Symbol, alias: Option<&str>) -> Comp
             })
         }),
         kind: Some(defkind_to_completion_kind(&sym.kind)),
+        ..Default::default()
+    }
+}
+
+/// A `:refer`red name whose namespace is not indexed yet: the user named it in
+/// the ns form, so it is offered on the strength of that alone — no arglists or
+/// doc to show, and `FUNCTION` as the safest guess at its kind.
+fn referred_completion(name: &str, fqn: &str) -> CompletionItem {
+    let ns = fqn.rsplit_once('/').map(|(ns, _)| ns).unwrap_or(fqn);
+    CompletionItem {
+        label: name.to_string(),
+        detail: Some(format!("{} (referred)", ns)),
+        kind: Some(CompletionItemKind::FUNCTION),
         ..Default::default()
     }
 }
