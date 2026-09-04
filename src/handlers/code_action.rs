@@ -896,6 +896,7 @@ mod tests {
             source: SymbolSource::Dir(PathBuf::from("/lib")),
             range: range(),
             name_range: range(),
+            private: false,
         }
     }
 
@@ -945,6 +946,7 @@ mod tests {
             source: SymbolSource::Project,
             range: range(),
             name_range: range(),
+            private: false,
         };
         index.insert_file(helpers_meta, vec![greet], Vec::<Occurrence>::new());
         index

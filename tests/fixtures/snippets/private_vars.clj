@@ -1,0 +1,7 @@
+(ns my.priv)
+(def ^:private secret 1)
+(defn ^{:private true :doc "d"} helper [] 1)
+(defn- old-style [] 2)
+(defonce ^:private state (atom nil))
+(defn public-fn [] 3)
+(def ^{:private false} not-private 4)

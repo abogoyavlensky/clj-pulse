@@ -997,3 +997,24 @@ fn test_catch_and_as_arrow_bind_locals() {
         occs
     );
 }
+
+#[test]
+fn test_extracts_private_flag() {
+    let (_, syms) = extract(
+        include_str!("fixtures/snippets/private_vars.clj"),
+        Path::new("private_vars.clj"),
+    )
+    .unwrap();
+    let private_of = |name: &str| {
+        syms.iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{} not found in {:?}", name, syms))
+            .private
+    };
+    for name in ["secret", "helper", "old-style", "state"] {
+        assert!(private_of(name), "{} must be private", name);
+    }
+    for name in ["public-fn", "not-private"] {
+        assert!(!private_of(name), "{} must not be private", name);
+    }
+}

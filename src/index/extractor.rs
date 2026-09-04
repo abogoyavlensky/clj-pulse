@@ -726,6 +726,8 @@ fn extract_def(
         }
     }
 
+    let private = kind == DefKind::DefnPrivate || has_private_meta(name_node, source);
+
     symbols.push(Symbol {
         name,
         fqn,
@@ -737,6 +739,7 @@ fn extract_def(
         source: super::SymbolSource::Project,
         range: node_to_lsp_range(form_node, source),
         name_range: node_to_lsp_range(sym_name_node(name_node), source),
+        private,
     });
 
     // A protocol's method signatures are namespace-level vars too; index each
@@ -744,6 +747,25 @@ fn extract_def(
     if kind == DefKind::Defprotocol {
         extract_protocol_methods(&children[2..], source, file, ns_name, symbols);
     }
+}
+
+/// Whether a def'd name carries `^:private` or `^{:private true}`. Metadata
+/// attaches to the *name* symbol (`(def ^:private x 1)`), so this reads the
+/// `sym_lit`'s own `meta_lit`/`old_meta_lit` children. `^{:private false}` is
+/// explicitly public.
+fn has_private_meta(name_node: Node, source: &str) -> bool {
+    named_children(name_node)
+        .into_iter()
+        .filter(|n| matches!(n.kind(), "meta_lit" | "old_meta_lit"))
+        .filter_map(|meta| named_children(meta).into_iter().next())
+        .any(|value| match value.kind() {
+            "kwd_lit" => node_text(value, source) == ":private",
+            "map_lit" => named_children(value).chunks(2).any(|pair| {
+                matches!(pair, [k, v]
+                    if node_text(*k, source) == ":private" && node_text(*v, source) == "true")
+            }),
+            _ => false,
+        })
 }
 
 /// The Integrant lifecycle multimethod whose `defmethod` we treat as the
@@ -809,6 +831,7 @@ fn extract_integrant_key(
         // Whole-keyword range so goto-definition lands on (and references list)
         // the full `::name` dispatch token.
         name_range: node_to_lsp_range(*dispatch, source),
+        private: false,
     });
 }
 
@@ -858,6 +881,8 @@ fn extract_protocol_methods(
             source: super::SymbolSource::Project,
             range: node_to_lsp_range(*sig, source),
             name_range: node_to_lsp_range(sym_name_node(*name_node), source),
+            // A protocol method signature is public by definition.
+            private: false,
         });
     }
 }

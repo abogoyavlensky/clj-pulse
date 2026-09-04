@@ -108,6 +108,7 @@ fn macro_sym(name: &str, ns: &str) -> Symbol {
         source: SymbolSource::Dir(PathBuf::from("clojure")),
         range: Range::default(),
         name_range: Range::default(),
+        private: false,
     }
 }
 
