@@ -52,9 +52,16 @@ Definition first checks for a **local binding** in scope at the cursor
 destructuring/`letfn`/… resolves to its binding site in the same file, shadowing
 any same-named var. Only when the cursor is not on an in-scope local does it fall
 back to the var/alias/namespace/core resolution below. (Completion likewise
-prepends in-scope locals; find-references resolves a local's usages
+prepends in-scope locals; find-references *and rename* resolve a local's usages
 structurally within the file via `extractor::local_references_at`, since locals
-are never recorded as occurrences.)
+are never recorded as occurrences — so renaming a local never reaches the fqn
+path, and a `:keys`-destructured binding is refused rather than silently
+changing which key is read.)
+
+The occurrence walker keeps its own scope stack (`Scope`/`LocalSlot`), which
+tracks whether each binding was ever read; frames report their unused,
+user-removable bindings as they pop, feeding the `unused-binding` diagnostic
+from the same scope rules that suppress local names from occurrences.
 
 word under cursor (from DocumentStore / ropey)
   → if contains "/": split into (alias, name)
