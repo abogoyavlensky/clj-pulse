@@ -726,7 +726,9 @@ fn extract_def(
         }
     }
 
-    let private = kind == DefKind::DefnPrivate || has_private_meta(name_node, source);
+    let private = kind == DefKind::DefnPrivate
+        || has_private_meta(name_node, source)
+        || has_private_attr_map(kind.clone(), &children[rest_start..], source);
 
     symbols.push(Symbol {
         name,
@@ -760,12 +762,55 @@ fn has_private_meta(name_node: Node, source: &str) -> bool {
         .filter_map(|meta| named_children(meta).into_iter().next())
         .any(|value| match value.kind() {
             "kwd_lit" => node_text(value, source) == ":private",
-            "map_lit" => named_children(value).chunks(2).any(|pair| {
-                matches!(pair, [k, v]
-                    if node_text(*k, source) == ":private" && node_text(*v, source) == "true")
-            }),
+            "map_lit" => map_declares_private(value, source),
             _ => false,
         })
+}
+
+/// Whether a map literal has `:private true` among its pairs.
+fn map_declares_private(map: Node, source: &str) -> bool {
+    named_children(map).chunks(2).any(|pair| {
+        matches!(pair, [k, v]
+            if node_text(*k, source) == ":private" && node_text(*v, source) == "true")
+    })
+}
+
+/// Whether a `defn`-family form declares `:private true` in its *attr-map*:
+/// `(defn f {:private true} [] …)`, or the trailing map of a multi-arity
+/// `(defn f ([] …) {:private true})`. `rest` is the form's children after the
+/// name and any docstring.
+///
+/// Only the two positions the reader treats as an attr-map count, so
+/// `(defn f [] {:private true})` — a function *returning* that map — stays
+/// public. Plain `def`/`defonce` are excluded entirely: their map is the value.
+fn has_private_attr_map(kind: DefKind, rest: &[Node], source: &str) -> bool {
+    if !matches!(
+        kind,
+        DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro
+    ) {
+        return false;
+    }
+    // Leading: the map sits directly before the params vector / first arity.
+    let leading = rest
+        .first()
+        .filter(|n| n.kind() == "map_lit")
+        .is_some_and(|m| {
+            let follows_params = rest
+                .get(1)
+                .map(|n| n.kind() == "vec_lit" || (n.kind() == "list_lit" && arity_body(*n)))
+                .unwrap_or(false);
+            follows_params && map_declares_private(*m, source)
+        });
+    // Trailing: after at least one `([params] body…)` arity.
+    let trailing = rest.len() > 1
+        && rest
+            .last()
+            .filter(|n| n.kind() == "map_lit")
+            .is_some_and(|m| map_declares_private(*m, source))
+        && rest[..rest.len() - 1]
+            .iter()
+            .any(|n| n.kind() == "list_lit" && arity_body(*n));
+    leading || trailing
 }
 
 /// The Integrant lifecycle multimethod whose `defmethod` we treat as the

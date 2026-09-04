@@ -5,3 +5,6 @@
 (defonce ^:private state (atom nil))
 (defn public-fn [] 3)
 (def ^{:private false} not-private 4)
+(defn attr-map-private {:private true} [] 5)
+(defn multi-arity-private ([] 6) ([x] x) {:private true})
+(defn returns-map [] {:private true})

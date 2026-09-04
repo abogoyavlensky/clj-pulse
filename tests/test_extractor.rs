@@ -1011,10 +1011,19 @@ fn test_extracts_private_flag() {
             .unwrap_or_else(|| panic!("{} not found in {:?}", name, syms))
             .private
     };
-    for name in ["secret", "helper", "old-style", "state"] {
+    for name in [
+        "secret",
+        "helper",
+        "old-style",
+        "state",
+        "attr-map-private",
+        "multi-arity-private",
+    ] {
         assert!(private_of(name), "{} must be private", name);
     }
-    for name in ["public-fn", "not-private"] {
+    // `returns-map` *returns* {:private true}; the map is a body form, not an
+    // attr-map.
+    for name in ["public-fn", "not-private", "returns-map"] {
         assert!(!private_of(name), "{} must not be private", name);
     }
 }
