@@ -3029,10 +3029,11 @@ fn test_e2e_references_work_without_indexed_definition() {
 }
 
 #[test]
-fn test_e2e_rename_rejects_local_shadowing_global() {
-    // `(defn f2 [add] add)` — the param shadows simple.core/add. Rename is still
-    // rejected (local rename unsupported), and references resolve to the local's
-    // own binding + usage, never the global var (its defn or cross-file uses).
+fn test_e2e_rename_local_never_touches_shadowed_global() {
+    // `(defn f2 [add] add)` — the param shadows simple.core/add. Renaming it
+    // edits the param and its body usage only; the global var (its defn earlier
+    // in core.clj, its use in utils.clj) is never touched. References resolve
+    // the same way.
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
 
@@ -3044,23 +3045,36 @@ fn test_e2e_rename_rejects_local_shadowing_global() {
     let last_line = std::fs::read_to_string(&core).unwrap().lines().count() as u32;
     client.did_change_insert(&core, last_line, 0, "(defn f2 [add] add)\n");
 
-    // Cursor on the param `add` (col 10)
-    let error = client.request_expect_error(
-        "textDocument/rename",
-        json!({
-            "textDocument": { "uri": format!("file://{}", core.display()) },
-            "position": { "line": last_line, "character": 11 },
-            "newName": "plus"
-        }),
+    // Cursor on the param `add` (col 11)
+    let result = client.rename(&core, last_line, 11, "plus");
+    let changes = result["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected a WorkspaceEdit, got: {}", result));
+    assert_eq!(
+        changes.len(),
+        1,
+        "only the shadowing file is edited: {:?}",
+        changes.keys().collect::<Vec<_>>()
     );
-    assert!(
-        error["message"]
-            .as_str()
-            .unwrap()
-            .contains("nothing to rename"),
-        "got: {}",
-        error
-    );
+    let (uri, edits) = changes.iter().next().unwrap();
+    assert!(uri.ends_with("/src/core.clj"), "got {}", uri);
+    let edits = edits.as_array().unwrap();
+    assert_eq!(edits.len(), 2, "param + body usage only: {:?}", edits);
+    let mut cols: Vec<u64> = edits
+        .iter()
+        .map(|e| {
+            assert_eq!(e["newText"], json!("plus"));
+            assert_eq!(
+                e["range"]["start"]["line"],
+                json!(last_line),
+                "edit off the shadowing form: {:?}",
+                e
+            );
+            e["range"]["start"]["character"].as_u64().unwrap()
+        })
+        .collect();
+    cols.sort_unstable();
+    assert_eq!(cols, vec![10, 15], "binding + usage columns: {:?}", edits);
 
     // References resolve to the local (param binding + body usage, both on the
     // inserted `f2` line) and must NOT reach the global `simple.core/add` — not
@@ -3077,6 +3091,129 @@ fn test_e2e_rename_rejects_local_shadowing_global() {
         }),
         "local refs stay on the shadowing form, never the global: {:?}",
         locs
+    );
+}
+
+#[test]
+fn test_e2e_rename_local_in_let() {
+    // Renaming a `let` binding rewrites the binding site and every in-scope
+    // usage, all within the one file.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+
+    let (line, ch) = position_of(&locals, "base");
+    let result = client.rename(&locals, line, ch, "b0");
+    let changes = result["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected a WorkspaceEdit, got: {}", result));
+    assert_eq!(
+        changes.len(),
+        1,
+        "one file: {:?}",
+        changes.keys().collect::<Vec<_>>()
+    );
+    let (uri, edits) = changes.iter().next().unwrap();
+    assert!(uri.ends_with("/src/locals.clj"), "got {}", uri);
+    let edits = edits.as_array().unwrap();
+    assert_eq!(edits.len(), 3, "binding + two usages: {:?}", edits);
+    assert!(
+        edits.iter().all(|e| e["newText"] == json!("b0")),
+        "{:?}",
+        edits
+    );
+    let mut lines: Vec<u64> = edits
+        .iter()
+        .map(|e| e["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![3, 4, 5],
+        "binding, RHS use, body use: {:?}",
+        edits
+    );
+}
+
+#[test]
+fn test_e2e_rename_local_rejects_capture_by_existing_binding() {
+    // Renaming `a` to `b` inside `(let [a 1 b 2] …)` would capture the usage
+    // under the wrong binding, so it is refused rather than silently applied.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+    let last_line = std::fs::read_to_string(&core).unwrap().lines().count() as u32;
+    client.did_change_insert(
+        &core,
+        last_line,
+        0,
+        "(defn f4 [] (let [a 1 b 2] (+ a b)))\n",
+    );
+
+    // Cursor on the binding `a` (col 18).
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", core.display()) },
+            "position": { "line": last_line, "character": 18 },
+            "newName": "b"
+        }),
+    );
+    assert!(
+        error["message"].as_str().unwrap().contains("already bound"),
+        "got: {}",
+        error
+    );
+
+    // A free name still renames fine from the same position.
+    let result = client.rename(&core, last_line, 18, "a2");
+    let changes = result["changes"]
+        .as_object()
+        .expect("rename should succeed");
+    assert_eq!(
+        changes.values().next().unwrap().as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn test_e2e_rename_rejects_keys_destructured_local() {
+    // `{:keys [k]}` makes the binding name double as the map key, so renaming
+    // it would silently change what is looked up. Rejected with a hint.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+    let last_line = std::fs::read_to_string(&core).unwrap().lines().count() as u32;
+    client.did_change_insert(&core, last_line, 0, "(defn f3 [{:keys [k]}] (inc k))\n");
+
+    // Cursor on the `k` inside `(inc k)`.
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", core.display()) },
+            "position": { "line": last_line, "character": 28 },
+            "newName": "kk"
+        }),
+    );
+    assert!(
+        error["message"].as_str().unwrap().contains("destructured"),
+        "got: {}",
+        error
     );
 }
 
@@ -5067,6 +5204,118 @@ fn diagnostic_codes(params: &Value) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+#[test]
+fn test_e2e_unused_binding_diagnostic() {
+    // With clj-kondo off (the harness default), the native unused-binding lint
+    // is what the editor sees.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let scratch = root.join("src/scratch.clj");
+    std::fs::write(
+        &scratch,
+        "(ns simple.scratch)\n\n(defn run [x y]\n  (let [z 1]\n    x))\n",
+    )
+    .unwrap();
+    client.did_open(&scratch);
+
+    let params = client.wait_for_diagnostics("/src/scratch.clj");
+    let found: Vec<&Value> = params["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == json!("unused-binding"))
+        .collect();
+    assert_eq!(found.len(), 2, "the param `y` and the let `z`: {}", params);
+    for d in &found {
+        assert_eq!(d["severity"], json!(2), "WARNING: {}", d);
+        assert_eq!(d["tags"], json!([1]), "UNNECESSARY: {}", d);
+        assert_eq!(d["source"], json!("clj-pulse"));
+    }
+    // Inner scopes are reported first (frames are harvested as they pop), so
+    // assert on the set rather than the order.
+    let mut messages: Vec<&str> = found
+        .iter()
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        vec!["Unused binding: y", "Unused binding: z"],
+        "{}",
+        params
+    );
+}
+
+#[test]
+fn test_e2e_unused_private_var_diagnostic() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let scratch = root.join("src/scratch.clj");
+    std::fs::write(
+        &scratch,
+        "(ns simple.scratch)\n\n(defn- helper [] 1)\n\n(defn run [] 2)\n",
+    )
+    .unwrap();
+    client.did_open(&scratch);
+
+    let params = client.wait_for_diagnostics("/src/scratch.clj");
+    let found: Vec<&Value> = params["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == json!("unused-private-var"))
+        .collect();
+    assert_eq!(found.len(), 1, "only `helper` is dead: {}", params);
+    assert_eq!(found[0]["severity"], json!(2));
+    assert_eq!(found[0]["tags"], json!([1]));
+    assert!(
+        found[0]["message"].as_str().unwrap().contains("helper"),
+        "{}",
+        found[0]
+    );
+}
+
+#[test]
+fn test_e2e_kondo_run_drops_native_unused_binding() {
+    // A successful clj-kondo run owns `unused-binding` too: the fake returns
+    // no findings with exit 0, so the native copy must not survive.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    // No fake-kondo marker in this file, so the fake reports nothing — but it
+    // still succeeds, which is what cedes ownership.
+    let scratch = root.join("src/scratch.clj");
+    std::fs::write(
+        &scratch,
+        "(ns kondo.scratch)\n\n(defn run [x]\n  (let [z 1]\n    x))\n",
+    )
+    .unwrap();
+    client.did_open(&scratch);
+
+    let params = client.wait_for_diagnostics("/src/scratch.clj");
+    assert!(
+        params["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["code"] != json!("unused-binding")),
+        "clj-kondo owns unused-binding: {}",
+        params
+    );
 }
 
 #[test]

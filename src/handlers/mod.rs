@@ -209,6 +209,7 @@ mod tests {
             source: SymbolSource::Project,
             range: Range::default(),
             name_range: Range::default(),
+            private: false,
         }
     }
 

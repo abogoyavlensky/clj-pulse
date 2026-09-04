@@ -244,6 +244,25 @@ pub fn extract_full_with(
     file: &Path,
     cfg: &ExtractConfig,
 ) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
+    let analysis = extract_analysis_with(source, file, cfg)?;
+    Ok((analysis.ns_meta, analysis.symbols, analysis.occurrences))
+}
+
+/// Everything one parse of a Clojure file yields: its namespace metadata, the
+/// definitions it introduces, every resolved usage, and the local bindings that
+/// were never used (the `unused-binding` lint's input). [`extract_full_with`]
+/// is the three-tuple view for callers that don't need the lint.
+pub struct Analysis {
+    pub ns_meta: NsMeta,
+    pub symbols: Vec<Symbol>,
+    pub occurrences: Vec<Occurrence>,
+    pub unused_bindings: Vec<LocalBinding>,
+}
+
+/// Parses `source` once and runs both passes: definitions (with `cfg`'s
+/// `:lint-as` macros) and, over the same tree, occurrences plus unused-binding
+/// analysis.
+pub fn extract_analysis_with(source: &str, file: &Path, cfg: &ExtractConfig) -> Result<Analysis> {
     let mut parser = Parser::new();
     parser
         .set_language(language())
@@ -287,13 +306,20 @@ pub fn extract_full_with(
         lint_as: &cfg.lint_as,
     };
     let mut occurrences = Vec::new();
-    let mut scope: Vec<HashSet<String>> = Vec::new();
+    let mut scope = Scope::new();
     for i in 0..root.named_child_count() {
         let child = root.named_child(i).unwrap();
         walk_occurrences(child, &ctx, &mut scope, &mut occurrences);
     }
+    // Every walk that pushes a frame pops it, so nothing is left holding
+    // bindings back from `scope.unused` here.
 
-    Ok((ns_meta, symbols, occurrences))
+    Ok(Analysis {
+        ns_meta,
+        symbols,
+        occurrences,
+        unused_bindings: scope.unused,
+    })
 }
 
 fn process_reader_conditional(
@@ -700,6 +726,10 @@ fn extract_def(
         }
     }
 
+    let private = kind == DefKind::DefnPrivate
+        || has_private_meta(name_node, source)
+        || has_private_attr_map(kind.clone(), &children[rest_start..], source);
+
     symbols.push(Symbol {
         name,
         fqn,
@@ -711,6 +741,7 @@ fn extract_def(
         source: super::SymbolSource::Project,
         range: node_to_lsp_range(form_node, source),
         name_range: node_to_lsp_range(sym_name_node(name_node), source),
+        private,
     });
 
     // A protocol's method signatures are namespace-level vars too; index each
@@ -718,6 +749,77 @@ fn extract_def(
     if kind == DefKind::Defprotocol {
         extract_protocol_methods(&children[2..], source, file, ns_name, symbols);
     }
+}
+
+/// Whether a def'd name carries `^:private` or `^{:private true}`. Metadata
+/// attaches to the *name* symbol (`(def ^:private x 1)`), so this reads the
+/// `sym_lit`'s own `meta_lit`/`old_meta_lit` children. `^{:private false}` is
+/// explicitly public.
+fn has_private_meta(name_node: Node, source: &str) -> bool {
+    named_children(name_node)
+        .into_iter()
+        .filter(|n| matches!(n.kind(), "meta_lit" | "old_meta_lit"))
+        .filter_map(|meta| named_children(meta).into_iter().next())
+        .any(|value| match value.kind() {
+            "kwd_lit" => node_text(value, source) == ":private",
+            "map_lit" => map_declares_private(value, source),
+            _ => false,
+        })
+}
+
+/// Whether a map literal has `:private true` among its pairs.
+fn map_declares_private(map: Node, source: &str) -> bool {
+    named_children(map).chunks(2).any(|pair| {
+        matches!(pair, [k, v]
+            if node_text(*k, source) == ":private" && node_text(*v, source) == "true")
+    })
+}
+
+/// Whether a `defn`-family form declares `:private true` in its *attr-map*:
+/// `(defn f {:private true} [] …)`, or the trailing map of a multi-arity
+/// `(defn f ([] …) {:private true})`. `rest` is the form's children after the
+/// name and any docstring.
+///
+/// Only the two positions the reader treats as an attr-map count, so
+/// `(defn f [] {:private true})` — a function *returning* that map — stays
+/// public. `defmulti` has its own leading-attr-map shape. Plain `def`/`defonce`
+/// are excluded entirely: their map is the value.
+fn has_private_attr_map(kind: DefKind, rest: &[Node], source: &str) -> bool {
+    // `(defmulti name attr-map? dispatch-fn & options)`: the attr-map is the
+    // leading map, and something (the dispatch fn) must follow it — a lone map
+    // is the dispatch fn itself, since maps are functions.
+    if kind == DefKind::Defmulti {
+        return rest.len() > 1
+            && rest[0].kind() == "map_lit"
+            && map_declares_private(rest[0], source);
+    }
+    if !matches!(
+        kind,
+        DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro
+    ) {
+        return false;
+    }
+    // Leading: the map sits directly before the params vector / first arity.
+    let leading = rest
+        .first()
+        .filter(|n| n.kind() == "map_lit")
+        .is_some_and(|m| {
+            let follows_params = rest
+                .get(1)
+                .map(|n| n.kind() == "vec_lit" || (n.kind() == "list_lit" && arity_body(*n)))
+                .unwrap_or(false);
+            follows_params && map_declares_private(*m, source)
+        });
+    // Trailing: after at least one `([params] body…)` arity.
+    let trailing = rest.len() > 1
+        && rest
+            .last()
+            .filter(|n| n.kind() == "map_lit")
+            .is_some_and(|m| map_declares_private(*m, source))
+        && rest[..rest.len() - 1]
+            .iter()
+            .any(|n| n.kind() == "list_lit" && arity_body(*n));
+    leading || trailing
 }
 
 /// The Integrant lifecycle multimethod whose `defmethod` we treat as the
@@ -783,6 +885,7 @@ fn extract_integrant_key(
         // Whole-keyword range so goto-definition lands on (and references list)
         // the full `::name` dispatch token.
         name_range: node_to_lsp_range(*dispatch, source),
+        private: false,
     });
 }
 
@@ -832,6 +935,8 @@ fn extract_protocol_methods(
             source: super::SymbolSource::Project,
             range: node_to_lsp_range(*sig, source),
             name_range: node_to_lsp_range(sym_name_node(*name_node), source),
+            // A protocol method signature is public by definition.
+            private: false,
         });
     }
 }
@@ -934,6 +1039,85 @@ fn keyword_fqn(node: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
 
 // --- occurrence collection -------------------------------------------------
 
+/// One local binding in the occurrence walker's scope stack: enough to
+/// suppress var resolution (`name`) *and* to report it unused (`name_range`,
+/// `used`, `lintable`).
+struct LocalSlot {
+    name: String,
+    name_range: Range,
+    used: bool,
+    /// Whether an unused slot is worth reporting. Names the user cannot drop —
+    /// `fn`/`letfn` self-names, record/type fields, protocol-method params —
+    /// bind but never report.
+    lintable: bool,
+}
+
+/// The occurrence walker's lexical scope: a stack of frames, plus the bindings
+/// that turned out unused. A frame's leftovers are harvested when it pops, so
+/// the unused-binding lint reuses the walker's scope rules rather than
+/// re-deriving them.
+struct Scope {
+    frames: Vec<Vec<LocalSlot>>,
+    unused: Vec<LocalBinding>,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Scope {
+            frames: Vec::new(),
+            unused: Vec::new(),
+        }
+    }
+
+    fn push(&mut self) {
+        self.frames.push(Vec::new());
+    }
+
+    /// Pops the innermost frame, reporting every lintable slot that was never
+    /// used. A leading `_` is the conventional opt-out and is never reported.
+    fn pop(&mut self) {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        for slot in frame {
+            if slot.lintable && !slot.used && !slot.name.starts_with('_') {
+                self.unused.push(LocalBinding {
+                    name: slot.name,
+                    name_range: slot.name_range,
+                });
+            }
+        }
+    }
+
+    /// Adds `bindings` to the innermost frame. Binding sites are collected
+    /// before the frame they belong to is pushed (`:or` defaults must be walked
+    /// in the enclosing scope), so this is a separate step from `push`.
+    fn bind_all(&mut self, bindings: Vec<LocalBinding>, lintable: bool) {
+        let Some(frame) = self.frames.last_mut() else {
+            return;
+        };
+        frame.extend(bindings.into_iter().map(|b| LocalSlot {
+            name: b.name,
+            name_range: b.name_range,
+            used: false,
+            lintable,
+        }));
+    }
+
+    /// Marks the innermost binding of `name` used, returning whether one
+    /// existed (i.e. whether the symbol is a local rather than a var). Slots are
+    /// searched newest-first so `(let [x 1 x (inc x)] x)` marks both.
+    fn mark_used(&mut self, name: &str) -> bool {
+        for frame in self.frames.iter_mut().rev() {
+            if let Some(slot) = frame.iter_mut().rev().find(|s| s.name == name) {
+                slot.used = true;
+                return true;
+            }
+        }
+        false
+    }
+}
+
 struct OccurrenceCtx<'a> {
     source: &'a str,
     ns_meta: &'a NsMeta,
@@ -973,12 +1157,7 @@ fn is_let_like(head: &str) -> bool {
     )
 }
 
-fn walk_occurrences(
-    node: Node,
-    ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
-    out: &mut Vec<Occurrence>,
-) {
+fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
     match node.kind() {
         "sym_lit" => record_occurrence(node, ctx, scope, out),
         // Every qualified keyword is a usage (`:lib/x`, `::x`, `::alias/x`);
@@ -1016,12 +1195,7 @@ fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
     }
 }
 
-fn walk_list(
-    node: Node,
-    ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
-    out: &mut Vec<Occurrence>,
-) {
+fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
     let children = named_children(node);
     let Some(head) = children.first() else { return };
 
@@ -1073,6 +1247,12 @@ fn walk_list(
             record_occurrence(*head, ctx, scope, out);
             walk_fn_form(&children, ctx, scope, out);
         }
+        // (catch Class name body…) / (as-> expr name body…): the second child
+        // is an ordinary usage, the third binds a local for the body.
+        Some("catch") | Some("as->") => {
+            record_occurrence(*head, ctx, scope, out);
+            walk_binding_tail(&children, ctx, scope, out);
+        }
         Some("extend-type") => {
             record_occurrence(*head, ctx, scope, out);
             // (extend-type Type & specs): Type is an occurrence; the specs
@@ -1121,7 +1301,7 @@ fn walk_def_form(
     kind: DefKind,
     children: &[Node],
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
     // A defprotocol body is only method *declarations* (signatures, no bodies),
@@ -1135,11 +1315,14 @@ fn walk_def_form(
     // (defrecord Name [fields] & specs) / (deftype …): bind the fields, then
     // walk the protocol/method specs (impl heads resolve to their protocol).
     if matches!(kind, DefKind::Defrecord | DefKind::Deftype) {
-        let mut frame = HashSet::new();
+        // Record/type fields are fixed by the type's shape, so they bind but
+        // are never reported unused.
+        let mut fields_bound = Vec::new();
         if let Some(fields) = children.get(2).filter(|n| n.kind() == "vec_lit") {
-            collect_binding_names(*fields, ctx, scope, out, &mut frame);
+            collect_binding_names(*fields, ctx, scope, out, &mut fields_bound);
         }
-        scope.push(frame);
+        scope.push();
+        scope.bind_all(fields_bound, false);
         if children.len() > 3 {
             walk_type_specs(&children[3..], SpecMode::Interleaved, ctx, scope, out);
         }
@@ -1187,19 +1370,21 @@ fn walk_def_form(
         match child.kind() {
             "vec_lit" if !frame_pushed => {
                 // Single-arity params: bind for the remaining body
-                let mut frame = HashSet::new();
-                collect_binding_names(*child, ctx, scope, out, &mut frame);
-                scope.push(frame);
+                let mut bound = Vec::new();
+                collect_binding_names(*child, ctx, scope, out, &mut bound);
+                scope.push();
+                scope.bind_all(bound, true);
                 frame_pushed = true;
             }
             "list_lit" if arity_body(*child) => {
                 // Multi-arity: ([params] body…) — bind per arity
                 let inner = named_children(*child);
-                let mut frame = HashSet::new();
+                let mut bound = Vec::new();
                 if let Some(params) = inner.first() {
-                    collect_binding_names(*params, ctx, scope, out, &mut frame);
+                    collect_binding_names(*params, ctx, scope, out, &mut bound);
                 }
-                scope.push(frame);
+                scope.push();
+                scope.bind_all(bound, true);
                 for body in inner.iter().skip(1) {
                     walk_occurrences(*body, ctx, scope, out);
                 }
@@ -1237,7 +1422,7 @@ fn walk_type_specs(
     specs: &[Node],
     mode: SpecMode,
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
     let interleaved = matches!(mode, SpecMode::Interleaved);
@@ -1266,7 +1451,7 @@ fn walk_method_impl(
     list: Node,
     proto_ns: Option<&str>,
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
     let inner = named_children(list);
@@ -1288,10 +1473,12 @@ fn walk_method_impl(
 
     let rest = &inner[1..];
     if rest.first().map(|n| n.kind() == "vec_lit").unwrap_or(false) {
-        // Single arity: (name [params] body…).
-        let mut frame = HashSet::new();
-        collect_binding_names(rest[0], ctx, scope, out, &mut frame);
-        scope.push(frame);
+        // Single arity: (name [params] body…). The signature fixes the arity,
+        // so an unused param is not the user's to remove — bind, never report.
+        let mut bound = Vec::new();
+        collect_binding_names(rest[0], ctx, scope, out, &mut bound);
+        scope.push();
+        scope.bind_all(bound, false);
         for body in rest.iter().skip(1) {
             walk_occurrences(*body, ctx, scope, out);
         }
@@ -1302,11 +1489,12 @@ fn walk_method_impl(
         for arity in rest {
             if arity.kind() == "list_lit" && arity_body(*arity) {
                 let parts = named_children(*arity);
-                let mut frame = HashSet::new();
+                let mut bound = Vec::new();
                 if let Some(params) = parts.first() {
-                    collect_binding_names(*params, ctx, scope, out, &mut frame);
+                    collect_binding_names(*params, ctx, scope, out, &mut bound);
                 }
-                scope.push(frame);
+                scope.push();
+                scope.bind_all(bound, false);
                 for body in parts.iter().skip(1) {
                     walk_occurrences(*body, ctx, scope, out);
                 }
@@ -1348,10 +1536,10 @@ fn protocol_ns(sym: Node, ctx: &OccurrenceCtx) -> Option<String> {
 fn walk_let_form(
     children: &[Node],
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
-    scope.push(HashSet::new());
+    scope.push();
     if let Some(bindings) = children.get(1).filter(|n| n.kind() == "vec_lit") {
         process_binding_pairs(*bindings, ctx, scope, out);
     }
@@ -1368,7 +1556,7 @@ fn walk_let_form(
 fn process_binding_pairs(
     bindings: Node,
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
     let items = named_children(bindings);
@@ -1384,26 +1572,53 @@ fn process_binding_pairs(
             continue;
         }
         walk_occurrences(*rhs, ctx, scope, out);
-        let mut names = HashSet::new();
-        collect_binding_names(*lhs, ctx, scope, out, &mut names);
-        scope.last_mut().unwrap().extend(names);
+        let mut bound = Vec::new();
+        collect_binding_names(*lhs, ctx, scope, out, &mut bound);
+        scope.bind_all(bound, true);
     }
+}
+
+/// `(catch Class name body…)` / `(as-> expr name body…)`: `children[1]` is an
+/// expression (the class or the seed value), `children[2]` binds a local
+/// visible only in `children[3..]`.
+fn walk_binding_tail(
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Scope,
+    out: &mut Vec<Occurrence>,
+) {
+    if let Some(expr) = children.get(1) {
+        walk_occurrences(*expr, ctx, scope, out);
+    }
+    let mut bound = Vec::new();
+    if let Some(name) = children.get(2).filter(|n| n.kind() == "sym_lit") {
+        collect_binding_names(*name, ctx, scope, out, &mut bound);
+    }
+    scope.push();
+    scope.bind_all(bound, true);
+    for body in children.iter().skip(3) {
+        walk_occurrences(*body, ctx, scope, out);
+    }
+    scope.pop();
 }
 
 /// `(fn name? [params] body…)` — optional self-name and params bind.
 fn walk_fn_form(
     children: &[Node],
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
-    let mut frame = HashSet::new();
+    // The self-name exists for recursion; an unused one is idiomatic, so it
+    // binds without being reported.
+    let mut self_name = Vec::new();
     let mut rest_start = 1;
     if let Some(name) = children.get(1).filter(|n| n.kind() == "sym_lit") {
-        frame.insert(sym_text(*name, ctx.source).to_string());
+        collect_binding_names(*name, ctx, scope, out, &mut self_name);
         rest_start = 2;
     }
-    scope.push(frame);
+    scope.push();
+    scope.bind_all(self_name, false);
     walk_fn_tail(&children[rest_start..], ctx, scope, out);
     scope.pop();
 }
@@ -1411,28 +1626,24 @@ fn walk_fn_form(
 /// Params + bodies of a fn-like form (after the optional name): a leading
 /// vector binds params; `([params] body…)` lists are per-arity scopes.
 /// Assumes the caller pushed a scope frame.
-fn walk_fn_tail(
-    parts: &[Node],
-    ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
-    out: &mut Vec<Occurrence>,
-) {
+fn walk_fn_tail(parts: &[Node], ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
     let mut params_bound = false;
     for child in parts {
         match child.kind() {
             "vec_lit" if !params_bound => {
-                let mut names = HashSet::new();
-                collect_binding_names(*child, ctx, scope, out, &mut names);
-                scope.last_mut().unwrap().extend(names);
+                let mut bound = Vec::new();
+                collect_binding_names(*child, ctx, scope, out, &mut bound);
+                scope.bind_all(bound, true);
                 params_bound = true;
             }
             "list_lit" if arity_body(*child) => {
                 let inner = named_children(*child);
-                let mut arity_frame = HashSet::new();
+                let mut bound = Vec::new();
                 if let Some(params) = inner.first() {
-                    collect_binding_names(*params, ctx, scope, out, &mut arity_frame);
+                    collect_binding_names(*params, ctx, scope, out, &mut bound);
                 }
-                scope.push(arity_frame);
+                scope.push();
+                scope.bind_all(bound, true);
                 for body in inner.iter().skip(1) {
                     walk_occurrences(*body, ctx, scope, out);
                 }
@@ -1448,7 +1659,7 @@ fn walk_fn_tail(
 fn walk_letfn_form(
     children: &[Node],
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
     let fn_specs: Vec<Node> = children
@@ -1457,25 +1668,28 @@ fn walk_letfn_form(
         .map(|n| named_children(*n))
         .unwrap_or_default();
 
-    let mut frame = HashSet::new();
+    // The fn names are mutually recursive: one used only by a sibling is not
+    // dead, and the walk order can't tell. Bind them without reporting.
+    let mut fn_names = Vec::new();
     for spec in &fn_specs {
         if spec.kind() == "list_lit" {
             if let Some(name) = named_children(*spec)
                 .first()
                 .filter(|n| n.kind() == "sym_lit")
             {
-                frame.insert(sym_text(*name, ctx.source).to_string());
+                collect_binding_names(*name, ctx, scope, out, &mut fn_names);
             }
         }
     }
-    scope.push(frame);
+    scope.push();
+    scope.bind_all(fn_names, false);
 
     for spec in &fn_specs {
         if spec.kind() != "list_lit" {
             continue;
         }
         let inner = named_children(*spec);
-        scope.push(HashSet::new());
+        scope.push();
         walk_fn_tail(&inner[1..], ctx, scope, out);
         scope.pop();
     }
@@ -1486,20 +1700,25 @@ fn walk_letfn_form(
 }
 
 /// Collects every symbol inside a binding pattern (plain names, vector and
-/// map destructuring) except `&` and `_`. Map destructuring `:or` defaults
-/// are *expressions*, recorded as occurrences rather than bindings.
+/// map destructuring) except `&` and `_`, each with its name range. Map
+/// destructuring `:or` defaults are *expressions*, recorded as occurrences
+/// rather than bindings.
 fn collect_binding_names(
     pattern: Node,
     ctx: &OccurrenceCtx,
-    scope: &mut Vec<HashSet<String>>,
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
-    names: &mut HashSet<String>,
+    names: &mut Vec<LocalBinding>,
 ) {
     match pattern.kind() {
         "sym_lit" => {
-            let name = sym_text(pattern, ctx.source);
+            let nn = sym_name_node(pattern);
+            let name = node_text(nn, ctx.source);
             if name != "&" && name != "_" {
-                names.insert(name.to_string());
+                names.push(LocalBinding {
+                    name: name.to_string(),
+                    name_range: node_to_lsp_range(nn, ctx.source),
+                });
             }
         }
         "map_lit" => {
@@ -1508,13 +1727,15 @@ fn collect_binding_names(
                 let [k, v] = pair else { continue };
                 if k.kind() == "kwd_lit" {
                     if node_text(*k, ctx.source) == ":or" && v.kind() == "map_lit" {
-                        // {:or {name default-expr}}: names bind, defaults
-                        // are usages
+                        // {:or {name default-expr}}: the defaults are usages.
+                        // The key is *not* a binding site — the real binding is
+                        // the `:keys`/`:as`/map-key entry elsewhere in the same
+                        // pattern, and a second slot here would shadow it and
+                        // report it unused. (It still resolves to that binding
+                        // through the position-directed scope walk, so
+                        // references and rename cover it.)
                         for default in named_children(*v).chunks(2) {
-                            let [dk, dv] = default else { continue };
-                            if dk.kind() == "sym_lit" {
-                                names.insert(sym_text(*dk, ctx.source).to_string());
-                            }
+                            let [_dk, dv] = default else { continue };
                             walk_occurrences(*dv, ctx, scope, out);
                         }
                     } else {
@@ -1590,7 +1811,7 @@ fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut V
 fn record_occurrence(
     node: Node,
     ctx: &OccurrenceCtx,
-    scope: &[HashSet<String>],
+    scope: &mut Scope,
     out: &mut Vec<Occurrence>,
 ) {
     // The grammar splits qualified symbols: `lib/process` is
@@ -1619,7 +1840,7 @@ fn record_occurrence(
         return;
     }
 
-    if scope.iter().any(|frame| frame.contains(name)) {
+    if scope.mark_used(name) {
         return; // locally bound
     }
 
@@ -1768,6 +1989,10 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                     walk_scope_letfn(&children, source, pos, out);
                     return;
                 }
+                if head_text == "catch" || head_text == "as->" {
+                    walk_scope_binding_tail(&children, source, pos, out);
+                    return;
+                }
             }
         }
     }
@@ -1837,6 +2062,40 @@ fn walk_scope_binding_vec(
         i += 2;
     }
     lsp_range_contains(node_to_lsp_range(bindings, source), pos)
+}
+
+/// `(catch Class name body…)` / `(as-> expr name body…)`: the name binds only
+/// for `children[3..]`. The occurrence-walker twin is `walk_binding_tail`.
+fn walk_scope_binding_tail(
+    children: &[Node],
+    source: &str,
+    pos: Position,
+    out: &mut Vec<LocalBinding>,
+) {
+    // A cursor in the class/seed expression sees no new binding.
+    if let Some(expr) = children.get(1) {
+        if lsp_range_contains(node_to_lsp_range(*expr, source), pos) {
+            walk_scope(*expr, source, pos, out);
+            return;
+        }
+    }
+    let mut bound = Vec::new();
+    if let Some(name) = children.get(2).filter(|n| n.kind() == "sym_lit") {
+        collect_binding_targets(*name, source, &mut bound);
+        // A cursor on the binding site itself yields that binding, like every
+        // other binding form (`walk_scope_binding_vec`'s LHS case).
+        if lsp_range_contains(node_to_lsp_range(*name, source), pos) {
+            out.extend(bound);
+            return;
+        }
+    }
+    for body in children.iter().skip(3) {
+        if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
+            out.extend(bound);
+            walk_scope(*body, source, pos, out);
+            return;
+        }
+    }
 }
 
 /// `(fn name? [params] body…)` or multi-arity `(fn name? ([params] body…) …)`.
@@ -2079,6 +2338,10 @@ fn pos_in_or_default(node: Node, source: &str, pos: Position) -> bool {
 pub struct LocalRefs {
     pub declaration: Range,
     pub usages: Vec<Range>,
+    /// Whether the declaration sits in a `:keys`/`:strs`/`:syms` vector, where
+    /// the binding name doubles as the key looked up. Renaming such a binding
+    /// would silently change which key is read, so rename refuses it.
+    pub destructured_key: bool,
 }
 
 /// Resolves the local named `name` under `pos` to its declaration and all
@@ -2126,7 +2389,49 @@ pub fn local_references_at(source: &str, pos: Position, name: &str) -> Option<Lo
     Some(LocalRefs {
         declaration,
         usages,
+        destructured_key: is_destructured_key(root, source, declaration),
     })
+}
+
+/// Whether the binding site at `declaration` is a name inside a
+/// `{:keys [...]}` / `:strs` / `:syms` vector — where the symbol is both the
+/// local's name and (modulo the key type) the key read from the map.
+/// Namespaced entries (`{:keys [foo/bar]}`) live in the same vector, so the
+/// same structural check covers them.
+fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
+    let Some(sym) = find_binding_sym(root, source, declaration) else {
+        return false;
+    };
+    let Some(vec) = sym.parent().filter(|p| p.kind() == "vec_lit") else {
+        return false;
+    };
+    if vec.parent().map(|g| g.kind()) != Some("map_lit") {
+        return false;
+    }
+    vec.prev_named_sibling()
+        .map(|kw| {
+            // The directive may be namespaced (`{:user/keys [name]}`,
+            // `{::keys [name]}`), which binds the same way — match on the
+            // keyword's name part, not its literal text.
+            kw.kind() == "kwd_lit"
+                && kw
+                    .child_by_field_name("name")
+                    .map(|n| matches!(node_text(n, source), "keys" | "strs" | "syms"))
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// The `sym_lit` whose name range is exactly `range`. Skips quoted data, like
+/// `collect_name_occurrences`.
+fn find_binding_sym<'a>(node: Node<'a>, source: &str, range: Range) -> Option<Node<'a>> {
+    match node.kind() {
+        "quoting_lit" => None,
+        "sym_lit" if node_to_lsp_range(sym_name_node(node), source) == range => Some(node),
+        _ => named_children(node)
+            .into_iter()
+            .find_map(|child| find_binding_sym(child, source, range)),
+    }
 }
 
 /// Ranges of every unqualified `sym_lit` named `name`. Skips `'name` quoted
@@ -2378,6 +2683,43 @@ mod tests {
     }
 
     #[test]
+    fn catch_binding_visible_in_its_body() {
+        let src = "(ns x)\n(defn f []\n  (try (g)\n       (catch Exception e\n         (log e))))";
+        assert!(
+            local_names(src, pos_of(src, "(log e)", 0, 2)).contains(&"e".to_string()),
+            "catch binding must be visible in its body"
+        );
+        assert!(
+            !local_names(src, pos_of(src, "(g)", 0, 1)).contains(&"e".to_string()),
+            "catch binding must not leak into the try body"
+        );
+    }
+
+    #[test]
+    fn catch_and_as_arrow_binding_sites_resolve_to_themselves() {
+        // A cursor on the binding symbol itself must yield that binding, so
+        // goto-definition/references/rename work from the declaration too.
+        let src = "(ns x)\n(defn f []\n  (try (g)\n       (catch Exception e\n         (log e))))";
+        assert!(local_names(src, pos_of(src, "Exception e", 0, 10)).contains(&"e".to_string()));
+
+        let src = "(ns x)\n(defn f [y]\n  (as-> y v\n    (inc v)))";
+        assert!(local_names(src, pos_of(src, "as-> y v", 0, 7)).contains(&"v".to_string()));
+    }
+
+    #[test]
+    fn as_arrow_name_visible_in_body() {
+        let src = "(ns x)\n(defn f [y]\n  (as-> y v\n    (inc v)))";
+        assert!(
+            local_names(src, pos_of(src, "(inc v)", 0, 2)).contains(&"v".to_string()),
+            "as-> name must be visible in its body"
+        );
+        assert!(
+            !local_names(src, pos_of(src, "as-> y", 0, 5)).contains(&"v".to_string()),
+            "as-> name must not be visible in the seed expression"
+        );
+    }
+
+    #[test]
     fn locals_letfn_names_visible() {
         let src =
             "(ns x)\n(defn j []\n  (letfn [(foo [] (bar))\n          (bar [] 1)]\n    (foo)))";
@@ -2432,6 +2774,120 @@ mod tests {
         );
     }
 
+    // --- unused bindings ----------------------------------------------------
+
+    /// `(name, start line)` of every binding the analysis reports unused.
+    fn unused(src: &str) -> Vec<(String, u32)> {
+        extract_analysis_with(src, Path::new("t.clj"), &ExtractConfig::default())
+            .unwrap()
+            .unused_bindings
+            .into_iter()
+            .map(|b| (b.name, b.name_range.start.line))
+            .collect()
+    }
+
+    fn unused_names(src: &str) -> Vec<String> {
+        unused(src).into_iter().map(|(n, _)| n).collect()
+    }
+
+    #[test]
+    fn unused_let_binding_reported() {
+        assert_eq!(unused("(let [a 1 b 2] a)"), vec![("b".to_string(), 0)]);
+    }
+
+    #[test]
+    fn unused_defn_param_reported() {
+        assert_eq!(unused_names("(defn f [x y] x)"), vec!["y"]);
+    }
+
+    #[test]
+    fn unused_underscore_prefixed_binding_is_opt_out() {
+        assert!(unused_names("(defn f [_y] 1)").is_empty());
+        assert!(unused_names("(defn f [_] 1)").is_empty());
+    }
+
+    #[test]
+    fn unused_rebinding_of_same_name_is_not_reported() {
+        // The RHS marks the first `x`, the body the second.
+        assert!(unused_names("(let [x 1 x (inc x)] x)").is_empty());
+    }
+
+    #[test]
+    fn unused_destructured_names_reported() {
+        let names = unused_names("(defn f [{:keys [a b] :as m}] a)");
+        assert_eq!(names, vec!["b", "m"], "got {:?}", names);
+    }
+
+    #[test]
+    fn unused_or_key_never_reports_on_its_own() {
+        // The `:or` key is not a binding site; only the `{a :a}` pattern is.
+        let found = unused("(let [{a :a :or {a 1}} m] 1)");
+        assert_eq!(found.len(), 1, "one report for `a`: {:?}", found);
+        let col = "(let [{".len() as u32;
+        let reported = extract_analysis_with(
+            "(let [{a :a :or {a 1}} m] 1)",
+            Path::new("t.clj"),
+            &ExtractConfig::default(),
+        )
+        .unwrap()
+        .unused_bindings;
+        assert_eq!(reported[0].name_range.start.character, col);
+    }
+
+    #[test]
+    fn unused_fn_self_name_is_exempt() {
+        assert!(unused_names("(fn me [x] x)").is_empty());
+        assert_eq!(unused_names("(fn me [x] 1)"), vec!["x"]);
+    }
+
+    #[test]
+    fn unused_letfn_name_is_exempt_but_params_are_not() {
+        assert_eq!(unused_names("(letfn [(g [p] 1)] (g 1))"), vec!["p"]);
+        assert!(unused_names("(letfn [(g [p] p)] 1)").is_empty());
+    }
+
+    #[test]
+    fn unused_record_fields_and_method_params_are_exempt() {
+        assert!(unused_names("(defrecord R [a b] P (m [this q] a))").is_empty());
+    }
+
+    #[test]
+    fn unused_catch_binding_reported() {
+        assert_eq!(unused_names("(try (f) (catch Exception e nil))"), vec!["e"]);
+    }
+
+    #[test]
+    fn unused_loop_binding_used_by_recur() {
+        assert!(unused_names("(loop [i 0] (when (< i 3) (recur (inc i))))").is_empty());
+    }
+
+    #[test]
+    fn unused_for_let_modifier_reported() {
+        assert_eq!(unused_names("(for [x xs :let [y (inc x)]] x)"), vec!["y"]);
+    }
+
+    #[test]
+    fn unused_defmethod_param_reported() {
+        assert_eq!(unused_names("(defmethod m :k [_ arg] 1)"), vec!["arg"]);
+    }
+
+    #[test]
+    fn unused_syntax_quote_gensym_is_matched_by_name() {
+        assert!(unused_names("(defmacro w [x] `(let [v# ~x] v#))").is_empty());
+    }
+
+    #[test]
+    fn unused_as_arrow_name_reported() {
+        assert_eq!(unused_names("(as-> 1 v)"), vec!["v"]);
+        assert!(unused_names("(as-> 1 v (inc v))").is_empty());
+    }
+
+    #[test]
+    fn unused_reported_per_arity() {
+        let names = unused_names("(defn f ([a] a) ([a b] a))");
+        assert_eq!(names, vec!["b"], "got {:?}", names);
+    }
+
     // --- local_references_at ------------------------------------------------
 
     #[test]
@@ -2444,6 +2900,62 @@ mod tests {
         let from_use = local_references_at(src, pos_of(src, "(+ a a)", 0, 3), "a").expect("local");
         assert_eq!(from_use.declaration, refs.declaration);
         assert_eq!(from_use.usages.len(), 2);
+    }
+
+    #[test]
+    fn local_refs_flags_keys_destructured() {
+        // `a` comes from `{:keys [a]}`: renaming it would change the key
+        // looked up, so the caller must be able to refuse.
+        let src = "(ns x)\n(defn f [{:keys [a]}] (inc a))";
+        let refs = local_references_at(src, pos_of(src, "(inc a)", 0, 5), "a").expect("local");
+        assert!(refs.destructured_key, "{{:keys [a]}} binding: {:?}", refs);
+        assert_eq!(refs.usages.len(), 1, "one body usage: {:?}", refs.usages);
+    }
+
+    #[test]
+    fn local_refs_flags_strs_and_syms() {
+        for kw in [":strs", ":syms"] {
+            let src = format!("(ns x)\n(defn f [{{{} [a]}}] (inc a))", kw);
+            let refs =
+                local_references_at(&src, pos_of(&src, "(inc a)", 0, 5), "a").expect("local");
+            assert!(refs.destructured_key, "{} binding: {:?}", kw, refs);
+        }
+    }
+
+    #[test]
+    fn local_refs_flags_namespaced_keys_directive() {
+        // `{:user/keys [a]}` and `{::keys [a]}` bind from `:user/a` / `::a`,
+        // so the name is still the key.
+        for directive in [":user/keys", "::keys", ":user/syms"] {
+            let src = format!("(ns x)\n(defn f [{{{} [a]}}] (inc a))", directive);
+            let refs =
+                local_references_at(&src, pos_of(&src, "(inc a)", 0, 5), "a").expect("local");
+            assert!(refs.destructured_key, "{} binding: {:?}", directive, refs);
+        }
+    }
+
+    #[test]
+    fn local_refs_plain_map_key_is_not_destructured_key() {
+        // `{a :a}` names the binding explicitly, so renaming `a` is safe.
+        let src = "(ns x)\n(let [{a :a} m] a)";
+        let refs = local_references_at(src, pos_of(src, "{a :a}", 0, 1), "a").expect("local");
+        assert!(!refs.destructured_key, "{{a :a}} binding: {:?}", refs);
+    }
+
+    #[test]
+    fn local_refs_or_key_is_a_usage() {
+        // The `:or` key resolves to the same declaration as the body usage.
+        let src = "(ns x)\n(let [{a :a :or {a 1}} m] a)";
+        let refs = local_references_at(src, pos_of(src, "] a)", 0, 2), "a").expect("local");
+        assert!(!refs.destructured_key, "{:?}", refs);
+        assert_eq!(refs.usages.len(), 2, ":or key + body: {:?}", refs.usages);
+    }
+
+    #[test]
+    fn local_refs_vector_binding_is_not_destructured_key() {
+        let src = "(ns x)\n(let [[a b] v] (+ a b))";
+        let refs = local_references_at(src, pos_of(src, "[[a b]", 0, 2), "a").expect("local");
+        assert!(!refs.destructured_key, "vector binding: {:?}", refs);
     }
 
     #[test]

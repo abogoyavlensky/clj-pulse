@@ -51,7 +51,8 @@ most of what follows.
       on save/open like definitions).
 - [x] `textDocument/references`.
 - [x] `textDocument/rename` — cross-file `WorkspaceEdit` built on
-      references.
+      references. Locals (params, `let`/`loop`/`for` bindings, destructured
+      names) are covered too, resolved structurally within the file.
 - [x] `workspace/didChangeWatchedFiles` — keep the index correct on git
       pulls and branch switches, not just editor saves.
 
@@ -78,7 +79,11 @@ meantime and keeping the server dependency-free is worth more early on.
 
 - [x] Native unresolved-namespace lint — warns on qualified usages whose
       prefix isn't required (debounced, powers the add-require lightbulb).
-- [ ] Native fallback lints: unused require, unresolved (unqualified) symbol.
+- [x] Native fallback lints, part 1 — `unused-namespace`,
+      `duplicate-require`, `unused-binding`, `unused-private-var`. They ship
+      whenever clj-kondo is absent or disabled; a successful kondo run owns
+      those codes instead.
+- [ ] Native fallback lints, part 2: unresolved (unqualified) symbol.
 - [ ] clj-kondo bridge — shell out to a `clj-kondo` binary when present,
       translate JSON findings to LSP diagnostics.
 

@@ -16,7 +16,8 @@ use super::{NsMeta, Symbol};
 /// 9: `DefKind::IntegrantKey` added (Symbol layout change).
 /// 10: `NsMeta.imports` added (`:import` parsing).
 /// 11: `DefKind::Deftest` + `NsMeta.refer_all` (layout change).
-pub const CACHE_FORMAT_VERSION: u32 = 11;
+/// 12: `Symbol.private` (layout change).
+pub const CACHE_FORMAT_VERSION: u32 = 12;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {
@@ -115,6 +116,7 @@ mod tests {
             source: SymbolSource::Jar(jar.to_path_buf()),
             range: make_range(2, 0, 20),
             name_range: make_range(2, 5, 10),
+            private: false,
         };
         JarCacheEntry {
             format_version: CACHE_FORMAT_VERSION,

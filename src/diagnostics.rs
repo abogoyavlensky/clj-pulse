@@ -2,14 +2,13 @@ use std::path::Path;
 
 use tower_lsp::lsp_types::*;
 
-use crate::index::extractor;
+use crate::index::{extractor, DefKind, ExtractConfig};
 
-/// Computes `unresolved-namespace` diagnostics for `source`: a warning for each
-/// qualified usage (`prefix/name`) whose prefix isn't resolvable from this file
-/// and isn't Java/JS interop. Pure and index-free — availability is decided
-/// from the file's own `ns` form, so a project without an indexed classpath
-/// never produces false positives.
-pub fn compute(source: &str, path: &Path) -> Vec<Diagnostic> {
+/// Computes this file's native diagnostics. Pure and index-free — every answer
+/// comes from the file's own text, so a project without an indexed classpath
+/// never produces false positives. `cfg` is only consulted for `:lint-as`, so a
+/// custom defining macro binds its params like the form it stands in for.
+pub fn compute(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Diagnostic> {
     // EDN config files (deps.edn / lgx.edn) are not source: their dependency
     // coordinates (`my/loc`, `org.clojure/clojure`) look like qualified usages
     // but must never be flagged.
@@ -17,10 +16,13 @@ pub fn compute(source: &str, path: &Path) -> Vec<Diagnostic> {
         return vec![];
     }
 
-    let Ok((ns_meta, _)) = extractor::extract(source, path) else {
+    let Ok(analysis) = extractor::extract_analysis_with(source, path, cfg) else {
         return vec![];
     };
+    let ns_meta = &analysis.ns_meta;
 
+    // A warning for each qualified usage (`prefix/name`) whose prefix isn't
+    // resolvable from this file and isn't Java/JS interop.
     let mut diags: Vec<Diagnostic> = extractor::qualified_usages(source)
         .into_iter()
         .filter(|u| {
@@ -74,16 +76,83 @@ pub fn compute(source: &str, path: &Path) -> Vec<Diagnostic> {
             }),
     );
 
+    // Locals the file binds but never reads. Tagged UNNECESSARY so editors fade
+    // them; a leading `_` is the opt-out, applied by the extractor.
+    diags.extend(analysis.unused_bindings.iter().map(|b| Diagnostic {
+        range: b.name_range,
+        severity: Some(DiagnosticSeverity::WARNING),
+        code: Some(NumberOrString::String("unused-binding".to_string())),
+        source: Some("clj-pulse".to_string()),
+        message: format!("Unused binding: {}", b.name),
+        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+        ..Default::default()
+    }));
+
+    // Private vars nothing in this file uses. Private means the var can only be
+    // reached from here, so the file's own occurrences settle it — but a usage
+    // inside the var's own form (recursion) does not count.
+    diags.extend(
+        analysis
+            .symbols
+            .iter()
+            .filter(|sym| sym.private && is_lintable_private_kind(&sym.kind))
+            .filter(|sym| {
+                !analysis
+                    .occurrences
+                    .iter()
+                    .any(|occ| occ.fqn == sym.fqn && !range_within(&occ.name_range, &sym.range))
+            })
+            .map(|sym| Diagnostic {
+                range: sym.name_range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("unused-private-var".to_string())),
+                source: Some("clj-pulse".to_string()),
+                message: format!("Unused private var: {}", sym.name),
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                ..Default::default()
+            }),
+    );
+
     diags
+}
+
+/// The `def`-family kinds whose private members are worth reporting.
+/// `deftest-` is deliberately absent: a test runner calls a private test by
+/// var, so it is never dead. Type/record/protocol forms are excluded too —
+/// their vars are reached through generated constructors and method dispatch.
+fn is_lintable_private_kind(kind: &DefKind) -> bool {
+    matches!(
+        kind,
+        DefKind::Def
+            | DefKind::Defonce
+            | DefKind::Defn
+            | DefKind::DefnPrivate
+            | DefKind::Defmacro
+            | DefKind::Defmulti
+    )
+}
+
+/// Whether `inner` sits inside `outer` — used to tell a recursive self-call
+/// (inside the def's own form) from a real use elsewhere in the file.
+fn range_within(inner: &Range, outer: &Range) -> bool {
+    let starts_after =
+        (inner.start.line, inner.start.character) >= (outer.start.line, outer.start.character);
+    let ends_before =
+        (inner.end.line, inner.end.character) <= (outer.end.line, outer.end.character);
+    starts_after && ends_before
 }
 
 /// The native codes clj-kondo also emits. When a clj-kondo run succeeds it
 /// owns these — publishing both sets would double every squiggle, with two
-/// slightly different messages.
-const KONDO_OWNED_CODES: [&str; 3] = [
+/// slightly different messages. `unused-binding` and `unused-private-var` are
+/// clj-kondo's `:unused-binding` and `:unused-private-var` linters; the native
+/// versions exist for the (common) case of no clj-kondo on the machine.
+const KONDO_OWNED_CODES: [&str; 5] = [
     "unresolved-namespace",
     "unused-namespace",
     "duplicate-require",
+    "unused-binding",
+    "unused-private-var",
 ];
 
 /// Combines this pass's native diagnostics with clj-kondo's.
@@ -130,9 +199,18 @@ fn is_interop(prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::ExtractConfig;
 
     fn diags(source: &str) -> Vec<Diagnostic> {
-        compute(source, Path::new("test.clj"))
+        compute(source, Path::new("test.clj"), &ExtractConfig::default())
+    }
+
+    /// Every diagnostic carrying `code`.
+    fn of_code(source: &str, code: &str) -> Vec<Diagnostic> {
+        diags(source)
+            .into_iter()
+            .filter(|d| d.code == Some(NumberOrString::String(code.to_string())))
+            .collect()
     }
 
     fn codes(source: &str) -> Vec<String> {
@@ -152,10 +230,10 @@ mod tests {
         // EDN config files are not source and must never be linted.
         let lgx = r#"{:deps {my/loc {:local/root "v"}
                              ext/lib {:git/url "u" :git/sha "s"}}}"#;
-        assert!(compute(lgx, Path::new("lgx.edn")).is_empty());
+        assert!(compute(lgx, Path::new("lgx.edn"), &ExtractConfig::default()).is_empty());
 
         let deps = r#"{:deps {org.clojure/clojure {:mvn/version "1.11.1"}}}"#;
-        assert!(compute(deps, Path::new("deps.edn")).is_empty());
+        assert!(compute(deps, Path::new("deps.edn"), &ExtractConfig::default()).is_empty());
     }
 
     #[test]
@@ -500,6 +578,107 @@ mod tests {
     }
 
     #[test]
+    fn flags_unused_let_binding() {
+        let d = of_code("(ns a)\n(defn f [x]\n  (let [y 1] x))\n", "unused-binding");
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+        let d = &d[0];
+        assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(d.source.as_deref(), Some("clj-pulse"));
+        assert_eq!(d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+        assert!(d.message.contains('y'), "message: {}", d.message);
+        assert_eq!(d.range.start.line, 2);
+        assert_eq!(d.range.end.character - d.range.start.character, 1);
+    }
+
+    #[test]
+    fn no_flag_for_used_binding() {
+        assert!(of_code("(ns a)\n(defn f []\n  (let [y 1] y))\n", "unused-binding").is_empty());
+    }
+
+    #[test]
+    fn no_flag_for_underscore_binding() {
+        assert!(of_code("(ns a)\n(defn f [_x] 1)\n", "unused-binding").is_empty());
+    }
+
+    #[test]
+    fn lint_as_defn_params_are_linted() {
+        // A `:lint-as` macro mapped to `defn` binds its params like `defn`, so
+        // an unused one is reported the same way.
+        let cfg = ExtractConfig {
+            lint_as: std::collections::HashMap::from([(
+                "my/defthing".to_string(),
+                crate::index::DefKind::Defn,
+            )]),
+        };
+        let src = "(ns x (:require [my :refer [defthing]]))\n(defthing foo [p] 1)\n";
+        let found: Vec<_> = compute(src, Path::new("x.clj"), &cfg)
+            .into_iter()
+            .filter(|d| d.code == Some(NumberOrString::String("unused-binding".to_string())))
+            .collect();
+        assert_eq!(found.len(), 1, "diagnostics: {:?}", found);
+        assert!(found[0].message.contains('p'), "{}", found[0].message);
+    }
+
+    #[test]
+    fn flags_unused_defn_private() {
+        let d = of_code("(ns a)\n(defn- helper [] 1)\n", "unused-private-var");
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+        let d = &d[0];
+        assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(d.source.as_deref(), Some("clj-pulse"));
+        assert_eq!(d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+        assert!(d.message.contains("helper"), "message: {}", d.message);
+        // The name, not the whole form: `helper` on line 1.
+        assert_eq!(d.range.start.line, 1);
+        assert_eq!(d.range.start.character, "(defn- ".len() as u32);
+        assert_eq!(d.range.end.character - d.range.start.character, 6);
+    }
+
+    #[test]
+    fn flags_unused_private_meta_def() {
+        let d = of_code("(ns a)\n(def ^:private x 1)\n", "unused-private-var");
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+        assert!(d[0].message.contains('x'), "message: {}", d[0].message);
+    }
+
+    #[test]
+    fn no_flag_when_private_var_is_called() {
+        assert!(of_code(
+            "(ns a)\n(defn- h [] 1)\n(defn g [] (h))\n",
+            "unused-private-var"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn no_flag_when_private_var_is_var_quoted() {
+        assert!(of_code(
+            "(ns a)\n(defn- h [] 1)\n(defn g [] #'h)\n",
+            "unused-private-var"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn recursion_only_is_still_unused() {
+        // A self-call inside the var's own form is not a use of it.
+        let d = of_code("(ns a)\n(defn- h [n] (h n))\n", "unused-private-var");
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+    }
+
+    #[test]
+    fn no_flag_for_public_var() {
+        assert!(of_code("(ns a)\n(defn h [] 1)\n", "unused-private-var").is_empty());
+    }
+
+    #[test]
+    fn no_flag_for_private_deftest() {
+        // Test runners call private tests by var, so `deftest-` is never dead.
+        let src = "(ns a (:require [clojure.test :refer [deftest-]]))\n(deftest- t 1)\n";
+        assert!(of_code(src, "unused-private-var").is_empty());
+    }
+
+    #[test]
     fn successful_kondo_run_cedes_the_codes_it_owns() {
         // Every native code today is one clj-kondo also emits, so a successful
         // run publishes clj-kondo's findings alone — no doubled squiggles.
@@ -507,6 +686,8 @@ mod tests {
             diag("unresolved-namespace", "clj-pulse"),
             diag("unused-namespace", "clj-pulse"),
             diag("duplicate-require", "clj-pulse"),
+            diag("unused-binding", "clj-pulse"),
+            diag("unused-private-var", "clj-pulse"),
         ];
         let kondo = vec![diag("unresolved-namespace", "clj-kondo")];
         assert_eq!(

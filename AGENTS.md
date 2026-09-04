@@ -73,10 +73,15 @@ protocol changes should also pass `bb e2e-nvim`.
 - `CLJ_PULSE_DISABLE_CLASSPATH_CLI` (non-empty) forces `:enabled false` for
   every project (the e2e harness depends on this).
 - Diagnostics come from two tiers: the native lints (`unresolved-namespace`,
-  `unused-namespace`, `duplicate-require`) and clj-kondo, spawned per lint pass
-  when found. A successful kondo run owns those three codes and the native
-  copies are dropped for that pass; any failure publishes the native set
-  unchanged. One publish per pass, never two.
+  `unused-namespace`, `duplicate-require`, `unused-binding`,
+  `unused-private-var`) and clj-kondo, spawned per lint pass when found. A
+  successful kondo run owns all five codes and the native copies are dropped
+  for that pass; any failure publishes the native set unchanged. One publish
+  per pass, never two.
+- Rename resolves locals structurally (`extractor::local_references_at`)
+  *before* the fqn path, so a param shadowing a global only ever edits itself;
+  a `:keys`/`:strs`/`:syms`-destructured binding is rejected, since its name is
+  also the key being read.
 - `CLJ_PULSE_DISABLE_KONDO` (non-empty) forces `:kondo {:enabled false}`, the
   twin of `CLJ_PULSE_DISABLE_CLASSPATH_CLI`. `LspClient::start` sets it, so no
   test depends on a host clj-kondo; kondo tests opt in with

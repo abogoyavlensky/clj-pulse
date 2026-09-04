@@ -434,6 +434,7 @@ mod tests {
             source: SymbolSource::Dir(PathBuf::from("core")),
             range: Range::default(),
             name_range: Range::default(),
+            private: false,
         }
     }
 

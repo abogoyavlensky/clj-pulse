@@ -108,6 +108,11 @@ pub struct Symbol {
     pub source: SymbolSource,
     pub range: Range,
     pub name_range: Range,
+    /// Whether the var is private (`defn-`, or `^:private` / `^{:private true}`
+    /// on the name). Feeds the `unused-private-var` lint: a private var can
+    /// only be used from its own file.
+    #[serde(default)]
+    pub private: bool,
 }
 
 /// A resolved usage of a symbol in a project file. For symbols, `name_range`
@@ -506,6 +511,7 @@ mod tests {
             source: SymbolSource::Project,
             range: Range::default(),
             name_range: Range::default(),
+            private: false,
         };
         let meta = || NsMeta {
             name: "a".to_string(),

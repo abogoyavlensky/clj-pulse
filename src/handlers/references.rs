@@ -72,15 +72,7 @@ fn local_references(
     pos: Position,
     include_declaration: bool,
 ) -> Option<Vec<Location>> {
-    if documents.is_keyword_at(uri, pos) {
-        return None;
-    }
-    let word = documents.word_at(uri, pos)?;
-    if word.contains('/') {
-        return None;
-    }
-    let text = documents.text(uri)?;
-    let refs = extractor::local_references_at(&text, pos, &word)?;
+    let (_, refs) = local_refs_at(documents, uri, pos)?;
 
     let mut locations = Vec::new();
     if include_declaration {
@@ -96,6 +88,55 @@ fn local_references(
         });
     }
     Some(locations)
+}
+
+/// The local under the cursor, as `(word, refs)`. `None` when the cursor is on
+/// a keyword, a qualified word (locals are never qualified), or a word that
+/// resolves to no local — the callers then fall back to the fqn path. Shared by
+/// find-references and rename so both agree on what counts as a local.
+fn local_refs_at(
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+) -> Option<(String, extractor::LocalRefs)> {
+    if documents.is_keyword_at(uri, pos) {
+        return None;
+    }
+    let word = documents.word_at(uri, pos)?;
+    if word.contains('/') {
+        return None;
+    }
+    let text = documents.text(uri)?;
+    let refs = extractor::local_references_at(&text, pos, &word)?;
+    Some((word, refs))
+}
+
+/// Refuses a local rename whose new name is already bound at the declaration
+/// or at any of its usages. Renaming `x` to `y` in `(let [x 1 y 2] (+ x y))`
+/// would otherwise produce `(let [y 1 y 2] (+ y y))`: valid code that quietly
+/// means something else. A new name that merely shadows a *var* is allowed —
+/// that is ordinary Clojure, and the local wins by design.
+fn reject_local_capture(
+    text: &str,
+    refs: &extractor::LocalRefs,
+    word: &str,
+    new_name: &str,
+) -> Result<()> {
+    let sites = std::iter::once(refs.declaration).chain(refs.usages.iter().copied());
+    for site in sites {
+        let taken = extractor::locals_in_scope_at(text, site.start)
+            .into_iter()
+            .any(|b| b.name == new_name);
+        if taken {
+            anyhow::bail!(
+                "cannot rename '{}' to '{}': '{}' is already bound in that scope",
+                word,
+                new_name,
+                new_name
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn rename(
@@ -119,6 +160,36 @@ pub fn rename(
         .ok_or_else(|| anyhow::anyhow!("cannot rename from this document"))?;
     if !index.is_project_path(&origin) {
         anyhow::bail!("cannot rename from a library file");
+    }
+
+    // Locals (let/fn/defn params, destructuring, …) are resolved structurally
+    // and never reach the fqn path, so renaming a param that shadows a global
+    // edits only the local's own binding and usages, all in this document.
+    if let Some((word, refs)) = local_refs_at(documents, &uri, pos) {
+        if let Some(text) = documents.text(&uri) {
+            reject_local_capture(&text, &refs, &word, &new_name)?;
+        }
+        if refs.destructured_key {
+            anyhow::bail!(
+                "cannot rename a :keys/:strs/:syms destructured binding '{}': \
+                 rewrite it as {{{} :{}}} first",
+                word,
+                new_name,
+                word
+            );
+        }
+        let mut edits = vec![TextEdit {
+            range: refs.declaration,
+            new_text: new_name.clone(),
+        }];
+        edits.extend(refs.usages.into_iter().map(|range| TextEdit {
+            range,
+            new_text: new_name.clone(),
+        }));
+        return Ok(Some(WorkspaceEdit {
+            changes: Some(HashMap::from([(uri, edits)])),
+            ..Default::default()
+        }));
     }
 
     let fqn = resolve_fqn_at(index, documents, &uri, pos)
@@ -191,7 +262,8 @@ fn is_valid_symbol_name(name: &str) -> bool {
 /// 1. Cursor on a definition name in this file → that definition's fqn.
 /// 2. Cursor on a recorded occurrence → that occurrence's fqn. Locals are
 ///    never occurrences, so a `(defn f [add] add)` param cannot leak the
-///    global `add` into references/rename.
+///    global `add` in here (references and rename also resolve locals
+///    structurally, before ever calling this).
 /// 3. Qualified words only (locals are never qualified): resolve through
 ///    the alias — covers a cursor on the alias half of `lib/name`.
 pub fn resolve_fqn_at(
