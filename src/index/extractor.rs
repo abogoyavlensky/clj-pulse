@@ -2151,7 +2151,14 @@ fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
     }
     vec.prev_named_sibling()
         .map(|kw| {
-            kw.kind() == "kwd_lit" && matches!(node_text(kw, source), ":keys" | ":strs" | ":syms")
+            // The directive may be namespaced (`{:user/keys [name]}`,
+            // `{::keys [name]}`), which binds the same way — match on the
+            // keyword's name part, not its literal text.
+            kw.kind() == "kwd_lit"
+                && kw
+                    .child_by_field_name("name")
+                    .map(|n| matches!(node_text(n, source), "keys" | "strs" | "syms"))
+                    .unwrap_or(false)
         })
         .unwrap_or(false)
 }
@@ -2502,6 +2509,18 @@ mod tests {
             let refs =
                 local_references_at(&src, pos_of(&src, "(inc a)", 0, 5), "a").expect("local");
             assert!(refs.destructured_key, "{} binding: {:?}", kw, refs);
+        }
+    }
+
+    #[test]
+    fn local_refs_flags_namespaced_keys_directive() {
+        // `{:user/keys [a]}` and `{::keys [a]}` bind from `:user/a` / `::a`,
+        // so the name is still the key.
+        for directive in [":user/keys", "::keys", ":user/syms"] {
+            let src = format!("(ns x)\n(defn f [{{{} [a]}}] (inc a))", directive);
+            let refs =
+                local_references_at(&src, pos_of(&src, "(inc a)", 0, 5), "a").expect("local");
+            assert!(refs.destructured_key, "{} binding: {:?}", directive, refs);
         }
     }
 
