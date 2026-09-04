@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tower_lsp::lsp_types::*;
 
-use crate::index::{extractor, ExtractConfig};
+use crate::index::{extractor, DefKind, ExtractConfig};
 
 /// Computes this file's native diagnostics. Pure and index-free — every answer
 /// comes from the file's own text, so a project without an indexed classpath
@@ -88,7 +88,58 @@ pub fn compute(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Diagnostic
         ..Default::default()
     }));
 
+    // Private vars nothing in this file uses. Private means the var can only be
+    // reached from here, so the file's own occurrences settle it — but a usage
+    // inside the var's own form (recursion) does not count.
+    diags.extend(
+        analysis
+            .symbols
+            .iter()
+            .filter(|sym| sym.private && is_lintable_private_kind(&sym.kind))
+            .filter(|sym| {
+                !analysis
+                    .occurrences
+                    .iter()
+                    .any(|occ| occ.fqn == sym.fqn && !range_within(&occ.name_range, &sym.range))
+            })
+            .map(|sym| Diagnostic {
+                range: sym.name_range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("unused-private-var".to_string())),
+                source: Some("clj-pulse".to_string()),
+                message: format!("Unused private var: {}", sym.name),
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                ..Default::default()
+            }),
+    );
+
     diags
+}
+
+/// The `def`-family kinds whose private members are worth reporting.
+/// `deftest-` is deliberately absent: a test runner calls a private test by
+/// var, so it is never dead. Type/record/protocol forms are excluded too —
+/// their vars are reached through generated constructors and method dispatch.
+fn is_lintable_private_kind(kind: &DefKind) -> bool {
+    matches!(
+        kind,
+        DefKind::Def
+            | DefKind::Defonce
+            | DefKind::Defn
+            | DefKind::DefnPrivate
+            | DefKind::Defmacro
+            | DefKind::Defmulti
+    )
+}
+
+/// Whether `inner` sits inside `outer` — used to tell a recursive self-call
+/// (inside the def's own form) from a real use elsewhere in the file.
+fn range_within(inner: &Range, outer: &Range) -> bool {
+    let starts_after =
+        (inner.start.line, inner.start.character) >= (outer.start.line, outer.start.character);
+    let ends_before =
+        (inner.end.line, inner.end.character) <= (outer.end.line, outer.end.character);
+    starts_after && ends_before
 }
 
 /// The native codes clj-kondo also emits. When a clj-kondo run succeeds it
@@ -566,6 +617,65 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 1, "diagnostics: {:?}", found);
         assert!(found[0].message.contains('p'), "{}", found[0].message);
+    }
+
+    #[test]
+    fn flags_unused_defn_private() {
+        let d = of_code("(ns a)\n(defn- helper [] 1)\n", "unused-private-var");
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+        let d = &d[0];
+        assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(d.source.as_deref(), Some("clj-pulse"));
+        assert_eq!(d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+        assert!(d.message.contains("helper"), "message: {}", d.message);
+        // The name, not the whole form: `helper` on line 1.
+        assert_eq!(d.range.start.line, 1);
+        assert_eq!(d.range.start.character, "(defn- ".len() as u32);
+        assert_eq!(d.range.end.character - d.range.start.character, 6);
+    }
+
+    #[test]
+    fn flags_unused_private_meta_def() {
+        let d = of_code("(ns a)\n(def ^:private x 1)\n", "unused-private-var");
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+        assert!(d[0].message.contains('x'), "message: {}", d[0].message);
+    }
+
+    #[test]
+    fn no_flag_when_private_var_is_called() {
+        assert!(of_code(
+            "(ns a)\n(defn- h [] 1)\n(defn g [] (h))\n",
+            "unused-private-var"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn no_flag_when_private_var_is_var_quoted() {
+        assert!(of_code(
+            "(ns a)\n(defn- h [] 1)\n(defn g [] #'h)\n",
+            "unused-private-var"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn recursion_only_is_still_unused() {
+        // A self-call inside the var's own form is not a use of it.
+        let d = of_code("(ns a)\n(defn- h [n] (h n))\n", "unused-private-var");
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+    }
+
+    #[test]
+    fn no_flag_for_public_var() {
+        assert!(of_code("(ns a)\n(defn h [] 1)\n", "unused-private-var").is_empty());
+    }
+
+    #[test]
+    fn no_flag_for_private_deftest() {
+        // Test runners call private tests by var, so `deftest-` is never dead.
+        let src = "(ns a (:require [clojure.test :refer [deftest-]]))\n(deftest- t 1)\n";
+        assert!(of_code(src, "unused-private-var").is_empty());
     }
 
     #[test]

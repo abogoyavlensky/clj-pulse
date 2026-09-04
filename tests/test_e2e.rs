@@ -5207,6 +5207,39 @@ fn test_e2e_unused_binding_diagnostic() {
 }
 
 #[test]
+fn test_e2e_unused_private_var_diagnostic() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let scratch = root.join("src/scratch.clj");
+    std::fs::write(
+        &scratch,
+        "(ns simple.scratch)\n\n(defn- helper [] 1)\n\n(defn run [] 2)\n",
+    )
+    .unwrap();
+    client.did_open(&scratch);
+
+    let params = client.wait_for_diagnostics("/src/scratch.clj");
+    let found: Vec<&Value> = params["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == json!("unused-private-var"))
+        .collect();
+    assert_eq!(found.len(), 1, "only `helper` is dead: {}", params);
+    assert_eq!(found[0]["severity"], json!(2));
+    assert_eq!(found[0]["tags"], json!([1]));
+    assert!(
+        found[0]["message"].as_str().unwrap().contains("helper"),
+        "{}",
+        found[0]
+    );
+}
+
+#[test]
 fn test_e2e_kondo_run_drops_native_unused_binding() {
     // A successful clj-kondo run owns `unused-binding` too: the fake returns
     // no findings with exit 0, so the native copy must not survive.
