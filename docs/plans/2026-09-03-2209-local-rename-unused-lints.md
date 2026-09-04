@@ -1,5 +1,7 @@
 # Local Rename and Native Unused Lints Implementation Plan
 
+**Status: completed** (2026-09-04, branch `rename-local-vars`).
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `textDocument/rename` work on locals (params, `let`/`loop`/`for` bindings, destructured names) and add two native diagnostics, `unused-binding` and `unused-private-var`, that show when clj-kondo is disabled or absent.
@@ -167,30 +169,35 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
 - Modify: `src/index/extractor.rs` (`walk_list`, `walk_scope`, tests module)
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `tests/test_extractor.rs`: `test_catch_and_as_arrow_bind_locals`. Source `(ns x)\n(defn f [] (try (g) (catch Exception e (log e))))\n(defn h [y] (as-> y v (inc v)))`. Use `extract_full` and assert no occurrence has fqn `x/e` or `x/v`, while `x/g`, `x/log`, and `clojure.core/inc` are present, and `catch`/`as->` heads are recorded as `clojure.core/…` or `x/…` (whichever `record_occurrence` yields today for `catch`; assert only that no `x/e`/`x/v` exists).
   - Extractor `mod tests`, using the existing `local_names` helper: `catch_binding_visible_in_its_body` (position inside `(log e)` lists `e`; position inside `(g)` does not) and `as_arrow_name_visible_in_body`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --test test_extractor test_catch_and_as_arrow && cargo test --lib catch_binding && cargo test --lib as_arrow`
   Expected: FAIL (`x/e` present; `e` not in scope).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `walk_list`: add arms `Some("catch")` and `Some("as->")`. `catch`: record the head, walk `children[1]`, push a frame binding `children[2]` (when a `sym_lit`), walk `children[3..]`, pop. `as->`: record the head, walk `children[1]`, bind `children[2]`, walk `children[3..]`, pop. `walk_scope`: the same shapes, steering descent: a cursor inside `children[1]` sees no new binding; inside `children[3..]` it sees the name, using `collect_binding_targets` on the name node.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --test test_extractor && cargo test --lib`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Treat catch and as-> as binding forms"`
+
+> Deviation: `walk_scope_binding_tail` also yields the binding when the cursor
+> is on the name itself (`(catch E e|)`), matching every other binding form —
+> without it goto-def/references/rename failed from the declaration site.
+> Found by the codex review.
 
 ### Task 4: Scope frames with usage tracking and `unused_bindings`
 
 **Files:**
 - Modify: `src/index/extractor.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In the extractor `mod tests`, add a helper `unused(src) -> Vec<(String, u32)>` returning `(name, start line)` from `extract_analysis_with(src, Path::new("t.clj"), &ExtractConfig::default()).unwrap().unused_bindings`. Cases, one test each or grouped sensibly:
   - `(let [a 1 b 2] a)` → `[("b", 0)]`.
   - `(defn f [x y] x)` → `y`.
@@ -209,11 +216,11 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   - `(as-> 1 v)` → `v`; `(as-> 1 v (inc v))` → none.
   - Multi-arity `(defn f ([a] a) ([a b] a))` → one `b`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib unused_`
   Expected: compile error (`extract_analysis_with` missing).
 
-- [ ] **Step 3: Implement the scope type**
+- [x] **Step 3: Implement the scope type**
   Replace `Vec<HashSet<String>>` in the occurrence walker with:
 
   ```rust
@@ -225,14 +232,14 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   `collect_binding_names` collects `Vec<LocalBinding>` (name + name range from `sym_name_node`) instead of a `HashSet`, keeps walking `:or` defaults and `{pattern :key}` keywords as usages, and stops inserting `:or` keys. Callers bind the collected list with `lintable = true`, except: `walk_def_form` record/type fields (`false`), `walk_method_impl` params (`false`), `walk_fn_form` and `walk_letfn_form` self-names (`false`).
   `walk_letfn_form` and `walk_fn_tail` params stay lintable.
 
-- [ ] **Step 4: Add `Analysis` and `extract_analysis_with`**
+- [x] **Step 4: Add `Analysis` and `extract_analysis_with`**
   Move the body of `extract_full_with` into `extract_analysis_with`, returning `Analysis { ns_meta, symbols, occurrences, unused_bindings: scope.unused }` (every top-level walk ends with all frames popped; after the loop, assert-free: `scope.frames` is empty). `extract_full_with` calls it and returns the 3-tuple. `file_occurrences_with` is unchanged.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
   Run: `cargo test --lib && cargo test --test test_extractor`
   Expected: PASS, including every pre-existing occurrence test (the refactor must not change occurrences).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -am "Track local usage in scope frames and expose unused bindings"`
 
 ### Task 5: `unused-binding` diagnostic
@@ -241,27 +248,31 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
 - Modify: `src/diagnostics.rs`, `src/server.rs`
 - Test: `src/diagnostics.rs` tests, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `src/diagnostics.rs`: change the `diags` helper to `compute(source, Path::new("test.clj"), &ExtractConfig::default())`. Add `flags_unused_let_binding` (`(ns a)\n(defn f [x]\n  (let [y 1] x))\n` → one `unused-binding`, WARNING, source clj-pulse, tags `[UNNECESSARY]`, message contains `y`, range on line 2 spanning 1 char), `no_flag_for_used_binding`, `no_flag_for_underscore_binding`, and `lint_as_defn_params_are_linted` (with a `:lint-as {"my/defthing" => Defn}` config, `(ns x (:require [my :refer [defthing]]))\n(defthing foo [p] 1)` flags `p`).
   - Update `successful_kondo_run_cedes_the_codes_it_owns` to include `unused-binding` and `unused-private-var` in the native list and assert both are dropped.
   - e2e `test_e2e_unused_binding_diagnostic`: write `src/scratch.clj` with `(ns simple.scratch)\n\n(defn run [x y]\n  (let [z 1]\n    x))\n`, `did_open`, `wait_for_diagnostics("/src/scratch.clj")`, assert exactly two `unused-binding` diagnostics naming `y` and `z`, severity 2, tags `[1]`.
   - e2e `test_e2e_kondo_run_drops_native_unused_binding`: copy the setup of the existing fake-kondo test (`start_with_kondo` on the `kondo_project` fixture, same wait), open a file containing an unused binding and no fake-kondo marker, and assert the published diagnostics contain no `unused-binding` (the fake returns zero findings with exit 0, which cedes ownership).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib diagnostics`
   Expected: compile error (`compute` arity).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   - `compute(source, path, cfg)`: call `extractor::extract_analysis_with(source, path, cfg)` once (it replaces the existing `extractor::extract` call; use `analysis.ns_meta` for the unresolved-namespace filter). Map each `unused_bindings` entry to a diagnostic per the table in the design.
   - Add both codes to `KONDO_OWNED_CODES` (now 5) and extend its doc comment.
   - `src/server.rs`: `lint_and_publish_doc(client, documents, index: &Index, kondo_state, uri, version)`; compute `let cfg = index.extract_config();` and pass `&cfg`. Thread `&self.index` / a cloned `Arc<Index>` through `relint_open_documents`, `lint_and_publish`, the `did_change` spawn, and `spawn_kondo_reload`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib diagnostics && cargo test --test test_e2e unused_binding`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Add native unused-binding diagnostic"`
+
+> Deviation: the e2e test asserts the *set* of reported names, not their order.
+> Frames are harvested as they pop, so the inner `let` binding is reported
+> before the outer param.
 
 ### Task 6: `Symbol.private`
 
@@ -270,7 +281,7 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
 - Create: `tests/fixtures/snippets/private_vars.clj`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   Fixture `private_vars.clj`:
   ```clojure
   (ns my.priv)
@@ -283,21 +294,27 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   ```
   `test_extracts_private_flag`: `secret`, `helper`, `old-style`, `state` have `private == true`; `public-fn`, `not-private` have `false`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
   Run: `cargo test --test test_extractor test_extracts_private_flag`
   Expected: compile error (no `private` field).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   - `Symbol` gains `#[serde(default)] pub private: bool`. Fix every constructor (`grep -rn "Symbol {" src tests`) with `private: false`, except `extract_def`.
   - In `extract_def`: `private = kind == DefKind::DefnPrivate || has_private_meta(name_node, source)`. `has_private_meta` walks `name_node`'s children of kind `meta_lit`/`old_meta_lit`; for each, take its named child: a `kwd_lit` with text `:private` → true; a `map_lit` whose pairs contain key text `:private` with value text `true` → true.
   - `CACHE_FORMAT_VERSION = 12` with the comment line `/// 12: \`Symbol.private\` (layout change).`
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test`
   Expected: PASS (all suites still compile).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git add tests/fixtures/snippets/private_vars.clj && git commit -am "Record private vars on Symbol"`
+
+> Deviation: privacy is also read from a `defn` *attr-map*
+> (`(defn f {:private true} [] …)`, and the trailing multi-arity form), not
+> only from metadata on the name symbol. Only the two positions the reader
+> treats as an attr-map count, so `(defn f [] {:private true})` stays public.
+> Found by the codex review; shipped as a follow-up commit.
 
 ### Task 7: `unused-private-var` diagnostic
 
@@ -305,7 +322,7 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
 - Modify: `src/diagnostics.rs`
 - Test: `src/diagnostics.rs` tests, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Unit tests filtering on the `unused-private-var` code:
   - `flags_unused_defn_private` (`(ns a)\n(defn- helper [] 1)\n` → one diagnostic, WARNING, tags UNNECESSARY, message contains `helper`, range on the name).
   - `flags_unused_private_meta_def` (`(def ^:private x 1)`).
@@ -315,18 +332,18 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   - `no_flag_for_public_var` and `no_flag_for_private_deftest` (`(ns a (:require [clojure.test :refer [deftest-]]))\n(deftest- t 1)` → none; check the extractor already maps `deftest-` to `Deftest`).
   - e2e `test_e2e_unused_private_var_diagnostic`: scratch file `(ns simple.scratch)\n\n(defn- helper [] 1)\n\n(defn run [] 2)\n` → exactly one `unused-private-var`, severity 2, tags `[1]`, message contains `helper`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib diagnostics`
   Expected: FAIL (no such code emitted).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `compute`, after the unused-binding block: for each symbol in `analysis.symbols` with `private` and kind in `{Def, Defonce, Defn, DefnPrivate, Defmacro, Defmulti}`, it is used when any occurrence in `analysis.occurrences` has `fqn == sym.fqn` and a `name_range` not inside `sym.range` (a small `range_within(inner, outer)` helper). Otherwise emit the diagnostic per the design table.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib diagnostics && cargo test --test test_e2e unused_private`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Add native unused-private-var diagnostic"`
 
 ### Task 8: Docs and full verification
@@ -334,19 +351,95 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
 **Files:**
 - Modify: `CLAUDE.md`, `ARCHITECTURE.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   - `CLAUDE.md` Invariants, diagnostics bullet: native lints are now `unresolved-namespace`, `unused-namespace`, `duplicate-require`, `unused-binding`, `unused-private-var`; a successful kondo run owns all five. Add one line: rename resolves locals structurally before the fqn path and rejects `:keys`-destructured bindings.
   - `ARCHITECTURE.md` Symbol Resolution paragraph: mention rename alongside find-references for locals, and that the occurrence walker's scope frames track usage to feed `unused-binding`.
   - `docs/ROADMAP.md` Phase 4: mark the native fallback bullet as partially done (`unused-binding`, `unused-private-var`); Phase 2 rename bullet: note locals are covered.
 
-- [ ] **Step 2: Full check**
+> Deviation: rather than a `[~]` checkbox (no such convention exists in the
+> file), the Phase 4 bullet was split into a checked "part 1" listing the four
+> shipped lints and an unchecked "part 2" for unresolved-symbol.
+
+- [x] **Step 2: Full check**
   Run: `bb check`
   Expected: fmt clean, clippy clean with `-D warnings`, all tests pass.
 
-- [ ] **Step 3: End-to-end**
+- [x] **Step 3: End-to-end**
   Run: `bb e2e`
   Expected: PASS. Then `bb e2e-nvim` (rename is client-visible).
   Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -am "Document local rename and native unused lints"`
+
+---
+
+## Completion summary
+
+All eight tasks landed on `rename-local-vars`, one commit each plus two
+review-driven follow-ups:
+
+| Commit | What |
+|---|---|
+| `faac747` | `LocalRefs.destructured_key` |
+| `771a120` | Local rename (the `:keys` rejection included) |
+| `817665b` | `catch` / `as->` bind in both walkers |
+| `9c91c45` | `Scope`/`LocalSlot` frames + `Analysis::unused_bindings` |
+| `da4bb2f` | `unused-binding` diagnostic, `&Index` threaded through the lint pass |
+| `8c228d3` | `Symbol.private`, cache format 12 |
+| `0893fab` | `:private` in a `defn` attr-map (follow-up) |
+| `bcbd4b0` | `unused-private-var` diagnostic |
+| `35adfb7` | Docs |
+
+**Verification:** `bb check` clean (fmt, clippy `-D warnings`, all suites),
+`bb e2e` 109 passed, `bb e2e-nvim` all checks passed. The new behaviour is
+covered end-to-end through the real binary: `test_e2e_rename_local_in_let`,
+`test_e2e_rename_local_never_touches_shadowed_global`,
+`test_e2e_rename_rejects_keys_destructured_local`,
+`test_e2e_unused_binding_diagnostic`, `test_e2e_unused_private_var_diagnostic`
+and `test_e2e_kondo_run_drops_native_unused_binding`.
+
+### Deviations (also noted inline above)
+
+1. `destructured_key` matches the directive keyword's *name* part, so
+   `{:user/keys [a]}` and `{::keys [a]}` are flagged too.
+2. The rename rejection message interpolates the requested new name into the
+   suggested rewrite.
+3. `walk_scope_binding_tail` yields the `catch`/`as->` binding when the cursor
+   is on the name itself, matching every other binding form.
+4. The `unused-binding` e2e test asserts the set of names, not their order —
+   frames are harvested as they pop, so inner scopes report first.
+5. Privacy is also read from a `defn` attr-map (`(defn f {:private true} [] …)`
+   and the trailing multi-arity form); a function *returning* that map stays
+   public.
+6. `docs/ROADMAP.md` Phase 4 was split into a checked "part 1" and an unchecked
+   "part 2" instead of inventing a `[~]` checkbox.
+
+Deviations 1, 3 and 5 came from the per-task codex reviews.
+
+### Out-of-scope findings raised by the reviews
+
+Three codex passes reported on code *surrounding* the diff (the `refer_all`
+work from `85198fb`) rather than the diff itself. Not acted on here; worth a
+look separately:
+
+- `(:use [lib.ns :only [foo]])` records the whole namespace in `refer_all`, so
+  completion and `resolve_symbol` offer names the `:only` list excludes.
+- refer-all resolution can return a `DefnPrivate` symbol; private vars are not
+  actually referred.
+- refer-all resolution does not fall back to `resolve_factory`, so `->Type` /
+  `map->Type` from a `:refer :all` namespace do not resolve.
+- A `:use` spec inside a reader conditional never reaches `refer_all`.
+- `test_e2e.rs` deftest/hover assertions that pass for the wrong reason (the
+  hover cursor lands on `=` rather than the referred `is`).
+
+### What the plan could have specified better
+
+Two things. The unused-binding e2e test pinned an *ordered* pair of
+diagnostics, but the scope stack harvests frames as they pop, so inner
+bindings are reported before outer ones — the plan should have said "the set
+of names". And Task 6 described privacy as metadata on the name symbol only;
+`(defn f {:private true} [] …)` is an equally standard spelling that the plan
+never mentioned, so it was missed until review. A line in the design about
+which map positions the reader treats as an attr-map would have caught it up
+front.
