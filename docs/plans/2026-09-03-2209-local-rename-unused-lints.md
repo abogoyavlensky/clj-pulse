@@ -137,7 +137,7 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   - `test_e2e_rename_rejects_keys_destructured_local`: append `(defn f3 [{:keys [k]}] (inc k))` to `core.clj`, cursor on the `k` inside `(inc k)`, `request_expect_error("textDocument/rename", …)`; assert the message contains `destructured`.
 
 - [ ] **Step 2: Run tests to verify they fail**
-  Run: `cargo test --test test_e2e test_e2e_rename_local test_e2e_rename_rejects_keys`
+  Run: `cargo test --test test_e2e test_e2e_rename_local && cargo test --test test_e2e test_e2e_rename_rejects_keys`
   Expected: FAIL. The first two get an error response ("nothing to rename here"); the third gets the wrong message.
 
 - [ ] **Step 3: Implement**
@@ -164,7 +164,7 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   - Extractor `mod tests`, using the existing `local_names` helper: `catch_binding_visible_in_its_body` (position inside `(log e)` lists `e`; position inside `(g)` does not) and `as_arrow_name_visible_in_body`.
 
 - [ ] **Step 2: Run tests to verify they fail**
-  Run: `cargo test --test test_extractor test_catch_and_as_arrow && cargo test --lib catch_binding as_arrow`
+  Run: `cargo test --test test_extractor test_catch_and_as_arrow && cargo test --lib catch_binding && cargo test --lib as_arrow`
   Expected: FAIL (`x/e` present; `e` not in scope).
 
 - [ ] **Step 3: Implement**
@@ -289,7 +289,7 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   Expected: PASS (all suites still compile).
 
 - [ ] **Step 5: Commit**
-  `git commit -am "Record private vars on Symbol"`
+  `git add tests/fixtures/snippets/private_vars.clj && git commit -am "Record private vars on Symbol"`
 
 ### Task 7: `unused-private-var` diagnostic
 

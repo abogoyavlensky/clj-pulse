@@ -2079,6 +2079,10 @@ fn pos_in_or_default(node: Node, source: &str, pos: Position) -> bool {
 pub struct LocalRefs {
     pub declaration: Range,
     pub usages: Vec<Range>,
+    /// Whether the declaration sits in a `:keys`/`:strs`/`:syms` vector, where
+    /// the binding name doubles as the key looked up. Renaming such a binding
+    /// would silently change which key is read, so rename refuses it.
+    pub destructured_key: bool,
 }
 
 /// Resolves the local named `name` under `pos` to its declaration and all
@@ -2126,7 +2130,42 @@ pub fn local_references_at(source: &str, pos: Position, name: &str) -> Option<Lo
     Some(LocalRefs {
         declaration,
         usages,
+        destructured_key: is_destructured_key(root, source, declaration),
     })
+}
+
+/// Whether the binding site at `declaration` is a name inside a
+/// `{:keys [...]}` / `:strs` / `:syms` vector — where the symbol is both the
+/// local's name and (modulo the key type) the key read from the map.
+/// Namespaced entries (`{:keys [foo/bar]}`) live in the same vector, so the
+/// same structural check covers them.
+fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
+    let Some(sym) = find_binding_sym(root, source, declaration) else {
+        return false;
+    };
+    let Some(vec) = sym.parent().filter(|p| p.kind() == "vec_lit") else {
+        return false;
+    };
+    if vec.parent().map(|g| g.kind()) != Some("map_lit") {
+        return false;
+    }
+    vec.prev_named_sibling()
+        .map(|kw| {
+            kw.kind() == "kwd_lit" && matches!(node_text(kw, source), ":keys" | ":strs" | ":syms")
+        })
+        .unwrap_or(false)
+}
+
+/// The `sym_lit` whose name range is exactly `range`. Skips quoted data, like
+/// `collect_name_occurrences`.
+fn find_binding_sym<'a>(node: Node<'a>, source: &str, range: Range) -> Option<Node<'a>> {
+    match node.kind() {
+        "quoting_lit" => None,
+        "sym_lit" if node_to_lsp_range(sym_name_node(node), source) == range => Some(node),
+        _ => named_children(node)
+            .into_iter()
+            .find_map(|child| find_binding_sym(child, source, range)),
+    }
 }
 
 /// Ranges of every unqualified `sym_lit` named `name`. Skips `'name` quoted
@@ -2444,6 +2483,50 @@ mod tests {
         let from_use = local_references_at(src, pos_of(src, "(+ a a)", 0, 3), "a").expect("local");
         assert_eq!(from_use.declaration, refs.declaration);
         assert_eq!(from_use.usages.len(), 2);
+    }
+
+    #[test]
+    fn local_refs_flags_keys_destructured() {
+        // `a` comes from `{:keys [a]}`: renaming it would change the key
+        // looked up, so the caller must be able to refuse.
+        let src = "(ns x)\n(defn f [{:keys [a]}] (inc a))";
+        let refs = local_references_at(src, pos_of(src, "(inc a)", 0, 5), "a").expect("local");
+        assert!(refs.destructured_key, "{{:keys [a]}} binding: {:?}", refs);
+        assert_eq!(refs.usages.len(), 1, "one body usage: {:?}", refs.usages);
+    }
+
+    #[test]
+    fn local_refs_flags_strs_and_syms() {
+        for kw in [":strs", ":syms"] {
+            let src = format!("(ns x)\n(defn f [{{{} [a]}}] (inc a))", kw);
+            let refs =
+                local_references_at(&src, pos_of(&src, "(inc a)", 0, 5), "a").expect("local");
+            assert!(refs.destructured_key, "{} binding: {:?}", kw, refs);
+        }
+    }
+
+    #[test]
+    fn local_refs_plain_map_key_is_not_destructured_key() {
+        // `{a :a}` names the binding explicitly, so renaming `a` is safe.
+        let src = "(ns x)\n(let [{a :a} m] a)";
+        let refs = local_references_at(src, pos_of(src, "{a :a}", 0, 1), "a").expect("local");
+        assert!(!refs.destructured_key, "{{a :a}} binding: {:?}", refs);
+    }
+
+    #[test]
+    fn local_refs_or_key_is_a_usage() {
+        // The `:or` key resolves to the same declaration as the body usage.
+        let src = "(ns x)\n(let [{a :a :or {a 1}} m] a)";
+        let refs = local_references_at(src, pos_of(src, "] a)", 0, 2), "a").expect("local");
+        assert!(!refs.destructured_key, "{:?}", refs);
+        assert_eq!(refs.usages.len(), 2, ":or key + body: {:?}", refs.usages);
+    }
+
+    #[test]
+    fn local_refs_vector_binding_is_not_destructured_key() {
+        let src = "(ns x)\n(let [[a b] v] (+ a b))";
+        let refs = local_references_at(src, pos_of(src, "[[a b]", 0, 2), "a").expect("local");
+        assert!(!refs.destructured_key, "vector binding: {:?}", refs);
     }
 
     #[test]
