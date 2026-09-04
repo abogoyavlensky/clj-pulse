@@ -390,12 +390,14 @@ review-driven follow-ups:
 | `0893fab` | `:private` in a `defn` attr-map (follow-up) |
 | `bcbd4b0` | `unused-private-var` diagnostic |
 | `35adfb7` | Docs |
+| `+ follow-up` | Local-rename capture guard; `:private` in a `defmulti` attr-map |
 
 **Verification:** `bb check` clean (fmt, clippy `-D warnings`, all suites),
-`bb e2e` 109 passed, `bb e2e-nvim` all checks passed. The new behaviour is
+`bb e2e` 110 passed, `bb e2e-nvim` all checks passed. The new behaviour is
 covered end-to-end through the real binary: `test_e2e_rename_local_in_let`,
 `test_e2e_rename_local_never_touches_shadowed_global`,
 `test_e2e_rename_rejects_keys_destructured_local`,
+`test_e2e_rename_local_rejects_capture_by_existing_binding`,
 `test_e2e_unused_binding_diagnostic`, `test_e2e_unused_private_var_diagnostic`
 and `test_e2e_kondo_run_drops_native_unused_binding`.
 
@@ -415,7 +417,15 @@ and `test_e2e_kondo_run_drops_native_unused_binding`.
 6. `docs/ROADMAP.md` Phase 4 was split into a checked "part 1" and an unchecked
    "part 2" instead of inventing a `[~]` checkbox.
 
-Deviations 1, 3 and 5 came from the per-task codex reviews.
+7. A local rename whose new name is already bound at the declaration or at any
+   usage is refused (`(let [x 1 y 2] …)`, `x` → `y` would capture the usage
+   under the wrong binding). Shadowing a *var* is still allowed — that is
+   ordinary Clojure.
+8. `:private` in a `defmulti` attr-map (`(defmulti d {:private true} type)`) is
+   detected too, using that form's own shape: a leading map with the dispatch
+   fn after it.
+
+Deviations 1, 3, 5, 7 and 8 came from the codex reviews.
 
 ### Out-of-scope findings raised by the reviews
 

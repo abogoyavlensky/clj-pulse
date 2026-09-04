@@ -111,6 +111,34 @@ fn local_refs_at(
     Some((word, refs))
 }
 
+/// Refuses a local rename whose new name is already bound at the declaration
+/// or at any of its usages. Renaming `x` to `y` in `(let [x 1 y 2] (+ x y))`
+/// would otherwise produce `(let [y 1 y 2] (+ y y))`: valid code that quietly
+/// means something else. A new name that merely shadows a *var* is allowed —
+/// that is ordinary Clojure, and the local wins by design.
+fn reject_local_capture(
+    text: &str,
+    refs: &extractor::LocalRefs,
+    word: &str,
+    new_name: &str,
+) -> Result<()> {
+    let sites = std::iter::once(refs.declaration).chain(refs.usages.iter().copied());
+    for site in sites {
+        let taken = extractor::locals_in_scope_at(text, site.start)
+            .into_iter()
+            .any(|b| b.name == new_name);
+        if taken {
+            anyhow::bail!(
+                "cannot rename '{}' to '{}': '{}' is already bound in that scope",
+                word,
+                new_name,
+                new_name
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn rename(
     index: &Index,
     documents: &DocumentStore,
@@ -138,6 +166,9 @@ pub fn rename(
     // and never reach the fqn path, so renaming a param that shadows a global
     // edits only the local's own binding and usages, all in this document.
     if let Some((word, refs)) = local_refs_at(documents, &uri, pos) {
+        if let Some(text) = documents.text(&uri) {
+            reject_local_capture(&text, &refs, &word, &new_name)?;
+        }
         if refs.destructured_key {
             anyhow::bail!(
                 "cannot rename a :keys/:strs/:syms destructured binding '{}': \

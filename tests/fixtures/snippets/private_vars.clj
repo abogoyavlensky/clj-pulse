@@ -8,3 +8,5 @@
 (defn attr-map-private {:private true} [] 5)
 (defn multi-arity-private ([] 6) ([x] x) {:private true})
 (defn returns-map [] {:private true})
+(defmulti multi-private {:private true} :kind)
+(defmulti multi-public :kind)

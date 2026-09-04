@@ -1018,12 +1018,13 @@ fn test_extracts_private_flag() {
         "state",
         "attr-map-private",
         "multi-arity-private",
+        "multi-private",
     ] {
         assert!(private_of(name), "{} must be private", name);
     }
     // `returns-map` *returns* {:private true}; the map is a body form, not an
     // attr-map.
-    for name in ["public-fn", "not-private", "returns-map"] {
+    for name in ["public-fn", "not-private", "returns-map", "multi-public"] {
         assert!(!private_of(name), "{} must not be private", name);
     }
 }

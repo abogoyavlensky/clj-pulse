@@ -3141,6 +3141,52 @@ fn test_e2e_rename_local_in_let() {
 }
 
 #[test]
+fn test_e2e_rename_local_rejects_capture_by_existing_binding() {
+    // Renaming `a` to `b` inside `(let [a 1 b 2] …)` would capture the usage
+    // under the wrong binding, so it is refused rather than silently applied.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+    let last_line = std::fs::read_to_string(&core).unwrap().lines().count() as u32;
+    client.did_change_insert(
+        &core,
+        last_line,
+        0,
+        "(defn f4 [] (let [a 1 b 2] (+ a b)))\n",
+    );
+
+    // Cursor on the binding `a` (col 18).
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", core.display()) },
+            "position": { "line": last_line, "character": 18 },
+            "newName": "b"
+        }),
+    );
+    assert!(
+        error["message"].as_str().unwrap().contains("already bound"),
+        "got: {}",
+        error
+    );
+
+    // A free name still renames fine from the same position.
+    let result = client.rename(&core, last_line, 18, "a2");
+    let changes = result["changes"]
+        .as_object()
+        .expect("rename should succeed");
+    assert_eq!(
+        changes.values().next().unwrap().as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
 fn test_e2e_rename_rejects_keys_destructured_local() {
     // `{:keys [k]}` makes the binding name double as the map key, so renaming
     // it would silently change what is looked up. Rejected with a hint.

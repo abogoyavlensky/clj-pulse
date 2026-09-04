@@ -782,8 +782,17 @@ fn map_declares_private(map: Node, source: &str) -> bool {
 ///
 /// Only the two positions the reader treats as an attr-map count, so
 /// `(defn f [] {:private true})` — a function *returning* that map — stays
-/// public. Plain `def`/`defonce` are excluded entirely: their map is the value.
+/// public. `defmulti` has its own leading-attr-map shape. Plain `def`/`defonce`
+/// are excluded entirely: their map is the value.
 fn has_private_attr_map(kind: DefKind, rest: &[Node], source: &str) -> bool {
+    // `(defmulti name attr-map? dispatch-fn & options)`: the attr-map is the
+    // leading map, and something (the dispatch fn) must follow it — a lone map
+    // is the dispatch fn itself, since maps are functions.
+    if kind == DefKind::Defmulti {
+        return rest.len() > 1
+            && rest[0].kind() == "map_lit"
+            && map_declares_private(rest[0], source);
+    }
     if !matches!(
         kind,
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro
