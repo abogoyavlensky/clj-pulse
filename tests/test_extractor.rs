@@ -960,3 +960,40 @@ fn test_lint_as_overrides_builtin_deftest() {
     let foo = syms.iter().find(|s| s.name == "foo").expect("foo missing");
     assert_eq!(foo.kind, DefKind::Def);
 }
+
+#[test]
+fn test_catch_and_as_arrow_bind_locals() {
+    // `(catch Exception e …)` and `(as-> x v …)` introduce locals; recording
+    // them as var usages of the current namespace would pollute references.
+    let src = "(ns x)\n(defn f [] (try (g) (catch Exception e (log e))))\n(defn h [y] (as-> y v (inc v)))";
+    let (_, _, occs) = extract_full(src, Path::new("x.clj")).unwrap();
+
+    assert!(
+        occurrences_of(&occs, "x/e").is_empty(),
+        "catch binding is a local: {:?}",
+        occs
+    );
+    assert!(
+        occurrences_of(&occs, "x/v").is_empty(),
+        "as-> binding is a local: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, "x/g").len(),
+        1,
+        "occurrences: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, "x/log").len(),
+        1,
+        "occurrences: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, "clojure.core/inc").len(),
+        1,
+        "occurrences: {:?}",
+        occs
+    );
+}

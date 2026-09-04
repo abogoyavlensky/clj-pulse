@@ -1073,6 +1073,12 @@ fn walk_list(
             record_occurrence(*head, ctx, scope, out);
             walk_fn_form(&children, ctx, scope, out);
         }
+        // (catch Class name body…) / (as-> expr name body…): the second child
+        // is an ordinary usage, the third binds a local for the body.
+        Some("catch") | Some("as->") => {
+            record_occurrence(*head, ctx, scope, out);
+            walk_binding_tail(&children, ctx, scope, out);
+        }
         Some("extend-type") => {
             record_occurrence(*head, ctx, scope, out);
             // (extend-type Type & specs): Type is an occurrence; the specs
@@ -1388,6 +1394,29 @@ fn process_binding_pairs(
         collect_binding_names(*lhs, ctx, scope, out, &mut names);
         scope.last_mut().unwrap().extend(names);
     }
+}
+
+/// `(catch Class name body…)` / `(as-> expr name body…)`: `children[1]` is an
+/// expression (the class or the seed value), `children[2]` binds a local
+/// visible only in `children[3..]`.
+fn walk_binding_tail(
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Vec<HashSet<String>>,
+    out: &mut Vec<Occurrence>,
+) {
+    if let Some(expr) = children.get(1) {
+        walk_occurrences(*expr, ctx, scope, out);
+    }
+    let mut frame = HashSet::new();
+    if let Some(name) = children.get(2).filter(|n| n.kind() == "sym_lit") {
+        collect_binding_names(*name, ctx, scope, out, &mut frame);
+    }
+    scope.push(frame);
+    for body in children.iter().skip(3) {
+        walk_occurrences(*body, ctx, scope, out);
+    }
+    scope.pop();
 }
 
 /// `(fn name? [params] body…)` — optional self-name and params bind.
@@ -1768,6 +1797,10 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                     walk_scope_letfn(&children, source, pos, out);
                     return;
                 }
+                if head_text == "catch" || head_text == "as->" {
+                    walk_scope_binding_tail(&children, source, pos, out);
+                    return;
+                }
             }
         }
     }
@@ -1837,6 +1870,34 @@ fn walk_scope_binding_vec(
         i += 2;
     }
     lsp_range_contains(node_to_lsp_range(bindings, source), pos)
+}
+
+/// `(catch Class name body…)` / `(as-> expr name body…)`: the name binds only
+/// for `children[3..]`. The occurrence-walker twin is `walk_binding_tail`.
+fn walk_scope_binding_tail(
+    children: &[Node],
+    source: &str,
+    pos: Position,
+    out: &mut Vec<LocalBinding>,
+) {
+    // A cursor in the class/seed expression sees no new binding.
+    if let Some(expr) = children.get(1) {
+        if lsp_range_contains(node_to_lsp_range(*expr, source), pos) {
+            walk_scope(*expr, source, pos, out);
+            return;
+        }
+    }
+    let mut bound = Vec::new();
+    if let Some(name) = children.get(2).filter(|n| n.kind() == "sym_lit") {
+        collect_binding_targets(*name, source, &mut bound);
+    }
+    for body in children.iter().skip(3) {
+        if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
+            out.extend(bound);
+            walk_scope(*body, source, pos, out);
+            return;
+        }
+    }
 }
 
 /// `(fn name? [params] body…)` or multi-arity `(fn name? ([params] body…) …)`.
@@ -2421,6 +2482,32 @@ mod tests {
         let body = local_names(src, pos_of(src, "(+ n m)", 0, 3));
         assert!(body.contains(&"n".to_string()), "n bound: {:?}", body);
         assert!(body.contains(&"m".to_string()), "m bound: {:?}", body);
+    }
+
+    #[test]
+    fn catch_binding_visible_in_its_body() {
+        let src = "(ns x)\n(defn f []\n  (try (g)\n       (catch Exception e\n         (log e))))";
+        assert!(
+            local_names(src, pos_of(src, "(log e)", 0, 2)).contains(&"e".to_string()),
+            "catch binding must be visible in its body"
+        );
+        assert!(
+            !local_names(src, pos_of(src, "(g)", 0, 1)).contains(&"e".to_string()),
+            "catch binding must not leak into the try body"
+        );
+    }
+
+    #[test]
+    fn as_arrow_name_visible_in_body() {
+        let src = "(ns x)\n(defn f [y]\n  (as-> y v\n    (inc v)))";
+        assert!(
+            local_names(src, pos_of(src, "(inc v)", 0, 2)).contains(&"v".to_string()),
+            "as-> name must be visible in its body"
+        );
+        assert!(
+            !local_names(src, pos_of(src, "as-> y", 0, 5)).contains(&"v".to_string()),
+            "as-> name must not be visible in the seed expression"
+        );
     }
 
     #[test]

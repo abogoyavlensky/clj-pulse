@@ -103,7 +103,7 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
 **Files:**
 - Modify: `src/index/extractor.rs` (`LocalRefs`, `local_references_at`, tests module)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In the extractor `mod tests`, next to `local_refs_let_declaration_and_usages`:
   - `local_refs_flags_keys_destructured`: `(defn f [{:keys [a]}] (inc a))`, cursor on the `a` in `(inc a)`. Expect `destructured_key == true` and one usage.
   - `local_refs_flags_strs_and_syms`: same with `:strs` and `:syms`.
@@ -111,19 +111,23 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
   - `local_refs_or_key_is_a_usage`: `(let [{a :a :or {a 1}} m] a)`, cursor on the body `a`. Expect `destructured_key == false` and two usages: the `:or` key and the body.
   - `local_refs_vector_binding_is_not_destructured_key`: `(let [[a b] v] (+ a b))` → `false`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --lib local_refs_`
   Expected: compile error (`destructured_key` missing).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add `pub destructured_key: bool` to `LocalRefs`. In `local_references_at`, after the declaration range is known, find the `sym_lit` whose name range equals it (a small recursive search over the tree, skipping `quoting_lit` like `collect_name_occurrences`) and check: parent is a `vec_lit`, grandparent is a `map_lit`, and the vector's `prev_named_sibling()` is a `kwd_lit` with text `:keys`, `:strs`, or `:syms`. Namespaced keys (`{:keys [foo/bar]}`) sit in the same vector, so the same check applies.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --lib local_refs_`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Flag :keys-destructured locals in LocalRefs"`
+
+> Deviation: the `:keys`/`:strs`/`:syms` check matches the directive keyword's
+> *name* part, so namespaced forms (`{:user/keys [a]}`, `{::keys [a]}`) are
+> flagged too — they bind from the key the same way. Found by the codex review.
 
 ### Task 2: Local rename
 
@@ -131,27 +135,31 @@ Other `Symbol { … }` constructors that must gain `private: false`: grep `Symbo
 - Modify: `src/handlers/references.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e tests**
+- [x] **Step 1: Write the failing e2e tests**
   - Rewrite `test_e2e_rename_rejects_local_shadowing_global` as `test_e2e_rename_local_never_touches_shadowed_global`. Same setup (insert `(defn f2 [add] add)` at the end of `core.clj`, cursor on the param at character 11). Now assert `client.rename(...)` succeeds: `changes` has exactly one key ending in `/src/core.clj`, with exactly two edits, both on `last_line`, with start characters 10 and 15 and `newText` `"plus"`. Keep the references assertions.
   - `test_e2e_rename_local_in_let`: open `src/locals.clj`, cursor via `position_of(&locals, "base")`, rename to `"b0"`. Expect one file, three edits, every `newText` `"b0"`, and the edits cover lines 3, 4, 5 of the fixture (the binding, the `scaled` RHS, the body).
   - `test_e2e_rename_rejects_keys_destructured_local`: append `(defn f3 [{:keys [k]}] (inc k))` to `core.clj`, cursor on the `k` inside `(inc k)`, `request_expect_error("textDocument/rename", …)`; assert the message contains `destructured`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
   Run: `cargo test --test test_e2e test_e2e_rename_local && cargo test --test test_e2e test_e2e_rename_rejects_keys`
   Expected: FAIL. The first two get an error response ("nothing to rename here"); the third gets the wrong message.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `rename`, after the project-origin guard, add the local path. Reuse the guards from `local_references` (keyword check, no `/` in the word) via a shared helper `local_refs_at(documents, uri, pos) -> Option<LocalRefs>` that `local_references` also calls. When it returns `Some(refs)`:
   - if `refs.destructured_key`, `bail!("cannot rename a :keys/:strs/:syms destructured binding '{}': rewrite it as {{new-name :{}}} first", word, word)`.
   - otherwise build `changes` with one entry for `uri` holding a `TextEdit` for `refs.declaration` and one per usage, all with `new_text = new_name`, and return the `WorkspaceEdit`.
   Update the doc comments on `rename` and `resolve_fqn_at` (point 2 of its list no longer needs to mention rename protection since locals are handled before it).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
   Run: `cargo test --test test_e2e rename`
   Expected: PASS for every rename test, including the unchanged cross-file and library-rejection ones.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Rename local bindings"`
+
+> Deviation: the rejection message interpolates the *requested* new name into
+> the suggested rewrite (`rewrite it as {kk :k} first`) instead of the literal
+> placeholder `new-name`.
 
 ### Task 3: `catch` and `as->` bind in both walkers
 
