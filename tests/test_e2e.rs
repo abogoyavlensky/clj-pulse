@@ -5161,6 +5161,85 @@ fn diagnostic_codes(params: &Value) -> Vec<(String, String)> {
 }
 
 #[test]
+fn test_e2e_unused_binding_diagnostic() {
+    // With clj-kondo off (the harness default), the native unused-binding lint
+    // is what the editor sees.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let scratch = root.join("src/scratch.clj");
+    std::fs::write(
+        &scratch,
+        "(ns simple.scratch)\n\n(defn run [x y]\n  (let [z 1]\n    x))\n",
+    )
+    .unwrap();
+    client.did_open(&scratch);
+
+    let params = client.wait_for_diagnostics("/src/scratch.clj");
+    let found: Vec<&Value> = params["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == json!("unused-binding"))
+        .collect();
+    assert_eq!(found.len(), 2, "the param `y` and the let `z`: {}", params);
+    for d in &found {
+        assert_eq!(d["severity"], json!(2), "WARNING: {}", d);
+        assert_eq!(d["tags"], json!([1]), "UNNECESSARY: {}", d);
+        assert_eq!(d["source"], json!("clj-pulse"));
+    }
+    // Inner scopes are reported first (frames are harvested as they pop), so
+    // assert on the set rather than the order.
+    let mut messages: Vec<&str> = found
+        .iter()
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        vec!["Unused binding: y", "Unused binding: z"],
+        "{}",
+        params
+    );
+}
+
+#[test]
+fn test_e2e_kondo_run_drops_native_unused_binding() {
+    // A successful clj-kondo run owns `unused-binding` too: the fake returns
+    // no findings with exit 0, so the native copy must not survive.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    // No fake-kondo marker in this file, so the fake reports nothing — but it
+    // still succeeds, which is what cedes ownership.
+    let scratch = root.join("src/scratch.clj");
+    std::fs::write(
+        &scratch,
+        "(ns kondo.scratch)\n\n(defn run [x]\n  (let [z 1]\n    x))\n",
+    )
+    .unwrap();
+    client.did_open(&scratch);
+
+    let params = client.wait_for_diagnostics("/src/scratch.clj");
+    assert!(
+        params["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["code"] != json!("unused-binding")),
+        "clj-kondo owns unused-binding: {}",
+        params
+    );
+}
+
+#[test]
 fn test_e2e_kondo_findings_published_and_native_codes_ceded() {
     let project = setup_kondo_project();
     let root = project.path().canonicalize().unwrap();

@@ -1139,11 +1139,12 @@ fn project_entries(state_arc: &SharedState, rel_path: &str) -> ClasspathEntries 
 async fn relint_open_documents(
     client: &Client,
     documents: &DocumentStore,
+    index: &Index,
     kondo_state: &SharedKondoState,
 ) {
     for uri in documents.open_uris() {
         let version = documents.current_version(&uri).unwrap_or(0);
-        lint_and_publish_doc(client, documents, kondo_state, uri, version).await;
+        lint_and_publish_doc(client, documents, index, kondo_state, uri, version).await;
     }
 }
 
@@ -1162,6 +1163,7 @@ static KONDO_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4
 async fn lint_and_publish_doc(
     client: &Client,
     documents: &DocumentStore,
+    index: &Index,
     kondo_state: &SharedKondoState,
     uri: Url,
     version: i32,
@@ -1172,7 +1174,7 @@ async fn lint_and_publish_doc(
     let Ok(path) = uri.to_file_path() else {
         return;
     };
-    let native = crate::diagnostics::compute(&text, &path);
+    let native = crate::diagnostics::compute(&text, &path, &index.extract_config());
 
     let engine = kondo_state.lock().unwrap().clone();
     let bin = engine
@@ -1676,6 +1678,7 @@ impl Backend {
     fn spawn_kondo_reload(&self, root: std::path::PathBuf, reprobe: bool, force_relint: bool) {
         let client = self.client.clone();
         let documents = self.documents.clone();
+        let index = self.index.clone();
         let editor_kondo = self.editor_kondo.clone();
         let warmer = self.kondo.clone();
         let projects_arc = self.projects.clone();
@@ -1686,7 +1689,7 @@ impl Backend {
             let engine_changed = reprobe
                 && probe_and_announce(&client, Some(&root), &editor_kondo, &warmer.state).await;
             if engine_changed || force_relint {
-                relint_open_documents(&client, &documents, &warmer.state).await;
+                relint_open_documents(&client, &documents, &index, &warmer.state).await;
             }
             if engine_changed {
                 // Gaining clj-kondo mid-session must not require a re-index to
@@ -1713,6 +1716,7 @@ impl Backend {
         lint_and_publish_doc(
             &self.client,
             &self.documents,
+            &self.index,
             &self.kondo.state,
             uri,
             version,
@@ -2493,13 +2497,14 @@ impl LanguageServer for Backend {
         // the sleep, so bursts of keystrokes collapse to one diagnostic pass.
         let documents = self.documents.clone();
         let client = self.client.clone();
+        let index = self.index.clone();
         let kondo_state = self.kondo.state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS)).await;
             if documents.current_version(&uri) != Some(version) {
                 return;
             }
-            lint_and_publish_doc(&client, &documents, &kondo_state, uri, version).await;
+            lint_and_publish_doc(&client, &documents, &index, &kondo_state, uri, version).await;
         });
     }
 
