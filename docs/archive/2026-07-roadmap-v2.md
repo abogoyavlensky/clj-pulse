@@ -1,6 +1,8 @@
+> **Archived 2026-09-05.** This was the second roadmap (gap analysis against clojure-lsp, July 2026). Sections 1.1 and about half of 1.2 shipped before archiving; the remaining items were re-prioritized into the active roadmap. The active plan is [docs/ROADMAP.md](../ROADMAP.md).
+
 # Roadmap 2 — closing the practical gap with clojure-lsp
 
-[ROADMAP.md](ROADMAP.md) covered the read-and-navigate core and is mostly
+[the first roadmap](2026-06-roadmap-v1.md) covered the read-and-navigate core and is mostly
 done. This document is the next arc: a source-level gap analysis against
 clojure-lsp (July 2026, clojure-lsp master vs clj-pulse 0.1.4) turned into
 prioritized work. Still-open items from ROADMAP.md are folded into the
@@ -87,7 +89,7 @@ The original plan, for reference:
 Silent correctness holes (`src/index/extractor.rs:493-535` parses only
 `:as` and `:refer [vec]`): they corrupt unused-namespace lints, clean-ns,
 and resolution in real codebases. Cheap fixes, outsized trust impact.
-Sourced from docs/MISSING_PARTS.md plus the gap analysis.
+Sourced from [missing-parts notes](2026-06-missing-parts-notes.md) plus the gap analysis.
 
 - [ ] `:as-alias` — treated as an alias for keyword/symbol resolution; must
       not count as "unused" just because no runtime var is referenced.

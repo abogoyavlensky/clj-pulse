@@ -19,9 +19,10 @@ depth it indexes varies:
 
 For `deps.edn`, indexing is graduated. Stage 2 reads whatever classpath a prior
 `clojure` invocation left in `.cpcache` — instant, no subprocess. Stage 3 then
-runs `clojure -A:dev:test -Spath` in the background (aliases configurable via
-`.clj-pulse/config.edn` `{:classpath {:aliases […]}}`, the whole stage
-disableable with `:enabled false`) and re-indexes when the authoritative
+runs `clojure -A:dev:test -Spath` in the background (the command is set per
+project in `.clj-pulse/config.edn`, `{:projects [{:path "." :classpath
+{:enabled true :cmd "…"}}]}`, and enabled by default only for the workspace
+root) and re-indexes when the authoritative
 classpath differs — this is what makes `:test`/`:dev` alias deps navigable.
 The clojure CLI is its own staleness check: with a warm cache it prints the
 classpath from a bash script without booting a JVM; only a deps.edn change or
@@ -91,5 +92,5 @@ Best-effort directions that respect the no-JVM rule, none urgent:
    apply.
 
 For complete, accurate Leiningen support, clojure-lsp (which embeds clj-kondo
-and resolves the real classpath) remains the better tool. See also the ROADMAP
-entry "Leiningen classpath ... Transitive deps deferred".
+and resolves the real classpath) remains the better tool. See also the
+"Leiningen transitive deps" item under best effort in [ROADMAP.md](ROADMAP.md).

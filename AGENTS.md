@@ -2,7 +2,10 @@
 
 Rust LSP server for Clojure (tower-lsp, tree-sitter). See ARCHITECTURE.md for data flow.
 
-See project's various notes at docs/MEMORY.md.
+See project's various notes at docs/MEMORY.md. The active plan is
+docs/ROADMAP.md; follow its working rules: when starting an item, link its
+plan on the item's `Plan:` line, and when the plan is complete, tick the item
+and update README and this file in the same change.
 
 ## Verification (run before claiming anything works)
 
@@ -110,10 +113,13 @@ for the full flow.
 
 ## User's setup
 
-The maintainer tests manually in VS Code on macOS via Calva
-(`calva.clojureLspPath` → `target/debug/clj-pulse`). Plain vscode-languageclient
-9.x has no `workspace/textDocumentContent` support, so `jar:` URI navigation
-needs client-side wiring in the editor extension (not yet done).
+The maintainer tests manually in VS Code on macOS via the Clojure Pulse
+extension (`../clojure-pulse-vscode`, `clojurePulse.server.path` →
+`target/debug/clj-pulse`) and via Calva (`calva.clojureLspPath`). Editor
+priority: Clojure Pulse, Calva, Neovim; Zed and ClojureScript are best effort.
+Clojure Pulse registers its own `jar:` `TextDocumentContentProvider` that calls
+the server's `workspace/textDocumentContent`; Calva reads JARs itself and never
+calls it, so both paths must keep working.
 
 See [docs/DEV_SETUP.md](docs/DEV_SETUP.md) for the full development &
 verification environment: the two environments (maintainer's Calva/macOS vs the

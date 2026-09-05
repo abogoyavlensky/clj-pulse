@@ -5,9 +5,11 @@ environments: the maintainer's editor, and the headless CI/agent box.
 
 ## Two environments
 
-- **Maintainer (manual testing):** VS Code on **macOS** via **Calva**, with
-  `"calva.clojureLspPath": "/Users/andrew/Projects/clj-pulse/target/debug/clj-pulse"`,
-  rebuilding the debug binary (`cargo build`) on each change.
+- **Maintainer (manual testing):** VS Code on **macOS** via the **Clojure
+  Pulse** extension (`../clojure-pulse-vscode`,
+  `"clojurePulse.server.path": ".../clj-pulse/target/debug/clj-pulse"`) and via
+  **Calva** (`"calva.clojureLspPath"` pointed at the same binary), rebuilding
+  the debug binary (`cargo build`) on each change.
 - **CI / automated agent:** an isolated **Linux** box with no editor and no
   view of the maintainer's setup. All verification here is headless.
 
@@ -42,9 +44,12 @@ work" (see also the quick reference in [AGENTS.md](../AGENTS.md)):
   `.cpcache` via `clojure -Spath` and navigates into a downloaded JAR.
 - `bb e2e-nvim` — drives the server through a real editor client (headless
   Neovim's built-in LSP client, `scripts/e2e_nvim.lua`).
-- `bb e2e-calva` — the definitive reproduction of the maintainer's setup: real
-  VS Code + real Calva (`calva.clojureLspPath` → our binary) under Xvfb
-  (`scripts/calva-e2e/`).
+- `bb e2e-calva` — real VS Code + real Calva (`calva.clojureLspPath` → our
+  binary) under Xvfb (`scripts/calva-e2e/`).
+- Clojure Pulse has no gate here yet (roadmap Milestone 0). Its own suite in
+  `../clojure-pulse-vscode` runs an end-to-end test against a server binary
+  when `CLJ_PULSE_E2E_BIN` is set:
+  `CLJ_PULSE_E2E_BIN=$PWD/target/debug/clj-pulse xvfb-run -a npx vscode-test -g "end to end"`.
 
 ## Why this matters
 
@@ -57,6 +62,8 @@ work" (see also the quick reference in [AGENTS.md](../AGENTS.md)):
   reads JARs locally (JSZip); it never calls `workspace/textDocumentContent`.
   Returning clojure-lsp-style `jar:file:///…!/…` scalar `Location`s is all the
   server needs to do. Verified working via the Calva rig on 2026-06-12.
+  **Clojure Pulse does the opposite:** its `jar:` provider asks the server via
+  `workspace/textDocumentContent`, so that request must keep working too.
 
 ## Related fixtures
 

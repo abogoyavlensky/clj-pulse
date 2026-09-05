@@ -1,3 +1,5 @@
+> **Archived 2026-09-05.** Raw notes from the initial build sessions. Most items shipped (`:use`, `^:private`, debounced didChange); `:as-alias`, `declare`, and `:refer-clojure` are tracked in the active roadmap. The active plan is [docs/ROADMAP.md](../ROADMAP.md).
+
 From step 2
 ⏺ For V1 scope (definition, completion, hover on project source), it covers the most common patterns. But it's not exhaustive. Some things it doesn't handle:                                                                                   
                                                                                                                                                                                                                                                 

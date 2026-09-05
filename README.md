@@ -11,6 +11,7 @@ With first-class [let-go](https://github.com/nooga/let-go) support: `.lg` projec
 > real-world testing, so expect the occasional rough edge. Bug reports and
 > feature requests via
 > [issues](https://github.com/abogoyavlensky/clj-pulse/issues) are very welcome.
+> What comes next is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Features
 
@@ -18,7 +19,9 @@ Language features:
 
 - **Go to definition** - across project source, library JARs (via `jar:` URIs),
   and source-directory deps (git deps in `~/.gitlibs`, `:local/root`).
-- **Autocomplete** - project symbols and `clojure.core` builtins.
+- **Autocomplete** - locals, project symbols, `:refer`red and alias-qualified
+  vars (including `:refer :all` and `:use`), namespace and alias names,
+  `clojure.core`, special forms, and JDK classes.
 - **Hover** - docstrings and signatures for the symbol under the cursor.
 - **ClojureDocs** - the `clojurePulse/clojureDocs` request returns the
   [ClojureDocs](https://clojuredocs.org) entry (docstring, arglists, community
@@ -28,7 +31,9 @@ Language features:
   [ClojureDocs data](#clojuredocs-data).
 - **Signature help** - argument hints while typing a call (after `(` and spaces).
 - **Find references** - locate every usage of a symbol across the project.
-- **Rename** - rename a project symbol and all of its references.
+- **Rename** - rename a project symbol and all of its references, or a local
+  binding (params, `let`/`loop`/`for` bindings, destructured names) within
+  its scope.
 - **Keyword navigation** - go to definition and find references on namespaced
   keywords, including Integrant component keys: jump from `:my.app/db` in a
   `config.edn` system map (or an `#ig/ref`) to its `(defmethod ig/init-key ::db …)`.
@@ -38,10 +43,12 @@ Language features:
 - **Document symbols** - outline of the definitions in the current file.
 - **Workspace symbols** - fuzzy symbol search across the whole project.
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
-  namespace isn't required yet.
-- **Diagnostics** - unresolved-namespace, unused-namespace, and
-  duplicate-require warnings, updated live as you type; clj-kondo's full
-  linter set as well when the binary is installed (see [Linting](#linting)).
+  namespace isn't required yet, and "Clean namespace" (`source.organizeImports`)
+  that drops unused and duplicate requires.
+- **Diagnostics** - unresolved-namespace, unused-namespace, duplicate-require,
+  unused-binding, and unused-private-var warnings, updated live as you type;
+  clj-kondo's full linter set as well when the binary is installed (see
+  [Linting](#linting)).
 - **Indent-on-Enter** - pressing Enter indents the new line to the structurally
   correct column (`textDocument/onTypeFormatting`): vectors, maps, and
   non-symbol-headed lists align to their first element; symbol-headed lists get
@@ -79,9 +86,10 @@ Clojure & project support:
 clj-pulse lints in two tiers.
 
 The **native** tier always runs. It is built into the server, needs nothing
-installed, and reports three things: `unresolved-namespace`,
-`unused-namespace`, and `duplicate-require`. It is instant, index-free, and it
-powers the "Add require" and "Clean namespace" quickfixes.
+installed, and reports five things: `unresolved-namespace`,
+`unused-namespace`, `duplicate-require`, `unused-binding`, and
+`unused-private-var`. It is instant, and it powers the "Add require" and
+"Clean namespace" quickfixes.
 
 The **clj-kondo** tier runs when a `clj-kondo` binary is on your `PATH`. Then
 clj-pulse spawns it once per lint pass, feeds it the unsaved buffer, and
@@ -93,7 +101,7 @@ exactly as they do on the command line. The config is resolved from the file
 being linted, so in a monorepo each subproject's own `.clj-kondo/config.edn`
 wins over the workspace root's.
 
-When a clj-kondo run succeeds it owns the three codes above, and the native
+When a clj-kondo run succeeds it owns the five codes above, and the native
 copies are dropped for that pass so no squiggle appears twice. When clj-kondo
 is missing, disabled, slow, or broken, the native diagnostics are published
 unchanged. Losing the binary never loses your diagnostics.
@@ -168,13 +176,41 @@ and put the binary on your `PATH`. Checksums for all archives are in
 
 ### VS Code
 
-Install [Calva](https://calva.io/) extension, then add to `settings.json`:
+Install the [Clojure Pulse](https://github.com/abogoyavlensky/clojure-pulse-vscode)
+extension. It finds `clj-pulse` on your `PATH`; to use another binary, set:
+
+```json
+{
+  "clojurePulse.server.path": "/path/to/clj-pulse"
+}
+```
+
+Alternatively, with [Calva](https://calva.io/) installed, point it at the
+server instead of clojure-lsp:
 
 ```json
 {
   "calva.clojureLspPath": "/path/to/clj-pulse"
 }
 ```
+
+### Neovim
+
+Neovim 0.11+ with the built-in LSP client, no plugin needed:
+
+```lua
+vim.lsp.config("clj_pulse", {
+  cmd = { "clj-pulse" },
+  filetypes = { "clojure" },
+  root_markers = { "deps.edn", "project.clj", "lgx.edn", ".git" },
+})
+vim.lsp.enable("clj_pulse")
+-- let-go sources:
+vim.filetype.add({ extension = { lg = "clojure" } })
+```
+
+`jar:` locations need a client that answers them; Neovim's built-in client
+does not, so definitions into library JARs are not opened yet.
 
 ### Zed
 
@@ -311,6 +347,15 @@ bb outdated   # check outdated deps
 bb build      # build the dev binary
 bb release    # build release binary
 bb tag        # create and push new git tag based on version form Cargo.toml
+```
+
+End-to-end checks (see [docs/DEV_SETUP.md](docs/DEV_SETUP.md)):
+
+```sh
+bb e2e        # real binary over stdio, framed JSON-RPC like an editor
+bb e2e-real   # same, against a real Maven classpath (needs the clojure CLI)
+bb e2e-nvim   # through headless Neovim's built-in LSP client
+bb e2e-calva  # real VS Code + Calva under Xvfb
 ```
 
 > [!NOTE]
