@@ -44,6 +44,11 @@ pub enum DefKind {
     /// A `clojure.test/deftest` var (or `deftest-`/`cljs.test/deftest`). Defines
     /// a zero-arg test fn, so it carries no params.
     Deftest,
+    /// A name introduced by `(declare foo)`: a var with no value yet. Kept only
+    /// when nothing else in the file defines the same name, so navigation
+    /// reaches the declaration when the real definition is elsewhere (or made
+    /// by a macro we don't model).
+    Declare,
     /// An Integrant component key, defined by `(defmethod ig/init-key ::x …)`.
     /// Its `fqn` is the canonical colon-prefixed keyword (`:my.ns/x`), keyed
     /// disjointly from var fqns (which never start with `:`).

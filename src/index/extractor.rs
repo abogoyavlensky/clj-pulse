@@ -301,6 +301,16 @@ pub fn extract_analysis_with(source: &str, file: &Path, cfg: &ExtractConfig) -> 
         }
     }
 
+    // A `declare`d name that the file goes on to define really is that
+    // definition: drop the placeholder so the index and the outline show one
+    // entry, pointing at the definition rather than the forward declaration.
+    let defined: HashSet<String> = symbols
+        .iter()
+        .filter(|s| s.kind != DefKind::Declare)
+        .map(|s| s.fqn.clone())
+        .collect();
+    symbols.retain(|s| s.kind != DefKind::Declare || !defined.contains(&s.fqn));
+
     // Second pass: occurrences, resolved through the completed ns metadata
     let def_names: HashSet<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
     let ctx = OccurrenceCtx {
@@ -435,6 +445,12 @@ fn process_top_level_list(
 
     if first_text == "ns" {
         extract_ns(&children, source, ns_meta);
+        return;
+    }
+
+    // `(declare a b c)` introduces one var per name, none of them defined yet.
+    if first_text == "declare" {
+        extract_declare(node, &children, source, file, &ns_meta.name, symbols);
         return;
     }
 
@@ -910,6 +926,43 @@ fn extract_def(
     // so go-to-definition / hover / completion / references reach them.
     if kind == DefKind::Defprotocol {
         extract_protocol_methods(&children[2..], source, file, ns_name, symbols);
+    }
+}
+
+/// Records one `Symbol` per name in `(declare a ^:private b)`. A declaration
+/// carries no params and no docstring; its `range` is the whole form, so the
+/// outline and hover point at the `declare` that introduced it.
+fn extract_declare(
+    form_node: Node,
+    children: &[Node],
+    source: &str,
+    file: &Path,
+    ns_name: &str,
+    symbols: &mut Vec<Symbol>,
+) {
+    for name_node in &children[1..] {
+        if name_node.kind() != "sym_lit" {
+            continue;
+        }
+        let name = sym_text(*name_node, source).to_string();
+        let fqn = if ns_name.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", ns_name, name)
+        };
+        symbols.push(Symbol {
+            name,
+            fqn,
+            ns: ns_name.to_string(),
+            kind: DefKind::Declare,
+            params: Vec::new(),
+            doc: None,
+            file: file.to_path_buf(),
+            source: super::SymbolSource::Project,
+            range: node_to_lsp_range(form_node, source),
+            name_range: node_to_lsp_range(sym_name_node(*name_node), source),
+            private: has_private_meta(*name_node, source),
+        });
     }
 }
 

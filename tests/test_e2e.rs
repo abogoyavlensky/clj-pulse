@@ -5754,3 +5754,75 @@ fn test_e2e_clojuredocs_unreadable_file() {
         );
     }
 }
+
+#[test]
+fn test_e2e_definition_reaches_declare_site() {
+    // `only-declared` is never defined; its `(declare …)` is the definition.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "(only-declared x)");
+    let result = client.goto_definition(&file, line, ch + 3);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.ends_with("/src/ns_options.clj"), "got {}", uri);
+
+    let (decl_line, _) = start_of(&text, "(declare only-declared)");
+    assert_eq!(result["range"]["start"]["line"], json!(decl_line));
+}
+
+#[test]
+fn test_e2e_declare_defers_to_the_real_definition() {
+    // `defined-later` is declared and then defined: definition lands on the
+    // `defn`, while references and rename still reach the declare site.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (use_line, use_ch) = start_of(&text, "(defined-later m)");
+    let result = client.goto_definition(&file, use_line, use_ch + 3);
+    let (defn_line, _) = start_of(&text, "(defn defined-later [x]");
+    assert_eq!(
+        result["range"]["start"]["line"],
+        json!(defn_line),
+        "definition should be the defn, not the declare: {}",
+        result
+    );
+
+    let (decl_line, decl_ch) = start_of(&text, "(declare defined-later)");
+    let refs = client.references(&file, use_line, use_ch + 3, true);
+    let lines: Vec<u64> = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert!(
+        lines.contains(&(decl_line as u64)),
+        "declare site missing from references: {:?}",
+        lines
+    );
+
+    let result = client.rename(&file, decl_line, decl_ch + 12, "later");
+    let changes = result["changes"].as_object().unwrap();
+    let edits = changes.values().next().unwrap().as_array().unwrap();
+    assert!(
+        edits
+            .iter()
+            .any(|e| e["range"]["start"]["line"] == json!(decl_line)),
+        "declare site not renamed: {:?}",
+        edits
+    );
+}

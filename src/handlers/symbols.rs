@@ -141,7 +141,7 @@ fn defkind_to_symbol_kind(kind: &DefKind) -> SymbolKind {
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro | DefKind::Defmulti => {
             SymbolKind::FUNCTION
         }
-        DefKind::Def | DefKind::Defonce => SymbolKind::VARIABLE,
+        DefKind::Def | DefKind::Defonce | DefKind::Declare => SymbolKind::VARIABLE,
         DefKind::Defprotocol => SymbolKind::INTERFACE,
         DefKind::Defrecord | DefKind::Deftype => SymbolKind::CLASS,
         DefKind::Defmethod => SymbolKind::METHOD,

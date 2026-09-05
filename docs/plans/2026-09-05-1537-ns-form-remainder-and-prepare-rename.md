@@ -181,25 +181,27 @@ Modify:
 - Modify: `src/index/mod.rs`, `src/index/extractor.rs`, `src/handlers/symbols.rs`
 - Test: `tests/test_extractor.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing extractor tests**
+- [x] **Step 1: Write the failing extractor tests**
   Snippet with `(declare helper ^:private hidden later)`, then `(defn later [] (helper))`. Tests: symbols contain `helper` (kind `Declare`, `private` false), `hidden` (`private` true), and exactly one `later` whose kind is `Defn`; the occurrence for `(helper)` has fqn `<ns>/helper`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor test_declare`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `DefKind::Declare`; `extract_declare` called from the top-level dispatch; de-duplication pass at the end of `extract_analysis_with` (or wherever `symbols` is final) that removes `Declare` symbols shadowed by a same-fqn non-declare symbol; `symbols.rs` mapping. Fix every exhaustive `match` on `DefKind` the compiler reports.
 
-- [ ] **Step 4: e2e test**
+- [x] **Step 4: e2e test**
   Add `declared.clj` content to the new `tests/fixtures/simple_project/src/ns_options.clj` (or a dedicated file): `(declare only-declared)` with no def, plus `(declare defined-later)` and its `defn`. Tests: definition on a usage of `only-declared` lands on the declare line; definition on `defined-later` lands on the `defn`; references on `defined-later` include the declare site; rename of `defined-later` edits the declare site too.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `cargo test --test test_extractor && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Index declare forms as declarations"`
+
+> Deviation: `hover.rs`'s `defkind_str` needed a `Declare => "declare"` arm — an exhaustive `DefKind` match the plan did not list.
 
 ### Task 5: e2e for the ns-form work
 

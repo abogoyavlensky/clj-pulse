@@ -1141,3 +1141,32 @@ fn test_ns_prefix_list_expanded() {
         meta.requires
     );
 }
+
+#[test]
+fn test_declare_indexes_each_name() {
+    let src = "(ns app)\n(declare helper ^:private hidden later)\n\n(defn later [] (helper))\n";
+    let (_, syms, occs) =
+        clj_pulse::index::extractor::extract_full(src, Path::new("app.clj")).unwrap();
+
+    let helper = syms.iter().find(|s| s.name == "helper").expect("helper");
+    assert_eq!(helper.kind, DefKind::Declare);
+    assert_eq!(helper.fqn, "app/helper");
+    assert!(!helper.private);
+    assert!(helper.params.is_empty());
+    assert!(helper.doc.is_none());
+
+    let hidden = syms.iter().find(|s| s.name == "hidden").expect("hidden");
+    assert_eq!(hidden.kind, DefKind::Declare);
+    assert!(hidden.private);
+
+    // The real definition wins: the declared `later` is dropped.
+    let laters: Vec<_> = syms.iter().filter(|s| s.name == "later").collect();
+    assert_eq!(laters.len(), 1, "symbols: {:?}", syms);
+    assert_eq!(laters[0].kind, DefKind::Defn);
+
+    assert!(
+        occs.iter().any(|o| o.fqn == "app/helper"),
+        "occurrences: {:?}",
+        occs
+    );
+}
