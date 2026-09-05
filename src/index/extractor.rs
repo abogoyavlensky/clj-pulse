@@ -181,6 +181,7 @@ pub fn extract_edn(source: &str) -> Vec<Occurrence> {
         requires: Vec::new(),
         imports: HashMap::new(),
         refer_all: Vec::new(),
+        as_aliases: Vec::new(),
     };
     let mut out = Vec::new();
     collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
@@ -281,6 +282,7 @@ pub fn extract_analysis_with(source: &str, file: &Path, cfg: &ExtractConfig) -> 
         requires: Vec::new(),
         imports: HashMap::new(),
         refer_all: Vec::new(),
+        as_aliases: Vec::new(),
     };
     let mut symbols = Vec::new();
 
@@ -622,7 +624,9 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
     } else {
         return;
     };
-    ns_meta.requires.push(ns_name.clone());
+    // `:as-alias` binds an alias without loading the namespace, so the require
+    // is only recorded once the options rule that out.
+    let mut as_alias_only = false;
 
     let mut i = 1;
     while i < items.len() {
@@ -633,6 +637,18 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
                 ":as" if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" => {
                     let alias = node_text(items[i + 1], source).to_string();
                     ns_meta.aliases.insert(alias, ns_name.clone());
+                    i += 2;
+                    continue;
+                }
+                // `[a.b :as-alias x]` binds `x` for keyword and symbol
+                // resolution without loading `a.b`.
+                ":as-alias" if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" => {
+                    let alias = node_text(items[i + 1], source).to_string();
+                    ns_meta.aliases.insert(alias, ns_name.clone());
+                    if !ns_meta.as_aliases.contains(&ns_name) {
+                        ns_meta.as_aliases.push(ns_name.clone());
+                    }
+                    as_alias_only = true;
                     i += 2;
                     continue;
                 }
@@ -663,6 +679,10 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         i += 1;
+    }
+
+    if !as_alias_only {
+        ns_meta.requires.push(ns_name);
     }
 }
 
@@ -2493,6 +2513,7 @@ mod tests {
             requires: Vec::new(),
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
         };
         keyword_fqn(kwd, &meta, source)
     }

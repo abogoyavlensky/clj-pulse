@@ -93,6 +93,7 @@ fn ns_meta(name: &str) -> NsMeta {
         requires: vec![],
         imports: HashMap::new(),
         refer_all: vec![],
+        as_aliases: vec![],
     }
 }
 

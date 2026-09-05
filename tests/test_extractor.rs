@@ -1028,3 +1028,35 @@ fn test_extracts_private_flag() {
         assert!(!private_of(name), "{} must not be private", name);
     }
 }
+
+#[test]
+fn test_ns_as_alias_recorded() {
+    let (meta, _, occs) = clj_pulse::index::extractor::extract_full(
+        include_str!("fixtures/snippets/ns_options.clj"),
+        Path::new("ns_options.clj"),
+    )
+    .unwrap();
+
+    // `:as-alias` binds the alias for keyword resolution …
+    assert_eq!(
+        meta.aliases.get("cfg").map(String::as_str),
+        Some("my.app.config")
+    );
+    assert!(
+        meta.as_aliases.contains(&"my.app.config".to_string()),
+        "as_aliases: {:?}",
+        meta.as_aliases
+    );
+    // … but the namespace is never loaded, so it is not a require.
+    assert!(
+        !meta.requires.contains(&"my.app.config".to_string()),
+        "requires: {:?}",
+        meta.requires
+    );
+
+    assert!(
+        occs.iter().any(|o| o.fqn == ":my.app.config/port"),
+        "occurrences: {:?}",
+        occs
+    );
+}

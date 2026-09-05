@@ -17,7 +17,7 @@ use super::{NsMeta, Symbol};
 /// 10: `NsMeta.imports` added (`:import` parsing).
 /// 11: `DefKind::Deftest` + `NsMeta.refer_all` (layout change).
 /// 12: `Symbol.private` (layout change).
-pub const CACHE_FORMAT_VERSION: u32 = 12;
+pub const CACHE_FORMAT_VERSION: u32 = 13;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {
@@ -104,6 +104,7 @@ mod tests {
             requires: Vec::new(),
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
         };
         let symbol = Symbol {
             name: "my-fn".to_string(),

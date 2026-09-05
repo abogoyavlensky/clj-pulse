@@ -447,6 +447,7 @@ mod tests {
             requires: vec![],
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
         }
     }
 

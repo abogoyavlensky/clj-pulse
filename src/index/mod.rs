@@ -144,6 +144,12 @@ pub struct NsMeta {
     /// or `(:use ns)`. Bare names in this file may resolve there.
     #[serde(default)]
     pub refer_all: Vec<String>,
+    /// Namespaces bound only through `[ns :as-alias x]`. Their aliases are in
+    /// `aliases` too, so keyword and qualified-symbol resolution work as usual,
+    /// but the namespace is never loaded — so it stays out of `requires`, and a
+    /// usage that spells the full name is still an unresolved namespace.
+    #[serde(default)]
+    pub as_aliases: Vec<String>,
 }
 
 impl NsMeta {
@@ -521,6 +527,7 @@ mod tests {
             requires: vec![],
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
         };
 
         let index = Index::new();
