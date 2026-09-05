@@ -47,13 +47,17 @@ async function main() {
     version: "stable",
     cachePath: path.resolve(__dirname, "../.vscode-cache"),
   });
-  const extensionsDir = path.join(__dirname, ".vscode-test", "extensions");
-  const userDataDir = path.join(__dirname, ".vscode-test", "user-data");
+  // The shared cache holds only VS Code itself, so this harness's own state
+  // dir has to be created here — nothing else makes it on a fresh checkout.
+  const testDir = path.join(__dirname, ".vscode-test");
+  fs.mkdirSync(testDir, { recursive: true });
+  const extensionsDir = path.join(testDir, "extensions");
+  const userDataDir = path.join(testDir, "user-data");
   const [cliPath, ...cliArgs] = resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath).filter(
     (a) => !a.startsWith("--extensions-dir") && !a.startsWith("--user-data-dir")
   );
 
-  const vsix = path.join(__dirname, ".vscode-test", "calva.vsix");
+  const vsix = path.join(testDir, "calva.vsix");
   if (!fs.existsSync(vsix)) {
     console.log("downloading Calva vsix…");
     cp.execSync(`curl -sL -o ${vsix} ${CALVA_VSIX_URL}`);
