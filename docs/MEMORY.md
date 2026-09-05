@@ -35,6 +35,11 @@ warm checkout stage 2 finishes seconds before stage 3 has re-resolved and
 re-indexed, and sampling there would fold a background reindex into every
 latency below.
 
+For scale: the same bench against a one-namespace project reports 8 ms to
+index, 31 ms to first diagnostics and a 331 ms median per edit — that is the
+300 ms debounce plus ~30 ms of work. The numbers above are what file *size*
+costs, not fixed overhead.
+
 ### What the numbers cost, and what is left
 
 A diagnostics pass used to run its two tiers in sequence — the native lints

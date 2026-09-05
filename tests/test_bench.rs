@@ -18,6 +18,11 @@ const INDEX_CEILING: Duration = Duration::from_secs(120);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Samples per latency metric.
 const SAMPLES: usize = 20;
+/// How long to wait for stage 3 to announce itself before concluding it is not
+/// going to run for this workspace (disabled in config, no CLI, an lgx project).
+/// It logs that line before it does any work, so this only ever absorbs the gap
+/// between the two background tasks.
+const STAGE3_ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
 
 #[test]
 #[ignore = "needs CLJ_PULSE_BENCH_ROOT pointing at a large Clojure checkout; run with `bb bench`"]
@@ -57,30 +62,53 @@ fn bench_large_project() {
     }
 
     // Stage 2/3: libraries. Stage 2 reads whatever `.cpcache` is already on
-    // disk and logs `library indexing complete` — which on a warm checkout
-    // arrives long before stage 3 has run `clojure -Spath` and re-indexed. So
-    // wait for a line that means stage 3 is *settled*, and only fall back to
-    // the stage-2 line when stage 3 never reports. Sampling before that would
-    // mix a background reindex into every latency number below.
-    let library_deadline = INDEX_CEILING.saturating_sub(started.elapsed());
-    let settled = client.log_line_within(
+    // disk; on a warm checkout it finishes seconds before stage 3 has run
+    // `clojure -Spath` and re-indexed. Sampling at stage 2 would fold a
+    // background reindex into every latency number below, so the report waits
+    // for stage 3 whenever stage 3 is going to run — and stage 3 says so, in
+    // the line it logs before it starts, so waiting for a stage-3 outcome that
+    // never comes cannot cost the whole ceiling.
+    let stage2 = client.log_line_within(
         &[
-            "full classpath indexed",
-            "classpath resolution failed",
+            "library indexing complete",
             "no classpath found",
+            "no lgx deps resolved",
         ],
-        library_deadline,
+        INDEX_CEILING.saturating_sub(started.elapsed()),
     );
-    let reached = match settled {
-        Some(line) => Some(line),
-        // Already stashed when stage 3 is disabled or absent, so this returns
-        // at once rather than spending the rest of the budget.
-        None => client.log_line_within(&["library indexing complete"], Duration::from_secs(1)),
-    };
-    if let Some(line) = reached {
-        report.library_index_wall = Some(started.elapsed());
-        report.rss_after_libraries = rss_kib(pid);
-        report.library_stage = Some(line);
+    let stage2_sample = (started.elapsed(), rss_kib(pid));
+
+    let stage3_will_run = client
+        .log_line_within(&["resolving classpath via"], STAGE3_ANNOUNCE_GRACE)
+        .is_some();
+    let stage3 = stage3_will_run
+        .then(|| {
+            client.log_line_within(
+                &["full classpath indexed", "classpath resolution failed"],
+                INDEX_CEILING.saturating_sub(started.elapsed()),
+            )
+        })
+        .flatten();
+
+    // Stage 3's own timing when it settled, stage 2's otherwise — never the
+    // moment the grace period or the ceiling happened to expire.
+    match stage3 {
+        Some(line) => {
+            report.library_index_wall = Some(started.elapsed());
+            report.rss_after_libraries = rss_kib(pid);
+            report.library_stage = Some(line);
+        }
+        None => {
+            if let Some(line) = stage2 {
+                report.library_index_wall = Some(stage2_sample.0);
+                report.rss_after_libraries = stage2_sample.1;
+                report.library_stage = Some(if stage3_will_run {
+                    format!("{line} (stage 3 never reported)")
+                } else {
+                    line
+                });
+            }
+        }
     }
 
     // The remaining metrics all run against the largest source file, the worst

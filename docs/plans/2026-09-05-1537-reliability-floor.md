@@ -202,3 +202,72 @@ Modify:
 
 - [ ] **Step 3: Commit**
   `git commit -m "Document the panic hook, test switch, and bench"`
+
+---
+
+## Completion summary
+
+**Status: complete.** `bb check`, `bb e2e`, `bb e2e-real`, `bb e2e-pulse`,
+`bb e2e-calva` and `bb e2e-nvim` all pass; `bb bench` runs and its first
+numbers are recorded in [docs/MEMORY.md](../MEMORY.md).
+
+### What was implemented
+
+- **Panic guard** (`src/panic_guard.rs`). A tower `Service` wrapper catches a
+  panicking handler's unwind and answers that one request with a JSON-RPC
+  internal error; `install_panic_hook` records payload and location in
+  `server.log`, background-task panics included. The red test first confirmed
+  the old behavior: the process died and the pipe closed.
+- **Malformed-input pass.** Six e2e tests — unbalanced buffer, 4 MB single
+  line, non-UTF-8 source file, empty `deps.edn`, unparseable `deps.edn`,
+  out-of-range `didChange`. All six passed against the server as it stood, so
+  no server fix was needed; they pin behavior that already existed.
+- **Bench** (`tests/test_bench.rs`, `bb bench`). The e2e client moved to
+  `tests/common/mod.rs` and is shared with a new ignored bench that drives the
+  release binary against metabase under production settings.
+- **One fix from the numbers.** The two diagnostics tiers ran in sequence —
+  native lints ~360 ms, then clj-kondo ~840 ms, on every keystroke. They are
+  independent, so they now run concurrently with the CPU-bound native pass on
+  a blocking thread: didChange → diagnostics fell ~1570 ms → ~1200 ms, didOpen
+  → first diagnostics ~1330 ms → ~950 ms.
+- **Two findings too large for the budget** became Milestone 1 roadmap items
+  with their measurements: no cached parse tree (three parses per lint pass,
+  one per position request — most of the ~75 ms definition latency), and
+  clj-kondo's own ~840 ms on a 452 KiB buffer.
+
+### Issues encountered
+
+- Three rounds of codex review each found a real defect, all in code this plan
+  added. They are listed as deviation notes under their tasks; the substantive
+  one is that tower-lsp clears its pending-request map only when a handler
+  *returns*, which the plan's design did not anticipate.
+- The bench's own first version measured the wrong thing: it accepted the
+  stage-2 `library indexing complete` line, which on a warm checkout arrives
+  seconds before stage 3 has re-resolved and re-indexed. The "35 s cold library
+  index" in the first run was an artifact of that; the honest figures are 7.9 s
+  cold and 3.0 s warm.
+
+### Deviations
+
+- `tower-service = "0.3"` is a second new dependency alongside `futures`:
+  tower-lsp does not re-export the `Service` trait `PanicGuard` implements.
+- The plan's `LspClient::start_production` needed two more helpers to be
+  useful: `initialize_no_wait` (so the bench times the stages itself) and a
+  multi-needle `log_line_within`.
+- The bench waits for a *settled stage 3* rather than "library indexing
+  complete or full classpath indexed", and detects up front whether stage 3
+  will run at all (it announces itself), so a workspace with stage 3 disabled
+  reports its real stage-2 timing instead of the 120 s ceiling.
+- `docs/ROADMAP.md` had unrelated edits on disk when this work started (a new
+  working rule and a Backlog section). They were left uncommitted; only the
+  Reliability-floor tick and the two new Milestone 1 items were committed.
+
+### What the plan could have specified better
+
+The plan treated "wrap the service in `catch_unwind`" as the whole of panic
+safety, and it is not: tower-lsp's pending-request map is cleaned up by the
+handler future returning, which a panic prevents. A plan that pins a library's
+internals — "`Server::serve` drives `service.call` futures through
+`buffer_unordered`" — should carry the same level of detail about the state
+that library keeps *per request*, because that is what a wrapper silently
+bypasses. Three review rounds went into rediscovering it.
