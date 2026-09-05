@@ -67,10 +67,10 @@ Nothing below ships as "done" without these.
       runs its end-to-end suite on `CLJ_PULSE_E2E_BIN`; reuse that where it
       fits. Then add the gate to AGENTS.md's verification list.
       Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — done
-- [ ] **Docs accuracy sweep on every release**. README feature list,
+- [x] **Docs accuracy sweep on every release**. README feature list,
       AGENTS.md invariants, and this file agree with `ServerCapabilities`
       (`src/server.rs`). Add a checklist step to `docs/RELEASE.md`.
-      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — in progress
+      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — done
 
 ## Milestone 1 — correctness of shipped features
 

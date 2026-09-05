@@ -12,8 +12,18 @@ truth**. The release CI refuses to publish if the tag and `Cargo.toml` disagree.
 ## Cutting a release
 
 1. **Bump `version` in `Cargo.toml`** (let `Cargo.lock` update) and commit it.
-2. **Verify** locally: `bb check` (fmt + clippy `-D warnings` + tests).
-3. **Tag and push:**
+2. **Sweep the docs.** Docs drift is the most common release-day defect here —
+   a feature lands, the prose keeps describing the world before it. Check that:
+
+   - the README feature list and Linting section match `ServerCapabilities` in
+     `src/server.rs` and the native lint codes in `src/diagnostics.rs`;
+   - the AGENTS.md invariants still describe what the code does;
+   - ROADMAP "Where we stand" and its ticked items match what ships;
+   - the editor setup snippets still work.
+
+   Commit any corrections before tagging.
+3. **Verify** locally: `bb check` (fmt + clippy `-D warnings` + tests).
+4. **Tag and push:**
 
    ```sh
    bb tag
