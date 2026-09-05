@@ -14,7 +14,12 @@ path = "src/main.rs"
 [dependencies]
 # LSP
 tower-lsp = "0.20"
+# The `Service` trait tower-lsp's `Server::serve` takes — what `PanicGuard`
+# implements. `tower-service` is the trait crate `tower` itself re-exports.
+tower-service = "0.3"
 tokio = { version = "1", features = ["full"] }
+# `FutureExt::catch_unwind`, for containing a panicking request handler.
+futures = "0.3"
 
 # Parsing — tree-sitter-clojure 0.1 requires tree-sitter ^0.25, NOT 0.26+
 tree-sitter = "0.25"

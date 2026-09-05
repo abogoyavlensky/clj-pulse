@@ -11,6 +11,7 @@ pub mod kondo;
 pub mod leiningen;
 pub mod lgx;
 pub mod libraries;
+pub mod panic_guard;
 pub mod projects;
 pub mod settings;
 pub mod uri;

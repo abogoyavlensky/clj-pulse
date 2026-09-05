@@ -1341,6 +1341,16 @@ impl Backend {
         Self::read_jar_uri(&params.uri)
     }
 
+    /// Test-only `clojurePulse/__testPanic`: panics on purpose, so the e2e
+    /// suite can prove a panicking handler no longer takes the server down.
+    /// Registered only when `CLJ_PULSE_TEST_PANIC` is set (see `main.rs`).
+    pub async fn test_panic(
+        &self,
+        _params: Option<serde_json::Value>,
+    ) -> tower_lsp::jsonrpc::Result<serde_json::Value> {
+        panic!("clj-pulse test panic: deliberate panic from clojurePulse/__testPanic");
+    }
+
     /// clj-pulse custom `clojurePulse/ignoredForms`: the whole-form ranges of
     /// `#_` discard forms and `(comment …)` blocks in the live buffer, for the
     /// editor to dim. An unparseable or unopened URI yields an empty list. Never

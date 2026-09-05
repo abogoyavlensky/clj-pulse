@@ -93,25 +93,30 @@ Modify:
 - Modify: `src/main.rs`, `src/server.rs`, `src/lib.rs`, `Cargo.toml`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Register the panic-on-demand method**
+- [x] **Step 1: Register the panic-on-demand method**
   In `main.rs`, when `CLJ_PULSE_TEST_PANIC` is non-empty, register `clojurePulse/__testPanic` whose handler in `server.rs` panics with a recognizable message. No guard yet.
 
-- [ ] **Step 2: Write the failing e2e test**
+- [x] **Step 2: Write the failing e2e test**
   `test_e2e_server_survives_handler_panic`: start with `LspClient::start_with_env(root, &[("CLJ_PULSE_TEST_PANIC", …)])` (the helper takes paths; add a sibling that takes string values, or pass a dummy path value since only non-emptiness matters), `initialize`, send `clojurePulse/__testPanic` via `request_expect_error`, then `hover` on `core/add` in `utils.clj` and assert a real hover.
 
-- [ ] **Step 3: Run it to verify it fails**
+- [x] **Step 3: Run it to verify it fails**
   Run: `cargo test --test test_e2e survives_handler_panic`
   Expected: FAIL with the harness reporting a closed pipe or a missing response: the process died on the panic.
 
-- [ ] **Step 4: Implement the guard**
+- [x] **Step 4: Implement the guard**
   `panic_guard.rs` per the design; `install_panic_hook()` called first thing in `main` after logging is initialized; `futures` dependency. Keep `PanicGuard` generic over `S: Service<Request, Response = Option<Response>, Error = ExitedError>`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `bb check && cargo test --test test_e2e survives_handler_panic`
   Expected: PASS; `server.log` in the temp project contains a `panicked` line with the location.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Survive handler panics with a catch_unwind service guard"`
+
+> Deviation: `tower-service = "0.3"` is a second new dependency alongside
+> `futures`. tower-lsp does not re-export the `tower` `Service` trait that
+> `PanicGuard` must implement, and `tower-service` is the trait crate `tower`
+> itself re-exports — already in `Cargo.lock` transitively.
 
 ### Task 2: Malformed input tests
 

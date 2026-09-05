@@ -49,6 +49,17 @@ impl LspClient {
         Self::spawn(project_root, envs, true, Kondo::Off)
     }
 
+    /// [`start_with_env`] for variables whose value is a plain string rather
+    /// than a path (`CLJ_PULSE_TEST_PANIC`).
+    fn start_with_str_env(project_root: &Path, envs: &[(&str, &str)]) -> Self {
+        let owned: Vec<(&str, std::path::PathBuf)> = envs
+            .iter()
+            .map(|(k, v)| (*k, std::path::PathBuf::from(v)))
+            .collect();
+        let borrowed: Vec<(&str, &Path)> = owned.iter().map(|(k, v)| (*k, v.as_path())).collect();
+        Self::spawn(project_root, &borrowed, true, Kondo::Off)
+    }
+
     /// Like [`start`] but with the clj-kondo bridge live, answered by the
     /// committed fake binary rather than whatever the host happens to have
     /// installed — so these tests assert on fixed findings and never wait on
@@ -6071,5 +6082,60 @@ fn test_e2e_prepare_rename_on_alias_half_reports_the_name() {
     assert_eq!(
         range["end"],
         json!({ "line": line, "character": name_ch + "greet".len() as u32 })
+    );
+}
+
+/// A handler that panics must fail that one request, not take the process
+/// down: the next request still gets a real answer.
+#[test]
+fn test_e2e_server_survives_handler_panic() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_str_env(&root, &[("CLJ_PULSE_TEST_PANIC", "1")]);
+    client.initialize(&root);
+
+    let error = client.request_expect_error("clojurePulse/__testPanic", json!({}));
+    assert!(
+        error["code"].as_i64().is_some(),
+        "panicking request returned no JSON-RPC error code: {}",
+        error
+    );
+
+    // The process must still be serving: a normal request answers as usual.
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+    let hover = client.hover(&utils, line, ch);
+    assert!(
+        !hover.is_null(),
+        "hover returned null after a handler panic"
+    );
+    let value = hover["contents"]["value"].as_str().unwrap();
+    assert!(
+        value.contains("Adds two numbers."),
+        "hover lost its answer after a handler panic: {}",
+        value
+    );
+
+    // The panic hook records payload and location in server.log, so the same
+    // line exists for panics in background tasks, which never reach a handler.
+    let log = root.join(".clj-pulse/server.log");
+    let deadline = Instant::now() + TIMEOUT;
+    let logged = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("panicked at src/server.rs") {
+            break text;
+        }
+        if Instant::now() >= deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        logged.contains("panicked at src/server.rs")
+            && logged.contains("deliberate panic from clojurePulse/__testPanic"),
+        "server.log has no panic line with a location: {}",
+        logged
     );
 }
