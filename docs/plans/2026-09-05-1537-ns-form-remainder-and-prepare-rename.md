@@ -227,25 +227,28 @@ Modify:
 - Modify: `src/handlers/references.rs`, `src/server.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e tests**
+- [x] **Step 1: Write the failing e2e tests**
   Add a `prepare_rename(path, line, character)` helper to `LspClient` sending `textDocument/prepareRename`. Tests: a local in `locals.clj` returns a range equal to the token; a project global returns the token range; a library symbol, a keyword, and a `:keys` binding return errors whose messages match the existing rename rejections; `initialize` advertises `renameProvider.prepareProvider == true`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e prepare_rename`
   Expected: FAIL (method not found).
 
-- [ ] **Step 3: Refactor `rename` around `rename_target`**
+- [x] **Step 3: Refactor `rename` around `rename_target`**
   Introduce `RenameTarget` and `rename_target` as in the design; `rename` keeps its behavior (all existing rename e2e tests stay green) and only reorders the new-name validation to after target resolution if needed. Keep the capture check in `rename`; it needs `new_name`.
 
-- [ ] **Step 4: Implement `prepare_rename`**
+- [x] **Step 4: Implement `prepare_rename`**
   Handler returns `PrepareRenameResponse::Range`; `server.rs` wires `prepare_rename` with `invalid_params` error mapping like `rename`, and the capability becomes `RenameOptions { prepare_provider: Some(true), .. }`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `bb check && bb e2e && bb e2e-nvim`
   Expected: PASS; the nvim run proves capability negotiation still works with the changed `renameProvider` shape.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Add textDocument/prepareRename"`
+
+> Deviation: the `:keys` rejection message lost its `new_name` interpolation ("rewrite it as {new-name :amount} first") because the check now lives in `rename_target`, which never sees a new name. That is what makes `rename` and `prepareRename` reject with byte-identical messages, which the e2e test now asserts for all three rejection paths.
+> Deviation: the library-symbol rejection could not be exercised from `simple_project` — `clojure.core/str` is not indexed there, so both entry points say "nothing to rename here". The test asserts message *agreement* between `rename` and `prepareRename` instead of a fixed string, which is the property that matters.
 
 ### Task 7: Docs and roadmap
 

@@ -566,6 +566,27 @@ impl LspClient {
         )
     }
 
+    fn prepare_rename(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/prepareRename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    fn prepare_rename_error(&mut self, path: &Path, line: u32, character: u32) -> String {
+        let error = self.request_expect_error(
+            "textDocument/prepareRename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        );
+        error["message"].as_str().unwrap().to_string()
+    }
+
     fn rename(&mut self, path: &Path, line: u32, character: u32, new_name: &str) -> Value {
         self.request(
             "textDocument/rename",
@@ -5913,4 +5934,113 @@ fn test_e2e_definition_through_prefix_list_alias() {
     let result = client.goto_definition(&file, line, ch + 4);
     let uri = result["uri"].as_str().expect("expected Location");
     assert!(uri.ends_with("/src/helpers.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_prepare_rename_advertises_capability() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let result = client.initialize(&root);
+    assert_eq!(
+        result["capabilities"]["renameProvider"]["prepareProvider"],
+        json!(true),
+        "capabilities: {}",
+        result["capabilities"]["renameProvider"]
+    );
+}
+
+#[test]
+fn test_e2e_prepare_rename_returns_token_range() {
+    // A local and a project global both report exactly the token the rename
+    // would rewrite, so the editor's rename box starts on the right text.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+    let text = std::fs::read_to_string(&locals).unwrap();
+    let (line, ch) = start_of(&text, "base");
+    let range = client.prepare_rename(&locals, line, ch + 1);
+    assert_eq!(range["start"], json!({ "line": line, "character": ch }));
+    assert_eq!(
+        range["end"],
+        json!({ "line": line, "character": ch + "base".len() as u32 })
+    );
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+    let core_text = std::fs::read_to_string(&core).unwrap();
+    let (dline, dch) = start_of(&core_text, "add");
+    let range = client.prepare_rename(&core, dline, dch + 1);
+    assert_eq!(range["start"], json!({ "line": dline, "character": dch }));
+    assert_eq!(
+        range["end"],
+        json!({ "line": dline, "character": dch + "add".len() as u32 })
+    );
+}
+
+#[test]
+fn test_e2e_prepare_rename_rejects_what_rename_rejects() {
+    // Every rejection `rename` makes, `prepareRename` makes with the same
+    // message — the editor refuses in place instead of opening a box that
+    // fails on submit.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let probe = root.join("src/destructured.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.destructured)\n(defn f [{:keys [amount]}] amount)\n",
+    )
+    .unwrap();
+
+    let utils = root.join("src/utils.clj");
+    let file = root.join("src/ns_options.clj");
+    for path in [&utils, &file, &probe] {
+        client.did_open(path);
+    }
+
+    let (str_line, str_ch) = position_of(&utils, "(str \"Hello");
+    let (kw_line, kw_ch) = start_of(&std::fs::read_to_string(&file).unwrap(), "::cfg/port");
+    let (bind_line, bind_ch) = start_of(&std::fs::read_to_string(&probe).unwrap(), "amount]");
+
+    let cases = [
+        (&utils, str_line, str_ch + 1, "rename"),
+        (&file, kw_line, kw_ch + 3, "keyword"),
+        (&probe, bind_line, bind_ch + 2, ":keys"),
+    ];
+    for (path, line, ch, needle) in cases {
+        let prepared = client.prepare_rename_error(path, line, ch);
+        assert!(
+            prepared.contains(needle),
+            "expected {:?} in the rejection at {}:{}, got: {}",
+            needle,
+            line,
+            ch,
+            prepared
+        );
+        let renamed = client.request_expect_error(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": ch },
+                "newName": "renamed"
+            }),
+        );
+        assert_eq!(
+            renamed["message"].as_str().unwrap(),
+            prepared,
+            "prepareRename and rename must reject alike at {}:{}",
+            line,
+            ch
+        );
+    }
 }

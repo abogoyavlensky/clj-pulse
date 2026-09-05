@@ -1989,7 +1989,10 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
-                rename_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
                     first_trigger_character: "\n".to_string(),
@@ -2537,6 +2540,20 @@ impl LanguageServer for Backend {
             tracing::error!("signature help error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        handlers::references::prepare_rename(
+            &self.index,
+            &self.documents,
+            &params.text_document.uri,
+            params.position,
+        )
+        .map(Some)
+        .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {

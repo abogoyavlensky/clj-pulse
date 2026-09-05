@@ -5,7 +5,7 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::{extractor, DefKind, Index, Occurrence, SymbolSource};
+use crate::index::{extractor, DefKind, Index, Occurrence, Symbol, SymbolSource};
 
 pub fn references(
     index: &Index,
@@ -139,24 +139,32 @@ fn reject_local_capture(
     Ok(())
 }
 
-pub fn rename(
+/// What a rename at a position would target, once every rejection that does not
+/// depend on the new name has been made.
+pub enum RenameTarget {
+    /// A local binding: its declaration and usages, all in the same document.
+    Local {
+        word: String,
+        refs: extractor::LocalRefs,
+    },
+    /// A project-wide var, record, keyword-free symbol — renamed by fqn.
+    Global { fqn: String, sym: Symbol },
+}
+
+/// Everything [`rename`] checks before building edits, minus the checks that
+/// need the new name. [`prepare_rename`] runs exactly this, so the editor's
+/// rename box appears only where a rename would actually succeed.
+pub fn rename_target(
     index: &Index,
     documents: &DocumentStore,
-    params: RenameParams,
-) -> Result<Option<WorkspaceEdit>> {
-    let uri = params.text_document_position.text_document.uri;
-    let pos = params.text_document_position.position;
-    let new_name = params.new_name;
-
-    if !is_valid_symbol_name(&new_name) {
-        anyhow::bail!("cannot rename: '{}' is not a valid symbol name", new_name);
-    }
-
+    uri: &Url,
+    pos: Position,
+) -> Result<RenameTarget> {
     // Rename may only be initiated from an editable project file. Library
     // buffers (jar: entries, dir-dep file:s) are read-only — and since the
     // resolver is fqn-only, a rename started there could otherwise edit a
     // project symbol that shadows the library one.
-    let origin = crate::uri::to_index_path(&uri)
+    let origin = crate::uri::to_index_path(uri)
         .ok_or_else(|| anyhow::anyhow!("cannot rename from this document"))?;
     if !index.is_project_path(&origin) {
         anyhow::bail!("cannot rename from a library file");
@@ -165,34 +173,19 @@ pub fn rename(
     // Locals (let/fn/defn params, destructuring, …) are resolved structurally
     // and never reach the fqn path, so renaming a param that shadows a global
     // edits only the local's own binding and usages, all in this document.
-    if let Some((word, refs)) = local_refs_at(documents, &uri, pos) {
-        if let Some(text) = documents.text(&uri) {
-            reject_local_capture(&text, &refs, &word, &new_name)?;
-        }
+    if let Some((word, refs)) = local_refs_at(documents, uri, pos) {
         if refs.destructured_key {
             anyhow::bail!(
                 "cannot rename a :keys/:strs/:syms destructured binding '{}': \
-                 rewrite it as {{{} :{}}} first",
+                 rewrite it as {{new-name :{}}} first",
                 word,
-                new_name,
                 word
             );
         }
-        let mut edits = vec![TextEdit {
-            range: refs.declaration,
-            new_text: new_name.clone(),
-        }];
-        edits.extend(refs.usages.into_iter().map(|range| TextEdit {
-            range,
-            new_text: new_name.clone(),
-        }));
-        return Ok(Some(WorkspaceEdit {
-            changes: Some(HashMap::from([(uri, edits)])),
-            ..Default::default()
-        }));
+        return Ok(RenameTarget::Local { word, refs });
     }
 
-    let fqn = resolve_fqn_at(index, documents, &uri, pos)
+    let fqn = resolve_fqn_at(index, documents, uri, pos)
         .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?;
     // Keyword fqns are colon-prefixed. Keyword occurrences span the whole
     // token, so renaming through this path would rewrite the entire keyword;
@@ -206,6 +199,83 @@ pub fn rename(
     if sym.source != SymbolSource::Project {
         anyhow::bail!("cannot rename library or built-in symbol {}", fqn);
     }
+    Ok(RenameTarget::Global { fqn, sym })
+}
+
+/// The range of the token under the cursor, for `textDocument/prepareRename` —
+/// the very range a rename would rewrite, so the editor pre-selects exactly
+/// what changes. Rejections carry the same messages as [`rename`].
+pub fn prepare_rename(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+) -> Result<PrepareRenameResponse> {
+    let range = match rename_target(index, documents, uri, pos)? {
+        RenameTarget::Local { refs, .. } => std::iter::once(refs.declaration)
+            .chain(refs.usages.iter().copied())
+            .find(|r| range_contains(r, pos))
+            .unwrap_or(refs.declaration),
+        RenameTarget::Global { fqn, sym } => {
+            occurrence_range_at(index, documents, uri, pos, &fqn).unwrap_or(sym.name_range)
+        }
+    };
+    Ok(PrepareRenameResponse::Range(range))
+}
+
+/// The `name_range` of the definition or occurrence of `fqn` under `pos` in
+/// this document — the exact span a rename edit would replace.
+fn occurrence_range_at(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+    fqn: &str,
+) -> Option<Range> {
+    let path = crate::uri::to_index_path(uri)?;
+    let text = documents.text(uri)?;
+    let (_, syms, occs) =
+        extractor::extract_full_with(&text, &path, &index.extract_config()).ok()?;
+    syms.iter()
+        .filter(|s| s.fqn == fqn)
+        .map(|s| s.name_range)
+        .chain(occs.iter().filter(|o| o.fqn == fqn).map(|o| o.name_range))
+        .find(|r| range_contains(r, pos))
+}
+
+pub fn rename(
+    index: &Index,
+    documents: &DocumentStore,
+    params: RenameParams,
+) -> Result<Option<WorkspaceEdit>> {
+    let uri = params.text_document_position.text_document.uri;
+    let pos = params.text_document_position.position;
+    let new_name = params.new_name;
+
+    if !is_valid_symbol_name(&new_name) {
+        anyhow::bail!("cannot rename: '{}' is not a valid symbol name", new_name);
+    }
+
+    let (fqn, sym) = match rename_target(index, documents, &uri, pos)? {
+        RenameTarget::Local { word, refs } => {
+            if let Some(text) = documents.text(&uri) {
+                reject_local_capture(&text, &refs, &word, &new_name)?;
+            }
+            let mut edits = vec![TextEdit {
+                range: refs.declaration,
+                new_text: new_name.clone(),
+            }];
+            edits.extend(refs.usages.into_iter().map(|range| TextEdit {
+                range,
+                new_text: new_name.clone(),
+            }));
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(HashMap::from([(uri, edits)])),
+                ..Default::default()
+            }));
+        }
+        RenameTarget::Global { fqn, sym } => (fqn, sym),
+    };
 
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
 
