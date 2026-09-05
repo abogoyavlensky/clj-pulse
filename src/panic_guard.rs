@@ -12,10 +12,11 @@
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use futures::FutureExt;
-use tower_lsp::jsonrpc::{Error, Request, Response};
+use tower_lsp::jsonrpc::{Error, Id, Request, Response};
 use tower_lsp::ExitedError;
 use tower_service::Service;
 
@@ -49,11 +50,17 @@ pub fn install_panic_hook() {
 /// process.
 pub struct PanicGuard<S> {
     inner: S,
+    /// Ids whose handler panicked and whose entry in tower-lsp's pending-request
+    /// map therefore leaked (see [`PanicGuard::call`]).
+    leaked: Arc<Mutex<Vec<Id>>>,
 }
 
 impl<S> PanicGuard<S> {
     pub fn new(inner: S) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            leaked: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 }
 
@@ -73,10 +80,32 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
+        // tower-lsp tracks every request carrying an id in a pending map and
+        // only removes the entry once the handler future *returns*. A panicking
+        // one never does, so the entry — and its abort handle — would leak, and
+        // a later request reusing that id would be answered `invalid request`
+        // forever after. `$/cancelRequest` is the public way to drop the entry,
+        // so each panicked id is cleared on the way into the next request.
+        let leaked: Vec<Id> = std::mem::take(&mut *self.leaked.lock().unwrap());
+        let cleanups: Vec<S::Future> = leaked
+            .into_iter()
+            .map(|id| {
+                self.inner.call(
+                    Request::build("$/cancelRequest")
+                        .params(serde_json::json!({ "id": id }))
+                        .finish(),
+                )
+            })
+            .collect();
+
         let id = req.id().cloned();
         let method = req.method().to_string();
         let future = self.inner.call(req);
+        let leaked = self.leaked.clone();
         Box::pin(async move {
+            for cleanup in cleanups {
+                let _ = cleanup.await;
+            }
             match AssertUnwindSafe(future).catch_unwind().await {
                 Ok(response) => response,
                 Err(_) => {
@@ -85,7 +114,11 @@ where
                         "handler for `{}` panicked; failing that request only",
                         method
                     );
-                    // A notification has no id, so there is nothing to answer.
+                    // A notification has no id, so nothing was ever entered in
+                    // the pending map and there is nothing to answer.
+                    if let Some(id) = id.clone() {
+                        leaked.lock().unwrap().push(id);
+                    }
                     Ok(id.map(|id| Response::from_error(id, Error::internal_error())))
                 }
             }

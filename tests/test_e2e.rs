@@ -203,6 +203,27 @@ impl LspClient {
             .clone()
     }
 
+    /// Sends a request under a caller-chosen id, so a test can reuse one.
+    /// Returns the raw JSON-RPC message.
+    fn request_with_id(&mut self, id: i64, method: &str, params: Value) -> Value {
+        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for response to {}", method));
+            let msg = self
+                .incoming
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("timed out waiting for response to {}", method));
+            if msg.get("method").is_none() && msg.get("id") == Some(&json!(id)) {
+                return msg;
+            }
+            self.stash(msg);
+        }
+    }
+
     fn request_full(&mut self, method: &str, params: Value) -> Value {
         self.next_id += 1;
         let id = self.next_id;
@@ -6137,5 +6158,55 @@ fn test_e2e_server_survives_handler_panic() {
             && logged.contains("deliberate panic from clojurePulse/__testPanic"),
         "server.log has no panic line with a location: {}",
         logged
+    );
+}
+
+/// A panicking handler leaves its id behind in tower-lsp's pending-request map,
+/// because the map is only cleared when the handler future returns. The guard
+/// clears it, so a client that reuses request ids keeps working.
+#[test]
+fn test_e2e_panicked_request_id_can_be_reused() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_str_env(&root, &[("CLJ_PULSE_TEST_PANIC", "1")]);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+
+    // Ids well past the harness counter, so nothing else claims them.
+    let panicked = client.request_with_id(9001, "clojurePulse/__testPanic", json!({}));
+    assert!(
+        panicked.get("error").is_some(),
+        "expected an error: {}",
+        panicked
+    );
+
+    // Something else in between, since the guard clears on the way into the
+    // next request — exactly what a real client's traffic looks like.
+    let _ = client.hover(&utils, line, ch);
+
+    let reused = client.request_with_id(
+        9001,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": format!("file://{}", utils.display()) },
+            "position": { "line": line, "character": ch }
+        }),
+    );
+    assert!(
+        reused.get("error").is_none(),
+        "reusing a panicked request id was rejected: {}",
+        reused
+    );
+    assert!(
+        reused["result"]["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Adds two numbers."),
+        "reused id returned no hover: {}",
+        reused
     );
 }
