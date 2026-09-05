@@ -86,26 +86,29 @@ where
         // a later request reusing that id would be answered `invalid request`
         // forever after. `$/cancelRequest` is the public way to drop the entry,
         // so each panicked id is cleared on the way into the next request.
+        //
+        // The clearing has to finish *before* `inner.call(req)` below, because
+        // that is where the pending map is consulted — a client reusing the id
+        // on its very next request would otherwise still be rejected. The
+        // `$/cancelRequest` handler only removes a map entry, so it resolves on
+        // the first poll; anything that somehow does not is queued again.
         let leaked: Vec<Id> = std::mem::take(&mut *self.leaked.lock().unwrap());
-        let cleanups: Vec<S::Future> = leaked
-            .into_iter()
-            .map(|id| {
-                self.inner.call(
-                    Request::build("$/cancelRequest")
-                        .params(serde_json::json!({ "id": id }))
-                        .finish(),
-                )
-            })
-            .collect();
+        for id in leaked {
+            let cancel = self.inner.call(
+                Request::build("$/cancelRequest")
+                    .params(serde_json::json!({ "id": id.clone() }))
+                    .finish(),
+            );
+            if cancel.now_or_never().is_none() {
+                self.leaked.lock().unwrap().push(id);
+            }
+        }
 
         let id = req.id().cloned();
         let method = req.method().to_string();
         let future = self.inner.call(req);
         let leaked = self.leaked.clone();
         Box::pin(async move {
-            for cleanup in cleanups {
-                let _ = cleanup.await;
-            }
             match AssertUnwindSafe(future).catch_unwind().await {
                 Ok(response) => response,
                 Err(_) => {
