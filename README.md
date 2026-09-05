@@ -356,6 +356,7 @@ bb e2e        # real binary over stdio, framed JSON-RPC like an editor
 bb e2e-real   # same, against a real Maven classpath (needs the clojure CLI)
 bb e2e-nvim   # through headless Neovim's built-in LSP client
 bb e2e-calva  # real VS Code + Calva under Xvfb
+bb e2e-pulse  # real VS Code + the Clojure Pulse extension under Xvfb
 ```
 
 > [!NOTE]

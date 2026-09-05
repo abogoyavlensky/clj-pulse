@@ -23,9 +23,19 @@ and update README and this file in the same change.
   (`calva.clojureLspPath` → our binary) under Xvfb (`scripts/calva-e2e/`).
   Covers project + jar: navigation through Calva's own definition pipeline and
   jar content provider. First run downloads VS Code + Calva (~150MB).
+- `bb e2e-pulse` — the first-priority editor, headless: real VS Code + the real
+  Clojure Pulse extension (`clojurePulse.server.path` → our binary) under Xvfb
+  (`scripts/pulse-e2e/`). Packages `../clojure-pulse-vscode` when that checkout
+  is present, else installs the latest release. Covers project definition,
+  `jar:` content through the extension's own `clojure/dependencyContents`
+  provider, hover, completion, and diagnostics.
 
-Server behavior changes are not done until `bb e2e` passes; client-visible
-protocol changes should also pass `bb e2e-nvim`.
+| Gate | Run when |
+|---|---|
+| `bb e2e` | every server behavior change |
+| `bb e2e-pulse` | any client-visible change |
+| `bb e2e-calva` | definition, `jar:`, or location-shape changes |
+| `bb e2e-nvim` | new capabilities or protocol changes |
 
 ## Testing notes
 
@@ -118,7 +128,7 @@ extension (`../clojure-pulse-vscode`, `clojurePulse.server.path` →
 `target/debug/clj-pulse`) and via Calva (`calva.clojureLspPath`). Editor
 priority: Clojure Pulse, Calva, Neovim; Zed and ClojureScript are best effort.
 Clojure Pulse registers its own `jar:` `TextDocumentContentProvider` that calls
-the server's `workspace/textDocumentContent`; Calva reads JARs itself and never
+the server's `clojure/dependencyContents`; Calva reads JARs itself and never
 calls it, so both paths must keep working.
 
 See [docs/DEV_SETUP.md](docs/DEV_SETUP.md) for the full development &
