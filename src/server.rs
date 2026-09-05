@@ -1195,35 +1195,32 @@ async fn lint_and_publish_doc(
         let Some(bin) = bin else {
             // Not an error the user should see — just "clj-kondo has no say in
             // this pass", which `merge` reads as "keep the native set".
-            return Some(Err("clj-kondo not in use".to_string()));
+            return Err("clj-kondo not in use".to_string());
         };
         let _permit = KONDO_LIMIT.acquire().await;
         let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
-        // Queueing behind the semaphore and then the subprocess can easily
-        // outlast the edit that started this pass — or the settings change
-        // that retired this engine. Either way the result is stale, and
-        // the re-lint that follows an engine change will publish the
-        // current one; the document version alone would not catch that,
-        // since a settings-triggered re-lint reuses the same version.
-        if documents.current_version(&uri) != Some(version)
-            || *kondo_state.lock().unwrap() != engine
-        {
-            return None;
-        }
         if let Err(e) = &result {
             // Debug, not warn: a missing or wedged clj-kondo would
             // otherwise log once per keystroke.
             tracing::debug!("clj-kondo lint of {} failed: {}", path.display(), e);
         }
-        Some(result)
+        result
     };
 
     let (native, kondo) = tokio::join!(native_pass, kondo_pass);
-    // `None` is the staleness bail-out above: this pass has been superseded, so
-    // it must not publish over the one that supersedes it.
-    let Some(kondo) = kondo else {
+
+    // Either tier can outlast the edit that started this pass — the semaphore
+    // and the subprocess in one, the blocking-thread queue in the other — or
+    // outlast the settings change that retired this engine. Either way the
+    // result is stale, and the re-lint that follows an engine change will
+    // publish the current one; the document version alone would not catch
+    // that, since a settings-triggered re-lint reuses the same version. The
+    // check belongs *after* the join: whichever tier finishes last is what
+    // decides how old this pass is.
+    if documents.current_version(&uri) != Some(version) || *kondo_state.lock().unwrap() != engine {
         return;
-    };
+    }
+
     let native = match native {
         Ok(native) => native,
         // The blocking task panicked; the guard in `panic_guard` never sees it,

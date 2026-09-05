@@ -19,16 +19,21 @@ release and after index or extractor changes, and compare.
   largest `.clj` in the repo, so the per-edit numbers are a worst case, not a
   typical file
 
-| Metric | Value |
-|---|---|
-| Time to project index | 2.8 s |
-| Time to library index (warm `.cpcache` and kondo cache) | 3.0 s |
-| Time to library index (cold, incl. `clojure -Spath` + kondo cache warm) | 35 s |
-| RSS after project index | 279 MiB |
-| RSS after library index | 283 MiB |
-| didOpen → first diagnostics | 973 ms |
-| didChange → diagnostics (median of 20) | 1200 ms |
-| Definition (median of 20) | 75 ms |
+| Metric | Cold caches | Warm `.cpcache` + kondo cache |
+|---|---|---|
+| Time to project index | 3.0 s | 2.8 s |
+| Time to library index (through stage 3, 491 classpath entries) | 7.9 s | 3.0 s |
+| RSS after project index | 304 MiB | 289 MiB |
+| RSS after library index | 349 MiB | 299 MiB |
+| didOpen → first diagnostics | 976 ms | 946 ms |
+| didChange → diagnostics (median of 20) | 1243 ms | 1202 ms |
+| Definition (median of 20) | 78 ms | 71 ms |
+
+The bench waits for `full classpath indexed` (or an explicit stage-3 failure)
+before it samples, never for the stage-2 `library indexing complete` line: on a
+warm checkout stage 2 finishes seconds before stage 3 has re-resolved and
+re-indexed, and sampling there would fold a background reindex into every
+latency below.
 
 ### What the numbers cost, and what is left
 
@@ -36,7 +41,7 @@ A diagnostics pass used to run its two tiers in sequence — the native lints
 (~360 ms on this file), then the clj-kondo subprocess (~840 ms). They are
 independent, so they now run concurrently, with the CPU-bound native pass on a
 blocking thread: didChange → diagnostics fell from ~1570 ms to ~1200 ms and
-didOpen → first diagnostics from ~1330 ms to ~973 ms.
+didOpen → first diagnostics from ~1330 ms to ~950 ms.
 
 Two costs remain, both above what a user would call comfortable, and both
 larger than a single fix:
@@ -44,7 +49,7 @@ larger than a single fix:
 - **No cached parse tree.** Every diagnostics pass parses the buffer three
   times (`extract_analysis_with` ~80 ms, `qualified_usages` ~65 ms,
   `unused_requires` ~140 ms on the 452 KiB file), and every position request
-  parses it once — which is most of the 75 ms definition latency. A parse
+  parses it once — which is most of the ~75 ms definition latency. A parse
   cached per document version, ideally updated incrementally from the
   `didChange` ranges tree-sitter already accepts, would cut the native pass to
   roughly one parse and take position requests to single-digit milliseconds.

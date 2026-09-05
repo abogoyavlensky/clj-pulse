@@ -56,18 +56,31 @@ fn bench_large_project() {
         ),
     }
 
-    // Stage 2/3: libraries. `full classpath indexed` is the stage-3 line; on a
-    // machine without a resolvable classpath only the stage-2 line arrives.
+    // Stage 2/3: libraries. Stage 2 reads whatever `.cpcache` is already on
+    // disk and logs `library indexing complete` — which on a warm checkout
+    // arrives long before stage 3 has run `clojure -Spath` and re-indexed. So
+    // wait for a line that means stage 3 is *settled*, and only fall back to
+    // the stage-2 line when stage 3 never reports. Sampling before that would
+    // mix a background reindex into every latency number below.
     let library_deadline = INDEX_CEILING.saturating_sub(started.elapsed());
-    if client
-        .log_line_within(
-            &["full classpath indexed", "library indexing complete"],
-            library_deadline,
-        )
-        .is_some()
-    {
+    let settled = client.log_line_within(
+        &[
+            "full classpath indexed",
+            "classpath resolution failed",
+            "no classpath found",
+        ],
+        library_deadline,
+    );
+    let reached = match settled {
+        Some(line) => Some(line),
+        // Already stashed when stage 3 is disabled or absent, so this returns
+        // at once rather than spending the rest of the budget.
+        None => client.log_line_within(&["library indexing complete"], Duration::from_secs(1)),
+    };
+    if let Some(line) = reached {
         report.library_index_wall = Some(started.elapsed());
         report.rss_after_libraries = rss_kib(pid);
+        report.library_stage = Some(line);
     }
 
     // The remaining metrics all run against the largest source file, the worst
@@ -127,6 +140,9 @@ struct Report {
     project_index_wall: Option<Duration>,
     project_index_reported: Option<String>,
     library_index_wall: Option<Duration>,
+    /// The log line that ended the library wait, so a warm run (stage 3
+    /// re-resolved) and a degraded one (stage 3 failed) are told apart.
+    library_stage: Option<String>,
     symbols: Option<u64>,
     namespaces: Option<u64>,
     rss_after_project: Option<u64>,
@@ -145,6 +161,7 @@ impl Report {
             project_index_wall: None,
             project_index_reported: None,
             library_index_wall: None,
+            library_stage: None,
             symbols: None,
             namespaces: None,
             rss_after_project: None,
@@ -199,6 +216,13 @@ impl Report {
             self.project_index_reported.as_deref().unwrap_or("n/a"),
         );
         row("time to library index", &ms(self.library_index_wall));
+        row(
+            "  ended by",
+            self.library_stage
+                .as_deref()
+                .map(|l| l.trim_start_matches("clj-pulse: "))
+                .unwrap_or("n/a"),
+        );
         row("symbols indexed", &count(self.symbols));
         row("namespaces indexed", &count(self.namespaces));
         row("RSS after project index", &mib(self.rss_after_project));
