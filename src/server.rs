@@ -1174,38 +1174,64 @@ async fn lint_and_publish_doc(
     let Ok(path) = uri.to_file_path() else {
         return;
     };
-    let native = crate::diagnostics::compute(&text, &path, &index.extract_config());
+    // The two tiers are independent, so they run at the same time rather than
+    // one after the other — on a large buffer each costs hundreds of
+    // milliseconds, and this is the path every keystroke takes. The native pass
+    // is CPU-bound, so it goes to a blocking thread instead of holding a tokio
+    // worker for the whole parse.
+    let native_pass = {
+        let text = text.clone();
+        let path = path.clone();
+        let cfg = index.extract_config();
+        tokio::task::spawn_blocking(move || crate::diagnostics::compute(&text, &path, &cfg))
+    };
 
     let engine = kondo_state.lock().unwrap().clone();
     let bin = engine
         .bin()
         .filter(|_| kondo::lints_file(&path))
         .map(str::to_string);
-    let kondo = match bin {
-        Some(bin) => {
-            let _permit = KONDO_LIMIT.acquire().await;
-            let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
-            // Queueing behind the semaphore and then the subprocess can easily
-            // outlast the edit that started this pass — or the settings change
-            // that retired this engine. Either way the result is stale, and
-            // the re-lint that follows an engine change will publish the
-            // current one; the document version alone would not catch that,
-            // since a settings-triggered re-lint reuses the same version.
-            if documents.current_version(&uri) != Some(version)
-                || *kondo_state.lock().unwrap() != engine
-            {
-                return;
-            }
-            if let Err(e) = &result {
-                // Debug, not warn: a missing or wedged clj-kondo would
-                // otherwise log once per keystroke.
-                tracing::debug!("clj-kondo lint of {} failed: {}", path.display(), e);
-            }
-            result
+    let kondo_pass = async {
+        let Some(bin) = bin else {
+            // Not an error the user should see — just "clj-kondo has no say in
+            // this pass", which `merge` reads as "keep the native set".
+            return Some(Err("clj-kondo not in use".to_string()));
+        };
+        let _permit = KONDO_LIMIT.acquire().await;
+        let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
+        // Queueing behind the semaphore and then the subprocess can easily
+        // outlast the edit that started this pass — or the settings change
+        // that retired this engine. Either way the result is stale, and
+        // the re-lint that follows an engine change will publish the
+        // current one; the document version alone would not catch that,
+        // since a settings-triggered re-lint reuses the same version.
+        if documents.current_version(&uri) != Some(version)
+            || *kondo_state.lock().unwrap() != engine
+        {
+            return None;
         }
-        // Not an error the user should see — just "clj-kondo has no say in this
-        // pass", which `merge` reads as "keep the native set".
-        None => Err("clj-kondo not in use".to_string()),
+        if let Err(e) = &result {
+            // Debug, not warn: a missing or wedged clj-kondo would
+            // otherwise log once per keystroke.
+            tracing::debug!("clj-kondo lint of {} failed: {}", path.display(), e);
+        }
+        Some(result)
+    };
+
+    let (native, kondo) = tokio::join!(native_pass, kondo_pass);
+    // `None` is the staleness bail-out above: this pass has been superseded, so
+    // it must not publish over the one that supersedes it.
+    let Some(kondo) = kondo else {
+        return;
+    };
+    let native = match native {
+        Ok(native) => native,
+        // The blocking task panicked; the guard in `panic_guard` never sees it,
+        // so log it and publish what clj-kondo found rather than nothing.
+        Err(e) => {
+            tracing::error!("native lint pass for {} panicked: {}", path.display(), e);
+            Vec::new()
+        }
     };
 
     client
