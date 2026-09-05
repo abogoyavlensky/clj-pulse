@@ -63,15 +63,15 @@ Nothing below ships as "done" without these.
       latest GitHub release), `clojurePulse.server.path` pointed at
       `target/debug/clj-pulse`. Checks: project definition, `jar:` navigation
       through the extension's own content provider (it calls
-      `workspace/textDocumentContent`, unlike Calva), diagnostics arrive,
-      `clojurePulse/ignoredForms` answers. The extension repo already skips or
+      `clojure/dependencyContents`, unlike Calva), hover, completion, and
+      diagnostics arrive. The extension repo already skips or
       runs its end-to-end suite on `CLJ_PULSE_E2E_BIN`; reuse that where it
       fits. Then add the gate to AGENTS.md's verification list.
-      Plan: —
+      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — in progress
 - [ ] **Docs accuracy sweep on every release** — S. README feature list,
       AGENTS.md invariants, and this file agree with `ServerCapabilities`
       (`src/server.rs`). Add a checklist step to `docs/RELEASE.md`.
-      Plan: —
+      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — in progress
 
 ## Milestone 1 — correctness of shipped features
 
