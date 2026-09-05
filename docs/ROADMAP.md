@@ -77,21 +77,21 @@ Nothing below ships as "done" without these.
 Small fixes that remove wrong answers. Each extractor change bumps
 `JarCacheEntry::format_version`.
 
-- [ ] **ns-form remainder**
-  - [ ] `:as-alias` — record as an alias; keyword resolution works; never
+- [x] **ns-form remainder**
+  - [x] `:as-alias` — record as an alias; keyword resolution works; never
         counts as an unused namespace.
-  - [ ] `:refer-clojure :exclude` / `:rename` — verify first whether a project
+  - [x] `:refer-clojure :exclude` / `:rename` — verify first whether a project
         var shadowing a core name resolves to the project or to core; then
         honor the clause.
-  - [ ] `:rename` in `:refer` clauses — map renamed names to the original vars.
-  - [ ] `declare` — index as a declaration so definition prefers the real def
+  - [x] `:rename` in `:refer` clauses — map renamed names to the original vars.
+  - [x] `declare` — index as a declaration so definition prefers the real def
         and references still resolve.
-  - [ ] Prefix-list requires `(clojure set string)` — legacy, lowest.
-  Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — in progress
-- [ ] **`prepareRename`**. Advertise `prepareProvider: true`; return the
+  - [x] Prefix-list requires `(clojure set string)` — legacy, lowest.
+  Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — done
+- [x] **`prepareRename`**. Advertise `prepareProvider: true`; return the
       token range for renameable symbols and a clean rejection (not a server
       error) for library, built-in, keyword, and `:keys`-destructured names.
-      Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — in progress
+      Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — done
 - [ ] **Reliability floor**
   - [ ] Panic hook that logs to `server.log`; verify how tower-lsp behaves
         when a handler panics and make a panicking request fail alone.

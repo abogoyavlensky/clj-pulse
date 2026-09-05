@@ -255,10 +255,51 @@ Modify:
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   README: the Rename bullet mentions the rename box validation (prepareRename); the "Clojure & project support" list notes `:as-alias`, `:refer-clojure`, `:rename`, prefix lists, and `declare`. AGENTS.md invariants: add a line on `as_aliases` (never in `requires`) and on declare de-duplication. ROADMAP: tick the two items and set their `Plan:` lines to `done`. Use /writing-clearly.
 
-- [ ] **Step 2: Final verification and commit**
+- [x] **Step 2: Final verification and commit**
   Run: `bb check && bb e2e`
   Expected: PASS.
   `git commit -m "Document ns-form options and prepareRename"`
+
+---
+
+## Completion summary
+
+**Status: complete.** All seven tasks are implemented, `bb check`, `bb e2e`
+(119 tests) and `bb e2e-nvim` pass.
+
+What shipped:
+
+- `:as-alias` binds an alias for keyword and qualified-name resolution without
+  ever entering `requires`, so the namespace is never treated as loaded and the
+  require is never reported unused.
+- `(:refer-clojure :exclude …)` and `(:refer-clojure :rename …)` are honored in
+  the occurrence walker, in core completion, and in `resolve_symbol`. A renamed
+  core name is unmapped under its original name, as Clojure does.
+- `:rename` inside a `:refer` libspec rebinds the referred name, keeping the
+  original fqn.
+- Legacy prefix lists expand in both `:require` and `:use`.
+- `declare` is indexed as `DefKind::Declare`, de-duplicated against a real
+  definition of the same fqn in the same file.
+- `textDocument/prepareRename` returns the token range a rename would rewrite —
+  including when the cursor sits on the alias half of `h/greet` — and shares
+  every rejection with `rename` through `references::rename_target`.
+- `CACHE_FORMAT_VERSION` 12 → 14 (once for the `NsMeta` fields, once for the new
+  `DefKind` variant).
+
+Codex review findings addressed: the `:refer-clojure :rename` unmapping, the
+`core_excludes` gate in `resolve_symbol`, the JAR cache bump for the shifted
+`DefKind` discriminant, and the alias-half prepareRename range. One advisory was
+declined: codex wanted `:as-alias` kept out of the general `aliases` map, which
+the plan explicitly decided against (clj-kondo accepts alias-qualified usage).
+
+Deviations are recorded inline under Tasks 3, 4, 5 and 6.
+
+**What the plan could have specified better:** Task 3 asserted that expanding
+prefix lists would make `prefix_list_require_does_not_suppress` stop flagging
+`set/union`. It does not — a prefix list binds only the joined name, so the
+diagnostic is correct and the test had to keep its assertion. A plan step that
+predicts a specific test flipping should state the semantics it relies on, so
+the discrepancy surfaces before the code is written.
