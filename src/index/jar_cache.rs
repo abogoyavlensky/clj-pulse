@@ -105,6 +105,7 @@ mod tests {
             imports: HashMap::new(),
             refer_all: vec![],
             as_aliases: vec![],
+            core_excludes: vec![],
         };
         let symbol = Symbol {
             name: "my-fn".to_string(),

@@ -97,27 +97,27 @@ Modify:
 - Modify: `src/index/mod.rs`, `src/index/jar_cache.rs`, `src/index/extractor.rs`, `src/handlers/code_action.rs`, `src/diagnostics.rs`
 - Test: `tests/test_extractor.rs`, `tests/fixtures/snippets/ns_options.clj`, `src/diagnostics.rs` tests
 
-- [ ] **Step 1: Write the failing extractor test**
+- [x] **Step 1: Write the failing extractor test**
   Create `tests/fixtures/snippets/ns_options.clj` with an ns form using `[my.app.config :as-alias cfg]` and a body that reads `::cfg/port`. Add `test_ns_as_alias_recorded`: `aliases["cfg"] == "my.app.config"`, `as_aliases` contains it, `requires` does not, and the occurrences contain the keyword fqn `:my.app.config/port`.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
   Run: `cargo test --test test_extractor test_ns_as_alias`
   Expected: FAIL (no `as_aliases` field, compile error).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add the field with `#[serde(default)]`, bump `CACHE_FORMAT_VERSION` to 13, parse `:as-alias` in `parse_require_vector` (insert into `aliases`, push to `as_aliases`, do not push to `requires`; note the `ns_meta.requires.push` at the top of the function must move after option parsing or be undone for this case).
 
-- [ ] **Step 4: Pin the lint behavior**
+- [x] **Step 4: Pin the lint behavior**
   In `src/diagnostics.rs` `mod tests`, next to `no_flag_when_alias_used_only_in_keyword`: `no_flag_for_as_alias_used_in_keyword` and `no_flag_for_unused_as_alias`. Both expect no `unused-namespace` diagnostic. In `code_action.rs` tests, next to `clean_prunes_unused_refer_keeping_sibling`: clean-ns leaves an unused `:as-alias` libspec in place. These should pass already (unmodeled option); they exist so a later "model `:as-alias`" change has to face them.
 
-- [ ] **Step 5: Confirm the unresolved-namespace side**
+- [x] **Step 5: Confirm the unresolved-namespace side**
   A diagnostics test that `cfg/thing` (a var usage through an `:as-alias` alias) is not flagged as unresolved, since `resolves_prefix` reads `aliases`. Add it next to `no_flag_when_aliased`.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
   Run: `cargo test --test test_extractor && cargo test --lib diagnostics`
   Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
   `git commit -m "Record :as-alias requires for keyword resolution and lints"`
 
 ### Task 2: `:refer-clojure` and `:rename`

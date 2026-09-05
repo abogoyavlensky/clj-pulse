@@ -182,6 +182,7 @@ pub fn extract_edn(source: &str) -> Vec<Occurrence> {
         imports: HashMap::new(),
         refer_all: Vec::new(),
         as_aliases: Vec::new(),
+        core_excludes: Vec::new(),
     };
     let mut out = Vec::new();
     collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
@@ -283,6 +284,7 @@ pub fn extract_analysis_with(source: &str, file: &Path, cfg: &ExtractConfig) -> 
         imports: HashMap::new(),
         refer_all: Vec::new(),
         as_aliases: Vec::new(),
+        core_excludes: Vec::new(),
     };
     let mut symbols = Vec::new();
 
@@ -486,6 +488,11 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                 // `(:use ns)` refers every public var of `ns`, so it is both a
                 // require and a refer-all. `:only` is not narrowed - the whole
                 // namespace is offered, which over-offers rather than misses.
+                // `(:refer-clojure :exclude [...] :rename {from to})` reshapes
+                // what bare names mean: excluded names are no longer core's,
+                // and a renamed one is referred under its new name. `:only` is
+                // ignored — narrowing core would only cost resolutions.
+                ":refer-clojure" => parse_refer_clojure(&inner[1..], source, ns_meta),
                 ":use" => {
                     for use_spec in &inner[1..] {
                         process_require_spec(*use_spec, source, ns_meta);
@@ -581,6 +588,57 @@ fn record_refer_all(ns_meta: &mut NsMeta, ns: &str) {
     }
 }
 
+/// Reads a `(:refer-clojure …)` clause: `:exclude [names]` into `core_excludes`
+/// and `:rename {from to}` into `refers`, so the new name resolves to the core
+/// var it renames.
+fn parse_refer_clojure(items: &[Node], source: &str, ns_meta: &mut NsMeta) {
+    let mut i = 0;
+    while i + 1 < items.len() {
+        if items[i].kind() != "kwd_lit" {
+            i += 1;
+            continue;
+        }
+        match node_text(items[i], source) {
+            ":exclude" if items[i + 1].kind() == "vec_lit" => {
+                for name in named_children(items[i + 1]) {
+                    if name.kind() == "sym_lit" {
+                        let name = sym_text(name, source).to_string();
+                        if !ns_meta.core_excludes.contains(&name) {
+                            ns_meta.core_excludes.push(name);
+                        }
+                    }
+                }
+            }
+            ":rename" if items[i + 1].kind() == "map_lit" => {
+                for (from, to) in rename_pairs(items[i + 1], source) {
+                    ns_meta.refers.insert(to, format!("clojure.core/{}", from));
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        i += 2;
+    }
+}
+
+/// The `{from to}` pairs of a `:rename` map, as source text. Non-symbol entries
+/// are skipped, so a malformed map records nothing rather than a bogus binding.
+fn rename_pairs(map_node: Node, source: &str) -> Vec<(String, String)> {
+    let items = named_children(map_node);
+    items
+        .chunks_exact(2)
+        .filter(|pair| pair[0].kind() == "sym_lit" && pair[1].kind() == "sym_lit")
+        .map(|pair| {
+            (
+                sym_text(pair[0], source).to_string(),
+                sym_text(pair[1], source).to_string(),
+            )
+        })
+        .collect()
+}
+
 /// Records one `:import` spec into `ns_meta.imports` (class simple name → fully
 /// qualified name). Handles the package-grouped forms `[java.util Date List]`
 /// and `(java.util Date List)`, and a bare fully-qualified class `java.io.File`.
@@ -627,6 +685,9 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
     // `:as-alias` binds an alias without loading the namespace, so the require
     // is only recorded once the options rule that out.
     let mut as_alias_only = false;
+    // Applied after the whole spec is read, so a `:rename` written before its
+    // `:refer` still finds the entry it renames.
+    let mut renames: Vec<(String, String)> = Vec::new();
 
     let mut i = 1;
     while i < items.len() {
@@ -663,6 +724,12 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
                     i += 2;
                     continue;
                 }
+                // `[a.b :refer [x] :rename {x y}]` binds `y`, not `x`.
+                ":rename" if i + 1 < items.len() && items[i + 1].kind() == "map_lit" => {
+                    renames.extend(rename_pairs(items[i + 1], source));
+                    i += 2;
+                    continue;
+                }
                 ":refer" if i + 1 < items.len() && items[i + 1].kind() == "vec_lit" => {
                     let refer_vec = named_children(items[i + 1]);
                     for refer_node in refer_vec {
@@ -679,6 +746,12 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         i += 1;
+    }
+
+    for (from, to) in renames {
+        if let Some(fqn) = ns_meta.refers.remove(&from) {
+            ns_meta.refers.insert(to, fqn);
+        }
     }
 
     if !as_alias_only {
@@ -1877,7 +1950,7 @@ fn record_occurrence(
         refer_fqn.clone()
     } else if ctx.def_names.contains(name) {
         in_ns(name)
-    } else if core_names().contains(name) {
+    } else if core_names().contains(name) && !ctx.ns_meta.core_excludes.iter().any(|e| e == name) {
         format!("clojure.core/{}", name)
     } else {
         in_ns(name)
@@ -2514,6 +2587,7 @@ mod tests {
             imports: HashMap::new(),
             refer_all: vec![],
             as_aliases: vec![],
+            core_excludes: vec![],
         };
         keyword_fqn(kwd, &meta, source)
     }

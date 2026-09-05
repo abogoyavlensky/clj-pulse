@@ -1060,3 +1060,55 @@ fn test_ns_as_alias_recorded() {
         occs
     );
 }
+
+#[test]
+fn test_ns_refer_clojure_exclude_and_rename() {
+    let (meta, _, occs) = clj_pulse::index::extractor::extract_full(
+        include_str!("fixtures/snippets/ns_options.clj"),
+        Path::new("ns_options.clj"),
+    )
+    .unwrap();
+
+    // `(:refer-clojure :rename {map cmap})` binds `cmap` to the core var.
+    assert_eq!(
+        meta.refers.get("cmap").map(String::as_str),
+        Some("clojure.core/map")
+    );
+    assert!(
+        meta.core_excludes.contains(&"update".to_string()),
+        "core_excludes: {:?}",
+        meta.core_excludes
+    );
+
+    // The excluded name belongs to this file's own `update`, not core's.
+    assert!(
+        occs.iter().any(|o| o.fqn == "my.app.handlers/update"),
+        "occurrences: {:?}",
+        occs
+    );
+    assert!(
+        !occs.iter().any(|o| o.fqn == "clojure.core/update"),
+        "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_ns_refer_rename_rebinds_name() {
+    let (meta, _) = extract(
+        include_str!("fixtures/snippets/ns_options.clj"),
+        Path::new("ns_options.clj"),
+    )
+    .unwrap();
+
+    // `:rename` replaces the refer entry: only the new name is bound.
+    assert_eq!(
+        meta.refers.get("str-join").map(String::as_str),
+        Some("clojure.string/join")
+    );
+    assert!(
+        !meta.refers.contains_key("join"),
+        "refers: {:?}",
+        meta.refers
+    );
+}

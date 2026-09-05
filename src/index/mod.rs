@@ -150,6 +150,11 @@ pub struct NsMeta {
     /// usage that spells the full name is still an unresolved namespace.
     #[serde(default)]
     pub as_aliases: Vec<String>,
+    /// Core names this file excludes, from `(:refer-clojure :exclude [...])`.
+    /// A bare usage of one of them is this namespace's own var, not core's, and
+    /// core completion must not offer it.
+    #[serde(default)]
+    pub core_excludes: Vec<String>,
 }
 
 impl NsMeta {
@@ -528,6 +533,7 @@ mod tests {
             imports: HashMap::new(),
             refer_all: vec![],
             as_aliases: vec![],
+            core_excludes: vec![],
         };
 
         let index = Index::new();
