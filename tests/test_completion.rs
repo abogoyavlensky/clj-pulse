@@ -93,6 +93,8 @@ fn ns_meta(name: &str) -> NsMeta {
         requires: vec![],
         imports: HashMap::new(),
         refer_all: vec![],
+        as_aliases: vec![],
+        core_excludes: vec![],
     }
 }
 
@@ -179,4 +181,45 @@ fn test_refer_all_does_not_duplicate_explicit_refers() {
 
 fn labels(items: &[tower_lsp::lsp_types::CompletionItem]) -> Vec<String> {
     items.iter().map(|i| i.label.clone()).collect()
+}
+
+#[test]
+fn test_core_exclude_hides_core_symbol() {
+    // `(:refer-clojure :exclude [update])` — `update` here is the file's own
+    // var, so core must not offer its version alongside.
+    let index = Index::new_with_core();
+    let mut meta = ns_meta("a.x");
+    meta.core_excludes = vec!["update".to_string()];
+    index.insert_file(
+        meta,
+        vec![Symbol {
+            name: "update".to_string(),
+            fqn: "a.x/update".to_string(),
+            ns: "a.x".to_string(),
+            kind: DefKind::Defn,
+            params: vec!["[m]".to_string()],
+            doc: None,
+            file: PathBuf::from("a/x.clj"),
+            source: SymbolSource::Project,
+            range: Range::default(),
+            name_range: Range::default(),
+            private: false,
+        }],
+        vec![],
+    );
+
+    let items = complete_symbols(&index, "upd", "a.x");
+    assert!(
+        !items.iter().any(|i| i.label == "update"
+            && i.detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("clojure.core"))),
+        "core update still offered: {:?}",
+        labels(&items)
+    );
+    assert!(
+        items.iter().any(|i| i.label == "update"),
+        "own update missing: {:?}",
+        labels(&items)
+    );
 }

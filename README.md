@@ -33,7 +33,9 @@ Language features:
 - **Find references** - locate every usage of a symbol across the project.
 - **Rename** - rename a project symbol and all of its references, or a local
   binding (params, `let`/`loop`/`for` bindings, destructured names) within
-  its scope.
+  its scope. The editor's rename box opens on the exact token that will change,
+  and names that cannot be renamed - library and built-in symbols, keywords,
+  `:keys`-destructured bindings - are refused up front with a reason.
 - **Keyword navigation** - go to definition and find references on namespaced
   keywords, including Integrant component keys: jump from `:my.app/db` in a
   `config.edn` system map (or an `#ig/ref`) to its `(defmethod ig/init-key ::db …)`.
@@ -65,6 +67,10 @@ Language features:
 Clojure & project support:
 
 - **File types:** `.clj`, `.cljs`, `.cljc`, `.lg`.
+- **ns forms:** `:as`, `:as-alias`, `:refer` (including `:refer :all` and
+  `(:use ns)`), `:rename`, `:refer-clojure :exclude` / `:rename`, `:import`,
+  reader conditionals, and legacy prefix lists `(clojure [set :as s] string)`.
+  `declare` is indexed too, so a name that is only declared still navigates.
 - **Project types:** `deps.edn` (resolved from the `.cpcache` classpath),
   Leiningen `project.clj`, and let-go `.lg` projects, whose lgx dependencies at `lgx.edn`
   (git and `:local/root` deps under `~/.lgx/gitlibs`) are indexed and navigable.

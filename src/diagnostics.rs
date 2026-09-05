@@ -262,6 +262,15 @@ mod tests {
     }
 
     #[test]
+    fn no_flag_for_as_alias_prefix() {
+        // A var usage through an `:as-alias` alias resolves via `aliases`.
+        assert!(
+            diags("(ns my.app\n  (:require [my.app.config :as-alias cfg]))\n(cfg/thing 1)\n")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn no_flag_when_plainly_required() {
         assert!(
             diags("(ns my.app\n  (:require [clojure.set]))\n(clojure.set/union #{} #{})\n")
@@ -336,11 +345,17 @@ mod tests {
     }
 
     #[test]
-    fn prefix_list_require_does_not_suppress() {
-        // Legacy `(clojure set)` prefix-list is unsupported; `set/union` must
-        // still be flagged (the real namespace is clojure.set, not `set`).
+    fn prefix_list_binds_the_joined_name_only() {
+        // A prefix list expands to `clojure.set`; the prefix itself binds
+        // nothing, so `set/union` is as unresolved in Clojure as it is here.
         let src = "(ns my.app\n  (:require (clojure set)))\n(set/union #{} #{})\n";
         assert_eq!(codes(src), vec!["unresolved-namespace"]);
+
+        // The expanded namespace and a prefix-list alias both resolve.
+        let full = "(ns my.app\n  (:require (clojure set)))\n(clojure.set/union #{} #{})\n";
+        assert!(diags(full).is_empty(), "{:?}", diags(full));
+        let aliased = "(ns my.app\n  (:require (clojure [set :as s])))\n(s/union #{} #{})\n";
+        assert!(diags(aliased).is_empty(), "{:?}", diags(aliased));
     }
 
     #[test]
@@ -433,6 +448,24 @@ mod tests {
             "(ns my.app\n  (:require [clojure.spec.alpha :as s]))\n(defn f [x] (::s/problem x))\n"
         )
         .is_empty());
+    }
+
+    #[test]
+    fn no_flag_for_as_alias_used_in_keyword() {
+        // `cfg` reaches the namespace only through `::cfg/port`.
+        assert!(unused(
+            "(ns my.app\n  (:require [my.app.config :as-alias cfg]))\n(defn f [m] (::cfg/port m))\n"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn no_flag_for_unused_as_alias() {
+        // An `:as-alias` require loads nothing, so it is never dead weight.
+        assert!(
+            unused("(ns my.app\n  (:require [my.app.config :as-alias cfg]))\n(def x 1)\n")
+                .is_empty()
+        );
     }
 
     #[test]

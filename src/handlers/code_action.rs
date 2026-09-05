@@ -909,6 +909,8 @@ mod tests {
             requires: vec![],
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
         }
     }
 
@@ -934,6 +936,8 @@ mod tests {
             requires: vec![],
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
         };
         let greet = Symbol {
             name: "greet".to_string(),
@@ -961,6 +965,8 @@ mod tests {
             requires: vec![],
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
         }
     }
 
@@ -1170,6 +1176,23 @@ mod tests {
             clean(source).as_deref(),
             Some("(ns app\n  (:require [c.d :refer [used]]))\n\n(used)\n")
         );
+    }
+
+    #[test]
+    fn clean_keeps_unused_as_alias() {
+        // `:as-alias` is an unmodeled option: the namespace is never loaded, so
+        // keeping the spec costs nothing and clean-ns must not prune it.
+        let source = "(ns app\n  (:require [c.d :as-alias d]))\n\n(def x 1)\n";
+        assert_eq!(clean(source), None);
+    }
+
+    #[test]
+    fn clean_keeps_renamed_refer() {
+        // `:rename` is unmodeled: pruning `split` would need the `:refer`
+        // vector and the `:rename` map rewritten together, so leave both.
+        let source =
+            "(ns app\n  (:require [clojure.string :refer [join split] :rename {join j}]))\n\n(j)\n";
+        assert_eq!(clean(source), None);
     }
 
     #[test]

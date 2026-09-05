@@ -111,6 +111,17 @@ and update README and this file in the same change.
   `:refer :all` / `(:use ns)` namespaces; head resolution, completion and
   `resolve_symbol` all consult it, so `deftest` works however `clojure.test`
   was required.
+- `NsMeta.as_aliases` never appears in `requires`: an `:as-alias` namespace is
+  not loaded, so the alias resolves keywords and qualified names while a usage
+  spelling the full namespace stays an unresolved namespace. `core_excludes`
+  holds `(:refer-clojure :exclude …)` names *and* the original half of every
+  `:refer-clojure :rename` pair, since renaming a core name unmaps it.
+- `declare` symbols are de-duplicated at the end of extraction: a `Declare`
+  whose fqn another symbol in the same file defines is dropped, so definition
+  lands on the real def while references and rename still reach the declare.
+- `rename` and `prepareRename` share `references::rename_target`, so every
+  rejection carries the same message from both. Only the checks that need the
+  new name (validity, local capture) live in `rename`.
 
 ## Releasing
 

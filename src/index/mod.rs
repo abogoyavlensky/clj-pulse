@@ -44,6 +44,11 @@ pub enum DefKind {
     /// A `clojure.test/deftest` var (or `deftest-`/`cljs.test/deftest`). Defines
     /// a zero-arg test fn, so it carries no params.
     Deftest,
+    /// A name introduced by `(declare foo)`: a var with no value yet. Kept only
+    /// when nothing else in the file defines the same name, so navigation
+    /// reaches the declaration when the real definition is elsewhere (or made
+    /// by a macro we don't model).
+    Declare,
     /// An Integrant component key, defined by `(defmethod ig/init-key ::x …)`.
     /// Its `fqn` is the canonical colon-prefixed keyword (`:my.ns/x`), keyed
     /// disjointly from var fqns (which never start with `:`).
@@ -144,6 +149,17 @@ pub struct NsMeta {
     /// or `(:use ns)`. Bare names in this file may resolve there.
     #[serde(default)]
     pub refer_all: Vec<String>,
+    /// Namespaces bound only through `[ns :as-alias x]`. Their aliases are in
+    /// `aliases` too, so keyword and qualified-symbol resolution work as usual,
+    /// but the namespace is never loaded — so it stays out of `requires`, and a
+    /// usage that spells the full name is still an unresolved namespace.
+    #[serde(default)]
+    pub as_aliases: Vec<String>,
+    /// Core names this file excludes, from `(:refer-clojure :exclude [...])`.
+    /// A bare usage of one of them is this namespace's own var, not core's, and
+    /// core completion must not offer it.
+    #[serde(default)]
+    pub core_excludes: Vec<String>,
 }
 
 impl NsMeta {
@@ -521,6 +537,8 @@ mod tests {
             requires: vec![],
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
         };
 
         let index = Index::new();

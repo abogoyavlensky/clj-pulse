@@ -187,8 +187,14 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                 }
             }
         } else {
+            // A name the file excludes from `clojure.core` is not core's here.
+            let excluded = |name: &str| {
+                ns_meta
+                    .as_ref()
+                    .is_some_and(|m| m.core_excludes.iter().any(|e| e == name))
+            };
             for core_sym in &index.core_symbols {
-                if core_sym.name.starts_with(prefix) {
+                if core_sym.name.starts_with(prefix) && !excluded(&core_sym.name) {
                     items.push(core_symbol_to_completion(core_sym));
                 }
             }
@@ -447,6 +453,8 @@ mod tests {
             requires: vec![],
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
         }
     }
 

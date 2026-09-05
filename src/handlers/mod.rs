@@ -63,6 +63,15 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
                         return Some(ResolvedSymbol::Project(sym));
                     }
                 }
+                // A core name referred under another name
+                // (`:refer-clojure :rename {map cmap}`) has no indexed var
+                // unless the clojure JAR is on the classpath — fall back to
+                // the curated core entry so hover still describes it.
+                if let Some(core_name) = fqn.strip_prefix("clojure.core/") {
+                    if let Some(core) = index.core_symbols.iter().find(|c| c.name == core_name) {
+                        return Some(ResolvedSymbol::Core(core.clone()));
+                    }
+                }
             }
         }
 
@@ -144,8 +153,15 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
             return Some(ResolvedSymbol::SpecialForm(sf));
         }
 
-        if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
-            return Some(ResolvedSymbol::Core(core.clone()));
+        // `(:refer-clojure :exclude [update])` unmaps the core var here, so a
+        // bare `update` is this file's own — never core's.
+        let excluded = ns_meta
+            .as_ref()
+            .is_some_and(|m| m.core_excludes.iter().any(|e| e == word));
+        if !excluded {
+            if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
+                return Some(ResolvedSymbol::Core(core.clone()));
+            }
         }
     }
 
@@ -213,6 +229,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn core_exclude_hides_the_core_var_and_rename_finds_it() {
+        // `(:refer-clojure :exclude [update] :rename {map cmap})`.
+        let index = Index::new_with_core();
+        let mut meta = NsMeta {
+            name: "my.ns".to_string(),
+            file: PathBuf::from("a.clj"),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: vec![],
+            imports: HashMap::new(),
+            refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec!["update".to_string(), "map".to_string()],
+        };
+        meta.refers
+            .insert("cmap".to_string(), "clojure.core/map".to_string());
+        index.insert_file(meta, vec![], vec![]);
+
+        assert!(
+            resolve_symbol(&index, "update", "my.ns").is_none(),
+            "an excluded core name must not resolve to clojure.core"
+        );
+        match resolve_symbol(&index, "cmap", "my.ns") {
+            Some(ResolvedSymbol::Core(core)) => assert_eq!(core.name, "map"),
+            other => panic!("cmap should resolve to core map, got {:?}", other.is_some()),
+        }
+    }
+
     fn index_with(symbols: Vec<Symbol>) -> Index {
         let index = Index::new();
         index.insert_file(
@@ -224,6 +269,8 @@ mod tests {
                 requires: vec![],
                 imports: HashMap::new(),
                 refer_all: vec![],
+                as_aliases: vec![],
+                core_excludes: vec![],
             },
             symbols,
             vec![],
@@ -289,6 +336,8 @@ mod tests {
                 requires: vec![],
                 imports: HashMap::new(),
                 refer_all: vec![],
+                as_aliases: vec![],
+                core_excludes: vec![],
             },
             vec![sym("DB", "recs", DefKind::Defrecord)],
             vec![],
@@ -306,6 +355,8 @@ mod tests {
                 requires: vec![],
                 imports: HashMap::new(),
                 refer_all: vec![],
+                as_aliases: vec![],
+                core_excludes: vec![],
             },
             vec![],
             vec![],
@@ -332,6 +383,8 @@ mod tests {
                 requires: vec![],
                 imports: HashMap::new(),
                 refer_all: vec![],
+                as_aliases: vec![],
+                core_excludes: vec![],
             },
             vec![
                 sym("public-fn", "lib", DefKind::Defn),
@@ -350,6 +403,8 @@ mod tests {
                 requires: vec!["lib".to_string()],
                 imports: HashMap::new(),
                 refer_all: vec!["lib".to_string()],
+                as_aliases: vec![],
+                core_excludes: vec![],
             },
             vec![sym("public-fn", "app", DefKind::Defn)],
             vec![],

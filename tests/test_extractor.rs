@@ -1028,3 +1028,145 @@ fn test_extracts_private_flag() {
         assert!(!private_of(name), "{} must not be private", name);
     }
 }
+
+#[test]
+fn test_ns_as_alias_recorded() {
+    let (meta, _, occs) = clj_pulse::index::extractor::extract_full(
+        include_str!("fixtures/snippets/ns_options.clj"),
+        Path::new("ns_options.clj"),
+    )
+    .unwrap();
+
+    // `:as-alias` binds the alias for keyword resolution …
+    assert_eq!(
+        meta.aliases.get("cfg").map(String::as_str),
+        Some("my.app.config")
+    );
+    assert!(
+        meta.as_aliases.contains(&"my.app.config".to_string()),
+        "as_aliases: {:?}",
+        meta.as_aliases
+    );
+    // … but the namespace is never loaded, so it is not a require.
+    assert!(
+        !meta.requires.contains(&"my.app.config".to_string()),
+        "requires: {:?}",
+        meta.requires
+    );
+
+    assert!(
+        occs.iter().any(|o| o.fqn == ":my.app.config/port"),
+        "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_ns_refer_clojure_exclude_and_rename() {
+    let (meta, _, occs) = clj_pulse::index::extractor::extract_full(
+        include_str!("fixtures/snippets/ns_options.clj"),
+        Path::new("ns_options.clj"),
+    )
+    .unwrap();
+
+    // `(:refer-clojure :rename {map cmap})` binds `cmap` to the core var.
+    assert_eq!(
+        meta.refers.get("cmap").map(String::as_str),
+        Some("clojure.core/map")
+    );
+    assert!(
+        meta.core_excludes.contains(&"update".to_string()),
+        "core_excludes: {:?}",
+        meta.core_excludes
+    );
+    // A renamed core name is unmapped under its original name too.
+    assert!(
+        meta.core_excludes.contains(&"map".to_string()),
+        "core_excludes: {:?}",
+        meta.core_excludes
+    );
+
+    // The excluded name belongs to this file's own `update`, not core's.
+    assert!(
+        occs.iter().any(|o| o.fqn == "my.app.handlers/update"),
+        "occurrences: {:?}",
+        occs
+    );
+    assert!(
+        !occs.iter().any(|o| o.fqn == "clojure.core/update"),
+        "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_ns_refer_rename_rebinds_name() {
+    let (meta, _) = extract(
+        include_str!("fixtures/snippets/ns_options.clj"),
+        Path::new("ns_options.clj"),
+    )
+    .unwrap();
+
+    // `:rename` replaces the refer entry: only the new name is bound.
+    assert_eq!(
+        meta.refers.get("str-join").map(String::as_str),
+        Some("clojure.string/join")
+    );
+    assert!(
+        !meta.refers.contains_key("join"),
+        "refers: {:?}",
+        meta.refers
+    );
+}
+
+#[test]
+fn test_ns_prefix_list_expanded() {
+    // Legacy prefix list: `(clojure [set :as s] string)` requires
+    // `clojure.set` (aliased `s`) and `clojure.string`.
+    let src = "(ns app\n  (:require (clojure [set :as s] string)))\n";
+    let (meta, _) = extract(src, Path::new("app.clj")).unwrap();
+
+    assert_eq!(
+        meta.aliases.get("s").map(String::as_str),
+        Some("clojure.set")
+    );
+    assert!(
+        meta.requires.contains(&"clojure.set".to_string()),
+        "requires: {:?}",
+        meta.requires
+    );
+    assert!(
+        meta.requires.contains(&"clojure.string".to_string()),
+        "requires: {:?}",
+        meta.requires
+    );
+}
+
+#[test]
+fn test_declare_indexes_each_name() {
+    let src = "(ns app)\n(declare helper ^:private hidden later)\n\n(defn later [] (helper))\n";
+    let (_, syms, occs) =
+        clj_pulse::index::extractor::extract_full(src, Path::new("app.clj")).unwrap();
+
+    let helper = syms.iter().find(|s| s.name == "helper").expect("helper");
+    assert_eq!(helper.kind, DefKind::Declare);
+    assert_eq!(helper.fqn, "app/helper");
+    assert!(!helper.private);
+    assert!(helper.params.is_empty());
+    assert!(helper.doc.is_none());
+
+    let hidden = syms.iter().find(|s| s.name == "hidden").expect("hidden");
+    assert_eq!(hidden.kind, DefKind::Declare);
+    assert!(hidden.private);
+
+    // The real definition wins: the declared `later` is dropped.
+    let laters: Vec<_> = syms.iter().filter(|s| s.name == "later").collect();
+    assert_eq!(laters.len(), 1, "symbols: {:?}", syms);
+    assert_eq!(laters[0].kind, DefKind::Defn);
+
+    assert!(
+        occs.iter().any(|o| o.fqn == "app/helper"),
+        "occurrences: {:?}",
+        occs
+    );
+}

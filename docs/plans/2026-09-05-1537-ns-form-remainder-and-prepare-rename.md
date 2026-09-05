@@ -97,27 +97,27 @@ Modify:
 - Modify: `src/index/mod.rs`, `src/index/jar_cache.rs`, `src/index/extractor.rs`, `src/handlers/code_action.rs`, `src/diagnostics.rs`
 - Test: `tests/test_extractor.rs`, `tests/fixtures/snippets/ns_options.clj`, `src/diagnostics.rs` tests
 
-- [ ] **Step 1: Write the failing extractor test**
+- [x] **Step 1: Write the failing extractor test**
   Create `tests/fixtures/snippets/ns_options.clj` with an ns form using `[my.app.config :as-alias cfg]` and a body that reads `::cfg/port`. Add `test_ns_as_alias_recorded`: `aliases["cfg"] == "my.app.config"`, `as_aliases` contains it, `requires` does not, and the occurrences contain the keyword fqn `:my.app.config/port`.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
   Run: `cargo test --test test_extractor test_ns_as_alias`
   Expected: FAIL (no `as_aliases` field, compile error).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add the field with `#[serde(default)]`, bump `CACHE_FORMAT_VERSION` to 13, parse `:as-alias` in `parse_require_vector` (insert into `aliases`, push to `as_aliases`, do not push to `requires`; note the `ns_meta.requires.push` at the top of the function must move after option parsing or be undone for this case).
 
-- [ ] **Step 4: Pin the lint behavior**
+- [x] **Step 4: Pin the lint behavior**
   In `src/diagnostics.rs` `mod tests`, next to `no_flag_when_alias_used_only_in_keyword`: `no_flag_for_as_alias_used_in_keyword` and `no_flag_for_unused_as_alias`. Both expect no `unused-namespace` diagnostic. In `code_action.rs` tests, next to `clean_prunes_unused_refer_keeping_sibling`: clean-ns leaves an unused `:as-alias` libspec in place. These should pass already (unmodeled option); they exist so a later "model `:as-alias`" change has to face them.
 
-- [ ] **Step 5: Confirm the unresolved-namespace side**
+- [x] **Step 5: Confirm the unresolved-namespace side**
   A diagnostics test that `cfg/thing` (a var usage through an `:as-alias` alias) is not flagged as unresolved, since `resolves_prefix` reads `aliases`. Add it next to `no_flag_when_aliased`.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
   Run: `cargo test --test test_extractor && cargo test --lib diagnostics`
   Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
   `git commit -m "Record :as-alias requires for keyword resolution and lints"`
 
 ### Task 2: `:refer-clojure` and `:rename`
@@ -126,27 +126,27 @@ Modify:
 - Modify: `src/index/mod.rs`, `src/index/extractor.rs`, `src/handlers/completion.rs`
 - Test: `tests/test_extractor.rs`, `tests/test_completion.rs`
 
-- [ ] **Step 1: Write the failing extractor tests**
+- [x] **Step 1: Write the failing extractor tests**
   Extend `ns_options.clj` with `(:refer-clojure :exclude [update] :rename {map cmap})` and `[clojure.string :refer [join] :rename {join str-join}]`, a `(defn update [] …)`, and a body calling `(cmap inc [1])`, `(str-join "," [])`, and `(update)`. Tests: `refers["cmap"] == "clojure.core/map"`, `refers["str-join"] == "clojure.string/join"` with no `join` entry, `core_excludes` contains `update`, and the occurrence for the `(update)` call has fqn `<ns>/update`, not `clojure.core/update`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor test_ns_refer_clojure`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `core_excludes` field; `":refer-clojure"` arm in `extract_ns`; `:rename` handling in `parse_require_vector` applied after the refer vector; core fallback in `record_occurrence` consults `core_excludes`.
 
-- [ ] **Step 4: Completion test**
+- [x] **Step 4: Completion test**
   In `tests/test_completion.rs`, add a test that a file excluding `update` from core gets no `clojure.core` `update` item for prefix `upd` (the project's own `update` still appears). Implement by filtering the core loop in `handlers/completion.rs` on `core_excludes`.
 
-- [ ] **Step 4b: Pin clean-ns under `:rename`**
+- [x] **Step 4b: Pin clean-ns under `:rename`**
   A `code_action.rs` test: `[clojure.string :refer [join split] :rename {join j}]` with only `j` used is neither flagged nor pruned by clean-ns (unmodeled option). The extractor still resolves `j` to `clojure.string/join`, which the Task 2 extractor test covers.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `cargo test --test test_extractor && cargo test --test test_completion`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Honor :refer-clojure :exclude/:rename and :refer :rename"`
 
 ### Task 3: Prefix-list requires
@@ -155,22 +155,25 @@ Modify:
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   Snippet with `(:require (clojure [set :as s] string))`. Assert `aliases["s"] == "clojure.set"` and `requires` contains `clojure.string` and `clojure.set`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor test_ns_prefix_list`
   Expected: FAIL (nothing recorded).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `process_require_spec`, add a `"list_lit"` arm for prefix lists as described in the design. Update the doc comments that say prefix lists are unsupported (`process_require_spec`, `collect_use_namespaces`, and `diagnostics.rs` test `prefix_list_require_does_not_suppress` — read that test: it asserts the *lint* still flags `set/union` under a prefix list because the lint parser skips prefix lists; decide whether `resolves_prefix` should now see the expanded requires. It should: `NsMeta.requires` is what `resolves_prefix` reads, so the diagnostic disappears. Update that test to assert no flag and rename it.)
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `cargo test --test test_extractor && cargo test --lib diagnostics`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Expand prefix-list requires"`
+
+> Deviation: the plan expected `prefix_list_require_does_not_suppress` to flip to "no flag". It must not — a prefix list binds only the joined name (`clojure.set`), never the prefix, so `set/union` is genuinely unresolved in Clojure too. The test keeps its assertion, is renamed `prefix_list_binds_the_joined_name_only`, and gains coverage that `clojure.set/union` and a prefix-list `:as` alias do resolve.
+> Deviation: `collect_use_namespaces` also learned prefix lists, so `(:use (clojure set))` refers `clojure.set` — otherwise `:use` and `:require` would disagree about the same syntax.
 
 ### Task 4: `declare`
 
@@ -178,40 +181,45 @@ Modify:
 - Modify: `src/index/mod.rs`, `src/index/extractor.rs`, `src/handlers/symbols.rs`
 - Test: `tests/test_extractor.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing extractor tests**
+- [x] **Step 1: Write the failing extractor tests**
   Snippet with `(declare helper ^:private hidden later)`, then `(defn later [] (helper))`. Tests: symbols contain `helper` (kind `Declare`, `private` false), `hidden` (`private` true), and exactly one `later` whose kind is `Defn`; the occurrence for `(helper)` has fqn `<ns>/helper`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor test_declare`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `DefKind::Declare`; `extract_declare` called from the top-level dispatch; de-duplication pass at the end of `extract_analysis_with` (or wherever `symbols` is final) that removes `Declare` symbols shadowed by a same-fqn non-declare symbol; `symbols.rs` mapping. Fix every exhaustive `match` on `DefKind` the compiler reports.
 
-- [ ] **Step 4: e2e test**
+- [x] **Step 4: e2e test**
   Add `declared.clj` content to the new `tests/fixtures/simple_project/src/ns_options.clj` (or a dedicated file): `(declare only-declared)` with no def, plus `(declare defined-later)` and its `defn`. Tests: definition on a usage of `only-declared` lands on the declare line; definition on `defined-later` lands on the `defn`; references on `defined-later` include the declare site; rename of `defined-later` edits the declare site too.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `cargo test --test test_extractor && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Index declare forms as declarations"`
+
+> Deviation: `hover.rs`'s `defkind_str` needed a `Declare => "declare"` arm — an exhaustive `DefKind` match the plan did not list.
 
 ### Task 5: e2e for the ns-form work
 
 **Files:**
 - Modify: `tests/test_e2e.rs`, `tests/fixtures/simple_project/src/ns_options.clj`
 
-- [ ] **Step 1: Add e2e tests**
+- [x] **Step 1: Add e2e tests**
   In the fixture file: an `:as-alias` require with a `::cfg/port` keyword whose definition exists as an Integrant key or keyword occurrence elsewhere in the fixture (check `integrant_project` for the pattern; a keyword's "definition" is its first occurrence or its `ig/init-key` defmethod). Tests: definition on `::cfg/port` resolves; completion of `cf` offers the `cfg` alias; definition on `cmap` lands on the curated core entry (hover shows `map`'s docstring); definition on a prefix-list alias usage works.
 
-- [ ] **Step 2: Run**
+- [x] **Step 2: Run**
   Run: `bb e2e`
   Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Cover ns-form options end to end"`
+
+> Deviation: hover on `cmap` needed `resolve_symbol` to fall back to the curated core entry when a refer names `clojure.core/<x>` that no indexed JAR provides — the plan assumed it already did. The same pass added the `core_excludes` gate to `resolve_symbol`'s core fallback (a codex P1 from Task 2): the plan's claim that `:exclude` "changes nothing for definition" holds only when the file also defines the name.
+> Deviation: the prefix-list e2e uses a project prefix list `(simple [helpers :as h])` rather than `clojure.string`, because the fixture's JAR classpath is never resolved in e2e (stage-3 CLI is disabled), so a `clojure.string` alias has nothing to navigate to.
 
 ### Task 6: prepareRename
 
@@ -219,35 +227,79 @@ Modify:
 - Modify: `src/handlers/references.rs`, `src/server.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e tests**
+- [x] **Step 1: Write the failing e2e tests**
   Add a `prepare_rename(path, line, character)` helper to `LspClient` sending `textDocument/prepareRename`. Tests: a local in `locals.clj` returns a range equal to the token; a project global returns the token range; a library symbol, a keyword, and a `:keys` binding return errors whose messages match the existing rename rejections; `initialize` advertises `renameProvider.prepareProvider == true`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e prepare_rename`
   Expected: FAIL (method not found).
 
-- [ ] **Step 3: Refactor `rename` around `rename_target`**
+- [x] **Step 3: Refactor `rename` around `rename_target`**
   Introduce `RenameTarget` and `rename_target` as in the design; `rename` keeps its behavior (all existing rename e2e tests stay green) and only reorders the new-name validation to after target resolution if needed. Keep the capture check in `rename`; it needs `new_name`.
 
-- [ ] **Step 4: Implement `prepare_rename`**
+- [x] **Step 4: Implement `prepare_rename`**
   Handler returns `PrepareRenameResponse::Range`; `server.rs` wires `prepare_rename` with `invalid_params` error mapping like `rename`, and the capability becomes `RenameOptions { prepare_provider: Some(true), .. }`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `bb check && bb e2e && bb e2e-nvim`
   Expected: PASS; the nvim run proves capability negotiation still works with the changed `renameProvider` shape.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Add textDocument/prepareRename"`
+
+> Deviation: the `:keys` rejection message lost its `new_name` interpolation ("rewrite it as {new-name :amount} first") because the check now lives in `rename_target`, which never sees a new name. That is what makes `rename` and `prepareRename` reject with byte-identical messages, which the e2e test now asserts for all three rejection paths.
+> Deviation: the library-symbol rejection could not be exercised from `simple_project` — `clojure.core/str` is not indexed there, so both entry points say "nothing to rename here". The test asserts message *agreement* between `rename` and `prepareRename` instead of a fixed string, which is the property that matters.
 
 ### Task 7: Docs and roadmap
 
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   README: the Rename bullet mentions the rename box validation (prepareRename); the "Clojure & project support" list notes `:as-alias`, `:refer-clojure`, `:rename`, prefix lists, and `declare`. AGENTS.md invariants: add a line on `as_aliases` (never in `requires`) and on declare de-duplication. ROADMAP: tick the two items and set their `Plan:` lines to `done`. Use /writing-clearly.
 
-- [ ] **Step 2: Final verification and commit**
+- [x] **Step 2: Final verification and commit**
   Run: `bb check && bb e2e`
   Expected: PASS.
   `git commit -m "Document ns-form options and prepareRename"`
+
+---
+
+## Completion summary
+
+**Status: complete.** All seven tasks are implemented, `bb check`, `bb e2e`
+(119 tests) and `bb e2e-nvim` pass.
+
+What shipped:
+
+- `:as-alias` binds an alias for keyword and qualified-name resolution without
+  ever entering `requires`, so the namespace is never treated as loaded and the
+  require is never reported unused.
+- `(:refer-clojure :exclude …)` and `(:refer-clojure :rename …)` are honored in
+  the occurrence walker, in core completion, and in `resolve_symbol`. A renamed
+  core name is unmapped under its original name, as Clojure does.
+- `:rename` inside a `:refer` libspec rebinds the referred name, keeping the
+  original fqn.
+- Legacy prefix lists expand in both `:require` and `:use`.
+- `declare` is indexed as `DefKind::Declare`, de-duplicated against a real
+  definition of the same fqn in the same file.
+- `textDocument/prepareRename` returns the token range a rename would rewrite —
+  including when the cursor sits on the alias half of `h/greet` — and shares
+  every rejection with `rename` through `references::rename_target`.
+- `CACHE_FORMAT_VERSION` 12 → 14 (once for the `NsMeta` fields, once for the new
+  `DefKind` variant).
+
+Codex review findings addressed: the `:refer-clojure :rename` unmapping, the
+`core_excludes` gate in `resolve_symbol`, the JAR cache bump for the shifted
+`DefKind` discriminant, and the alias-half prepareRename range. One advisory was
+declined: codex wanted `:as-alias` kept out of the general `aliases` map, which
+the plan explicitly decided against (clj-kondo accepts alias-qualified usage).
+
+Deviations are recorded inline under Tasks 3, 4, 5 and 6.
+
+**What the plan could have specified better:** Task 3 asserted that expanding
+prefix lists would make `prefix_list_require_does_not_suppress` stop flagging
+`set/union`. It does not — a prefix list binds only the joined name, so the
+diagnostic is correct and the test had to keep its assertion. A plan step that
+predicts a specific test flipping should state the semantics it relies on, so
+the discrepancy surfaces before the code is written.

@@ -566,6 +566,27 @@ impl LspClient {
         )
     }
 
+    fn prepare_rename(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/prepareRename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    fn prepare_rename_error(&mut self, path: &Path, line: u32, character: u32) -> String {
+        let error = self.request_expect_error(
+            "textDocument/prepareRename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        );
+        error["message"].as_str().unwrap().to_string()
+    }
+
     fn rename(&mut self, path: &Path, line: u32, character: u32, new_name: &str) -> Value {
         self.request(
             "textDocument/rename",
@@ -5753,4 +5774,302 @@ fn test_e2e_clojuredocs_unreadable_file() {
             "{err}"
         );
     }
+}
+
+#[test]
+fn test_e2e_definition_reaches_declare_site() {
+    // `only-declared` is never defined; its `(declare …)` is the definition.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "(only-declared x)");
+    let result = client.goto_definition(&file, line, ch + 3);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.ends_with("/src/ns_options.clj"), "got {}", uri);
+
+    let (decl_line, _) = start_of(&text, "(declare only-declared)");
+    assert_eq!(result["range"]["start"]["line"], json!(decl_line));
+}
+
+#[test]
+fn test_e2e_declare_defers_to_the_real_definition() {
+    // `defined-later` is declared and then defined: definition lands on the
+    // `defn`, while references and rename still reach the declare site.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (use_line, use_ch) = start_of(&text, "(defined-later m)");
+    let result = client.goto_definition(&file, use_line, use_ch + 3);
+    let (defn_line, _) = start_of(&text, "(defn defined-later [x]");
+    assert_eq!(
+        result["range"]["start"]["line"],
+        json!(defn_line),
+        "definition should be the defn, not the declare: {}",
+        result
+    );
+
+    let (decl_line, decl_ch) = start_of(&text, "(declare defined-later)");
+    let refs = client.references(&file, use_line, use_ch + 3, true);
+    let lines: Vec<u64> = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert!(
+        lines.contains(&(decl_line as u64)),
+        "declare site missing from references: {:?}",
+        lines
+    );
+
+    let result = client.rename(&file, decl_line, decl_ch + 12, "later");
+    let changes = result["changes"].as_object().unwrap();
+    let edits = changes.values().next().unwrap().as_array().unwrap();
+    assert!(
+        edits
+            .iter()
+            .any(|e| e["range"]["start"]["line"] == json!(decl_line)),
+        "declare site not renamed: {:?}",
+        edits
+    );
+}
+
+#[test]
+fn test_e2e_as_alias_keyword_navigates_and_completes() {
+    // `[simple.config :as-alias cfg]` binds `cfg` without requiring the
+    // namespace: `::cfg/port` resolves to its Integrant key, and the alias is
+    // offered in completion.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    let config = root.join("src/config.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "::cfg/port");
+    let result = client.goto_definition(&file, line, ch + 3);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.ends_with("/src/config.clj"), "got {}", uri);
+    let (key_line, _) = start_of(
+        &std::fs::read_to_string(&config).unwrap(),
+        "(defmethod ig/init-key ::port",
+    );
+    assert_eq!(result["range"]["start"]["line"], json!(key_line));
+
+    // Completion offers the alias itself.
+    let last_line = text.lines().count() as u32;
+    client.did_change_insert(&file, last_line, 0, "cf");
+    let items = client.completion(&file, last_line, 2);
+    let items = items["items"].as_array().unwrap_or_else(|| {
+        items
+            .as_array()
+            .unwrap_or_else(|| panic!("unexpected completion shape: {}", items))
+    });
+    let cfg = items
+        .iter()
+        .find(|i| i["label"] == json!("cfg"))
+        .unwrap_or_else(|| panic!("cfg alias not offered: {}", json!(items)));
+    assert_eq!(cfg["detail"], json!("alias for simple.config"));
+}
+
+#[test]
+fn test_e2e_refer_clojure_rename_hovers_core_doc() {
+    // `(:refer-clojure :rename {map cmap})` — `cmap` is `clojure.core/map`,
+    // so hover shows the curated core entry for `map`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "(cmap inc");
+    let hover = client.hover(&file, line, ch + 2);
+    let value = hover["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for cmap: {}", hover));
+    assert!(
+        value.contains("map"),
+        "hover does not describe core map: {}",
+        value
+    );
+}
+
+#[test]
+fn test_e2e_definition_through_prefix_list_alias() {
+    // `(simple [helpers :as h])` — the prefix list binds `h` to
+    // `simple.helpers`, so `h/greet` navigates to helpers.clj.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "(h/greet who)");
+    let result = client.goto_definition(&file, line, ch + 4);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.ends_with("/src/helpers.clj"), "got {}", uri);
+}
+
+#[test]
+fn test_e2e_prepare_rename_advertises_capability() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let result = client.initialize(&root);
+    assert_eq!(
+        result["capabilities"]["renameProvider"]["prepareProvider"],
+        json!(true),
+        "capabilities: {}",
+        result["capabilities"]["renameProvider"]
+    );
+}
+
+#[test]
+fn test_e2e_prepare_rename_returns_token_range() {
+    // A local and a project global both report exactly the token the rename
+    // would rewrite, so the editor's rename box starts on the right text.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+    let text = std::fs::read_to_string(&locals).unwrap();
+    let (line, ch) = start_of(&text, "base");
+    let range = client.prepare_rename(&locals, line, ch + 1);
+    assert_eq!(range["start"], json!({ "line": line, "character": ch }));
+    assert_eq!(
+        range["end"],
+        json!({ "line": line, "character": ch + "base".len() as u32 })
+    );
+
+    let core = root.join("src/core.clj");
+    client.did_open(&core);
+    let core_text = std::fs::read_to_string(&core).unwrap();
+    let (dline, dch) = start_of(&core_text, "add");
+    let range = client.prepare_rename(&core, dline, dch + 1);
+    assert_eq!(range["start"], json!({ "line": dline, "character": dch }));
+    assert_eq!(
+        range["end"],
+        json!({ "line": dline, "character": dch + "add".len() as u32 })
+    );
+}
+
+#[test]
+fn test_e2e_prepare_rename_rejects_what_rename_rejects() {
+    // Every rejection `rename` makes, `prepareRename` makes with the same
+    // message — the editor refuses in place instead of opening a box that
+    // fails on submit.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let probe = root.join("src/destructured.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.destructured)\n(defn f [{:keys [amount]}] amount)\n",
+    )
+    .unwrap();
+
+    let utils = root.join("src/utils.clj");
+    let file = root.join("src/ns_options.clj");
+    for path in [&utils, &file, &probe] {
+        client.did_open(path);
+    }
+
+    let (str_line, str_ch) = position_of(&utils, "(str \"Hello");
+    let (kw_line, kw_ch) = start_of(&std::fs::read_to_string(&file).unwrap(), "::cfg/port");
+    let (bind_line, bind_ch) = start_of(&std::fs::read_to_string(&probe).unwrap(), "amount]");
+
+    let cases = [
+        (&utils, str_line, str_ch + 1, "rename"),
+        (&file, kw_line, kw_ch + 3, "keyword"),
+        (&probe, bind_line, bind_ch + 2, ":keys"),
+    ];
+    for (path, line, ch, needle) in cases {
+        let prepared = client.prepare_rename_error(path, line, ch);
+        assert!(
+            prepared.contains(needle),
+            "expected {:?} in the rejection at {}:{}, got: {}",
+            needle,
+            line,
+            ch,
+            prepared
+        );
+        let renamed = client.request_expect_error(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": ch },
+                "newName": "renamed"
+            }),
+        );
+        assert_eq!(
+            renamed["message"].as_str().unwrap(),
+            prepared,
+            "prepareRename and rename must reject alike at {}:{}",
+            line,
+            ch
+        );
+    }
+}
+
+#[test]
+fn test_e2e_prepare_rename_on_alias_half_reports_the_name() {
+    // A cursor on the `h` of `h/greet` renames `greet`, so prepareRename must
+    // report `greet`'s range in *this* file — never the definition's file.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "h/greet");
+    let range = client.prepare_rename(&file, line, ch);
+    let name_ch = ch + "h/".len() as u32;
+    assert_eq!(
+        range["start"],
+        json!({ "line": line, "character": name_ch }),
+        "alias-half prepareRename: {}",
+        range
+    );
+    assert_eq!(
+        range["end"],
+        json!({ "line": line, "character": name_ch + "greet".len() as u32 })
+    );
 }

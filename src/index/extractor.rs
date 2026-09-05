@@ -181,6 +181,8 @@ pub fn extract_edn(source: &str) -> Vec<Occurrence> {
         requires: Vec::new(),
         imports: HashMap::new(),
         refer_all: Vec::new(),
+        as_aliases: Vec::new(),
+        core_excludes: Vec::new(),
     };
     let mut out = Vec::new();
     collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
@@ -281,6 +283,8 @@ pub fn extract_analysis_with(source: &str, file: &Path, cfg: &ExtractConfig) -> 
         requires: Vec::new(),
         imports: HashMap::new(),
         refer_all: Vec::new(),
+        as_aliases: Vec::new(),
+        core_excludes: Vec::new(),
     };
     let mut symbols = Vec::new();
 
@@ -296,6 +300,16 @@ pub fn extract_analysis_with(source: &str, file: &Path, cfg: &ExtractConfig) -> 
             _ => {}
         }
     }
+
+    // A `declare`d name that the file goes on to define really is that
+    // definition: drop the placeholder so the index and the outline show one
+    // entry, pointing at the definition rather than the forward declaration.
+    let defined: HashSet<String> = symbols
+        .iter()
+        .filter(|s| s.kind != DefKind::Declare)
+        .map(|s| s.fqn.clone())
+        .collect();
+    symbols.retain(|s| s.kind != DefKind::Declare || !defined.contains(&s.fqn));
 
     // Second pass: occurrences, resolved through the completed ns metadata
     let def_names: HashSet<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
@@ -434,6 +448,12 @@ fn process_top_level_list(
         return;
     }
 
+    // `(declare a b c)` introduces one var per name, none of them defined yet.
+    if first_text == "declare" {
+        extract_declare(node, &children, source, file, &ns_meta.name, symbols);
+        return;
+    }
+
     // A built-in def form (`defn`, `def`, …), or a `:lint-as` / well-known macro
     // mapped to one (`defcomponent` → `def`, `clojure.test/deftest` →
     // `deftest`). The mapped kind reuses the normal def extraction, so the
@@ -484,6 +504,11 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                 // `(:use ns)` refers every public var of `ns`, so it is both a
                 // require and a refer-all. `:only` is not narrowed - the whole
                 // namespace is offered, which over-offers rather than misses.
+                // `(:refer-clojure :exclude [...] :rename {from to})` reshapes
+                // what bare names mean: excluded names are no longer core's,
+                // and a renamed one is referred under its new name. `:only` is
+                // ignored — narrowing core would only cost resolutions.
+                ":refer-clojure" => parse_refer_clojure(&inner[1..], source, ns_meta),
                 ":use" => {
                     for use_spec in &inner[1..] {
                         process_require_spec(*use_spec, source, ns_meta);
@@ -501,10 +526,10 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
 }
 
 /// Records one `:require` spec into `ns_meta`. Handles plain libspecs
-/// (`[a.b :as x]`), bare namespaces (`clojure.set`), and reader conditionals
+/// (`[a.b :as x]`), bare namespaces (`clojure.set`), legacy prefix lists
+/// (`(clojure [set :as s] string)`), and reader conditionals
 /// (`#?(:clj [a :as x])` / `#?@(:clj [[a :as x]])`) — every branch's aliases
-/// are recorded so conditional requires aren't reported as unresolved. (Legacy
-/// prefix-list libspecs `(clojure set)` are still not expanded.)
+/// are recorded so conditional requires aren't reported as unresolved.
 fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
     match spec.kind() {
         "vec_lit" => {
@@ -522,10 +547,45 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         "sym_lit" => ns_meta.requires.push(sym_text(spec, source).to_string()),
+        // Legacy prefix list `(clojure [set :as s] string)`: each entry is a
+        // libspec whose namespace is the prefix joined by a dot. The prefix
+        // itself binds nothing, so `set/union` stays unresolved — only
+        // `clojure.set/union` and the alias `s` resolve, as in Clojure.
+        "list_lit" => {
+            let items = named_children(spec);
+            let Some(prefix_node) = items.first() else {
+                return;
+            };
+            let is_prefix_list = prefix_node.kind() == "sym_lit"
+                && items.len() > 1
+                && items[1..]
+                    .iter()
+                    .all(|n| matches!(n.kind(), "sym_lit" | "vec_lit"));
+            if !is_prefix_list {
+                return;
+            }
+            let prefix = sym_text(*prefix_node, source).to_string();
+            for item in &items[1..] {
+                match item.kind() {
+                    "sym_lit" => {
+                        ns_meta
+                            .requires
+                            .push(format!("{}.{}", prefix, sym_text(*item, source)))
+                    }
+                    "vec_lit" => {
+                        let sub = named_children(*item);
+                        if sub.first().map(|n| n.kind()) == Some("sym_lit") {
+                            let ns_name = format!("{}.{}", prefix, sym_text(sub[0], source));
+                            parse_libspec_items(&sub, ns_name, source, ns_meta);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         // Reader conditional: descend into each branch's form (skip platform
-        // keywords). Other shapes (e.g. legacy prefix-lists `(clojure set)`)
-        // are unsupported and intentionally record nothing, so they don't
-        // mask real unresolved-namespace diagnostics.
+        // keywords). Reader conditionals nested inside a prefix list are out
+        // of scope and record nothing.
         "read_cond_lit" | "splicing_read_cond_lit" => {
             for child in named_children(spec) {
                 if child.kind() != "kwd_lit" {
@@ -542,8 +602,8 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
 /// a vector of specs, or each branch of a reader conditional — the same shapes
 /// [`process_require_spec`] accepts, so a conditional `:use` refers in full on
 /// every platform. `:only` is not narrowed: the whole namespace is referred,
-/// which over-offers rather than misses. Legacy prefix lists are no more
-/// expanded here than they are in `:require`.
+/// which over-offers rather than misses. Legacy prefix lists expand exactly as
+/// they do in `:require`, so `(:use (clojure set))` refers `clojure.set`.
 fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
     match spec.kind() {
         "sym_lit" => out.push(sym_text(spec, source).to_string()),
@@ -557,6 +617,29 @@ fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
                     }
                 }
                 _ => {}
+            }
+        }
+        "list_lit" => {
+            let items = named_children(spec);
+            let Some(prefix_node) = items.first() else {
+                return;
+            };
+            if prefix_node.kind() != "sym_lit" || items.len() < 2 {
+                return;
+            }
+            let prefix = sym_text(*prefix_node, source);
+            for item in &items[1..] {
+                let name = match item.kind() {
+                    "sym_lit" => Some(sym_text(*item, source)),
+                    "vec_lit" => named_children(*item)
+                        .first()
+                        .filter(|n| n.kind() == "sym_lit")
+                        .map(|n| sym_text(*n, source)),
+                    _ => None,
+                };
+                if let Some(name) = name {
+                    out.push(format!("{}.{}", prefix, name));
+                }
             }
         }
         "read_cond_lit" | "splicing_read_cond_lit" => {
@@ -577,6 +660,62 @@ fn record_refer_all(ns_meta: &mut NsMeta, ns: &str) {
     if !ns_meta.refer_all.iter().any(|n| n == ns) {
         ns_meta.refer_all.push(ns.to_string());
     }
+}
+
+/// Reads a `(:refer-clojure …)` clause: `:exclude [names]` into `core_excludes`
+/// and `:rename {from to}` into `refers`, so the new name resolves to the core
+/// var it renames.
+fn parse_refer_clojure(items: &[Node], source: &str, ns_meta: &mut NsMeta) {
+    let mut i = 0;
+    while i + 1 < items.len() {
+        if items[i].kind() != "kwd_lit" {
+            i += 1;
+            continue;
+        }
+        match node_text(items[i], source) {
+            ":exclude" if items[i + 1].kind() == "vec_lit" => {
+                for name in named_children(items[i + 1]) {
+                    if name.kind() == "sym_lit" {
+                        let name = sym_text(name, source).to_string();
+                        if !ns_meta.core_excludes.contains(&name) {
+                            ns_meta.core_excludes.push(name);
+                        }
+                    }
+                }
+            }
+            ":rename" if items[i + 1].kind() == "map_lit" => {
+                for (from, to) in rename_pairs(items[i + 1], source) {
+                    ns_meta.refers.insert(to, format!("clojure.core/{}", from));
+                    // Renaming a core name unmaps the original: after
+                    // `:rename {map cmap}`, bare `map` is not core's `map`.
+                    if !ns_meta.core_excludes.contains(&from) {
+                        ns_meta.core_excludes.push(from);
+                    }
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        i += 2;
+    }
+}
+
+/// The `{from to}` pairs of a `:rename` map, as source text. Non-symbol entries
+/// are skipped, so a malformed map records nothing rather than a bogus binding.
+fn rename_pairs(map_node: Node, source: &str) -> Vec<(String, String)> {
+    let items = named_children(map_node);
+    items
+        .chunks_exact(2)
+        .filter(|pair| pair[0].kind() == "sym_lit" && pair[1].kind() == "sym_lit")
+        .map(|pair| {
+            (
+                sym_text(pair[0], source).to_string(),
+                sym_text(pair[1], source).to_string(),
+            )
+        })
+        .collect()
 }
 
 /// Records one `:import` spec into `ns_meta.imports` (class simple name → fully
@@ -613,16 +752,27 @@ fn process_import_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
 
 fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
     let items: Vec<Node> = named_children(vec_node);
-    if items.is_empty() {
-        return;
-    }
-
-    let ns_name = if items[0].kind() == "sym_lit" {
-        sym_text(items[0], source).to_string()
-    } else {
+    let Some(first) = items.first() else {
         return;
     };
-    ns_meta.requires.push(ns_name.clone());
+    if first.kind() != "sym_lit" {
+        return;
+    }
+    let ns_name = sym_text(*first, source).to_string();
+    parse_libspec_items(&items, ns_name, source, ns_meta);
+}
+
+/// The options of a libspec whose namespace is already resolved. Split out so a
+/// prefix-list entry (`[set :as s]` under `(clojure …)`) is read with its joined
+/// name (`clojure.set`) without rewriting source text. `items` is the whole
+/// libspec, `items[0]` being the namespace symbol.
+fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &mut NsMeta) {
+    // `:as-alias` binds an alias without loading the namespace, so the require
+    // is only recorded once the options rule that out.
+    let mut as_alias_only = false;
+    // Applied after the whole spec is read, so a `:rename` written before its
+    // `:refer` still finds the entry it renames.
+    let mut renames: Vec<(String, String)> = Vec::new();
 
     let mut i = 1;
     while i < items.len() {
@@ -636,6 +786,18 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
                     i += 2;
                     continue;
                 }
+                // `[a.b :as-alias x]` binds `x` for keyword and symbol
+                // resolution without loading `a.b`.
+                ":as-alias" if i + 1 < items.len() && items[i + 1].kind() == "sym_lit" => {
+                    let alias = node_text(items[i + 1], source).to_string();
+                    ns_meta.aliases.insert(alias, ns_name.clone());
+                    if !ns_meta.as_aliases.contains(&ns_name) {
+                        ns_meta.as_aliases.push(ns_name.clone());
+                    }
+                    as_alias_only = true;
+                    i += 2;
+                    continue;
+                }
                 // `:refer :all` names no individual vars, so it lands in
                 // `refer_all` instead of `refers`.
                 ":refer"
@@ -644,6 +806,12 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
                         && node_text(items[i + 1], source) == ":all" =>
                 {
                     record_refer_all(ns_meta, &ns_name);
+                    i += 2;
+                    continue;
+                }
+                // `[a.b :refer [x] :rename {x y}]` binds `y`, not `x`.
+                ":rename" if i + 1 < items.len() && items[i + 1].kind() == "map_lit" => {
+                    renames.extend(rename_pairs(items[i + 1], source));
                     i += 2;
                     continue;
                 }
@@ -663,6 +831,16 @@ fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         i += 1;
+    }
+
+    for (from, to) in renames {
+        if let Some(fqn) = ns_meta.refers.remove(&from) {
+            ns_meta.refers.insert(to, fqn);
+        }
+    }
+
+    if !as_alias_only {
+        ns_meta.requires.push(ns_name);
     }
 }
 
@@ -748,6 +926,43 @@ fn extract_def(
     // so go-to-definition / hover / completion / references reach them.
     if kind == DefKind::Defprotocol {
         extract_protocol_methods(&children[2..], source, file, ns_name, symbols);
+    }
+}
+
+/// Records one `Symbol` per name in `(declare a ^:private b)`. A declaration
+/// carries no params and no docstring; its `range` is the whole form, so the
+/// outline and hover point at the `declare` that introduced it.
+fn extract_declare(
+    form_node: Node,
+    children: &[Node],
+    source: &str,
+    file: &Path,
+    ns_name: &str,
+    symbols: &mut Vec<Symbol>,
+) {
+    for name_node in &children[1..] {
+        if name_node.kind() != "sym_lit" {
+            continue;
+        }
+        let name = sym_text(*name_node, source).to_string();
+        let fqn = if ns_name.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", ns_name, name)
+        };
+        symbols.push(Symbol {
+            name,
+            fqn,
+            ns: ns_name.to_string(),
+            kind: DefKind::Declare,
+            params: Vec::new(),
+            doc: None,
+            file: file.to_path_buf(),
+            source: super::SymbolSource::Project,
+            range: node_to_lsp_range(form_node, source),
+            name_range: node_to_lsp_range(sym_name_node(*name_node), source),
+            private: has_private_meta(*name_node, source),
+        });
     }
 }
 
@@ -1857,7 +2072,7 @@ fn record_occurrence(
         refer_fqn.clone()
     } else if ctx.def_names.contains(name) {
         in_ns(name)
-    } else if core_names().contains(name) {
+    } else if core_names().contains(name) && !ctx.ns_meta.core_excludes.iter().any(|e| e == name) {
         format!("clojure.core/{}", name)
     } else {
         in_ns(name)
@@ -2493,6 +2708,8 @@ mod tests {
             requires: Vec::new(),
             imports: HashMap::new(),
             refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
         };
         keyword_fqn(kwd, &meta, source)
     }
