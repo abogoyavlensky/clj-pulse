@@ -126,27 +126,27 @@ Modify:
 - Modify: `src/index/mod.rs`, `src/index/extractor.rs`, `src/handlers/completion.rs`
 - Test: `tests/test_extractor.rs`, `tests/test_completion.rs`
 
-- [ ] **Step 1: Write the failing extractor tests**
+- [x] **Step 1: Write the failing extractor tests**
   Extend `ns_options.clj` with `(:refer-clojure :exclude [update] :rename {map cmap})` and `[clojure.string :refer [join] :rename {join str-join}]`, a `(defn update [] …)`, and a body calling `(cmap inc [1])`, `(str-join "," [])`, and `(update)`. Tests: `refers["cmap"] == "clojure.core/map"`, `refers["str-join"] == "clojure.string/join"` with no `join` entry, `core_excludes` contains `update`, and the occurrence for the `(update)` call has fqn `<ns>/update`, not `clojure.core/update`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor test_ns_refer_clojure`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `core_excludes` field; `":refer-clojure"` arm in `extract_ns`; `:rename` handling in `parse_require_vector` applied after the refer vector; core fallback in `record_occurrence` consults `core_excludes`.
 
-- [ ] **Step 4: Completion test**
+- [x] **Step 4: Completion test**
   In `tests/test_completion.rs`, add a test that a file excluding `update` from core gets no `clojure.core` `update` item for prefix `upd` (the project's own `update` still appears). Implement by filtering the core loop in `handlers/completion.rs` on `core_excludes`.
 
-- [ ] **Step 4b: Pin clean-ns under `:rename`**
+- [x] **Step 4b: Pin clean-ns under `:rename`**
   A `code_action.rs` test: `[clojure.string :refer [join split] :rename {join j}]` with only `j` used is neither flagged nor pruned by clean-ns (unmodeled option). The extractor still resolves `j` to `clojure.string/join`, which the Task 2 extractor test covers.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `cargo test --test test_extractor && cargo test --test test_completion`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Honor :refer-clojure :exclude/:rename and :refer :rename"`
 
 ### Task 3: Prefix-list requires

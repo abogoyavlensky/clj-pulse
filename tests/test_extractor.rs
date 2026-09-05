@@ -1079,6 +1079,12 @@ fn test_ns_refer_clojure_exclude_and_rename() {
         "core_excludes: {:?}",
         meta.core_excludes
     );
+    // A renamed core name is unmapped under its original name too.
+    assert!(
+        meta.core_excludes.contains(&"map".to_string()),
+        "core_excludes: {:?}",
+        meta.core_excludes
+    );
 
     // The excluded name belongs to this file's own `update`, not core's.
     assert!(

@@ -612,6 +612,11 @@ fn parse_refer_clojure(items: &[Node], source: &str, ns_meta: &mut NsMeta) {
             ":rename" if items[i + 1].kind() == "map_lit" => {
                 for (from, to) in rename_pairs(items[i + 1], source) {
                     ns_meta.refers.insert(to, format!("clojure.core/{}", from));
+                    // Renaming a core name unmaps the original: after
+                    // `:rename {map cmap}`, bare `map` is not core's `map`.
+                    if !ns_meta.core_excludes.contains(&from) {
+                        ns_meta.core_excludes.push(from);
+                    }
                 }
             }
             _ => {
