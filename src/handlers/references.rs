@@ -216,15 +216,18 @@ pub fn prepare_rename(
             .chain(refs.usages.iter().copied())
             .find(|r| range_contains(r, pos))
             .unwrap_or(refs.declaration),
-        RenameTarget::Global { fqn, sym } => {
-            occurrence_range_at(index, documents, uri, pos, &fqn).unwrap_or(sym.name_range)
+        RenameTarget::Global { fqn, .. } => {
+            occurrence_range_at(index, documents, uri, pos, &fqn)
+                .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?
         }
     };
     Ok(PrepareRenameResponse::Range(range))
 }
 
 /// The `name_range` of the definition or occurrence of `fqn` under `pos` in
-/// this document — the exact span a rename edit would replace.
+/// *this* document — the exact span a rename edit would replace. A range from
+/// the defining file would be meaningless to the editor, so a cursor that
+/// resolves to nothing here yields `None` rather than a foreign range.
 fn occurrence_range_at(
     index: &Index,
     documents: &DocumentStore,
@@ -236,11 +239,30 @@ fn occurrence_range_at(
     let text = documents.text(uri)?;
     let (_, syms, occs) =
         extractor::extract_full_with(&text, &path, &index.extract_config()).ok()?;
+    let line = text.lines().nth(pos.line as usize).unwrap_or_default();
     syms.iter()
         .filter(|s| s.fqn == fqn)
         .map(|s| s.name_range)
         .chain(occs.iter().filter(|o| o.fqn == fqn).map(|o| o.name_range))
-        .find(|r| range_contains(r, pos))
+        .find(|r| range_contains(r, pos) || on_qualifier_of(line, pos, *r))
+}
+
+/// Whether `pos` sits on the alias half of a qualified usage whose name half is
+/// `name`: everything from the cursor up to the name must be identifier text
+/// closed by the `/` separator. A cursor on the `h` of `h/greet` renames
+/// `greet`, so prepareRename must report `greet`'s range.
+fn on_qualifier_of(line: &str, pos: Position, name: Range) -> bool {
+    if pos.line != name.start.line || pos.character >= name.start.character {
+        return false;
+    }
+    let units: Vec<u16> = line.encode_utf16().collect();
+    let (from, to) = (pos.character as usize, name.start.character as usize);
+    if to == 0 || to > units.len() || units[to - 1] != u16::from(b'/') {
+        return false;
+    }
+    String::from_utf16_lossy(&units[from..to - 1])
+        .chars()
+        .all(crate::document::is_clj_ident_char)
 }
 
 pub fn rename(

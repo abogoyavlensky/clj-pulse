@@ -6044,3 +6044,32 @@ fn test_e2e_prepare_rename_rejects_what_rename_rejects() {
         );
     }
 }
+
+#[test]
+fn test_e2e_prepare_rename_on_alias_half_reports_the_name() {
+    // A cursor on the `h` of `h/greet` renames `greet`, so prepareRename must
+    // report `greet`'s range in *this* file — never the definition's file.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "h/greet");
+    let range = client.prepare_rename(&file, line, ch);
+    let name_ch = ch + "h/".len() as u32;
+    assert_eq!(
+        range["start"],
+        json!({ "line": line, "character": name_ch }),
+        "alias-half prepareRename: {}",
+        range
+    );
+    assert_eq!(
+        range["end"],
+        json!({ "line": line, "character": name_ch + "greet".len() as u32 })
+    );
+}
