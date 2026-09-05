@@ -448,6 +448,35 @@ impl LspClient {
         )
     }
 
+    /// Incremental edit over an arbitrary range, so a test can send one the
+    /// document does not have. [`did_change_insert`] can only express a
+    /// zero-width range at a position.
+    fn did_change_range(
+        &mut self,
+        path: &Path,
+        version: i64,
+        start: (u32, u32),
+        end: (u32, u32),
+        text: &str,
+    ) {
+        self.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": format!("file://{}", path.display()),
+                    "version": version
+                },
+                "contentChanges": [{
+                    "range": {
+                        "start": { "line": start.0, "character": start.1 },
+                        "end": { "line": end.0, "character": end.1 }
+                    },
+                    "text": text
+                }]
+            }),
+        )
+    }
+
     fn text_document_content(&mut self, uri: &str) -> Value {
         self.request("workspace/textDocumentContent", json!({ "uri": uri }))
     }
@@ -6158,6 +6187,218 @@ fn test_e2e_server_survives_handler_panic() {
             && logged.contains("deliberate panic from clojurePulse/__testPanic"),
         "server.log has no panic line with a location: {}",
         logged
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Malformed input: every handler returns, none takes the server down.
+// ---------------------------------------------------------------------------
+
+/// Builds a bare temp project with the given `deps.edn` contents and one
+/// source file, for the manifest tests that need a broken manifest on disk.
+fn malformed_deps_project(deps_edn: &str) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("deps.edn"), deps_edn).unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("src/ok.clj"),
+        "(ns broken.ok)\n\n(defn only-fn\n  \"The one thing this project defines.\"\n  [x]\n  (inc x))\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// A buffer the user is mid-way through typing does not parse. Every
+/// position-based handler must still answer rather than error or hang.
+#[test]
+fn test_e2e_malformed_unbalanced_buffer_still_answers() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let half_typed = root.join("src/half_typed.clj");
+    std::fs::write(
+        &half_typed,
+        "(ns simple.half-typed\n  (:require [simple.core :as core]))\n\n(defn f [x] (let [y (core/add\n",
+    )
+    .unwrap();
+    client.did_open(&half_typed);
+
+    let (line, ch) = position_of(&half_typed, "core/add");
+    // None of these may error; a null hover or an empty list is a fine answer.
+    let _ = client.hover(&half_typed, line, ch);
+    let _ = client.completion(&half_typed, line, ch);
+    let _ = client.goto_definition(&half_typed, line, ch);
+
+    // Positions inside the unterminated form answer too.
+    let last_line = 3;
+    let _ = client.hover(&half_typed, last_line, 20);
+    let _ = client.document_symbols(&half_typed);
+
+    // And a healthy file in the same session is unaffected.
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+    let hover = client.hover(&utils, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Adds two numbers."),
+        "an unbalanced buffer broke a healthy one: {}",
+        hover
+    );
+}
+
+/// A generated or minified source file can be one enormous line. It must not
+/// blow up the position math or the parser.
+#[test]
+fn test_e2e_malformed_huge_single_line_answers() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let huge = root.join("src/huge.clj");
+    let mut text = String::from("(ns simple.huge) (def big \"");
+    text.push_str(&"abcdefgh".repeat(4 * 1024 * 1024 / 8));
+    text.push_str("\")\n");
+    assert!(text.len() > 4 * 1024 * 1024, "fixture is not 4 MB");
+    std::fs::write(&huge, &text).unwrap();
+    client.did_open(&huge);
+
+    let symbols = client.document_symbols(&huge);
+    assert!(
+        symbols.is_array(),
+        "documentSymbol on a 4 MB line did not answer with a list: {}",
+        symbols
+    );
+    // A position far along that single line answers too.
+    let _ = client.hover(&huge, 0, 2_000_000);
+}
+
+/// A source file that is not valid UTF-8 is skipped with a log line; the rest
+/// of the project still indexes and answers.
+#[test]
+fn test_e2e_malformed_non_utf8_file_is_skipped() {
+    let project = setup_named("malformed_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let ok = root.join("src/ok.clj");
+    client.did_open(&ok);
+    let (line, ch) = position_of(&ok, "well-formed");
+    let hover = client.hover(&ok, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("perfectly ordinary function"),
+        "the readable file did not index alongside the unreadable one: {}",
+        hover
+    );
+
+    let log = std::fs::read_to_string(root.join(".clj-pulse/server.log")).unwrap_or_default();
+    assert!(
+        log.contains("failed to read") && log.contains("bad_bytes.clj"),
+        "the unreadable file was not logged as skipped: {}",
+        log
+    );
+}
+
+/// An empty `deps.edn` has no `:paths`; the server falls back to `src`/`test`
+/// and indexes the project anyway.
+#[test]
+fn test_e2e_malformed_empty_deps_edn_still_indexes() {
+    let project = malformed_deps_project("{}\n");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let ok = root.join("src/ok.clj");
+    client.did_open(&ok);
+    let (line, ch) = position_of(&ok, "only-fn");
+    let hover = client.hover(&ok, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("The one thing this project defines."),
+        "an empty deps.edn stopped src/ from indexing: {}",
+        hover
+    );
+}
+
+/// A `deps.edn` that does not parse must not stop the server: it initializes,
+/// falls back to the default source paths, and answers.
+#[test]
+fn test_e2e_malformed_invalid_deps_edn_still_answers() {
+    let project = malformed_deps_project("{:paths [\n");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let ok = root.join("src/ok.clj");
+    client.did_open(&ok);
+    let (line, ch) = position_of(&ok, "only-fn");
+    // The truncated `:paths` may or may not yield `src`, so the contract is
+    // only that the request returns instead of erroring or hanging.
+    let _ = client.hover(&ok, line, ch);
+    let symbols = client.document_symbols(&ok);
+    assert!(
+        symbols.is_array(),
+        "a broken deps.edn broke documentSymbol: {}",
+        symbols
+    );
+}
+
+/// A `didChange` whose range is past the end of the document is dropped, and
+/// the next request still answers off the last good text.
+#[test]
+fn test_e2e_malformed_did_change_past_end_of_document() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    client.did_change_range(&utils, 2, (9_999, 0), (9_999, 5), "nonsense");
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let hover = client.hover(&utils, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Adds two numbers."),
+        "an out-of-range didChange cost the buffer its answers: {}",
+        hover
+    );
+
+    // A well-formed edit after the bad one still applies. utils.clj ends with
+    // a newline, so line 10 is the empty line past the last form.
+    client.did_change_insert(&utils, 10, 0, "(defn later [] 1)\n");
+    let symbols = client.document_symbols(&utils);
+    let names: Vec<&str> = symbols
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"later"),
+        "edits stopped applying after an out-of-range one: {:?}",
+        names
     );
 }
 

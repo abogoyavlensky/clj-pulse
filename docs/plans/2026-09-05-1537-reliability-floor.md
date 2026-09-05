@@ -113,6 +113,13 @@ Modify:
 - [x] **Step 6: Commit**
   `git commit -m "Survive handler panics with a catch_unwind service guard"`
 
+> Codex review of Task 1 found a real defect: tower-lsp clears its
+> pending-request map only when a handler future *returns*, so a panicking one
+> leaked its abort handle and made that id answer `invalid request` for the rest
+> of the session. Fixed in a follow-up commit — the guard cancels each panicked
+> id on the way into the next request — with
+> `test_e2e_panicked_request_id_can_be_reused` as the regression guard.
+
 > Deviation: `tower-service = "0.3"` is a second new dependency alongside
 > `futures`. tower-lsp does not re-export the `tower` `Service` trait that
 > `PanicGuard` must implement, and `tower-service` is the trait crate `tower`
@@ -124,15 +131,20 @@ Modify:
 - Create: `tests/fixtures/malformed_project/…`
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
   One test per bullet in the design's "Malformed input" section. Each ends with a normal request that must succeed. For the non-UTF-8 fixture, write the bytes with a tiny Python one-liner and commit the file; add a comment file next to it explaining why it is binary.
 
-- [ ] **Step 2: Run them**
+- [x] **Step 2: Run them**
   Run: `cargo test --test test_e2e malformed`
   Expected: PASS for most. Any failure is a real finding: fix it in the server in the smallest way that keeps the request path alive (clamping a bad range, skipping a bad file with a log line), with the test as the regression guard.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Prove the server answers on malformed input"` (plus one commit per server fix, if any).
+
+> All six passed against the server as it stands — no server fix was needed.
+> `scanner` already skips an unreadable file with a warning and `did_change`
+> already drops an out-of-range edit with one, so the tests pin behavior that
+> was there rather than behavior that had to be added.
 
 ### Task 3: Bench harness
 
