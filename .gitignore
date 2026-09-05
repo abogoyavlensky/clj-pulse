@@ -8,3 +8,4 @@
 .clj-pulse
 .tmp/
 tests/fixtures/simple_project/.cpcache/
+scripts/.vscode-cache/
