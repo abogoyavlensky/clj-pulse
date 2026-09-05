@@ -30,16 +30,25 @@ and update README and this file in the same change.
   `jar:` content through the extension's own `clojure/dependencyContents`
   provider, hover, completion, and diagnostics.
 
+- `bb bench` — a large real project (metabase, shallow-cloned into
+  `.tmp/bench/` on first run) indexed by the release binary under production
+  settings, reporting index time, symbol counts, RSS, and per-edit and
+  definition latency (`tests/test_bench.rs`). Not a pass/fail gate beyond a
+  120 s hang ceiling; compare its table against the baseline in
+  [docs/MEMORY.md](docs/MEMORY.md).
+
 | Gate | Run when |
 |---|---|
 | `bb e2e` | every server behavior change |
 | `bb e2e-pulse` | any client-visible change |
 | `bb e2e-calva` | definition, `jar:`, or location-shape changes |
 | `bb e2e-nvim` | new capabilities or protocol changes |
+| `bb bench` | before a release, and after index or extractor changes |
 
 ## Testing notes
 
-- The e2e harness (`LspClient` in `tests/test_e2e.rs`) is the template for new
+- The e2e harness (`LspClient` in `tests/common/mod.rs`, shared by
+  `test_e2e.rs` and `test_bench.rs`) is the template for new
   feature tests: copy the fixture with `setup_project()`, `initialize`, `did_open`,
   then assert on raw JSON responses. `wait_for_log("Indexed")` /
   `wait_for_log("library indexing complete")` synchronize with the two
@@ -50,6 +59,14 @@ and update README and this file in the same change.
   exercise stage 3 use `LspClient::start_with_classpath_cli`. It sets
   `CLJ_PULSE_DISABLE_KONDO=1` for the same reason: the suite must behave
   identically on a machine with clj-kondo installed and one without.
+- `CLJ_PULSE_TEST_PANIC` (non-empty) makes the server register one extra
+  method, `clojurePulse/__testPanic`, whose handler panics on purpose. It is
+  the only way to test the panic guard end to end; `LspClient::start_with_str_env`
+  sets it. Never set in normal runs, so the method does not exist in a release.
+- `LspClient::start_production` sets *none* of the `CLJ_PULSE_DISABLE_*`
+  variables, so stage 3 runs and clj-kondo is spawned when installed. It exists
+  for `bb bench` alone — a regular test using it would behave differently per
+  machine.
 - Test realistic Clojure, not just toy snippets: real libraries use ns/def
   metadata (`(ns ^{:doc "…"} foo)`), reader conditionals, multi-arity fns.
   The extractor must handle them (see `test_extractor.rs`).
@@ -119,6 +136,14 @@ and update README and this file in the same change.
 - `declare` symbols are de-duplicated at the end of extraction: a `Declare`
   whose fqn another symbol in the same file defines is dropped, so definition
   lands on the real def while references and rename still reach the declare.
+- A panicking request handler must not take the process down. tower-lsp polls
+  handler futures inline, so `PanicGuard` (`src/panic_guard.rs`) wraps the
+  service in `catch_unwind` and answers that one request with an internal
+  error; `install_panic_hook` records payload and location in `server.log`, for
+  background-task panics too. Because tower-lsp clears its pending-request map
+  only when a handler *returns*, the guard also cancels each panicked id before
+  it dispatches the next request — otherwise that id would answer
+  `invalid request` for the rest of the session.
 - `rename` and `prepareRename` share `references::rename_target`, so every
   rejection carries the same message from both. Only the checks that need the
   new name (validity, local capture) live in `rename`.

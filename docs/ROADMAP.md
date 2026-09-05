@@ -92,15 +92,30 @@ Small fixes that remove wrong answers. Each extractor change bumps
       token range for renameable symbols and a clean rejection (not a server
       error) for library, built-in, keyword, and `:keys`-destructured names.
       Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — done
-- [ ] **Reliability floor**
-  - [ ] Panic hook that logs to `server.log`; verify how tower-lsp behaves
+- [x] **Reliability floor**
+  - [x] Panic hook that logs to `server.log`; verify how tower-lsp behaves
         when a handler panics and make a panicking request fail alone.
-  - [ ] Performance baseline: a `bb bench` task that indexes a large
+  - [x] Performance baseline: a `bb bench` task that indexes a large
         open-source Clojure repo and reports startup, memory, and per-edit
         lint latency. Fix cliffs it finds.
-  - [ ] Malformed-input pass: unbalanced buffers, huge single lines, non-UTF-8
+  - [x] Malformed-input pass: unbalanced buffers, huge single lines, non-UTF-8
         files, empty `deps.edn`. Every handler returns, none panics.
-  Plan: [2026-09-05-1537-reliability-floor.md](plans/2026-09-05-1537-reliability-floor.md) — in progress
+  Plan: [2026-09-05-1537-reliability-floor.md](plans/2026-09-05-1537-reliability-floor.md) — done
+- [ ] **Cache the parse tree per document.** The bench
+      ([MEMORY.md](MEMORY.md)) shows every diagnostics pass parsing the buffer
+      three times and every position request parsing it once: on a 452 KiB file
+      that is ~285 ms of the ~360 ms native lint pass and most of the 75 ms
+      definition latency. Cache a tree per document version, updated
+      incrementally from the `didChange` ranges tree-sitter already accepts.
+  Plan: —
+- [ ] **Keep clj-kondo off the keystroke path for large buffers.** It costs
+      ~840 ms on the same file, which is its own runtime, not ours. Options: a
+      size-scaled debounce, a size threshold above which the kondo tier is
+      skipped, or publishing the native tier immediately and the kondo tier
+      when it lands — the last one changes the "one publish per pass"
+      invariant, so decide that first.
+  Plan: —
+
 
 ## Milestone 2 — completion quality
 

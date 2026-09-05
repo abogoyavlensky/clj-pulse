@@ -152,23 +152,23 @@ Modify:
 - Create: `tests/test_bench.rs`
 - Modify: `bb.edn`, `tests/test_e2e.rs` (only if the client is moved to `tests/common/`)
 
-- [ ] **Step 1: Make `LspClient` reusable**
+- [x] **Step 1: Make `LspClient` reusable**
   Prefer `#[path = "test_e2e.rs"]`-free sharing: move `LspClient` and its helpers into `tests/common/mod.rs` and `mod common;` it from both test files. Run `bb e2e` to prove nothing changed.
 
-- [ ] **Step 2: Add `LspClient::start_production`**
+- [x] **Step 2: Add `LspClient::start_production`**
   A constructor that sets none of the `CLJ_PULSE_DISABLE_*` variables. Keep it out of the regular e2e tests: a comment explains it exists for the bench only.
 
-- [ ] **Step 3: Write the bench**
+- [x] **Step 3: Write the bench**
   `tests/test_bench.rs` with one `#[test] #[ignore] fn bench_large_project()` implementing the metric table, including the two-stage RSS sampling, the OS-specific RSS readers, and the deterministic qualified-symbol choice. Print with fixed columns. Skip cleanly when `CLJ_PULSE_BENCH_ROOT` is unset.
 
-- [ ] **Step 4: Add `bb bench`**
+- [x] **Step 4: Add `bb bench`**
   Task: clone if `.tmp/bench/metabase` is missing (`git clone --depth 1 https://github.com/metabase/metabase .tmp/bench/metabase`), then `CLJ_PULSE_BENCH_ROOT=$PWD/.tmp/bench/metabase cargo test --release --test test_bench -- --ignored --nocapture`. Use `--release`: the debug build's numbers are not what users see.
 
-- [ ] **Step 5: Run it**
+- [x] **Step 5: Run it**
   Run: `bb bench`
   Expected: the table prints and the test passes the hang ceiling. Record the numbers.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Add a large-project bench"`
 
 ### Task 4: Act on the bench
@@ -176,16 +176,16 @@ Modify:
 **Files:**
 - Modify: whatever the numbers point at; `docs/MEMORY.md`; `docs/ROADMAP.md`
 
-- [ ] **Step 1: Read the numbers**
+- [x] **Step 1: Read the numbers**
   Anything that would surprise a user: index time over 30 s, RSS over 1 GB, didChange latency over 300 ms (the diagnostics debounce), definition over 50 ms. Profile the worst one with `cargo flamegraph` or `perf` if installed, otherwise with `tracing` timing around the suspect.
 
-- [ ] **Step 2: Fix within budget**
+- [x] **Step 2: Fix within budget**
   Fix what fits in a day with a test or a repeat bench run proving the improvement. For anything larger, add a Milestone 1 roadmap item with the measurement and the suspected cause.
 
-- [ ] **Step 3: Record the baseline**
+- [x] **Step 3: Record the baseline**
   `docs/MEMORY.md`: "Performance baseline" with date, commit, machine, and the table after fixes.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "Record the performance baseline"` (fixes in their own commits before it).
 
 ### Task 5: Docs and roadmap

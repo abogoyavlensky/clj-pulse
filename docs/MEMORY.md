@@ -4,6 +4,58 @@ Durable findings about clj-pulse worth keeping in one place: known gaps, their
 root causes in the code, and what a fix would involve. Complements the
 forward-looking [ROADMAP.md](ROADMAP.md).
 
+## Performance baseline
+
+Measured with `bb bench`: the release binary indexing a shallow clone of
+[metabase](https://github.com/metabase/metabase) under production settings
+(stage-3 classpath resolution on, clj-kondo on PATH). Re-run it before a
+release and after index or extractor changes, and compare.
+
+- **Date:** 2026-09-05
+- **Machine:** Linux x86-64 container, 8 cores
+- **Corpus:** metabase at `.tmp/bench/metabase`, 42 905 symbols in 2 976
+  namespaces
+- **Edit target:** `test/metabase/dashboards_rest/api_test.clj`, 452 KiB — the
+  largest `.clj` in the repo, so the per-edit numbers are a worst case, not a
+  typical file
+
+| Metric | Value |
+|---|---|
+| Time to project index | 2.8 s |
+| Time to library index (warm `.cpcache` and kondo cache) | 3.0 s |
+| Time to library index (cold, incl. `clojure -Spath` + kondo cache warm) | 35 s |
+| RSS after project index | 279 MiB |
+| RSS after library index | 283 MiB |
+| didOpen → first diagnostics | 973 ms |
+| didChange → diagnostics (median of 20) | 1200 ms |
+| Definition (median of 20) | 75 ms |
+
+### What the numbers cost, and what is left
+
+A diagnostics pass used to run its two tiers in sequence — the native lints
+(~360 ms on this file), then the clj-kondo subprocess (~840 ms). They are
+independent, so they now run concurrently, with the CPU-bound native pass on a
+blocking thread: didChange → diagnostics fell from ~1570 ms to ~1200 ms and
+didOpen → first diagnostics from ~1330 ms to ~973 ms.
+
+Two costs remain, both above what a user would call comfortable, and both
+larger than a single fix:
+
+- **No cached parse tree.** Every diagnostics pass parses the buffer three
+  times (`extract_analysis_with` ~80 ms, `qualified_usages` ~65 ms,
+  `unused_requires` ~140 ms on the 452 KiB file), and every position request
+  parses it once — which is most of the 75 ms definition latency. A parse
+  cached per document version, ideally updated incrementally from the
+  `didChange` ranges tree-sitter already accepts, would cut the native pass to
+  roughly one parse and take position requests to single-digit milliseconds.
+- **clj-kondo dominates the remaining per-edit time** at ~840 ms on this file,
+  which is its own cost, not ours. Options are all design changes: a longer
+  debounce for large buffers, skipping the kondo tier above a size threshold,
+  or publishing the native tier first and the kondo tier when it lands
+  (which the "one publish per pass" invariant currently forbids).
+
+Both are tracked as Milestone 1 items in [ROADMAP.md](ROADMAP.md).
+
 ## Leiningen indexes only direct dependencies
 
 ### How deep each project type goes

@@ -8,7 +8,9 @@ With first-class [let-go](https://github.com/nooga/let-go) support: `.lg` projec
 > **Status:** clj-pulse is early-stage and a bit experimental, but it already
 > covers much of the day-to-day Clojure workflow - go-to-definition, completion,
 > hover, find references, and rename. It's under active development and
-> real-world testing, so expect the occasional rough edge. Bug reports and
+> real-world testing, so expect the occasional rough edge - though a request
+> that goes wrong now fails on its own instead of taking the server down with
+> it. Bug reports and
 > feature requests via
 > [issues](https://github.com/abogoyavlensky/clj-pulse/issues) are very welcome.
 > What comes next is in [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -349,6 +351,7 @@ bb fmt-check  # check formatting without fixing
 bb lint       # run clippy linter
 bb test       # run tests
 bb check      # run all checks (fmt + lint + test)
+bb bench      # index a large real project and report timings and memory
 bb outdated   # check outdated deps 
 bb build      # build the dev binary
 bb release    # build release binary
@@ -364,6 +367,11 @@ bb e2e-nvim   # through headless Neovim's built-in LSP client
 bb e2e-calva  # real VS Code + Calva under Xvfb
 bb e2e-pulse  # real VS Code + the Clojure Pulse extension under Xvfb
 ```
+
+`bb bench` clones [metabase](https://github.com/metabase/metabase) into
+`.tmp/bench/` the first time and indexes it with the release binary, printing
+index time, symbol counts, resident memory, and per-edit and definition
+latency. The recorded baseline is in [docs/MEMORY.md](docs/MEMORY.md).
 
 > [!NOTE]
 > To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.
