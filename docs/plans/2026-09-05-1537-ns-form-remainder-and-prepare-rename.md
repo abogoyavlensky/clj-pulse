@@ -155,22 +155,25 @@ Modify:
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   Snippet with `(:require (clojure [set :as s] string))`. Assert `aliases["s"] == "clojure.set"` and `requires` contains `clojure.string` and `clojure.set`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor test_ns_prefix_list`
   Expected: FAIL (nothing recorded).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `process_require_spec`, add a `"list_lit"` arm for prefix lists as described in the design. Update the doc comments that say prefix lists are unsupported (`process_require_spec`, `collect_use_namespaces`, and `diagnostics.rs` test `prefix_list_require_does_not_suppress` — read that test: it asserts the *lint* still flags `set/union` under a prefix list because the lint parser skips prefix lists; decide whether `resolves_prefix` should now see the expanded requires. It should: `NsMeta.requires` is what `resolves_prefix` reads, so the diagnostic disappears. Update that test to assert no flag and rename it.)
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `cargo test --test test_extractor && cargo test --lib diagnostics`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Expand prefix-list requires"`
+
+> Deviation: the plan expected `prefix_list_require_does_not_suppress` to flip to "no flag". It must not — a prefix list binds only the joined name (`clojure.set`), never the prefix, so `set/union` is genuinely unresolved in Clojure too. The test keeps its assertion, is renamed `prefix_list_binds_the_joined_name_only`, and gains coverage that `clojure.set/union` and a prefix-list `:as` alias do resolve.
+> Deviation: `collect_use_namespaces` also learned prefix lists, so `(:use (clojure set))` refers `clojure.set` — otherwise `:use` and `:require` would disagree about the same syntax.
 
 ### Task 4: `declare`
 

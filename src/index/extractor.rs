@@ -510,10 +510,10 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
 }
 
 /// Records one `:require` spec into `ns_meta`. Handles plain libspecs
-/// (`[a.b :as x]`), bare namespaces (`clojure.set`), and reader conditionals
+/// (`[a.b :as x]`), bare namespaces (`clojure.set`), legacy prefix lists
+/// (`(clojure [set :as s] string)`), and reader conditionals
 /// (`#?(:clj [a :as x])` / `#?@(:clj [[a :as x]])`) — every branch's aliases
-/// are recorded so conditional requires aren't reported as unresolved. (Legacy
-/// prefix-list libspecs `(clojure set)` are still not expanded.)
+/// are recorded so conditional requires aren't reported as unresolved.
 fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
     match spec.kind() {
         "vec_lit" => {
@@ -531,10 +531,45 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         "sym_lit" => ns_meta.requires.push(sym_text(spec, source).to_string()),
+        // Legacy prefix list `(clojure [set :as s] string)`: each entry is a
+        // libspec whose namespace is the prefix joined by a dot. The prefix
+        // itself binds nothing, so `set/union` stays unresolved — only
+        // `clojure.set/union` and the alias `s` resolve, as in Clojure.
+        "list_lit" => {
+            let items = named_children(spec);
+            let Some(prefix_node) = items.first() else {
+                return;
+            };
+            let is_prefix_list = prefix_node.kind() == "sym_lit"
+                && items.len() > 1
+                && items[1..]
+                    .iter()
+                    .all(|n| matches!(n.kind(), "sym_lit" | "vec_lit"));
+            if !is_prefix_list {
+                return;
+            }
+            let prefix = sym_text(*prefix_node, source).to_string();
+            for item in &items[1..] {
+                match item.kind() {
+                    "sym_lit" => {
+                        ns_meta
+                            .requires
+                            .push(format!("{}.{}", prefix, sym_text(*item, source)))
+                    }
+                    "vec_lit" => {
+                        let sub = named_children(*item);
+                        if sub.first().map(|n| n.kind()) == Some("sym_lit") {
+                            let ns_name = format!("{}.{}", prefix, sym_text(sub[0], source));
+                            parse_libspec_items(&sub, ns_name, source, ns_meta);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         // Reader conditional: descend into each branch's form (skip platform
-        // keywords). Other shapes (e.g. legacy prefix-lists `(clojure set)`)
-        // are unsupported and intentionally record nothing, so they don't
-        // mask real unresolved-namespace diagnostics.
+        // keywords). Reader conditionals nested inside a prefix list are out
+        // of scope and record nothing.
         "read_cond_lit" | "splicing_read_cond_lit" => {
             for child in named_children(spec) {
                 if child.kind() != "kwd_lit" {
@@ -551,8 +586,8 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
 /// a vector of specs, or each branch of a reader conditional — the same shapes
 /// [`process_require_spec`] accepts, so a conditional `:use` refers in full on
 /// every platform. `:only` is not narrowed: the whole namespace is referred,
-/// which over-offers rather than misses. Legacy prefix lists are no more
-/// expanded here than they are in `:require`.
+/// which over-offers rather than misses. Legacy prefix lists expand exactly as
+/// they do in `:require`, so `(:use (clojure set))` refers `clojure.set`.
 fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
     match spec.kind() {
         "sym_lit" => out.push(sym_text(spec, source).to_string()),
@@ -566,6 +601,29 @@ fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
                     }
                 }
                 _ => {}
+            }
+        }
+        "list_lit" => {
+            let items = named_children(spec);
+            let Some(prefix_node) = items.first() else {
+                return;
+            };
+            if prefix_node.kind() != "sym_lit" || items.len() < 2 {
+                return;
+            }
+            let prefix = sym_text(*prefix_node, source);
+            for item in &items[1..] {
+                let name = match item.kind() {
+                    "sym_lit" => Some(sym_text(*item, source)),
+                    "vec_lit" => named_children(*item)
+                        .first()
+                        .filter(|n| n.kind() == "sym_lit")
+                        .map(|n| sym_text(*n, source)),
+                    _ => None,
+                };
+                if let Some(name) = name {
+                    out.push(format!("{}.{}", prefix, name));
+                }
             }
         }
         "read_cond_lit" | "splicing_read_cond_lit" => {
@@ -678,15 +736,21 @@ fn process_import_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
 
 fn parse_require_vector(vec_node: Node, source: &str, ns_meta: &mut NsMeta) {
     let items: Vec<Node> = named_children(vec_node);
-    if items.is_empty() {
-        return;
-    }
-
-    let ns_name = if items[0].kind() == "sym_lit" {
-        sym_text(items[0], source).to_string()
-    } else {
+    let Some(first) = items.first() else {
         return;
     };
+    if first.kind() != "sym_lit" {
+        return;
+    }
+    let ns_name = sym_text(*first, source).to_string();
+    parse_libspec_items(&items, ns_name, source, ns_meta);
+}
+
+/// The options of a libspec whose namespace is already resolved. Split out so a
+/// prefix-list entry (`[set :as s]` under `(clojure …)`) is read with its joined
+/// name (`clojure.set`) without rewriting source text. `items` is the whole
+/// libspec, `items[0]` being the namespace symbol.
+fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &mut NsMeta) {
     // `:as-alias` binds an alias without loading the namespace, so the require
     // is only recorded once the options rule that out.
     let mut as_alias_only = false;

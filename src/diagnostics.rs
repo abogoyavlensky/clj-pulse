@@ -345,11 +345,17 @@ mod tests {
     }
 
     #[test]
-    fn prefix_list_require_does_not_suppress() {
-        // Legacy `(clojure set)` prefix-list is unsupported; `set/union` must
-        // still be flagged (the real namespace is clojure.set, not `set`).
+    fn prefix_list_binds_the_joined_name_only() {
+        // A prefix list expands to `clojure.set`; the prefix itself binds
+        // nothing, so `set/union` is as unresolved in Clojure as it is here.
         let src = "(ns my.app\n  (:require (clojure set)))\n(set/union #{} #{})\n";
         assert_eq!(codes(src), vec!["unresolved-namespace"]);
+
+        // The expanded namespace and a prefix-list alias both resolve.
+        let full = "(ns my.app\n  (:require (clojure set)))\n(clojure.set/union #{} #{})\n";
+        assert!(diags(full).is_empty(), "{:?}", diags(full));
+        let aliased = "(ns my.app\n  (:require (clojure [set :as s])))\n(s/union #{} #{})\n";
+        assert!(diags(aliased).is_empty(), "{:?}", diags(aliased));
     }
 
     #[test]

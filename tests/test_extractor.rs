@@ -1118,3 +1118,26 @@ fn test_ns_refer_rename_rebinds_name() {
         meta.refers
     );
 }
+
+#[test]
+fn test_ns_prefix_list_expanded() {
+    // Legacy prefix list: `(clojure [set :as s] string)` requires
+    // `clojure.set` (aliased `s`) and `clojure.string`.
+    let src = "(ns app\n  (:require (clojure [set :as s] string)))\n";
+    let (meta, _) = extract(src, Path::new("app.clj")).unwrap();
+
+    assert_eq!(
+        meta.aliases.get("s").map(String::as_str),
+        Some("clojure.set")
+    );
+    assert!(
+        meta.requires.contains(&"clojure.set".to_string()),
+        "requires: {:?}",
+        meta.requires
+    );
+    assert!(
+        meta.requires.contains(&"clojure.string".to_string()),
+        "requires: {:?}",
+        meta.requires
+    );
+}
