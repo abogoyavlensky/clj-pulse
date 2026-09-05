@@ -41,19 +41,40 @@ async function main() {
   );
 
   // 3. VS Code + Calva (shared extensions dir so the test run sees it)
-  const vscodeExecutablePath = await downloadAndUnzipVSCode("stable");
-  const extensionsDir = path.join(__dirname, ".vscode-test", "extensions");
-  const [cliPath, ...cliArgs] = resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath);
+  // Shared download cache with scripts/pulse-e2e; each harness keeps its own
+  // extensions and user-data dirs so the two never share editor state.
+  const vscodeExecutablePath = await downloadAndUnzipVSCode({
+    version: "stable",
+    cachePath: path.resolve(__dirname, "../.vscode-cache"),
+  });
+  // The shared cache holds only VS Code itself, so this harness's own state
+  // dir has to be created here — nothing else makes it on a fresh checkout.
+  const testDir = path.join(__dirname, ".vscode-test");
+  fs.mkdirSync(testDir, { recursive: true });
+  const extensionsDir = path.join(testDir, "extensions");
+  const userDataDir = path.join(testDir, "user-data");
+  const [cliPath, ...cliArgs] = resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath).filter(
+    (a) => !a.startsWith("--extensions-dir") && !a.startsWith("--user-data-dir")
+  );
 
-  const vsix = path.join(__dirname, ".vscode-test", "calva.vsix");
+  const vsix = path.join(testDir, "calva.vsix");
   if (!fs.existsSync(vsix)) {
     console.log("downloading Calva vsix…");
     cp.execSync(`curl -sL -o ${vsix} ${CALVA_VSIX_URL}`);
   }
-  cp.spawnSync(cliPath, [...cliArgs, "--extensions-dir", extensionsDir, "--install-extension", vsix], {
-    encoding: "utf-8",
-    stdio: "inherit",
-  });
+  cp.spawnSync(
+    cliPath,
+    [
+      ...cliArgs,
+      "--extensions-dir",
+      extensionsDir,
+      "--user-data-dir",
+      userDataDir,
+      "--install-extension",
+      vsix,
+    ],
+    { encoding: "utf-8", stdio: "inherit" }
+  );
 
   // 4. Run the checks inside the extension host
   await runTests({
@@ -64,6 +85,8 @@ async function main() {
       work,
       "--extensions-dir",
       extensionsDir,
+      "--user-data-dir",
+      userDataDir,
       "--disable-workspace-trust",
       "--disable-gpu",
       "--no-sandbox",

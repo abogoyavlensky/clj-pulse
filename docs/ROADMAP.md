@@ -56,7 +56,7 @@ baselines.
 
 Nothing below ships as "done" without these.
 
-- [ ] **Clojure Pulse e2e gate** (`bb e2e-pulse`). Mirror
+- [x] **Clojure Pulse e2e gate** (`bb e2e-pulse`). Mirror
       `scripts/calva-e2e/`: real VS Code under Xvfb, the packaged Clojure Pulse
       `.vsix` (built from `../clojure-pulse-vscode` when present, else the
       latest GitHub release), `clojurePulse.server.path` pointed at
@@ -66,11 +66,11 @@ Nothing below ships as "done" without these.
       diagnostics arrive. The extension repo already skips or
       runs its end-to-end suite on `CLJ_PULSE_E2E_BIN`; reuse that where it
       fits. Then add the gate to AGENTS.md's verification list.
-      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — in progress
-- [ ] **Docs accuracy sweep on every release**. README feature list,
+      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — done
+- [x] **Docs accuracy sweep on every release**. README feature list,
       AGENTS.md invariants, and this file agree with `ServerCapabilities`
       (`src/server.rs`). Add a checklist step to `docs/RELEASE.md`.
-      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — in progress
+      Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — done
 
 ## Milestone 1 — correctness of shipped features
 

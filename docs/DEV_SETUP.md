@@ -30,6 +30,11 @@ installs all of them (CI's `mise-action` reads the same file).
 - **Xvfb + real VS Code + real Calva** for `bb e2e-calva`: `xvfb` from the OS
   package manager, `npm install` in `scripts/calva-e2e`; the first run
   downloads VS Code + Calva (~150MB) into the gitignored `.vscode-test/`.
+- **Xvfb + real VS Code + the Clojure Pulse extension** for `bb e2e-pulse`:
+  `npm install` in `scripts/pulse-e2e`. VS Code is shared with the Calva gate
+  (`scripts/.vscode-cache/`); the extension is packaged from
+  `../clojure-pulse-vscode` when that checkout is present, else downloaded from
+  the latest release.
 
 ## Verifying changes headlessly
 
@@ -46,9 +51,12 @@ work" (see also the quick reference in [AGENTS.md](../AGENTS.md)):
   Neovim's built-in LSP client, `scripts/e2e_nvim.lua`).
 - `bb e2e-calva` — real VS Code + real Calva (`calva.clojureLspPath` → our
   binary) under Xvfb (`scripts/calva-e2e/`).
-- Clojure Pulse has no gate here yet (roadmap Milestone 0). Its own suite in
-  `../clojure-pulse-vscode` runs an end-to-end test against a server binary
-  when `CLJ_PULSE_E2E_BIN` is set:
+- `bb e2e-pulse` — real VS Code + the real Clojure Pulse extension
+  (`clojurePulse.server.path` → our binary) under Xvfb (`scripts/pulse-e2e/`):
+  project definition, `jar:` content through the extension's own
+  `clojure/dependencyContents` provider, hover, completion, and diagnostics.
+  The extension's own suite covers the other direction — it runs against a
+  server binary when `CLJ_PULSE_E2E_BIN` is set:
   `CLJ_PULSE_E2E_BIN=$PWD/target/debug/clj-pulse xvfb-run -a npx vscode-test -g "end to end"`.
 
 ## Why this matters
@@ -63,7 +71,8 @@ work" (see also the quick reference in [AGENTS.md](../AGENTS.md)):
   Returning clojure-lsp-style `jar:file:///…!/…` scalar `Location`s is all the
   server needs to do. Verified working via the Calva rig on 2026-06-12.
   **Clojure Pulse does the opposite:** its `jar:` provider asks the server via
-  `workspace/textDocumentContent`, so that request must keep working too.
+  `clojure/dependencyContents`, so that request must keep working too. Verified
+  by `bb e2e-pulse`.
 
 ## Related fixtures
 
