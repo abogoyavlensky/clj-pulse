@@ -2,7 +2,7 @@
   "Exercises the ns-form options: :as-alias, :refer-clojure, prefix lists."
   (:refer-clojure :exclude [update] :rename {map cmap})
   (:require [simple.config :as-alias cfg]
-            (clojure [string :as s])))
+            (simple [helpers :as h])))
 
 (declare only-declared)
 
@@ -14,8 +14,8 @@
 (defn port [system]
   (get system ::cfg/port))
 
-(defn shout [xs]
-  (s/upper-case (first (cmap str xs))))
+(defn shout [who]
+  (h/greet who))
 
 (defn update [m]
-  (defined-later m))
+  (cmap inc (defined-later m)))

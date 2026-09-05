@@ -208,15 +208,18 @@ Modify:
 **Files:**
 - Modify: `tests/test_e2e.rs`, `tests/fixtures/simple_project/src/ns_options.clj`
 
-- [ ] **Step 1: Add e2e tests**
+- [x] **Step 1: Add e2e tests**
   In the fixture file: an `:as-alias` require with a `::cfg/port` keyword whose definition exists as an Integrant key or keyword occurrence elsewhere in the fixture (check `integrant_project` for the pattern; a keyword's "definition" is its first occurrence or its `ig/init-key` defmethod). Tests: definition on `::cfg/port` resolves; completion of `cf` offers the `cfg` alias; definition on `cmap` lands on the curated core entry (hover shows `map`'s docstring); definition on a prefix-list alias usage works.
 
-- [ ] **Step 2: Run**
+- [x] **Step 2: Run**
   Run: `bb e2e`
   Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Cover ns-form options end to end"`
+
+> Deviation: hover on `cmap` needed `resolve_symbol` to fall back to the curated core entry when a refer names `clojure.core/<x>` that no indexed JAR provides — the plan assumed it already did. The same pass added the `core_excludes` gate to `resolve_symbol`'s core fallback (a codex P1 from Task 2): the plan's claim that `:exclude` "changes nothing for definition" holds only when the file also defines the name.
+> Deviation: the prefix-list e2e uses a project prefix list `(simple [helpers :as h])` rather than `clojure.string`, because the fixture's JAR classpath is never resolved in e2e (stage-3 CLI is disabled), so a `clojure.string` alias has nothing to navigate to.
 
 ### Task 6: prepareRename
 

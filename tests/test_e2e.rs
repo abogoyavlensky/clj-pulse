@@ -5826,3 +5826,91 @@ fn test_e2e_declare_defers_to_the_real_definition() {
         edits
     );
 }
+
+#[test]
+fn test_e2e_as_alias_keyword_navigates_and_completes() {
+    // `[simple.config :as-alias cfg]` binds `cfg` without requiring the
+    // namespace: `::cfg/port` resolves to its Integrant key, and the alias is
+    // offered in completion.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    let config = root.join("src/config.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "::cfg/port");
+    let result = client.goto_definition(&file, line, ch + 3);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.ends_with("/src/config.clj"), "got {}", uri);
+    let (key_line, _) = start_of(
+        &std::fs::read_to_string(&config).unwrap(),
+        "(defmethod ig/init-key ::port",
+    );
+    assert_eq!(result["range"]["start"]["line"], json!(key_line));
+
+    // Completion offers the alias itself.
+    let last_line = text.lines().count() as u32;
+    client.did_change_insert(&file, last_line, 0, "cf");
+    let items = client.completion(&file, last_line, 2);
+    let items = items["items"].as_array().unwrap_or_else(|| {
+        items
+            .as_array()
+            .unwrap_or_else(|| panic!("unexpected completion shape: {}", items))
+    });
+    let cfg = items
+        .iter()
+        .find(|i| i["label"] == json!("cfg"))
+        .unwrap_or_else(|| panic!("cfg alias not offered: {}", json!(items)));
+    assert_eq!(cfg["detail"], json!("alias for simple.config"));
+}
+
+#[test]
+fn test_e2e_refer_clojure_rename_hovers_core_doc() {
+    // `(:refer-clojure :rename {map cmap})` — `cmap` is `clojure.core/map`,
+    // so hover shows the curated core entry for `map`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "(cmap inc");
+    let hover = client.hover(&file, line, ch + 2);
+    let value = hover["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no hover for cmap: {}", hover));
+    assert!(
+        value.contains("map"),
+        "hover does not describe core map: {}",
+        value
+    );
+}
+
+#[test]
+fn test_e2e_definition_through_prefix_list_alias() {
+    // `(simple [helpers :as h])` — the prefix list binds `h` to
+    // `simple.helpers`, so `h/greet` navigates to helpers.clj.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "(h/greet who)");
+    let result = client.goto_definition(&file, line, ch + 4);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(uri.ends_with("/src/helpers.clj"), "got {}", uri);
+}
