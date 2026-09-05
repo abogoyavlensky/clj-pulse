@@ -33,7 +33,6 @@ then the editor features users notice as missing. Guiding decisions:
    status to `done`, and update README and AGENTS.md in the same change.
 3. **Reordering** is fine; say why in the commit message. New items go in the
    milestone they belong to, not at the end.
-4. Effort tags: **S** ≤ 1 day, **M** 2–5 days, **L** more than a week.
 
 ## Where we stand (September 2026, v0.3.0)
 
@@ -57,7 +56,7 @@ baselines.
 
 Nothing below ships as "done" without these.
 
-- [ ] **Clojure Pulse e2e gate** (`bb e2e-pulse`) — S/M. Mirror
+- [ ] **Clojure Pulse e2e gate** (`bb e2e-pulse`). Mirror
       `scripts/calva-e2e/`: real VS Code under Xvfb, the packaged Clojure Pulse
       `.vsix` (built from `../clojure-pulse-vscode` when present, else the
       latest GitHub release), `clojurePulse.server.path` pointed at
@@ -68,7 +67,7 @@ Nothing below ships as "done" without these.
       runs its end-to-end suite on `CLJ_PULSE_E2E_BIN`; reuse that where it
       fits. Then add the gate to AGENTS.md's verification list.
       Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — in progress
-- [ ] **Docs accuracy sweep on every release** — S. README feature list,
+- [ ] **Docs accuracy sweep on every release**. README feature list,
       AGENTS.md invariants, and this file agree with `ServerCapabilities`
       (`src/server.rs`). Add a checklist step to `docs/RELEASE.md`.
       Plan: [2026-09-05-1502-pulse-e2e-gate.md](plans/2026-09-05-1502-pulse-e2e-gate.md) — in progress
@@ -78,7 +77,7 @@ Nothing below ships as "done" without these.
 Small fixes that remove wrong answers. Each extractor change bumps
 `JarCacheEntry::format_version`.
 
-- [ ] **ns-form remainder** — S each.
+- [ ] **ns-form remainder**
   - [ ] `:as-alias` — record as an alias; keyword resolution works; never
         counts as an unused namespace.
   - [ ] `:refer-clojure :exclude` / `:rename` — verify first whether a project
@@ -89,11 +88,11 @@ Small fixes that remove wrong answers. Each extractor change bumps
         and references still resolve.
   - [ ] Prefix-list requires `(clojure set string)` — legacy, lowest.
   Plan: —
-- [ ] **`prepareRename`** — S. Advertise `prepareProvider: true`; return the
+- [ ] **`prepareRename`**. Advertise `prepareProvider: true`; return the
       token range for renameable symbols and a clean rejection (not a server
       error) for library, built-in, keyword, and `:keys`-destructured names.
       Plan: —
-- [ ] **Reliability floor** — S/M.
+- [ ] **Reliability floor**
   - [ ] Panic hook that logs to `server.log`; verify how tower-lsp behaves
         when a handler panics and make a panicking request fail alone.
   - [ ] Performance baseline: a `bb bench` task that indexes a large
@@ -108,16 +107,15 @@ Small fixes that remove wrong answers. Each extractor change bumps
 The feature users touch most; today it is prefix-only and fires only on
 identifier characters.
 
-- [ ] Trigger characters `:` and `/` in `CompletionOptions` — S.
-- [ ] Fuzzy matching — S. Extract the exact/prefix/substring/subsequence
+- [ ] Trigger characters `:` and `/` in `CompletionOptions`.
+- [ ] Fuzzy matching. Extract the exact/prefix/substring/subsequence
       matcher from `handlers/symbols.rs` into a shared module and use it in
       `handlers/completion.rs`.
-- [ ] Keyword completion from the occurrence index, current-ns keywords first
-      — S/M.
+- [ ] Keyword completion from the occurrence index, current-ns keywords first.
 - [ ] Auto-require on accept via `additionalTextEdits`, reusing the
-      add-require edit builder — M.
+      add-require edit builder.
 - [ ] `completionItem/resolve` for docstrings and signatures so long lists stay
-      cheap — S.
+      cheap.
   Plan: —
 
 ## Milestone 3 — editor chrome for Calva and Neovim
@@ -125,12 +123,12 @@ identifier characters.
 Cheap with the tree-sitter parse resident; their absence reads as
 "unfinished" in Neovim.
 
-- [ ] `textDocument/documentHighlight` — S. Reuse `local_references_at` and
+- [ ] `textDocument/documentHighlight`. Reuse `local_references_at` and
       the occurrence index; Read vs Write where cheap.
-- [ ] `textDocument/selectionRange` — S. Expand along the parse tree.
-- [ ] `textDocument/foldingRange` — S. Top-level forms, `(comment …)`, the ns
+- [ ] `textDocument/selectionRange`. Expand along the parse tree.
+- [ ] `textDocument/foldingRange`. Top-level forms, `(comment …)`, the ns
       form, multi-line collections.
-- [ ] **Keyword rename** — M. Rewrite each occurrence in its own notation
+- [ ] **Keyword rename**. Rewrite each occurrence in its own notation
       (`::kw`, `:ns/kw`, `::alias/kw`); include Integrant EDN files; refuse
       only when an occurrence can't be rewritten safely.
   Plan: —
@@ -139,52 +137,52 @@ Cheap with the tree-sitter parse resident; their absence reads as
 
 Each is small because the index already holds the data.
 
-- [ ] `textDocument/implementation` — S/M. defprotocol/defmulti →
+- [ ] `textDocument/implementation`. defprotocol/defmulti →
       deftype/defrecord/extend-*/reify/defmethod; the inverse of the
       impl→declaration navigation that exists.
-- [ ] Sort requires, as an extension of clean-ns — S.
-- [ ] `workspace/willRenameFiles` — S. Rewrite the `ns` form and every require
+- [ ] Sort requires, as an extension of clean-ns.
+- [ ] `workspace/willRenameFiles`. Rewrite the `ns` form and every require
       when a file moves.
-- [ ] Reference-count code lens, off by default — S.
+- [ ] Reference-count code lens, off by default.
   Plan: —
 
 ## Milestone 5 — public release
 
 - [ ] Windows build target restored in the release matrix (commented out for
-      CI time) — S, or documented as unsupported.
+      CI time), or documented as unsupported.
 - [ ] Settings documented in one place: every `.clj-pulse/config.edn` key with
-      its default and the matching Clojure Pulse setting — S.
+      its default and the matching Clojure Pulse setting.
 - [ ] Neovim setup verified against `bb e2e-nvim` and documented in README
-      (done in README; keep it true) — S.
-- [ ] Issue templates and a short contributing note — S.
+      (done in README; keep it true).
+- [ ] Issue templates and a short contributing note.
 - [ ] Version 1.0 tag once Milestones 0–3 are done.
   Plan: —
 
 ## Best effort — do when cheap or asked
 
 - **Native cljfmt-compatible formatter** (`textDocument/formatting` and
-  `rangeFormatting`) — L. Wanted for Neovim and Zed; Clojure Pulse formats
+  `rangeFormatting`). Wanted for Neovim and Zed; Clojure Pulse formats
   client-side today. Compatibility bar: byte-identical to cljfmt on
   cljfmt-formatted sources, idempotent, honors `.cljfmt.edn`. A `cljfmt`
   native-binary bridge (same pattern as clj-kondo) is the cheaper interim if
   demand appears first.
-- **ClojureScript** — M. `:require-macros` / `:refer-macros` parsing,
+- **ClojureScript**. `:require-macros` / `:refer-macros` parsing,
   `goog.*` prefixes, shadow-cljs classpath (`shadow-cljs.edn` `:dependencies`
   need Maven resolution, the same problem as Leiningen transitive deps).
 - **Zed** — Zed formats and highlights via LSP and tree-sitter; the formatter
   above is what it needs most.
-- **Semantic tokens** — M. Calva and Zed highlight without them; lowest of the
+- **Semantic tokens**. Calva and Zed highlight without them; lowest of the
   chrome items.
-- **Refactor set as `executeCommand`** — M each: extract function, inline
+- **Refactor set as `executeCommand`**: extract function, inline
   symbol, thread/unthread, move-to-let, cycle privacy. Build one
   "edit a form, preserve formatting" helper first.
-- **Library-wide occurrence index** — M. Truthful references from inside deps;
+- **Library-wide occurrence index**. Truthful references from inside deps;
   gate behind a setting, lazy per JAR.
 - **Leiningen transitive deps** — see [MEMORY.md](MEMORY.md); opt-in
   `lein classpath` at most.
-- **re-frame keyword registrations** (`reg-sub`/`reg-event-*` as definitions)
-  — M; the Integrant machinery is the template.
-- **CLI mode** (`clj-pulse clean-ns|lint`) for CI — S once the features exist.
+- **re-frame keyword registrations** (`reg-sub`/`reg-event-*` as definitions);
+  the Integrant machinery is the template.
+- **CLI mode** (`clj-pulse clean-ns|lint`) for CI, once the features exist.
 - **Persistent project analysis cache** — only if a monorepo shows the need.
 - **Custom macros beyond `:lint-as`** (multi-name macros) — consider clj-kondo
   hook metadata as a config source, never by running hook code.
