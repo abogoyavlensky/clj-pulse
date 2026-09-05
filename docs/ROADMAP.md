@@ -87,11 +87,11 @@ Small fixes that remove wrong answers. Each extractor change bumps
   - [ ] `declare` — index as a declaration so definition prefers the real def
         and references still resolve.
   - [ ] Prefix-list requires `(clojure set string)` — legacy, lowest.
-  Plan: —
+  Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — in progress
 - [ ] **`prepareRename`**. Advertise `prepareProvider: true`; return the
       token range for renameable symbols and a clean rejection (not a server
       error) for library, built-in, keyword, and `:keys`-destructured names.
-      Plan: —
+      Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — in progress
 - [ ] **Reliability floor**
   - [ ] Panic hook that logs to `server.log`; verify how tower-lsp behaves
         when a handler panics and make a panicking request fail alone.
@@ -100,7 +100,7 @@ Small fixes that remove wrong answers. Each extractor change bumps
         lint latency. Fix cliffs it finds.
   - [ ] Malformed-input pass: unbalanced buffers, huge single lines, non-UTF-8
         files, empty `deps.edn`. Every handler returns, none panics.
-  Plan: —
+  Plan: [2026-09-05-1537-reliability-floor.md](plans/2026-09-05-1537-reliability-floor.md) — in progress
 
 ## Milestone 2 — completion quality
 
