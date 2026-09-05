@@ -31,13 +31,15 @@ function capture(cmd, cwd) {
 /**
  * Packages the sibling checkout, reusing the last .vsix when HEAD is unchanged
  * and its tree is clean — a dirty tree is repackaged every run so local
- * extension edits are actually under test.
+ * extension edits are actually under test, and under its own name so reverting
+ * those edits never leaves a dirty build sitting at the clean-HEAD path.
  */
 function packageLocalExtension() {
   const pkg = JSON.parse(fs.readFileSync(path.join(EXT_CHECKOUT, "package.json"), "utf-8"));
   const sha = capture("git rev-parse --short HEAD", EXT_CHECKOUT);
   const dirty = capture("git status --porcelain", EXT_CHECKOUT) !== "";
-  const vsix = path.join(TEST_DIR, `clojure-pulse-${pkg.version}-${sha}.vsix`);
+  const name = `clojure-pulse-${pkg.version}-${sha}${dirty ? "-dirty" : ""}.vsix`;
+  const vsix = path.join(TEST_DIR, name);
 
   if (fs.existsSync(vsix) && !dirty) {
     return vsix;
@@ -119,8 +121,12 @@ async function main() {
     (a) => !a.startsWith("--extensions-dir") && !a.startsWith("--user-data-dir")
   );
 
+  // --force so an older .vsix (the release fallback, an explicit
+  // $CLJ_PULSE_VSIX) replaces a newer one left in the persistent extensions
+  // dir; without it VS Code refuses the downgrade and the tests would silently
+  // run against the extension from a previous run.
   const vsix = resolveVsix();
-  cp.spawnSync(
+  const install = cp.spawnSync(
     cliPath,
     [
       ...cliArgs,
@@ -130,9 +136,16 @@ async function main() {
       userDataDir,
       "--install-extension",
       vsix,
+      "--force",
     ],
     { encoding: "utf-8", stdio: "inherit" }
   );
+  if (install.error) {
+    throw install.error;
+  }
+  if (install.status !== 0) {
+    throw new Error(`installing ${path.basename(vsix)} failed with exit code ${install.status}`);
+  }
 
   // 4. Run the checks inside the extension host
   await runTests({
