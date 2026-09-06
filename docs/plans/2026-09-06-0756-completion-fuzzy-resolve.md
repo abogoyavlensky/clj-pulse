@@ -145,21 +145,21 @@ Modify:
 - Modify: `src/server.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   `test_e2e_completion_capabilities`: `initialize` result has `completionProvider.triggerCharacters == ["/"]` and `resolveProvider == true`. `test_e2e_completion_after_slash_trigger`: completion at the position right after `core/` (empty name prefix) returns `core/add`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e completion_capabilities`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Set `trigger_characters` in `CompletionOptions`.
 
-- [ ] **Step 4: Run every gate**
+- [x] **Step 4: Run every gate**
   Run: `bb check && bb e2e && bb e2e-nvim && bb e2e-pulse`
   Expected: PASS. The nvim run proves the changed `completionProvider` shape negotiates; the Pulse run proves VS Code still completes through the extension.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Trigger completion on / and advertise resolve"`
 
 ### Task 5: Docs and roadmap
