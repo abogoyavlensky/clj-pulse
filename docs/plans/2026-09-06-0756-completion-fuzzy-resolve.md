@@ -114,6 +114,8 @@ Modify:
 - [x] **Step 5: Commit**
   `git commit -m "Rank completion candidates by match tier and pool"`
 
+> Deviation: `handle` now answers `CompletionList { is_incomplete: true }` instead of `CompletionResponse::Array` (codex review, approved by the user). With a complete list the client filters its cache, so a candidate the guardrails withhold at `d` never appears at `dd`, and namespaces past the cap stay unreachable. `LspClient::completion_items` reads through `items` in the e2e tests.
+
 ### Task 3: Resolve
 
 **Files:**

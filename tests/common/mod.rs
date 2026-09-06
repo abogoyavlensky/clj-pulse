@@ -501,6 +501,11 @@ impl LspClient {
         self.completion(path, line, character)["items"].clone()
     }
 
+    /// `completionItem/resolve` for one item of a completion response.
+    pub fn completion_resolve(&mut self, item: Value) -> Value {
+        self.request("completionItem/resolve", item)
+    }
+
     /// Incremental edit: inserts `text` at (line, character), version bump.
     pub fn did_change_insert(&mut self, path: &Path, line: u32, character: u32, text: &str) {
         self.notify(

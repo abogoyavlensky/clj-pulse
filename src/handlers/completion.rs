@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
+use serde_json::json;
+
 use super::builtins;
 use super::matching::match_score;
 use crate::document::DocumentStore;
@@ -271,7 +273,12 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
         if index.letgo_core() {
             for sf in builtins::special_forms(true) {
                 if let Some(tier) = matched(sf.name, prefix, Pool::Core) {
-                    push(&mut items, special_form_to_completion(sf), tier, Pool::Core);
+                    push(
+                        &mut items,
+                        special_form_to_completion(sf, true),
+                        tier,
+                        Pool::Core,
+                    );
                 }
             }
             // Native (Go `ns.Def`) names: the set harvested from this let-go
@@ -334,7 +341,12 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             // Clojure special forms aren't clojure.core vars, so offer them too.
             for sf in builtins::special_forms(false) {
                 if let Some(tier) = matched(sf.name, prefix, Pool::Core) {
-                    push(&mut items, special_form_to_completion(sf), tier, Pool::Core);
+                    push(
+                        &mut items,
+                        special_form_to_completion(sf, false),
+                        tier,
+                        Pool::Core,
+                    );
                 }
             }
         }
@@ -474,15 +486,17 @@ fn symbol_to_completion(sym: &crate::index::Symbol, alias: Option<&str>) -> Comp
     CompletionItem {
         label,
         detail: Some(format!("{} ({})", sym.ns, params_display(&sym.params))),
-        documentation: sym.doc.as_ref().map(|d| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: d.clone(),
-            })
-        }),
         kind: Some(defkind_to_completion_kind(&sym.kind)),
+        data: sym
+            .doc
+            .as_ref()
+            .map(|_| json!({ "src": "symbol", "fqn": sym.fqn })),
         ..Default::default()
     }
+}
+
+fn symbol_documentation(sym: &crate::index::Symbol) -> Option<Documentation> {
+    sym.doc.as_deref().map(markdown)
 }
 
 /// A `:refer`red name whose namespace is not indexed yet: the user named it in
@@ -502,28 +516,22 @@ fn core_symbol_to_completion(sym: &crate::index::CoreSymbol) -> CompletionItem {
     CompletionItem {
         label: sym.name.clone(),
         detail: Some(format!("clojure.core ({})", sym.params)),
-        documentation: if sym.doc.is_empty() {
-            None
-        } else {
-            Some(Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: sym.doc.clone(),
-            }))
-        },
         kind: Some(CompletionItemKind::FUNCTION),
+        data: core_documentation(sym).map(|_| json!({ "src": "core", "name": sym.name })),
         ..Default::default()
     }
 }
 
-fn special_form_to_completion(sf: &builtins::SpecialForm) -> CompletionItem {
+fn core_documentation(sym: &CoreSymbol) -> Option<Documentation> {
+    (!sym.doc.is_empty()).then(|| markdown(&sym.doc))
+}
+
+fn special_form_to_completion(sf: &builtins::SpecialForm, letgo: bool) -> CompletionItem {
     CompletionItem {
         label: sf.name.to_string(),
         detail: Some(format!("special form {}", sf.usage)),
-        documentation: Some(Documentation::MarkupContent(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: sf.doc.to_string(),
-        })),
         kind: Some(CompletionItemKind::KEYWORD),
+        data: Some(json!({ "src": "special", "name": sf.name, "letgo": letgo })),
         ..Default::default()
     }
 }
@@ -541,15 +549,54 @@ fn letgo_native_to_completion(name: &str, core: Option<&CoreSymbol>) -> Completi
     CompletionItem {
         label: name.to_string(),
         detail: Some(detail),
-        documentation: core.filter(|c| !c.doc.is_empty()).map(|c| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: c.doc.clone(),
-            })
-        }),
         kind: Some(CompletionItemKind::FUNCTION),
+        data: core
+            .and_then(core_documentation)
+            .map(|_| json!({ "src": "native", "name": name })),
         ..Default::default()
     }
+}
+
+/// Fills in the documentation of the one item the client is about to show,
+/// from the `data` its builder attached. Items with no `data`, and data that
+/// names nothing this index holds, come back untouched.
+pub fn resolve(index: &Index, item: CompletionItem) -> CompletionItem {
+    let Some(documentation) = item
+        .data
+        .as_ref()
+        .and_then(|data| documentation_for(index, data))
+    else {
+        return item;
+    };
+    CompletionItem {
+        documentation: Some(documentation),
+        ..item
+    }
+}
+
+fn documentation_for(index: &Index, data: &serde_json::Value) -> Option<Documentation> {
+    let name = || data.get("name")?.as_str();
+    match data.get("src")?.as_str()? {
+        "symbol" => symbol_documentation(&index.lookup(data.get("fqn")?.as_str()?)?),
+        // A let-go native borrows its doc from the clojure.core table, the same
+        // table the `core` source reads.
+        "core" | "native" => {
+            let name = name()?;
+            core_documentation(index.core_symbols.iter().find(|c| c.name == name)?)
+        }
+        "special" => {
+            let letgo = data.get("letgo").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(markdown(builtins::special_form(name()?, letgo)?.doc))
+        }
+        _ => None,
+    }
+}
+
+fn markdown(value: &str) -> Documentation {
+    Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: value.to_string(),
+    })
 }
 
 fn defkind_to_completion_kind(kind: &DefKind) -> CompletionItemKind {

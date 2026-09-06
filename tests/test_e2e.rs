@@ -1051,6 +1051,44 @@ fn test_e2e_completion_list_is_incomplete() {
 }
 
 #[test]
+fn test_e2e_completion_resolve_adds_documentation() {
+    // Items travel without documentation; the client asks for it per item.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let items = client.completion_items(&utils, line, ch);
+    let item = items
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .find(|i| i["label"] == "core/add")
+        .unwrap_or_else(|| panic!("core/add not offered: {}", items))
+        .clone();
+    assert!(
+        item["documentation"].is_null(),
+        "documentation sent up front: {}",
+        item
+    );
+
+    let resolved = client.completion_resolve(item);
+    let doc = resolved["documentation"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no documentation after resolve: {}", resolved));
+    assert!(
+        doc.contains("Adds two numbers"),
+        "unexpected documentation: {}",
+        doc
+    );
+}
+
+#[test]
 fn test_e2e_completion_bare_prefix_in_current_ns() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
