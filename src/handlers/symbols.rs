@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
+use super::matching::match_score;
 use crate::document::DocumentStore;
 use crate::index::{extractor, DefKind, Index, Symbol, SymbolSource};
 
@@ -112,30 +113,6 @@ pub fn workspace_symbols(index: &Index, query: &str) -> Vec<SymbolInformation> {
         .collect()
 }
 
-/// Match tiers: exact (0) > prefix (1) > substring (2) > subsequence (3).
-/// `None` means no match. An empty query matches everything.
-fn match_score(name: &str, query: &str) -> Option<u8> {
-    if query.is_empty() {
-        return Some(3);
-    }
-    if name == query {
-        Some(0)
-    } else if name.starts_with(query) {
-        Some(1)
-    } else if name.contains(query) {
-        Some(2)
-    } else if is_subsequence(query, name) {
-        Some(3)
-    } else {
-        None
-    }
-}
-
-fn is_subsequence(needle: &str, haystack: &str) -> bool {
-    let mut chars = haystack.chars();
-    needle.chars().all(|n| chars.any(|h| h == n))
-}
-
 fn defkind_to_symbol_kind(kind: &DefKind) -> SymbolKind {
     match kind {
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro | DefKind::Defmulti => {
@@ -148,30 +125,5 @@ fn defkind_to_symbol_kind(kind: &DefKind) -> SymbolKind {
         // A deftest defines a fn var; the editor's outline shows it as one.
         DefKind::Deftest => SymbolKind::FUNCTION,
         DefKind::IntegrantKey => SymbolKind::KEY,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_match_score_tiers() {
-        assert_eq!(match_score("add", "add"), Some(0));
-        assert_eq!(match_score("add-and-double", "add"), Some(1));
-        assert_eq!(match_score("re-add", "add"), Some(2));
-        assert_eq!(match_score("a-d-d", "add"), Some(3));
-        assert_eq!(match_score("multiply", "add"), None);
-    }
-
-    #[test]
-    fn test_match_score_empty_query_matches_all() {
-        assert_eq!(match_score("anything", ""), Some(3));
-    }
-
-    #[test]
-    fn test_is_subsequence() {
-        assert!(is_subsequence("aad", "add-and-double"));
-        assert!(!is_subsequence("xyz", "add"));
     }
 }
