@@ -1051,6 +1051,61 @@ fn test_e2e_completion_list_is_incomplete() {
 }
 
 #[test]
+fn test_e2e_completion_capabilities() {
+    // `/` retriggers completion after an alias, and documentation is fetched
+    // per item — both have to reach the client through `initialize`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let result = client.initialize(&root);
+
+    let provider = &result["capabilities"]["completionProvider"];
+    assert_eq!(
+        provider["triggerCharacters"],
+        serde_json::json!(["/"]),
+        "completion trigger characters: {}",
+        provider
+    );
+    assert_eq!(
+        provider["resolveProvider"], true,
+        "completion resolve provider: {}",
+        provider
+    );
+}
+
+#[test]
+fn test_e2e_completion_after_slash_trigger() {
+    // Typing the trigger character: the cursor sits right after `core/`, so the
+    // name prefix is empty and the whole namespace is offered.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    // Type the alias and the trigger character, nothing more.
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(core/");
+    let items = client.completion_items(&utils, last_line, 6);
+
+    let labels: Vec<&str> = items
+        .as_array()
+        .expect("expected CompletionItem array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"core/add"),
+        "expected core/add right after the slash, got {:?}",
+        labels
+    );
+}
+
+#[test]
 fn test_e2e_completion_resolve_adds_documentation() {
     // Items travel without documentation; the client asks for it per item.
     let project = setup_project();

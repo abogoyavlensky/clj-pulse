@@ -122,21 +122,21 @@ Modify:
 - Modify: `src/handlers/completion.rs`, `src/server.rs`
 - Test: `tests/test_completion.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Unit: `test_items_carry_data_not_documentation` (a `symbol` item from `complete_symbols` has `data` and no `documentation`), `test_resolve_fills_symbol_documentation`, `test_resolve_fills_core_documentation`, `test_resolve_fills_special_form_documentation`, `test_resolve_fills_letgo_native_documentation` (a let-go index; see how `test_completion.rs` builds one, or add a minimal case), `test_resolve_passes_unknown_item_through`, and `test_resolve_ignores_malformed_data` (`data` that is a string, or an object missing `src`). The existing `test_completion_item_has_doc_and_detail` in `tests/test_completion.rs` asserts documentation on the initial item; change it to assert `detail` on the item and documentation after `resolve`. e2e: add a `completion_resolve(item: Value) -> Value` helper to `LspClient`; `test_e2e_completion_resolve_adds_documentation` requests completion on `core/ad`, picks `core/add`, asserts no `documentation`, resolves it, asserts `documentation.value` contains the docstring from `core.clj`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_completion resolve && cargo test --test test_e2e completion_resolve`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Split the builders, add `data`, write `resolve`, wire `completion_resolve` in `server.rs`, set `resolve_provider: Some(true)`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Defer completion documentation to completionItem/resolve"`
 
 ### Task 4: `/` trigger and client gates
