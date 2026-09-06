@@ -1,5 +1,7 @@
 # Completion Core: Fuzzy Matching, Resolve, `/` Trigger Implementation Plan
 
+**Status: complete.**
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make completion rank like a modern editor expects: fuzzy candidate matching with tiered ranking, lazy documentation through `completionItem/resolve`, and `/` as a trigger character (ROADMAP Milestone 2, part 1 of 2).
@@ -167,10 +169,59 @@ Modify:
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   README Autocomplete bullet: fuzzy matching and ranking, docs loaded on demand. AGENTS.md invariants: one line that `sort_text` is `tier-pool-name` and every pool goes through `handlers::matching`. ROADMAP Milestone 2: tick the trigger-`/` half of the trigger item (leave `:` for the next plan), fuzzy matching, and resolve. Use /writing-clearly.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Document fuzzy completion and resolve"`
+
+---
+
+## Completion summary
+
+All five tasks are implemented and committed (`caf485e`, `ea48994`, `77b89b5`,
+`3a3e499`, `3f5aa00`, `c370db7`).
+
+- `handlers::matching` now owns `match_score`/`is_subsequence` and their tests;
+  `symbols.rs` and every completion pool call it.
+- Completion items carry `sort_text` of `tier-pool-name`. `tier_allowed` keeps a
+  one-character prefix a prefix search and keeps subsequence out of the
+  namespace pool, which is also capped at 50 after sorting by tier then name.
+- Items travel without `documentation`. Their `data` names the source
+  (`symbol`, `core`, `special`, `native`) and `completion::resolve` renders the
+  doc when the client asks; unknown or malformed `data` returns the item as-is.
+- `CompletionOptions` advertises `triggerCharacters: ["/"]` and
+  `resolveProvider: true`.
+
+Gates: `bb check`, `bb e2e`, `bb e2e-nvim` and `bb e2e-pulse` all pass. Codex
+reviewed each commit; only the one finding below was actionable. A manual drive
+of the real binary confirmed the whole path: typing `dd` in `simple.utils`
+offers `add-and-double` (`sortText` `2-1-add-and-double`) ahead of the
+`clojure.core` substring matches, with no documentation until
+`completionItem/resolve` returns "Adds two numbers then doubles the result."
+
+### Deviations
+
+> Task 2: `handle` answers `CompletionList { is_incomplete: true }` instead of
+> `CompletionResponse::Array` (codex finding, approved by the user). A complete
+> list lets the client filter its cache, so a candidate the guardrails withhold
+> at `d` would never appear at `dd`, and namespaces past the cap would stay
+> unreachable. `LspClient::completion_items` reads through `items`, and
+> `test_e2e_completion_list_is_incomplete` pins the shape.
+
+> Task 2: the new unit tests are named `test_fuzzy_*` so the plan's own
+> `cargo test --test test_completion fuzzy` selects them.
+
+> Task 4: `test_e2e_completion_after_slash_trigger` types `(core/` on a fresh
+> last line instead of using `position_of("core/add")`. `word_at` returns the
+> whole word around the cursor, so a position inside an existing `core/add`
+> yields the name prefix `add`, not the empty prefix the trigger case is about.
+
+### What the plan could have specified better
+
+The `isIncomplete` question. The plan changed which candidates a single request
+returns without saying what the response promises the client, and that promise
+is what decides whether fuzzy matching is reachable while typing. A plan that
+loosens matching should state the response shape alongside it.
