@@ -136,7 +136,7 @@ identifier characters.
       add-require edit builder.
 - [ ] `completionItem/resolve` for docstrings and signatures so long lists stay
       cheap.
-  Plan: —
+  Plan: [2026-09-06-0756-completion-fuzzy-resolve.md](plans/2026-09-06-0756-completion-fuzzy-resolve.md) — in progress (trigger `/`, fuzzy, resolve); [2026-09-06-0757-completion-keywords-auto-require.md](plans/2026-09-06-0757-completion-keywords-auto-require.md) — in progress (trigger `:`, keywords, auto-require)
 
 ## Milestone 3 — editor chrome for Calva and Neovim
 
