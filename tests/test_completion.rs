@@ -223,3 +223,121 @@ fn test_core_exclude_hides_core_symbol() {
         labels(&items)
     );
 }
+
+/// A plain project defn, so tests can hand-build a namespace's symbol set.
+fn defn_sym(name: &str, ns: &str) -> Symbol {
+    Symbol {
+        name: name.to_string(),
+        fqn: format!("{}/{}", ns, name),
+        ns: ns.to_string(),
+        kind: DefKind::Defn,
+        params: vec!["[x]".to_string()],
+        doc: None,
+        file: PathBuf::from(format!("{}.clj", ns)),
+        source: SymbolSource::Project,
+        range: Range::default(),
+        name_range: Range::default(),
+        private: false,
+    }
+}
+
+#[test]
+fn test_fuzzy_substring_match() {
+    // `dd` matches `add` in the middle: a tier-2 (substring) hit from the
+    // current-namespace pool (1).
+    let index = build_test_index();
+    let items = complete_symbols(&index, "dd", "simple.core");
+    let add = items
+        .iter()
+        .find(|i| i.label == "add")
+        .unwrap_or_else(|| panic!("add not offered for `dd`: {:?}", labels(&items)));
+    assert_eq!(add.sort_text.as_deref(), Some("2-1-add"));
+}
+
+#[test]
+fn test_fuzzy_subsequence_ranks_below_prefix() {
+    // `add` prefix-matches `add-more` (tier 1) and subsequence-matches `a-d-d`
+    // (tier 3); both live in the current namespace, so sort_text orders them.
+    let index = Index::new();
+    index.insert_file(
+        ns_meta("a.x"),
+        vec![defn_sym("add-more", "a.x"), defn_sym("a-d-d", "a.x")],
+        vec![],
+    );
+
+    let items = complete_symbols(&index, "add", "a.x");
+    let sort_text = |label: &str| -> String {
+        items
+            .iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("{} not offered: {:?}", label, labels(&items)))
+            .sort_text
+            .clone()
+            .unwrap_or_else(|| panic!("{} has no sort_text", label))
+    };
+    let prefix = sort_text("add-more");
+    let subsequence = sort_text("a-d-d");
+    assert!(
+        prefix < subsequence,
+        "prefix match must rank first: {} vs {}",
+        prefix,
+        subsequence
+    );
+}
+
+#[test]
+fn test_fuzzy_single_char_prefix_is_prefix_only() {
+    // One character is too little to fuzzy-match on: `d` stays a prefix search,
+    // so `add` (a substring hit) is not offered.
+    let index = build_test_index();
+    let items = complete_symbols(&index, "d", "simple.core");
+    assert!(
+        !items.iter().any(|i| i.label == "add"),
+        "single-char prefix fuzzy-matched: {:?}",
+        labels(&items)
+    );
+}
+
+#[test]
+fn test_fuzzy_namespace_pool_is_capped() {
+    // Substring matching over namespaces would offer every library namespace
+    // sharing the typed text; the pool is capped.
+    let index = Index::new();
+    for i in 0..60 {
+        index.insert_file(ns_meta(&format!("lib{:02}.widget", i)), vec![], vec![]);
+    }
+    index.insert_file(ns_meta("a.x"), vec![], vec![]);
+
+    let items = complete_symbols(&index, "widget", "a.x");
+    let namespaces = items
+        .iter()
+        .filter(|i| i.detail.as_deref() == Some("namespace"))
+        .count();
+    assert!(
+        namespaces > 0 && namespaces <= 50,
+        "namespace pool not capped: {} items",
+        namespaces
+    );
+}
+
+#[test]
+fn test_fuzzy_namespace_pool_skips_subsequence() {
+    // `str` subsequence-matches hundreds of library namespaces; only prefix and
+    // substring hits are namespace candidates.
+    let index = Index::new();
+    index.insert_file(ns_meta("s.t.r"), vec![], vec![]);
+    index.insert_file(ns_meta("clojure.string"), vec![], vec![]);
+    index.insert_file(ns_meta("a.x"), vec![], vec![]);
+
+    let names = labels(&complete_symbols(&index, "str", "a.x"));
+    assert!(
+        names.contains(&"clojure.string".to_string()),
+        "substring namespace missing: {:?}",
+        names
+    );
+    assert!(
+        !names.contains(&"s.t.r".to_string()),
+        "subsequence namespace offered: {:?}",
+        names
+    );
+}
