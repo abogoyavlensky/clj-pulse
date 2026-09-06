@@ -342,7 +342,7 @@ fn test_e2e_letgo_completion_harvests_native_vars_from_lang_go() {
 
     let last_line = std::fs::read_to_string(&app).unwrap().lines().count() as u32;
     client.did_change_insert(&app, last_line, 0, "(*comm");
-    let result = client.completion(&app, last_line, 6);
+    let result = client.completion_items(&app, last_line, 6);
 
     let items = result.as_array().expect("expected CompletionItem array");
     let item = items
@@ -710,7 +710,7 @@ fn test_e2e_completion_local_in_let() {
     // and `scaled` are in scope.
     let (bl, bc) = start_of(&text, "(+ base");
     client.did_change_insert(&locals, bl, bc, "ba");
-    let result = client.completion(&locals, bl, bc + 2);
+    let result = client.completion_items(&locals, bl, bc + 2);
 
     let items = result.as_array().expect("expected CompletionItem array");
     let base = items
@@ -917,7 +917,7 @@ fn test_e2e_java_completion_and_signature() {
     // Static-member completion: `Greeter/g` → `Greeter/greet` (labelled with the
     // class prefix so the editor's `Class/...` filter keeps it).
     client.did_change_insert(&probe, base, 0, "Greeter/g\n");
-    let comp = client.completion(&probe, base, 9);
+    let comp = client.completion_items(&probe, base, 9);
     let labels: Vec<&str> = comp
         .as_array()
         .expect("completion array")
@@ -931,7 +931,7 @@ fn test_e2e_java_completion_and_signature() {
 
     // Class-name completion: PascalCase `Gr` → Greeter.
     client.did_change_insert(&probe, base + 1, 0, "Gr\n");
-    let comp2 = client.completion(&probe, base + 1, 2);
+    let comp2 = client.completion_items(&probe, base + 1, 2);
     let labels2: Vec<&str> = comp2
         .as_array()
         .expect("completion array")
@@ -1005,7 +1005,7 @@ fn test_e2e_completion_with_alias_prefix() {
     client.did_open(&utils);
 
     let (line, ch) = position_of(&utils, "core/add");
-    let result = client.completion(&utils, line, ch);
+    let result = client.completion_items(&utils, line, ch);
 
     assert!(!result.is_null(), "completion returned null");
     let labels: Vec<&str> = result
@@ -1018,6 +1018,35 @@ fn test_e2e_completion_with_alias_prefix() {
         labels.contains(&"core/add"),
         "expected core/add in completions, got {:?}",
         labels
+    );
+}
+
+#[test]
+fn test_e2e_completion_list_is_incomplete() {
+    // Fuzzy tiers and the namespace cap mean a longer prefix can yield
+    // candidates the current list lacks, so the server must not let the client
+    // filter its cache instead of asking again.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let result = client.completion(&utils, line, ch);
+
+    assert_eq!(
+        result["isIncomplete"], true,
+        "completion list must be incomplete: {}",
+        result
+    );
+    assert!(
+        result["items"].is_array(),
+        "completion items missing: {}",
+        result
     );
 }
 
@@ -1035,7 +1064,7 @@ fn test_e2e_completion_bare_prefix_in_current_ns() {
     // Type a partial bare symbol and complete it
     let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
     client.did_change_insert(&utils, last_line, 0, "(add-an");
-    let result = client.completion(&utils, last_line, 7);
+    let result = client.completion_items(&utils, last_line, 7);
 
     let labels: Vec<&str> = result
         .as_array()
@@ -1063,7 +1092,7 @@ fn test_e2e_completion_clojure_core_builtins() {
 
     let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
     client.did_change_insert(&utils, last_line, 0, "(redu");
-    let result = client.completion(&utils, last_line, 5);
+    let result = client.completion_items(&utils, last_line, 5);
 
     let items = result.as_array().expect("expected CompletionItem array");
     let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
@@ -1112,7 +1141,7 @@ fn test_e2e_completion_from_jar_library() {
     client.did_open(&consumer);
 
     client.did_change_insert(&consumer, 2, 0, "(u/hel");
-    let result = client.completion(&consumer, 2, 6);
+    let result = client.completion_items(&consumer, 2, 6);
 
     let labels: Vec<&str> = result
         .as_array()
@@ -1216,7 +1245,7 @@ fn test_e2e_deftest_outline_and_completion() {
     // Completion of a fresh `(deft` offers the referred macros.
     let last_line = text.lines().count() as u32;
     client.did_change_insert(&test_file, last_line, 0, "(deft");
-    let result = client.completion(&test_file, last_line, 5);
+    let result = client.completion_items(&test_file, last_line, 5);
     let labels: Vec<&str> = result
         .as_array()
         .expect("CompletionItem array")
@@ -1274,7 +1303,7 @@ fn test_e2e_deftest_refer_all_completion() {
 
     let last_line = text.lines().count() as u32;
     client.did_change_insert(&test_file, last_line, 0, "(deft");
-    let result = client.completion(&test_file, last_line, 5);
+    let result = client.completion_items(&test_file, last_line, 5);
     let labels: Vec<&str> = result
         .as_array()
         .expect("CompletionItem array")
@@ -1347,7 +1376,7 @@ fn test_e2e_leiningen_navigation_into_m2_jar() {
     client.did_open(&consumer);
 
     client.did_change_insert(&consumer, 2, 0, "(u/hel");
-    let result = client.completion(&consumer, 2, 6);
+    let result = client.completion_items(&consumer, 2, 6);
 
     let labels: Vec<&str> = result
         .as_array()
@@ -1468,7 +1497,7 @@ fn test_e2e_completion_from_directory_library() {
     client.did_open(&consumer);
 
     client.did_change_insert(&consumer, 2, 0, "(u/hel");
-    let result = client.completion(&consumer, 2, 6);
+    let result = client.completion_items(&consumer, 2, 6);
 
     let labels: Vec<&str> = result
         .as_array()
@@ -1515,7 +1544,7 @@ fn test_e2e_completion_namespaces_and_aliases() {
 
     // Namespace completion, as when typing inside (:require [gitli…])
     client.did_change_insert(&consumer, 2, 0, "gitli\n");
-    let result = client.completion(&consumer, 2, 5);
+    let result = client.completion_items(&consumer, 2, 5);
     let labels: Vec<&str> = result
         .as_array()
         .expect("expected CompletionItem array")
@@ -1530,7 +1559,7 @@ fn test_e2e_completion_namespaces_and_aliases() {
 
     // Alias completion: typing "u" offers the alias itself
     client.did_change_insert(&consumer, 3, 0, "(u");
-    let result = client.completion(&consumer, 3, 2);
+    let result = client.completion_items(&consumer, 3, 2);
     let items = result.as_array().expect("expected CompletionItem array");
     let alias = items
         .iter()
@@ -3960,7 +3989,7 @@ fn test_e2e_zed_client_hover_and_completion() {
     assert!(val.contains("Adds two numbers."), "zed hover doc: {}", val);
 
     // Alias-prefixed completion.
-    let comp = client.completion(&utils, line, ch);
+    let comp = client.completion_items(&utils, line, ch);
     let labels: Vec<&str> = comp
         .as_array()
         .unwrap_or_else(|| panic!("zed completion returned null: {}", comp))
@@ -5154,7 +5183,7 @@ fn test_e2e_as_alias_keyword_navigates_and_completes() {
     // Completion offers the alias itself.
     let last_line = text.lines().count() as u32;
     client.did_change_insert(&file, last_line, 0, "cf");
-    let items = client.completion(&file, last_line, 2);
+    let items = client.completion_items(&file, last_line, 2);
     let items = items["items"].as_array().unwrap_or_else(|| {
         items
             .as_array()
@@ -5445,7 +5474,7 @@ fn test_e2e_malformed_unbalanced_buffer_still_answers() {
     let (line, ch) = position_of(&half_typed, "core/add");
     // None of these may error; a null hover or an empty list is a fine answer.
     let _ = client.hover(&half_typed, line, ch);
-    let _ = client.completion(&half_typed, line, ch);
+    let _ = client.completion_items(&half_typed, line, ch);
     let _ = client.goto_definition(&half_typed, line, ch);
 
     // Positions inside the unterminated form answer too.

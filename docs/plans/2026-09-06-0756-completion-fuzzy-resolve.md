@@ -81,14 +81,14 @@ Modify:
 - Create: `src/handlers/matching.rs`
 - Modify: `src/handlers/mod.rs`, `src/handlers/symbols.rs`
 
-- [ ] **Step 1: Move the matcher**
+- [x] **Step 1: Move the matcher**
   Create `matching.rs` with `match_score` and `is_subsequence` (both `pub`), moving the three existing tests. Point `symbols.rs` at it.
 
-- [ ] **Step 2: Verify nothing changed**
+- [x] **Step 2: Verify nothing changed**
   Run: `bb check`
   Expected: PASS, including the moved tests under `handlers::matching::tests`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Extract the symbol matcher into handlers::matching"`
 
 ### Task 2: Fuzzy completion with tiered ranking
@@ -97,21 +97,21 @@ Modify:
 - Modify: `src/handlers/completion.rs`
 - Test: `tests/test_completion.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In `tests/test_completion.rs`: `test_fuzzy_substring_match` (prefix `dd` in `simple.core` finds `add` with `sort_text` starting `2-`); `test_fuzzy_subsequence_ranks_below_prefix` (a query that prefix-matches one symbol and subsequence-matches another, ordered by `sort_text`; note `ad` prefix-matches `add-and-double`, so use a query like `add` against a prefix match `add-more` and a subsequence match `a-d-d`, adding both to a hand-built index or the fixture); `test_single_char_prefix_is_prefix_only` (`d` does not return `add`); `test_namespace_pool_is_capped` (build an index with 60 namespaces sharing a substring, assert at most 50 namespace items). Check the fixture's symbol names in `tests/fixtures/simple_project/src/` before choosing queries.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_completion fuzzy`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Introduce `enum Pool` with its digit, `tier_allowed`, and a small `fn push(items, item, tier, pool)` helper that sets `sort_text`. Replace each `starts_with` in `complete_symbols` and `local_completions` with `match_score` plus `tier_allowed`. Cap the namespace pool after sorting.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `cargo test --test test_completion && bb e2e`
   Expected: PASS. Existing e2e completion tests assert on labels only, so ranking changes do not break them; if one asserts on order, update it deliberately.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Rank completion candidates by match tier and pool"`
 
 ### Task 3: Resolve

@@ -40,7 +40,15 @@ pub fn handle(
         return Ok(None);
     }
 
-    Ok(Some(CompletionResponse::Array(items)))
+    // Incomplete on purpose: the guardrails in `tier_allowed` and the namespace
+    // cap mean a longer prefix can yield candidates this list does not hold
+    // (`d` is prefix-only, `dd` substring-matches `add`). A complete list would
+    // let the client filter its cache instead of asking again, and those
+    // candidates would never appear.
+    Ok(Some(CompletionResponse::List(CompletionList {
+        is_incomplete: true,
+        items,
+    })))
 }
 
 /// In-scope local bindings at `pos` whose name matches `prefix`, innermost-first

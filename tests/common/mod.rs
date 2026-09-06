@@ -494,6 +494,13 @@ impl LspClient {
         )
     }
 
+    /// The `items` of a completion response. The server answers with a
+    /// `CompletionList` (`isIncomplete: true`), so tests read through `items`;
+    /// a null response stays null.
+    pub fn completion_items(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.completion(path, line, character)["items"].clone()
+    }
+
     /// Incremental edit: inserts `text` at (line, character), version bump.
     pub fn did_change_insert(&mut self, path: &Path, line: u32, character: u32, text: &str) {
         self.notify(
