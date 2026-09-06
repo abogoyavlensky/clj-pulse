@@ -16,6 +16,7 @@ mod kondo;
 mod leiningen;
 mod lgx;
 mod libraries;
+mod panic_guard;
 mod projects;
 mod server;
 mod settings;
@@ -55,11 +56,13 @@ async fn main() {
         .with_writer(non_blocking)
         .init();
 
+    panic_guard::install_panic_hook();
+
     tracing::info!("clj-pulse starting");
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::build(Backend::new)
+    let builder = LspService::build(Backend::new)
         .custom_method(
             "workspace/textDocumentContent",
             Backend::text_document_content,
@@ -86,7 +89,21 @@ async fn main() {
         // clj-pulse custom: the ClojureDocs entry (examples, see-alsos) for the
         // symbol at a position or a given `ns/name`, from the export file the
         // editor pointed at in initializationOptions — never the network.
-        .custom_method("clojurePulse/clojureDocs", Backend::clojure_docs)
-        .finish();
-    Server::new(stdin, stdout, socket).serve(service).await;
+        .custom_method("clojurePulse/clojureDocs", Backend::clojure_docs);
+
+    // Test-only: a request that panics on demand, so the e2e suite can prove a
+    // panicking handler fails alone instead of killing the process.
+    let builder = if std::env::var_os("CLJ_PULSE_TEST_PANIC").is_some_and(|v| !v.is_empty()) {
+        builder.custom_method("clojurePulse/__testPanic", Backend::test_panic)
+    } else {
+        builder
+    };
+
+    let (service, socket) = builder.finish();
+    // A panicking handler must fail that request alone: tower-lsp polls
+    // handler futures inline, so an unguarded panic would exit the process and
+    // cost the editor its whole index.
+    Server::new(stdin, stdout, socket)
+        .serve(panic_guard::PanicGuard::new(service))
+        .await;
 }

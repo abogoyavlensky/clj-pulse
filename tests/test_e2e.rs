@@ -1,739 +1,16 @@
 //! End-to-end tests: spawn the real `clj-pulse` binary and speak LSP over
 //! stdio with Content-Length framing, the same way VS Code/Calva drives it.
+//! The client itself lives in `tests/common/mod.rs`, shared with the bench.
 
-use std::io::{BufRead, BufReader, Read, Write};
+mod common;
+
+use std::io::Write;
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-const TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Which `clj-kondo`, if any, the server under test may find.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kondo {
-    /// Kill-switch on: the bridge is inert, as for every non-kondo test.
-    Off,
-    /// The committed fake, first on PATH.
-    Fake,
-    /// Whatever the host has installed (ignored tests only).
-    Real,
-}
-
-struct LspClient {
-    child: Child,
-    stdin: ChildStdin,
-    incoming: Receiver<Value>,
-    notifications: Vec<Value>,
-    next_id: i64,
-}
-
-impl LspClient {
-    /// Spawns the server binary with `cwd` set to the project root,
-    /// mirroring how an editor launches it.
-    fn start(project_root: &Path) -> Self {
-        Self::start_with_env(project_root, &[])
-    }
-
-    /// Like [`start`] but with stage-3 classpath resolution left enabled —
-    /// only for tests that exercise the `clojure -Spath` flow.
-    fn start_with_classpath_cli(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], false, Kondo::Off)
-    }
-
-    /// Like [`start`] but sets extra environment variables on the server
-    /// process (e.g. `LGX_HOME` for hermetic lgx dep resolution).
-    fn start_with_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
-        Self::spawn(project_root, envs, true, Kondo::Off)
-    }
-
-    /// Like [`start`] but with the clj-kondo bridge live, answered by the
-    /// committed fake binary rather than whatever the host happens to have
-    /// installed — so these tests assert on fixed findings and never wait on
-    /// a JVM.
-    fn start_with_kondo(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], true, Kondo::Fake)
-    }
-
-    /// [`start_with_kondo`] with extra environment variables — `FAKE_KONDO_LOG`,
-    /// the file the fake records its cache-warming invocations in.
-    fn start_with_kondo_env(project_root: &Path, envs: &[(&str, &Path)]) -> Self {
-        Self::spawn(project_root, envs, true, Kondo::Fake)
-    }
-
-    /// Like [`start_with_kondo`] but resolving `clj-kondo` from the host's own
-    /// PATH — the real binary, for the ignored smoke test.
-    fn start_with_real_kondo(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], true, Kondo::Real)
-    }
-
-    /// The directory holding the fake `clj-kondo`, prepended to the server's
-    /// PATH by [`start_with_kondo`].
-    fn fake_kondo_dir() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-clj-kondo")
-    }
-
-    fn spawn(
-        project_root: &Path,
-        envs: &[(&str, &Path)],
-        disable_classpath_cli: bool,
-        kondo: Kondo,
-    ) -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
-        cmd.current_dir(project_root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        if disable_classpath_cli {
-            // Fixtures carry a deps.edn; without this every test would spawn
-            // `clojure` for stage-3 classpath resolution.
-            cmd.env("CLJ_PULSE_DISABLE_CLASSPATH_CLI", "1");
-        } else {
-            // Strip an inherited kill-switch too — the stage-3 tests must not
-            // be silently neutered by the parent environment.
-            cmd.env_remove("CLJ_PULSE_DISABLE_CLASSPATH_CLI");
-        }
-        match kondo {
-            // No fixture may depend on a clj-kondo installed on the host: the
-            // whole suite would then behave differently per machine.
-            Kondo::Off => {
-                cmd.env("CLJ_PULSE_DISABLE_KONDO", "1");
-            }
-            // Discovery goes through PATH, so putting the fake first is all it
-            // takes — the server has no test-only code path.
-            Kondo::Fake => {
-                cmd.env_remove("CLJ_PULSE_DISABLE_KONDO");
-                let inherited = std::env::var_os("PATH").unwrap_or_default();
-                let mut dirs = vec![Self::fake_kondo_dir()];
-                dirs.extend(std::env::split_paths(&inherited));
-                cmd.env("PATH", std::env::join_paths(dirs).unwrap());
-            }
-            // The host's own binary, inherited PATH untouched.
-            Kondo::Real => {
-                cmd.env_remove("CLJ_PULSE_DISABLE_KONDO");
-            }
-        }
-        for (key, value) in envs {
-            cmd.env(key, value);
-        }
-        let mut child = cmd.spawn().expect("failed to spawn clj-pulse");
-
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let mut content_length: Option<usize> = None;
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                        return; // server exited
-                    }
-                    let line = line.trim_end();
-                    if line.is_empty() {
-                        break;
-                    }
-                    if let Some(len) = line.strip_prefix("Content-Length: ") {
-                        content_length = len.parse().ok();
-                    }
-                }
-                let Some(len) = content_length else { return };
-                let mut buf = vec![0u8; len];
-                if reader.read_exact(&mut buf).is_err() {
-                    return;
-                }
-                let Ok(msg) = serde_json::from_slice::<Value>(&buf) else {
-                    continue;
-                };
-                if tx.send(msg).is_err() {
-                    return;
-                }
-            }
-        });
-
-        Self {
-            child,
-            stdin,
-            incoming: rx,
-            notifications: Vec::new(),
-            next_id: 0,
-        }
-    }
-
-    fn send(&mut self, msg: Value) {
-        let body = serde_json::to_string(&msg).unwrap();
-        write!(self.stdin, "Content-Length: {}\r\n\r\n{}", body.len(), body).unwrap();
-        self.stdin.flush().unwrap();
-    }
-
-    fn notify(&mut self, method: &str, params: Value) {
-        self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
-    }
-
-    /// Sends a request and blocks until its response arrives.
-    /// Server-initiated messages received in the meantime are stashed.
-    fn request(&mut self, method: &str, params: Value) -> Value {
-        let msg = self.request_full(method, params);
-        if let Some(err) = msg.get("error") {
-            panic!("{} returned error: {}", method, err);
-        }
-        msg["result"].clone()
-    }
-
-    /// Like `request` but expects a JSON-RPC error and returns it.
-    fn request_expect_error(&mut self, method: &str, params: Value) -> Value {
-        let msg = self.request_full(method, params);
-        msg.get("error")
-            .unwrap_or_else(|| panic!("{} unexpectedly succeeded: {}", method, msg))
-            .clone()
-    }
-
-    fn request_full(&mut self, method: &str, params: Value) -> Value {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-
-        let deadline = Instant::now() + TIMEOUT;
-        loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("timed out waiting for response to {}", method));
-            let msg = self
-                .incoming
-                .recv_timeout(remaining)
-                .unwrap_or_else(|_| panic!("timed out waiting for response to {}", method));
-            if msg.get("method").is_none() && msg.get("id") == Some(&json!(id)) {
-                return msg;
-            }
-            self.stash(msg);
-        }
-    }
-
-    /// Stashes a server-initiated message; server→client *requests*
-    /// (e.g. client/registerCapability) get a null success response so the
-    /// server never blocks on us.
-    fn stash(&mut self, msg: Value) {
-        if let (Some(id), Some(_)) = (msg.get("id").cloned(), msg.get("method")) {
-            self.send(json!({ "jsonrpc": "2.0", "id": id, "result": null }));
-        }
-        self.notifications.push(msg);
-    }
-
-    /// Waits until a `window/logMessage` whose text contains `needle` has
-    /// been received (checks already-stashed notifications first).
-    fn wait_for_log(&mut self, needle: &str) {
-        self.wait_for_log_within(needle, TIMEOUT);
-    }
-
-    /// [`wait_for_log`] with a custom deadline — for waits that legitimately
-    /// exceed the harness default, like a cold-network dependency download.
-    fn wait_for_log_within(&mut self, needle: &str, timeout: Duration) {
-        let matches = |m: &Value| {
-            m["method"] == "window/logMessage"
-                && m["params"]["message"]
-                    .as_str()
-                    .map(|s| s.contains(needle))
-                    .unwrap_or(false)
-        };
-        if self.notifications.iter().any(matches) {
-            return;
-        }
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("timed out waiting for log: {}", needle));
-            let msg = self
-                .incoming
-                .recv_timeout(remaining)
-                .unwrap_or_else(|_| panic!("timed out waiting for log: {}", needle));
-            let found = matches(&msg);
-            self.stash(msg);
-            if found {
-                return;
-            }
-        }
-    }
-
-    /// Full editor-style startup: initialize (with rootUri), initialized,
-    /// then wait for project indexing to finish.
-    fn initialize(&mut self, root: &Path) -> Value {
-        let root_uri = format!("file://{}", root.display());
-        let result = self.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "rootUri": root_uri,
-                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
-                "capabilities": {
-                    "textDocument": { "definition": { "linkSupport": true } },
-                    "general": { "positionEncodings": ["utf-16"] }
-                },
-                // Calva passes clojure-lsp settings here; the server must
-                // tolerate unknown options.
-                "initializationOptions": { "dependency-scheme": "jar" }
-            }),
-        );
-        self.notify("initialized", json!({}));
-        self.wait_for_log("Indexed");
-        result
-    }
-
-    /// Like [`initialize`] but with the given `initializationOptions` — what
-    /// Clojure Pulse sends (`{"projects": …, "kondo": …, "clojuredocs": …}`).
-    fn initialize_with_options(&mut self, root: &Path, options: Value) -> Value {
-        let root_uri = format!("file://{}", root.display());
-        let result = self.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "rootUri": root_uri,
-                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
-                "capabilities": {
-                    "textDocument": { "definition": { "linkSupport": true } },
-                    "general": { "positionEncodings": ["utf-16"] }
-                },
-                "initializationOptions": options
-            }),
-        );
-        self.notify("initialized", json!({}));
-        self.wait_for_log("Indexed");
-        result
-    }
-
-    /// `clojurePulse/clojureDocs`, returning the raw JSON-RPC message so a
-    /// test can assert on either `result` or `error`.
-    fn clojure_docs(&mut self, params: Value) -> Value {
-        self.request_full("clojurePulse/clojureDocs", params)
-    }
-
-    /// Like [`initialize`] but advertising `window.workDoneProgress`, so the
-    /// server may report `$/progress`.
-    fn initialize_with_progress(&mut self, root: &Path) -> Value {
-        let root_uri = format!("file://{}", root.display());
-        let result = self.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "rootUri": root_uri,
-                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
-                "capabilities": {
-                    "textDocument": { "definition": { "linkSupport": true } },
-                    "general": { "positionEncodings": ["utf-16"] },
-                    "window": { "workDoneProgress": true }
-                }
-            }),
-        );
-        self.notify("initialized", json!({}));
-        self.wait_for_log("Indexed");
-        result
-    }
-
-    /// Zed-shaped startup: only `workspaceFolders` (no deprecated `rootUri`),
-    /// offering UTF-8 then UTF-16 position encodings — what Zed's LSP client
-    /// sends. Exercises the same indexing path real Zed users hit.
-    fn initialize_zed(&mut self, root: &Path) -> Value {
-        let root_uri = format!("file://{}", root.display());
-        let result = self.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }],
-                "capabilities": {
-                    "textDocument": { "definition": { "linkSupport": true } },
-                    "general": { "positionEncodings": ["utf-8", "utf-16"] }
-                }
-            }),
-        );
-        self.notify("initialized", json!({}));
-        self.wait_for_log("Indexed");
-        result
-    }
-
-    fn did_open(&mut self, path: &Path) {
-        let text = std::fs::read_to_string(path).unwrap();
-        self.notify(
-            "textDocument/didOpen",
-            json!({
-                "textDocument": {
-                    "uri": format!("file://{}", path.display()),
-                    "languageId": "clojure",
-                    "version": 1,
-                    "text": text
-                }
-            }),
-        );
-    }
-
-    fn goto_definition(&mut self, path: &Path, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/definition",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character }
-            }),
-        )
-    }
-
-    fn hover(&mut self, path: &Path, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/hover",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character }
-            }),
-        )
-    }
-
-    fn completion(&mut self, path: &Path, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/completion",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character }
-            }),
-        )
-    }
-
-    /// Incremental edit: inserts `text` at (line, character), version bump.
-    fn did_change_insert(&mut self, path: &Path, line: u32, character: u32, text: &str) {
-        self.notify(
-            "textDocument/didChange",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()), "version": 2 },
-                "contentChanges": [{
-                    "range": {
-                        "start": { "line": line, "character": character },
-                        "end": { "line": line, "character": character }
-                    },
-                    "text": text
-                }]
-            }),
-        )
-    }
-
-    fn text_document_content(&mut self, uri: &str) -> Value {
-        self.request("workspace/textDocumentContent", json!({ "uri": uri }))
-    }
-
-    /// clojure-lsp's custom jar content request (what Calva calls). Returns the
-    /// raw content string.
-    fn dependency_contents(&mut self, uri: &str) -> Value {
-        self.request("clojure/dependencyContents", json!({ "uri": uri }))
-    }
-
-    fn signature_help(&mut self, path: &Path, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/signatureHelp",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character }
-            }),
-        )
-    }
-
-    fn document_symbols(&mut self, path: &Path) -> Value {
-        self.request(
-            "textDocument/documentSymbol",
-            json!({ "textDocument": { "uri": format!("file://{}", path.display()) } }),
-        )
-    }
-
-    fn ignored_forms(&mut self, path: &Path) -> Value {
-        self.request(
-            "clojurePulse/ignoredForms",
-            json!({ "uri": format!("file://{}", path.display()) }),
-        )
-    }
-
-    fn on_type_formatting(&mut self, path: &Path, line: u32, character: u32, ch: &str) -> Value {
-        self.request(
-            "textDocument/onTypeFormatting",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character },
-                "ch": ch,
-                "options": { "tabSize": 2, "insertSpaces": true }
-            }),
-        )
-    }
-
-    fn workspace_symbols(&mut self, query: &str) -> Value {
-        self.request("workspace/symbol", json!({ "query": query }))
-    }
-
-    fn code_action(&mut self, path: &Path, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/codeAction",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "range": {
-                    "start": { "line": line, "character": character },
-                    "end": { "line": line, "character": character }
-                },
-                "context": { "diagnostics": [] }
-            }),
-        )
-    }
-
-    /// Code action request restricted to specific kinds, as VS Code sends for
-    /// "Organize Imports" / code-actions-on-save (`context.only`).
-    fn code_action_only(&mut self, path: &Path, only: &[&str]) -> Value {
-        self.request(
-            "textDocument/codeAction",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "range": {
-                    "start": { "line": 0, "character": 0 },
-                    "end": { "line": 0, "character": 0 }
-                },
-                "context": { "diagnostics": [], "only": only }
-            }),
-        )
-    }
-
-    /// Code action request carrying a diagnostic in context, as VS Code sends
-    /// when the cursor is on a squiggle.
-    fn code_action_for_diagnostic(&mut self, path: &Path, diagnostic: &Value) -> Value {
-        self.request(
-            "textDocument/codeAction",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "range": diagnostic["range"].clone(),
-                "context": { "diagnostics": [diagnostic.clone()] }
-            }),
-        )
-    }
-
-    /// Drops every stashed server message, so a following `wait_for_*` can
-    /// only be satisfied by something that arrives afterwards. Needed when a
-    /// test asserts on a *second* publish for a document it already saw one
-    /// for — otherwise the stash answers instantly with the stale one.
-    fn clear_notifications(&mut self) {
-        // Drain what is already in flight before dropping the stash: a message
-        // sitting unread in the channel is exactly as stale as one already
-        // stashed, and would otherwise satisfy the next `wait_for_*`. Draining
-        // through `stash` keeps answering server→client requests.
-        while let Ok(msg) = self.incoming.try_recv() {
-            self.stash(msg);
-        }
-        self.notifications.clear();
-    }
-
-    /// Waits for a `textDocument/publishDiagnostics` whose uri ends with
-    /// `uri_suffix` and returns its `params` (checks already-stashed first).
-    fn wait_for_diagnostics(&mut self, uri_suffix: &str) -> Value {
-        let matches = |m: &Value| {
-            m["method"] == "textDocument/publishDiagnostics"
-                && m["params"]["uri"]
-                    .as_str()
-                    .map(|s| s.ends_with(uri_suffix))
-                    .unwrap_or(false)
-        };
-        if let Some(m) = self.notifications.iter().find(|m| matches(m)) {
-            return m["params"].clone();
-        }
-        let deadline = Instant::now() + TIMEOUT;
-        loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("timed out waiting for diagnostics: {}", uri_suffix));
-            let msg = self
-                .incoming
-                .recv_timeout(remaining)
-                .unwrap_or_else(|_| panic!("timed out waiting for diagnostics: {}", uri_suffix));
-            let found = matches(&msg);
-            let params = msg["params"].clone();
-            self.stash(msg);
-            if found {
-                return params;
-            }
-        }
-    }
-
-    fn references(&mut self, path: &Path, line: u32, character: u32, include_decl: bool) -> Value {
-        self.request(
-            "textDocument/references",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character },
-                "context": { "includeDeclaration": include_decl }
-            }),
-        )
-    }
-
-    fn prepare_rename(&mut self, path: &Path, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/prepareRename",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character }
-            }),
-        )
-    }
-
-    fn prepare_rename_error(&mut self, path: &Path, line: u32, character: u32) -> String {
-        let error = self.request_expect_error(
-            "textDocument/prepareRename",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character }
-            }),
-        );
-        error["message"].as_str().unwrap().to_string()
-    }
-
-    fn rename(&mut self, path: &Path, line: u32, character: u32, new_name: &str) -> Value {
-        self.request(
-            "textDocument/rename",
-            json!({
-                "textDocument": { "uri": format!("file://{}", path.display()) },
-                "position": { "line": line, "character": character },
-                "newName": new_name
-            }),
-        )
-    }
-
-    // URI-addressed variants: a JAR entry the editor displays is identified by
-    // its `jar:` URI, not a filesystem path, so these drive navigation/inspection
-    // from inside a library file.
-
-    fn did_open_uri(&mut self, uri: &str, text: &str) {
-        self.notify(
-            "textDocument/didOpen",
-            json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": "clojure",
-                    "version": 1,
-                    "text": text
-                }
-            }),
-        );
-    }
-
-    fn goto_definition_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/definition",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character }
-            }),
-        )
-    }
-
-    fn references_uri(
-        &mut self,
-        uri: &str,
-        line: u32,
-        character: u32,
-        include_decl: bool,
-    ) -> Value {
-        self.request(
-            "textDocument/references",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-                "context": { "includeDeclaration": include_decl }
-            }),
-        )
-    }
-
-    fn hover_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
-        self.request(
-            "textDocument/hover",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character }
-            }),
-        )
-    }
-
-    /// Rename by URI, returning the raw JSON-RPC message so the caller can
-    /// assert on either `result` or `error`.
-    fn rename_uri(&mut self, uri: &str, line: u32, character: u32, new_name: &str) -> Value {
-        self.request_full(
-            "textDocument/rename",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-                "newName": new_name
-            }),
-        )
-    }
-}
-
-impl Drop for LspClient {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Copies the simple_project fixture into a temp dir so tests can mutate it
-/// (and so `.clj-pulse/` artifacts don't pollute the repo).
-fn setup_project() -> tempfile::TempDir {
-    setup_named("simple_project")
-}
-
-fn setup_named(name: &str) -> tempfile::TempDir {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
-    copy_dir(&src, tmp.path());
-    tmp
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
-/// Finds the (line, character) of `needle` in a file, pointing at its middle.
-fn position_of(path: &Path, needle: &str) -> (u32, u32) {
-    let text = std::fs::read_to_string(path).unwrap();
-    for (i, line) in text.lines().enumerate() {
-        if let Some(col) = line.find(needle) {
-            return (i as u32, (col + needle.len() / 2) as u32);
-        }
-    }
-    panic!("{:?} not found in {}", needle, path.display());
-}
-
-/// The (line, character) of the *start* of the first occurrence of `needle`
-/// (ASCII), for asserting a binding-site range exactly.
-fn start_of(text: &str, needle: &str) -> (u32, u32) {
-    for (i, line) in text.lines().enumerate() {
-        if let Some(col) = line.find(needle) {
-            return (i as u32, col as u32);
-        }
-    }
-    panic!("{:?} not found in text", needle);
-}
-
-/// Like [`position_of`] but over an in-memory string — JAR content is served
-/// from the archive, not from a file on disk.
-fn position_in_text(text: &str, needle: &str) -> (u32, u32) {
-    for (i, line) in text.lines().enumerate() {
-        if let Some(col) = line.find(needle) {
-            return (i as u32, (col + needle.len() / 2) as u32);
-        }
-    }
-    panic!("{:?} not found in text", needle);
-}
+use common::*;
 
 /// Applies LSP `TextEdit` JSON values to `source` (highest position first, so
 /// earlier offsets stay valid) and returns the result.
@@ -6071,5 +5348,320 @@ fn test_e2e_prepare_rename_on_alias_half_reports_the_name() {
     assert_eq!(
         range["end"],
         json!({ "line": line, "character": name_ch + "greet".len() as u32 })
+    );
+}
+
+/// A handler that panics must fail that one request, not take the process
+/// down: the next request still gets a real answer.
+#[test]
+fn test_e2e_server_survives_handler_panic() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_str_env(&root, &[("CLJ_PULSE_TEST_PANIC", "1")]);
+    client.initialize(&root);
+
+    let error = client.request_expect_error("clojurePulse/__testPanic", json!({}));
+    assert!(
+        error["code"].as_i64().is_some(),
+        "panicking request returned no JSON-RPC error code: {}",
+        error
+    );
+
+    // The process must still be serving: a normal request answers as usual.
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+    let hover = client.hover(&utils, line, ch);
+    assert!(
+        !hover.is_null(),
+        "hover returned null after a handler panic"
+    );
+    let value = hover["contents"]["value"].as_str().unwrap();
+    assert!(
+        value.contains("Adds two numbers."),
+        "hover lost its answer after a handler panic: {}",
+        value
+    );
+
+    // The panic hook records payload and location in server.log, so the same
+    // line exists for panics in background tasks, which never reach a handler.
+    let log = root.join(".clj-pulse/server.log");
+    let deadline = Instant::now() + TIMEOUT;
+    let logged = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("panicked at src/server.rs") {
+            break text;
+        }
+        if Instant::now() >= deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        logged.contains("panicked at src/server.rs")
+            && logged.contains("deliberate panic from clojurePulse/__testPanic"),
+        "server.log has no panic line with a location: {}",
+        logged
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Malformed input: every handler returns, none takes the server down.
+// ---------------------------------------------------------------------------
+
+/// Builds a bare temp project with the given `deps.edn` contents and one
+/// source file, for the manifest tests that need a broken manifest on disk.
+fn malformed_deps_project(deps_edn: &str) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("deps.edn"), deps_edn).unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("src/ok.clj"),
+        "(ns broken.ok)\n\n(defn only-fn\n  \"The one thing this project defines.\"\n  [x]\n  (inc x))\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// A buffer the user is mid-way through typing does not parse. Every
+/// position-based handler must still answer rather than error or hang.
+#[test]
+fn test_e2e_malformed_unbalanced_buffer_still_answers() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let half_typed = root.join("src/half_typed.clj");
+    std::fs::write(
+        &half_typed,
+        "(ns simple.half-typed\n  (:require [simple.core :as core]))\n\n(defn f [x] (let [y (core/add\n",
+    )
+    .unwrap();
+    client.did_open(&half_typed);
+
+    let (line, ch) = position_of(&half_typed, "core/add");
+    // None of these may error; a null hover or an empty list is a fine answer.
+    let _ = client.hover(&half_typed, line, ch);
+    let _ = client.completion(&half_typed, line, ch);
+    let _ = client.goto_definition(&half_typed, line, ch);
+
+    // Positions inside the unterminated form answer too.
+    let last_line = 3;
+    let _ = client.hover(&half_typed, last_line, 20);
+    let _ = client.document_symbols(&half_typed);
+
+    // And a healthy file in the same session is unaffected.
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+    let hover = client.hover(&utils, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Adds two numbers."),
+        "an unbalanced buffer broke a healthy one: {}",
+        hover
+    );
+}
+
+/// A generated or minified source file can be one enormous line. It must not
+/// blow up the position math or the parser.
+#[test]
+fn test_e2e_malformed_huge_single_line_answers() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let huge = root.join("src/huge.clj");
+    let mut text = String::from("(ns simple.huge) (def big \"");
+    text.push_str(&"abcdefgh".repeat(4 * 1024 * 1024 / 8));
+    text.push_str("\")\n");
+    assert!(text.len() > 4 * 1024 * 1024, "fixture is not 4 MB");
+    std::fs::write(&huge, &text).unwrap();
+    client.did_open(&huge);
+
+    let symbols = client.document_symbols(&huge);
+    assert!(
+        symbols.is_array(),
+        "documentSymbol on a 4 MB line did not answer with a list: {}",
+        symbols
+    );
+    // A position far along that single line answers too.
+    let _ = client.hover(&huge, 0, 2_000_000);
+}
+
+/// A source file that is not valid UTF-8 is skipped with a log line; the rest
+/// of the project still indexes and answers.
+#[test]
+fn test_e2e_malformed_non_utf8_file_is_skipped() {
+    let project = setup_named("malformed_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let ok = root.join("src/ok.clj");
+    client.did_open(&ok);
+    let (line, ch) = position_of(&ok, "well-formed");
+    let hover = client.hover(&ok, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("perfectly ordinary function"),
+        "the readable file did not index alongside the unreadable one: {}",
+        hover
+    );
+
+    let log = std::fs::read_to_string(root.join(".clj-pulse/server.log")).unwrap_or_default();
+    assert!(
+        log.contains("failed to read") && log.contains("bad_bytes.clj"),
+        "the unreadable file was not logged as skipped: {}",
+        log
+    );
+}
+
+/// An empty `deps.edn` has no `:paths`; the server falls back to `src`/`test`
+/// and indexes the project anyway.
+#[test]
+fn test_e2e_malformed_empty_deps_edn_still_indexes() {
+    let project = malformed_deps_project("{}\n");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let ok = root.join("src/ok.clj");
+    client.did_open(&ok);
+    let (line, ch) = position_of(&ok, "only-fn");
+    let hover = client.hover(&ok, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("The one thing this project defines."),
+        "an empty deps.edn stopped src/ from indexing: {}",
+        hover
+    );
+}
+
+/// A `deps.edn` that does not parse must not stop the server: it initializes,
+/// falls back to the default source paths, and answers.
+#[test]
+fn test_e2e_malformed_invalid_deps_edn_still_answers() {
+    let project = malformed_deps_project("{:paths [\n");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let ok = root.join("src/ok.clj");
+    client.did_open(&ok);
+    let (line, ch) = position_of(&ok, "only-fn");
+    // The truncated `:paths` may or may not yield `src`, so the contract is
+    // only that the request returns instead of erroring or hanging.
+    let _ = client.hover(&ok, line, ch);
+    let symbols = client.document_symbols(&ok);
+    assert!(
+        symbols.is_array(),
+        "a broken deps.edn broke documentSymbol: {}",
+        symbols
+    );
+}
+
+/// A `didChange` whose range is past the end of the document is dropped, and
+/// the next request still answers off the last good text.
+#[test]
+fn test_e2e_malformed_did_change_past_end_of_document() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    client.did_change_range(&utils, 2, (9_999, 0), (9_999, 5), "nonsense");
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let hover = client.hover(&utils, line, ch);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Adds two numbers."),
+        "an out-of-range didChange cost the buffer its answers: {}",
+        hover
+    );
+
+    // A well-formed edit after the bad one still applies. utils.clj ends with
+    // a newline, so line 10 is the empty line past the last form.
+    client.did_change_insert(&utils, 10, 0, "(defn later [] 1)\n");
+    let symbols = client.document_symbols(&utils);
+    let names: Vec<&str> = symbols
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"later"),
+        "edits stopped applying after an out-of-range one: {:?}",
+        names
+    );
+}
+
+/// A panicking handler leaves its id behind in tower-lsp's pending-request map,
+/// because the map is only cleared when the handler future returns. The guard
+/// clears it, so a client that reuses request ids keeps working.
+#[test]
+fn test_e2e_panicked_request_id_can_be_reused() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_with_str_env(&root, &[("CLJ_PULSE_TEST_PANIC", "1")]);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let (line, ch) = position_of(&utils, "core/add");
+
+    // Ids well past the harness counter, so nothing else claims them.
+    let panicked = client.request_with_id(9001, "clojurePulse/__testPanic", json!({}));
+    assert!(
+        panicked.get("error").is_some(),
+        "expected an error: {}",
+        panicked
+    );
+
+    // No request in between: the guard must clear the id before it dispatches
+    // the reusing request, not merely before some later one.
+    let reused = client.request_with_id(
+        9001,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": format!("file://{}", utils.display()) },
+            "position": { "line": line, "character": ch }
+        }),
+    );
+    assert!(
+        reused.get("error").is_none(),
+        "reusing a panicked request id was rejected: {}",
+        reused
+    );
+    assert!(
+        reused["result"]["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Adds two numbers."),
+        "reused id returned no hover: {}",
+        reused
     );
 }

@@ -93,25 +93,37 @@ Modify:
 - Modify: `src/main.rs`, `src/server.rs`, `src/lib.rs`, `Cargo.toml`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Register the panic-on-demand method**
+- [x] **Step 1: Register the panic-on-demand method**
   In `main.rs`, when `CLJ_PULSE_TEST_PANIC` is non-empty, register `clojurePulse/__testPanic` whose handler in `server.rs` panics with a recognizable message. No guard yet.
 
-- [ ] **Step 2: Write the failing e2e test**
+- [x] **Step 2: Write the failing e2e test**
   `test_e2e_server_survives_handler_panic`: start with `LspClient::start_with_env(root, &[("CLJ_PULSE_TEST_PANIC", …)])` (the helper takes paths; add a sibling that takes string values, or pass a dummy path value since only non-emptiness matters), `initialize`, send `clojurePulse/__testPanic` via `request_expect_error`, then `hover` on `core/add` in `utils.clj` and assert a real hover.
 
-- [ ] **Step 3: Run it to verify it fails**
+- [x] **Step 3: Run it to verify it fails**
   Run: `cargo test --test test_e2e survives_handler_panic`
   Expected: FAIL with the harness reporting a closed pipe or a missing response: the process died on the panic.
 
-- [ ] **Step 4: Implement the guard**
+- [x] **Step 4: Implement the guard**
   `panic_guard.rs` per the design; `install_panic_hook()` called first thing in `main` after logging is initialized; `futures` dependency. Keep `PanicGuard` generic over `S: Service<Request, Response = Option<Response>, Error = ExitedError>`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `bb check && cargo test --test test_e2e survives_handler_panic`
   Expected: PASS; `server.log` in the temp project contains a `panicked` line with the location.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Survive handler panics with a catch_unwind service guard"`
+
+> Codex review of Task 1 found a real defect: tower-lsp clears its
+> pending-request map only when a handler future *returns*, so a panicking one
+> leaked its abort handle and made that id answer `invalid request` for the rest
+> of the session. Fixed in a follow-up commit — the guard cancels each panicked
+> id on the way into the next request — with
+> `test_e2e_panicked_request_id_can_be_reused` as the regression guard.
+
+> Deviation: `tower-service = "0.3"` is a second new dependency alongside
+> `futures`. tower-lsp does not re-export the `tower` `Service` trait that
+> `PanicGuard` must implement, and `tower-service` is the trait crate `tower`
+> itself re-exports — already in `Cargo.lock` transitively.
 
 ### Task 2: Malformed input tests
 
@@ -119,15 +131,20 @@ Modify:
 - Create: `tests/fixtures/malformed_project/…`
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
   One test per bullet in the design's "Malformed input" section. Each ends with a normal request that must succeed. For the non-UTF-8 fixture, write the bytes with a tiny Python one-liner and commit the file; add a comment file next to it explaining why it is binary.
 
-- [ ] **Step 2: Run them**
+- [x] **Step 2: Run them**
   Run: `cargo test --test test_e2e malformed`
   Expected: PASS for most. Any failure is a real finding: fix it in the server in the smallest way that keeps the request path alive (clamping a bad range, skipping a bad file with a log line), with the test as the regression guard.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Prove the server answers on malformed input"` (plus one commit per server fix, if any).
+
+> All six passed against the server as it stands — no server fix was needed.
+> `scanner` already skips an unreadable file with a warning and `did_change`
+> already drops an out-of-range edit with one, so the tests pin behavior that
+> was there rather than behavior that had to be added.
 
 ### Task 3: Bench harness
 
@@ -135,23 +152,23 @@ Modify:
 - Create: `tests/test_bench.rs`
 - Modify: `bb.edn`, `tests/test_e2e.rs` (only if the client is moved to `tests/common/`)
 
-- [ ] **Step 1: Make `LspClient` reusable**
+- [x] **Step 1: Make `LspClient` reusable**
   Prefer `#[path = "test_e2e.rs"]`-free sharing: move `LspClient` and its helpers into `tests/common/mod.rs` and `mod common;` it from both test files. Run `bb e2e` to prove nothing changed.
 
-- [ ] **Step 2: Add `LspClient::start_production`**
+- [x] **Step 2: Add `LspClient::start_production`**
   A constructor that sets none of the `CLJ_PULSE_DISABLE_*` variables. Keep it out of the regular e2e tests: a comment explains it exists for the bench only.
 
-- [ ] **Step 3: Write the bench**
+- [x] **Step 3: Write the bench**
   `tests/test_bench.rs` with one `#[test] #[ignore] fn bench_large_project()` implementing the metric table, including the two-stage RSS sampling, the OS-specific RSS readers, and the deterministic qualified-symbol choice. Print with fixed columns. Skip cleanly when `CLJ_PULSE_BENCH_ROOT` is unset.
 
-- [ ] **Step 4: Add `bb bench`**
+- [x] **Step 4: Add `bb bench`**
   Task: clone if `.tmp/bench/metabase` is missing (`git clone --depth 1 https://github.com/metabase/metabase .tmp/bench/metabase`), then `CLJ_PULSE_BENCH_ROOT=$PWD/.tmp/bench/metabase cargo test --release --test test_bench -- --ignored --nocapture`. Use `--release`: the debug build's numbers are not what users see.
 
-- [ ] **Step 5: Run it**
+- [x] **Step 5: Run it**
   Run: `bb bench`
   Expected: the table prints and the test passes the hang ceiling. Record the numbers.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Add a large-project bench"`
 
 ### Task 4: Act on the bench
@@ -159,16 +176,16 @@ Modify:
 **Files:**
 - Modify: whatever the numbers point at; `docs/MEMORY.md`; `docs/ROADMAP.md`
 
-- [ ] **Step 1: Read the numbers**
+- [x] **Step 1: Read the numbers**
   Anything that would surprise a user: index time over 30 s, RSS over 1 GB, didChange latency over 300 ms (the diagnostics debounce), definition over 50 ms. Profile the worst one with `cargo flamegraph` or `perf` if installed, otherwise with `tracing` timing around the suspect.
 
-- [ ] **Step 2: Fix within budget**
+- [x] **Step 2: Fix within budget**
   Fix what fits in a day with a test or a repeat bench run proving the improvement. For anything larger, add a Milestone 1 roadmap item with the measurement and the suspected cause.
 
-- [ ] **Step 3: Record the baseline**
+- [x] **Step 3: Record the baseline**
   `docs/MEMORY.md`: "Performance baseline" with date, commit, machine, and the table after fixes.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "Record the performance baseline"` (fixes in their own commits before it).
 
 ### Task 5: Docs and roadmap
@@ -185,3 +202,72 @@ Modify:
 
 - [ ] **Step 3: Commit**
   `git commit -m "Document the panic hook, test switch, and bench"`
+
+---
+
+## Completion summary
+
+**Status: complete.** `bb check`, `bb e2e`, `bb e2e-real`, `bb e2e-pulse`,
+`bb e2e-calva` and `bb e2e-nvim` all pass; `bb bench` runs and its first
+numbers are recorded in [docs/MEMORY.md](../MEMORY.md).
+
+### What was implemented
+
+- **Panic guard** (`src/panic_guard.rs`). A tower `Service` wrapper catches a
+  panicking handler's unwind and answers that one request with a JSON-RPC
+  internal error; `install_panic_hook` records payload and location in
+  `server.log`, background-task panics included. The red test first confirmed
+  the old behavior: the process died and the pipe closed.
+- **Malformed-input pass.** Six e2e tests — unbalanced buffer, 4 MB single
+  line, non-UTF-8 source file, empty `deps.edn`, unparseable `deps.edn`,
+  out-of-range `didChange`. All six passed against the server as it stood, so
+  no server fix was needed; they pin behavior that already existed.
+- **Bench** (`tests/test_bench.rs`, `bb bench`). The e2e client moved to
+  `tests/common/mod.rs` and is shared with a new ignored bench that drives the
+  release binary against metabase under production settings.
+- **One fix from the numbers.** The two diagnostics tiers ran in sequence —
+  native lints ~360 ms, then clj-kondo ~840 ms, on every keystroke. They are
+  independent, so they now run concurrently with the CPU-bound native pass on
+  a blocking thread: didChange → diagnostics fell ~1570 ms → ~1200 ms, didOpen
+  → first diagnostics ~1330 ms → ~950 ms.
+- **Two findings too large for the budget** became Milestone 1 roadmap items
+  with their measurements: no cached parse tree (three parses per lint pass,
+  one per position request — most of the ~75 ms definition latency), and
+  clj-kondo's own ~840 ms on a 452 KiB buffer.
+
+### Issues encountered
+
+- Three rounds of codex review each found a real defect, all in code this plan
+  added. They are listed as deviation notes under their tasks; the substantive
+  one is that tower-lsp clears its pending-request map only when a handler
+  *returns*, which the plan's design did not anticipate.
+- The bench's own first version measured the wrong thing: it accepted the
+  stage-2 `library indexing complete` line, which on a warm checkout arrives
+  seconds before stage 3 has re-resolved and re-indexed. The "35 s cold library
+  index" in the first run was an artifact of that; the honest figures are 7.9 s
+  cold and 3.0 s warm.
+
+### Deviations
+
+- `tower-service = "0.3"` is a second new dependency alongside `futures`:
+  tower-lsp does not re-export the `Service` trait `PanicGuard` implements.
+- The plan's `LspClient::start_production` needed two more helpers to be
+  useful: `initialize_no_wait` (so the bench times the stages itself) and a
+  multi-needle `log_line_within`.
+- The bench waits for a *settled stage 3* rather than "library indexing
+  complete or full classpath indexed", and detects up front whether stage 3
+  will run at all (it announces itself), so a workspace with stage 3 disabled
+  reports its real stage-2 timing instead of the 120 s ceiling.
+- `docs/ROADMAP.md` had unrelated edits on disk when this work started (a new
+  working rule and a Backlog section). They were left uncommitted; only the
+  Reliability-floor tick and the two new Milestone 1 items were committed.
+
+### What the plan could have specified better
+
+The plan treated "wrap the service in `catch_unwind`" as the whole of panic
+safety, and it is not: tower-lsp's pending-request map is cleaned up by the
+handler future returning, which a panic prevents. A plan that pins a library's
+internals — "`Server::serve` drives `service.call` futures through
+`buffer_unordered`" — should carry the same level of detail about the state
+that library keeps *per request*, because that is what a wrapper silently
+bypasses. Three review rounds went into rediscovering it.

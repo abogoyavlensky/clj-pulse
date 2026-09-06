@@ -1,5 +1,7 @@
 {:tasks
- {:enter (println "Running task:" (:name (current-task)))
+ {:requires ([babashka.fs :as fs])
+
+  :enter (println "Running task:" (:name (current-task)))
 
   fmt-check {:doc "Check code formatting"
              :task (shell "cargo fmt --all -- --check")}
@@ -15,6 +17,15 @@
 
   e2e {:doc "End-to-end tests (spawns real binary, speaks LSP over stdio)"
        :task (shell "cargo test --test test_e2e")}
+
+  bench {:doc "Bench against a large real Clojure repo (clones metabase into .tmp/bench on first run)"
+         :task (let [corpus ".tmp/bench/metabase"]
+                 (when-not (fs/exists? corpus)
+                   (println "Cloning the bench corpus into" corpus "...")
+                   (shell "git clone --depth 1 https://github.com/metabase/metabase" corpus))
+                 ;; --release: the debug build's numbers are not what users see.
+                 (shell {:extra-env {"CLJ_PULSE_BENCH_ROOT" (str (fs/absolutize corpus))}}
+                        "cargo test --release --test test_bench -- --ignored --nocapture"))}
 
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}

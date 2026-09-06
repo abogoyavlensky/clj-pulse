@@ -33,6 +33,10 @@ then the editor features users notice as missing. Guiding decisions:
    status to `done`, and update README and AGENTS.md in the same change.
 3. **Reordering** is fine; say why in the commit message. New items go in the
    milestone they belong to, not at the end.
+4. **Nothing lives only in chat.** An idea, gap, or follow-up raised in a
+   discussion or review that is not scheduled goes into the Backlog below the
+   same day, one line with the date. Promote it into a milestone when it is
+   scheduled; delete it when it is rejected, with the reason in Not planned.
 
 ## Where we stand (September 2026, v0.3.0)
 
@@ -92,15 +96,31 @@ Small fixes that remove wrong answers. Each extractor change bumps
       token range for renameable symbols and a clean rejection (not a server
       error) for library, built-in, keyword, and `:keys`-destructured names.
       Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — done
-- [ ] **Reliability floor**
-  - [ ] Panic hook that logs to `server.log`; verify how tower-lsp behaves
+- [x] **Reliability floor**
+  - [x] Panic hook that logs to `server.log`; verify how tower-lsp behaves
         when a handler panics and make a panicking request fail alone.
-  - [ ] Performance baseline: a `bb bench` task that indexes a large
+  - [x] Performance baseline: a `bb bench` task that indexes a large
         open-source Clojure repo and reports startup, memory, and per-edit
         lint latency. Fix cliffs it finds.
-  - [ ] Malformed-input pass: unbalanced buffers, huge single lines, non-UTF-8
+  - [x] Malformed-input pass: unbalanced buffers, huge single lines, non-UTF-8
         files, empty `deps.edn`. Every handler returns, none panics.
-  Plan: [2026-09-05-1537-reliability-floor.md](plans/2026-09-05-1537-reliability-floor.md) — in progress
+  Plan: [2026-09-05-1537-reliability-floor.md](plans/2026-09-05-1537-reliability-floor.md) — done
+- [ ] **Cache the parse tree per document.** The bench
+      ([MEMORY.md](MEMORY.md)) shows every diagnostics pass parsing the buffer
+      three times and every position request parsing it once: on a 452 KiB file
+      that is ~285 ms of the ~360 ms native lint pass. The lint pass is the
+      case that matters — definition measures ~30 ms on the maintainer's macOS
+      machine, under the bar, however bad it looks on the Linux box. Cache a
+      tree per document version, updated incrementally from the `didChange`
+      ranges tree-sitter already accepts.
+  Plan: —
+- [ ] **Keep clj-kondo off the keystroke path for large buffers.** It costs
+      ~840 ms on the same file, which is its own runtime, not ours. Options: a
+      size-scaled debounce, a size threshold above which the kondo tier is
+      skipped, or publishing the native tier immediately and the kondo tier
+      when it lands — the last one changes the "one publish per pass"
+      invariant, so decide that first.
+  Plan: —
 
 ## Milestone 2 — completion quality
 
@@ -157,6 +177,26 @@ Each is small because the index already holds the data.
 - [ ] Issue templates and a short contributing note.
 - [ ] Version 1.0 tag once Milestones 0–3 are done.
   Plan: —
+
+## Backlog — unscheduled, not forgotten
+
+One line each, newest last. Promote or reject; never let this grow silently.
+
+- 2026-09-05 **Neovim and Zed cannot open `jar:` locations.** Their built-in
+  clients have no `jar:` handler, so library navigation dead-ends for two
+  priority-or-best-effort editors. Options: a documented Lua/Zed snippet that
+  reads the entry via `clojure/dependencyContents`, or a server-side fallback
+  that materializes the entry under `.clj-pulse/` and returns a `file:` URI
+  when the client is not known to handle `jar:` (`clientInfo.name`).
+  Candidate for Milestone 3.
+- 2026-09-05 **clj-kondo analysis as an optional enrichment source.** Names
+  defined through kondo hooks (`:analysis` output) could feed the index without
+  running hook code. Pairs with "Custom macros beyond `:lint-as`" below.
+- 2026-09-05 **Add missing import** (Java classes) as a code action; `:import`
+  is already parsed. Belongs with the refactor set.
+- 2026-09-05 **clj-kondo `--copy-configs`** for JAR-exported lint configs.
+  Deferred because it writes into the user's working tree; would need an
+  explicit opt-in.
 
 ## Best effort — do when cheap or asked
 
