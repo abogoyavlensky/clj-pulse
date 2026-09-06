@@ -18,6 +18,16 @@ const INDEX_CEILING: Duration = Duration::from_secs(120);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Samples per latency metric.
 const SAMPLES: usize = 20;
+/// The lines that mean stage 2 has finished with the libraries it could find.
+const STAGE2_LINES: [&str; 3] = [
+    "library indexing complete",
+    "no classpath found",
+    "no lgx deps resolved",
+];
+/// The lines that mean stage 3 has settled, resolved or failed. A stage-3
+/// failure degrades to the stage-2 result, which is still a settled state.
+const STAGE3_LINES: [&str; 2] = ["full classpath indexed", "classpath resolution failed"];
+
 /// How long to wait for stage 3 to announce itself before concluding it is not
 /// going to run for this workspace (disabled in config, no CLI, an lgx project).
 /// It logs that line before it does any work, so this only ever absorbs the gap
@@ -61,54 +71,53 @@ fn bench_large_project() {
         ),
     }
 
-    // Stage 2/3: libraries. Stage 2 reads whatever `.cpcache` is already on
-    // disk; on a warm checkout it finishes seconds before stage 3 has run
-    // `clojure -Spath` and re-indexed. Sampling at stage 2 would fold a
-    // background reindex into every latency number below, so the report waits
-    // for stage 3 whenever stage 3 is going to run — and stage 3 says so, in
-    // the line it logs before it starts, so waiting for a stage-3 outcome that
-    // never comes cannot cost the whole ceiling.
-    let stage2 = client.log_line_within(
-        &[
-            "library indexing complete",
-            "no classpath found",
-            "no lgx deps resolved",
-        ],
-        INDEX_CEILING.saturating_sub(started.elapsed()),
-    );
-    let stage2_sample = (started.elapsed(), rss_kib(pid));
+    // Stage 2/3: libraries. The two tiers must be waited on *together*, not in
+    // sequence: on a warm checkout stage 2 reports first and stage 3 re-resolves
+    // seconds later, but on a cold one stage 2 finds nothing and stays silent
+    // entirely — stage 3 wins the race, so the "nothing found" warning never
+    // fires either. Waiting for stage 2 first would then burn the whole ceiling
+    // and report it as the library index time.
+    let terminal: Vec<&str> = STAGE2_LINES
+        .iter()
+        .chain(STAGE3_LINES.iter())
+        .copied()
+        .collect();
+    let first = client.log_line_within(&terminal, INDEX_CEILING.saturating_sub(started.elapsed()));
+    let first_sample = (started.elapsed(), rss_kib(pid));
 
-    let stage3_will_run = client
-        .log_line_within(&["resolving classpath via"], STAGE3_ANNOUNCE_GRACE)
-        .is_some();
-    let stage3 = stage3_will_run
-        .then(|| {
-            client.log_line_within(
-                &["full classpath indexed", "classpath resolution failed"],
-                INDEX_CEILING.saturating_sub(started.elapsed()),
-            )
-        })
-        .flatten();
-
-    // Stage 3's own timing when it settled, stage 2's otherwise — never the
-    // moment the grace period or the ceiling happened to expire.
-    match stage3 {
+    let settled = match first {
+        // Stage 3 has already settled; there is nothing further to wait for.
+        Some(line) if is_stage3(&line) => Some((line, first_sample)),
+        // Stage 2 reported. Stage 3 logs a line before it does any work, so a
+        // short look for that decides whether waiting for it is worth anything
+        // — a workspace with stage 3 disabled must not pay the ceiling.
         Some(line) => {
-            report.library_index_wall = Some(started.elapsed());
-            report.rss_after_libraries = rss_kib(pid);
-            report.library_stage = Some(line);
-        }
-        None => {
-            if let Some(line) = stage2 {
-                report.library_index_wall = Some(stage2_sample.0);
-                report.rss_after_libraries = stage2_sample.1;
-                report.library_stage = Some(if stage3_will_run {
-                    format!("{line} (stage 3 never reported)")
-                } else {
-                    line
-                });
+            let announced = client
+                .log_line_within(&["resolving classpath via"], STAGE3_ANNOUNCE_GRACE)
+                .is_some();
+            let later = announced
+                .then(|| {
+                    client.log_line_within(
+                        &STAGE3_LINES,
+                        INDEX_CEILING.saturating_sub(started.elapsed()),
+                    )
+                })
+                .flatten();
+            match later {
+                Some(stage3) => Some((stage3, (started.elapsed(), rss_kib(pid)))),
+                None if announced => {
+                    Some((format!("{line} (stage 3 never reported)"), first_sample))
+                }
+                None => Some((line, first_sample)),
             }
         }
+        None => None,
+    };
+
+    if let Some((line, (wall, rss))) = settled {
+        report.library_index_wall = Some(wall);
+        report.rss_after_libraries = rss;
+        report.library_stage = Some(line);
     }
 
     // The remaining metrics all run against the largest source file, the worst
@@ -308,6 +317,10 @@ fn rss_kib(pid: u32) -> Option<u64> {
         return String::from_utf8_lossy(&out.stdout).trim().parse().ok();
     }
     None
+}
+
+fn is_stage3(line: &str) -> bool {
+    STAGE3_LINES.iter().any(|n| line.contains(n))
 }
 
 fn median(samples: &mut [Duration]) -> Option<Duration> {

@@ -1157,9 +1157,9 @@ static KONDO_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4
 /// `textDocument/publishDiagnostics` for a source buffer originates, so every
 /// path — didOpen, didSave, the debounced didChange, an engine change —
 /// produces the same set.
-/// Native lints are computed first and clj-kondo is awaited second, but only
-/// one `publishDiagnostics` is sent: publishing the native set and then
-/// replacing it would flicker every squiggle on every keystroke.
+/// The two tiers run concurrently, but only one `publishDiagnostics` is sent:
+/// publishing the native set and then replacing it would flicker every squiggle
+/// on every keystroke.
 async fn lint_and_publish_doc(
     client: &Client,
     documents: &DocumentStore,

@@ -29,11 +29,16 @@ release and after index or extractor changes, and compare.
 | didChange → diagnostics (median of 20) | 1243 ms | 1202 ms |
 | Definition (median of 20) | 78 ms | 71 ms |
 
-The bench waits for `full classpath indexed` (or an explicit stage-3 failure)
-before it samples, never for the stage-2 `library indexing complete` line: on a
-warm checkout stage 2 finishes seconds before stage 3 has re-resolved and
-re-indexed, and sampling there would fold a background reindex into every
-latency below.
+The bench waits on both library tiers at once and samples when stage 3 settles,
+never at the stage-2 `library indexing complete` line: on a warm checkout stage
+2 finishes seconds before stage 3 has re-resolved and re-indexed, and sampling
+there would fold a background reindex into every latency below. Waiting on them
+*in sequence* is wrong in the other direction — on a cold checkout stage 2 finds
+nothing and stays silent, so a stage-2-first wait burns the whole ceiling.
+
+Re-confirmed against an independent full metabase checkout at a later commit:
+project index 2.9 s, library index 3.3 s warm and 7.1 s cold, 1228 ms per edit,
+71 ms definition — all within run-to-run noise of the table above.
 
 For scale: the same bench against a one-namespace project reports 8 ms to
 index, 31 ms to first diagnostics and a 331 ms median per edit — that is the
@@ -58,11 +63,15 @@ larger than a single fix:
   cached per document version, ideally updated incrementally from the
   `didChange` ranges tree-sitter already accepts, would cut the native pass to
   roughly one parse and take position requests to single-digit milliseconds.
-- **clj-kondo dominates the remaining per-edit time** at ~840 ms on this file,
-  which is its own cost, not ours. Options are all design changes: a longer
-  debounce for large buffers, skipping the kondo tier above a size threshold,
-  or publishing the native tier first and the kondo tier when it lands
-  (which the "one publish per pass" invariant currently forbids).
+- **clj-kondo dominates the remaining per-edit time**, and that is its own cost,
+  not ours. Measured directly by taking it off `PATH`: the median per edit falls
+  from ~1230 ms to **633 ms** — i.e. 300 ms debounce plus a 333 ms native pass,
+  with clj-kondo adding ~595 ms on top. (Its standalone run on this file is
+  ~1.0 s; the difference is what the concurrent native pass already hides.)
+  Options are all design changes: a longer debounce for large buffers, skipping
+  the kondo tier above a size threshold, or publishing the native tier first and
+  the kondo tier when it lands — which the "one publish per pass" invariant
+  currently forbids.
 
 Both are tracked as Milestone 1 items in [ROADMAP.md](ROADMAP.md).
 
