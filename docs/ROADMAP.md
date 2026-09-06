@@ -108,9 +108,11 @@ Small fixes that remove wrong answers. Each extractor change bumps
 - [ ] **Cache the parse tree per document.** The bench
       ([MEMORY.md](MEMORY.md)) shows every diagnostics pass parsing the buffer
       three times and every position request parsing it once: on a 452 KiB file
-      that is ~285 ms of the ~360 ms native lint pass and most of the 75 ms
-      definition latency. Cache a tree per document version, updated
-      incrementally from the `didChange` ranges tree-sitter already accepts.
+      that is ~285 ms of the ~360 ms native lint pass. The lint pass is the
+      case that matters — definition measures ~30 ms on the maintainer's macOS
+      machine, under the bar, however bad it looks on the Linux box. Cache a
+      tree per document version, updated incrementally from the `didChange`
+      ranges tree-sitter already accepts.
   Plan: —
 - [ ] **Keep clj-kondo off the keystroke path for large buffers.** It costs
       ~840 ms on the same file, which is its own runtime, not ours. Options: a

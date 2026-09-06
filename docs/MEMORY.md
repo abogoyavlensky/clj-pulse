@@ -40,6 +40,33 @@ Re-confirmed against an independent full metabase checkout at a later commit:
 project index 2.9 s, library index 3.3 s warm and 7.1 s cold, 1228 ms per edit,
 71 ms definition — all within run-to-run noise of the table above.
 
+### On the maintainer's machine (macOS)
+
+The table above is a Linux CI-shaped box. The numbers users actually see are
+better, so treat the Linux figures as a pessimistic bound. Measured on macOS
+against a metabase checkout that is *not* the same commit — 35 003 symbols in
+2 587 namespaces, 477 classpath entries, and a 390 KiB edit target rather than
+452 KiB — so compare shapes, not digits:
+
+| Metric | Cold | Warm |
+|---|---|---|
+| Time to project index | 1.6 s | 1.7 s |
+| Time to library index (through stage 3) | 10.3 s | 1.8 s |
+| RSS after project / library index | 308 / 332 MiB | 298 / 322 MiB |
+| didOpen → first diagnostics | 546 ms | 574 ms |
+| didChange → diagnostics (median of 20) | 957 ms | 1053 ms |
+| Definition (median of 20) | 33 ms | 30 ms |
+
+Two things this changes. **Definition is ~30 ms on real hardware**, under the
+50 ms bar, not the ~75 ms the Linux box reports — the parse-cache item below is
+still worth doing for the lint pass, but definition latency is not the argument
+for it. And **~400 ms separates the wall clock from the elapsed time the server
+logs for itself** (1.6 s vs 1.18 s, consistent across runs), where on Linux the
+gap is ~10 ms. That gap is process spawn plus the `initialize` handshake plus
+project detection, before indexing starts — worth a look given that instant
+startup is a stated differentiator, and not something the current metrics
+isolate.
+
 For scale: the same bench against a one-namespace project reports 8 ms to
 index, 31 ms to first diagnostics and a 331 ms median per edit — that is the
 300 ms debounce plus ~30 ms of work. The numbers above are what file *size*
