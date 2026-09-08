@@ -27,6 +27,16 @@ Language features:
   prefix, substring, subsequence) and rank by match quality first, then by how
   local the name is. Docstrings load per item through `completionItem/resolve`,
   so a long list stays cheap.
+- **Keyword completion** - typing `:` or `::` offers the keywords the project
+  already uses, in the notation being typed: `::name` and `::alias/name` under
+  `::`, `:name` and `:ns/name` under a single colon. The current namespace's
+  keywords come first, then the most-used ones.
+- **Auto-require on accept** - completion also offers vars from namespaces the
+  file has not required yet, labelled `alias/name`; accepting one inserts the
+  `:require` along with the name. The pool is every project namespace, aliased
+  by its last segment, plus the conventional aliases (`str`, `set`, `io`,
+  `edn`, `walk`, `pp`, `async`, `sh`). An alias the file has already bound to
+  something else is never proposed.
 - **Hover** - docstrings and signatures for the symbol under the cursor.
 - **ClojureDocs** - the `clojurePulse/clojureDocs` request returns the
   [ClojureDocs](https://clojuredocs.org) entry (docstring, arglists, community
@@ -353,7 +363,7 @@ bb fmt        # fix code formatting
 bb fmt-check  # check formatting without fixing
 bb lint       # run clippy linter
 bb test       # run tests
-bb check      # run all checks (fmt + lint + test)
+bb check      # run all checks (fmt-check + lint + test), exactly as CI does
 bb bench      # index a large real project and report timings and memory
 bb outdated   # check outdated deps 
 bb build      # build the dev binary

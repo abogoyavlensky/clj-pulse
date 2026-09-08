@@ -40,6 +40,18 @@ Re-confirmed against an independent full metabase checkout at a later commit:
 project index 2.9 s, library index 3.3 s warm and 7.1 s cold, 1228 ms per edit,
 71 ms definition — all within run-to-run noise of the table above.
 
+**2026-09-08, keyword completion: +70 MiB, nothing else.** Recording every
+unqualified keyword as an occurrence (`:id`, not just `:my.ns/id`) is the one
+measurable cost of keyword completion. Measured on one box against a `master`
+build of the same corpus, so the absolute numbers are that box's, not the
+table's: RSS after project index 287 → 358 MiB (median of two runs), while
+index time (4.1 → 4.2 s), per-edit diagnostics (1340 → 1380 ms) and definition
+(91 ms both) did not move. metabase is ~43 000 symbols; the extra bytes are the
+occurrence vectors themselves plus the small `keyword_counts` aggregate, and
+they buy find-references and completion on unqualified keywords. If it ever
+needs winning back, interning occurrence fqns is the lever — most of them
+repeat.
+
 ### On the maintainer's machine (macOS)
 
 The table above is a Linux CI-shaped box. The numbers users actually see are

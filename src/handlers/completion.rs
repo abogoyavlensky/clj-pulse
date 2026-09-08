@@ -7,8 +7,8 @@ use serde_json::json;
 
 use super::builtins;
 use super::matching::match_score;
-use crate::document::DocumentStore;
-use crate::index::{extractor, CoreSymbol, DefKind, Index};
+use crate::document::{DocumentStore, KeywordContext};
+use crate::index::{extractor, CoreSymbol, DefKind, Index, NsMeta};
 
 pub fn handle(
     index: &Index,
@@ -27,13 +27,31 @@ pub fn handle(
         .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
-    let mut items = complete_symbols(index, &prefix, &current_ns);
+    // A keyword is being typed: `:`/`::` is not an identifier character, so the
+    // `word_at` prefix would silently drop the notation and offer vars. Keyword
+    // completion answers on its own, with keywords only.
+    if let Some(ctx) = documents.keyword_at(&uri, pos) {
+        let ns_meta = index.ns_meta(&current_ns);
+        let items = complete_keywords(index, &ctx, &current_ns, ns_meta.as_ref());
+        if items.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(CompletionResponse::List(CompletionList {
+            is_incomplete: true,
+            items,
+        })));
+    }
+
+    // The live buffer, for the locals walk and for the require edit an
+    // auto-require item carries.
+    let source = documents.text(&uri);
+    let mut items = complete_symbols(index, &prefix, &current_ns, source.as_deref());
 
     // Locals (let/fn/loop/… bound names) in scope at the cursor. They shadow
     // globals, so offer them ahead of the index symbols. Qualified prefixes
     // (`alias/…`) can't name a local, so skip the walk there.
     if !prefix.contains('/') {
-        let mut merged = local_completions(documents, &uri, pos, &prefix);
+        let mut merged = local_completions(source.as_deref(), pos, &prefix);
         merged.extend(items);
         items = merged;
     }
@@ -56,18 +74,13 @@ pub fn handle(
 /// In-scope local bindings at `pos` whose name matches `prefix`, innermost-first
 /// and de-duplicated by name (an inner binding shadows an outer one). Locals are
 /// pool 0, so within a match tier they rank above every var and core name.
-fn local_completions(
-    documents: &DocumentStore,
-    uri: &Url,
-    pos: Position,
-    prefix: &str,
-) -> Vec<CompletionItem> {
-    let Some(text) = documents.text(uri) else {
+fn local_completions(source: Option<&str>, pos: Position, prefix: &str) -> Vec<CompletionItem> {
+    let Some(text) = source else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for binding in extractor::locals_in_scope_at(&text, pos).into_iter().rev() {
+    for binding in extractor::locals_in_scope_at(text, pos).into_iter().rev() {
         let Some(tier) = matched(&binding.name, prefix, Pool::Local) else {
             continue;
         };
@@ -152,7 +165,144 @@ fn push(items: &mut Vec<CompletionItem>, item: CompletionItem, tier: u8, pool: P
     });
 }
 
-pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<CompletionItem> {
+/// Cap on keyword completions: a bare `:` matches every keyword the project
+/// uses, and the ranking below puts the ones worth seeing at the top.
+const KEYWORD_LIMIT: usize = 100;
+
+/// Keyword candidates for the token being typed, in the notation being typed:
+/// `::name` and `::alias/` under a bare `::`, `::alias/name` once an alias is
+/// spelled, every keyword as written under a single `:`. Ranked by match tier,
+/// then by whether the keyword belongs to this namespace, then by how often the
+/// project uses it.
+pub fn complete_keywords(
+    index: &Index,
+    ctx: &KeywordContext,
+    current_ns: &str,
+    ns_meta: Option<&NsMeta>,
+) -> Vec<CompletionItem> {
+    // Candidates are matched against the whole token, marker included, so a
+    // typed `::lo` prefix-matches `::local` instead of merely containing it.
+    let typed = format!("{}{}", if ctx.auto_resolved { "::" } else { ":" }, ctx.text);
+    let counts = index.keyword_counts();
+    let mut items = Vec::new();
+    let mut push = |label: String, detail: String, count: u32, own_ns: bool| {
+        let Some(tier) = keyword_tier(&label, &typed, &ctx.text) else {
+            return;
+        };
+        items.push(keyword_item(label, detail, tier, own_ns, count, ctx));
+    };
+
+    match (ctx.auto_resolved, ctx.text.split_once('/')) {
+        // `::alias/name` — the alias decides the namespace; an alias this file
+        // does not bind resolves to nothing, so there is nothing to offer.
+        (true, Some((alias, _))) => {
+            let Some(full_ns) = ns_meta.and_then(|m| m.aliases.get(alias)) else {
+                return Vec::new();
+            };
+            let ns_prefix = format!(":{}/", full_ns);
+            for (fqn, count) in &counts {
+                if let Some(name) = fqn.strip_prefix(&ns_prefix) {
+                    push(format!("::{}/{}", alias, name), uses(*count), *count, false);
+                }
+            }
+        }
+        // Bare `::` — this namespace's own keywords, plus every alias as
+        // `::alias/` so the user can carry on into another namespace.
+        (true, None) => {
+            let ns_prefix = format!(":{}/", current_ns);
+            for (fqn, count) in &counts {
+                if let Some(name) = fqn.strip_prefix(&ns_prefix) {
+                    push(format!("::{}", name), uses(*count), *count, true);
+                }
+            }
+            if let Some(meta) = ns_meta {
+                for (alias, full_ns) in &meta.aliases {
+                    push(
+                        format!("::{}/", alias),
+                        format!("alias for {}", full_ns),
+                        0,
+                        false,
+                    );
+                }
+            }
+        }
+        // A single colon takes keywords exactly as they are indexed, qualified
+        // (`:ns/name`) or not (`:name`).
+        (false, _) => {
+            let own = format!(":{}/", current_ns);
+            for (fqn, count) in &counts {
+                let own_ns = !current_ns.is_empty() && fqn.starts_with(&own);
+                push(fqn.clone(), uses(*count), *count, own_ns);
+            }
+        }
+    }
+
+    // Sorted here as well as in `sort_text`, so the cap keeps the items the
+    // ranking actually put first.
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    items.truncate(KEYWORD_LIMIT);
+    items
+}
+
+fn uses(count: u32) -> String {
+    if count == 1 {
+        "keyword, 1 use".to_string()
+    } else {
+        format!("keyword, {} uses", count)
+    }
+}
+
+/// The match tier a keyword label earns, with the same guardrail the symbol
+/// pools use: one typed character is too little to fuzzy-match on. The `:`/`::`
+/// marker is not typing, so it does not count toward that minimum.
+fn keyword_tier(label: &str, typed: &str, text: &str) -> Option<u8> {
+    let tier = match_score(label, typed)?;
+    (tier < 2 || text.chars().count() >= 2).then_some(tier)
+}
+
+/// A keyword item. The edit spans the whole token (`ctx.start..ctx.end`) rather
+/// than relying on the client's word pattern: `:` is a word character to
+/// Clojure Pulse and not to Calva, and both must replace the same span.
+fn keyword_item(
+    label: String,
+    detail: String,
+    tier: u8,
+    own_ns: bool,
+    count: u32,
+    ctx: &KeywordContext,
+) -> CompletionItem {
+    CompletionItem {
+        sort_text: Some(format!(
+            "{}-{}-{:010}-{}",
+            tier,
+            u8::from(!own_ns),
+            u32::MAX - count,
+            label
+        )),
+        filter_text: Some(label.clone()),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: Range {
+                start: ctx.start,
+                end: ctx.end,
+            },
+            new_text: label.clone(),
+        })),
+        kind: Some(CompletionItemKind::KEYWORD),
+        detail: Some(detail),
+        label,
+        ..Default::default()
+    }
+}
+
+/// Completion candidates for `prefix` in `current_ns`. `source` is the live
+/// buffer, needed only to build the `:require` edit an auto-require item
+/// carries; without it those items are still offered, without their edit.
+pub fn complete_symbols(
+    index: &Index,
+    prefix: &str,
+    current_ns: &str,
+    source: Option<&str>,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let ns_meta = index.ns_meta(current_ns);
 
@@ -206,6 +356,16 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     }
                 }
             }
+        } else if let Some(meta) = &ns_meta {
+            // Neither an alias of this file nor a class: the user is naming a
+            // namespace they have not required yet. Offer its vars and let
+            // accepting one insert the require.
+            let pool: Vec<(String, String)> =
+                super::code_action::namespaces_for_alias(index, meta, alias)
+                    .into_iter()
+                    .map(|c| (c.namespace, c.alias.unwrap_or_else(|| alias.to_string())))
+                    .collect();
+            items.extend(auto_require_items(index, &pool, name_prefix, source));
         }
     } else {
         // Pool A: current namespace symbols
@@ -422,10 +582,129 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     }
                 }
             }
+
+            // Pool G: vars of namespaces this file has not required. Two typed
+            // characters minimum — a one-character prefix over every project
+            // namespace is noise, and inserting a require is a big enough
+            // action to deserve a real prefix.
+            if prefix.chars().count() >= 2 {
+                if let Some(meta) = &ns_meta {
+                    let pool = auto_require_pool(index, meta);
+                    items.extend(auto_require_items(index, &pool, prefix, source));
+                }
+            }
         }
     }
 
     items
+}
+
+/// Cap on auto-require completions, so a short prefix doesn't turn the list
+/// into a catalogue of every namespace in the workspace.
+const AUTO_REQUIRE_LIMIT: usize = 30;
+
+/// The namespaces auto-require completion may propose for a bare prefix, each
+/// with the alias it would be required under: every project namespace by its
+/// last segment, plus the curated aliases. Library namespaces outside that
+/// table are deliberately absent — the pool stays small and the aliases stay
+/// the conventional ones. Namespaces this file already reaches, and aliases it
+/// has already bound to something else, are dropped here.
+fn auto_require_pool(index: &Index, meta: &NsMeta) -> Vec<(String, String)> {
+    let mut pool: Vec<(String, String)> = Vec::new();
+    for entry in index.namespaces.iter() {
+        if !index.is_project_path(&entry.value().file) {
+            continue;
+        }
+        let ns = entry.key();
+        let alias = ns.rsplit('.').next().unwrap_or(ns);
+        pool.push((ns.clone(), alias.to_string()));
+    }
+    for (alias, ns) in super::code_action::CURATED_ALIASES {
+        pool.push((ns.to_string(), alias.to_string()));
+    }
+    pool.retain(|(ns, alias)| {
+        // Already reachable from here, or the alias is taken: inserting the
+        // require would be a no-op or a conflict.
+        ns != &meta.name
+            && !meta.resolves_prefix(ns)
+            && !meta.aliases.contains_key(alias)
+            && !meta.requires.iter().any(|r| r == ns)
+    });
+    pool
+}
+
+/// Auto-require items for `prefix` over `pool` (namespace, alias) pairs: every
+/// public var whose name matches, labelled `alias/name` and carrying the edit
+/// that inserts the require. Ranked and capped here, then sorted after every
+/// in-scope item — picking a name already in scope always beats editing the ns
+/// form, whatever the match tiers say.
+fn auto_require_items(
+    index: &Index,
+    pool: &[(String, String)],
+    prefix: &str,
+    source: Option<&str>,
+) -> Vec<CompletionItem> {
+    let mut hits: Vec<AutoRequireHit> = Vec::new();
+    for (ns, alias) in pool {
+        let Some(fqns) = index.ns_symbols.get(ns) else {
+            continue;
+        };
+        for fqn in fqns.iter() {
+            let Some(sym) = index.symbols.get(fqn) else {
+                continue;
+            };
+            // Private vars are not referable, and an Integrant key is a
+            // keyword definition, not a var: `alias/database` would name
+            // nothing (see `DefKind::IntegrantKey`).
+            if sym.private || sym.kind == DefKind::DefnPrivate || sym.fqn.starts_with(':') {
+                continue;
+            }
+            if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {
+                hits.push(AutoRequireHit {
+                    tier,
+                    label: format!("{}/{}", alias, sym.name),
+                    spec: super::code_action::Candidate {
+                        namespace: ns.clone(),
+                        alias: Some(alias.clone()),
+                    }
+                    .spec(),
+                    kind: defkind_to_completion_kind(&sym.kind),
+                    doc_fqn: sym.doc.as_ref().map(|_| sym.fqn.clone()),
+                });
+            }
+        }
+    }
+    hits.sort_by(|a, b| a.tier.cmp(&b.tier).then_with(|| a.label.cmp(&b.label)));
+    hits.truncate(AUTO_REQUIRE_LIMIT);
+
+    // One parse for the whole pool: every candidate inserts at the same place.
+    let anchor = source.and_then(super::code_action::require_anchor);
+
+    hits.into_iter()
+        .map(|hit| CompletionItem {
+            sort_text: Some(format!("9-{}-{}", hit.tier, hit.label)),
+            label: hit.label,
+            detail: Some(format!("requires {}", hit.spec)),
+            kind: Some(hit.kind),
+            additional_text_edits: anchor.as_ref().map(|a| vec![a.edit(&hit.spec)]),
+            // Same lazy documentation as an ordinary symbol item: the user can
+            // read the docstring before deciding to add the require.
+            data: hit
+                .doc_fqn
+                .map(|fqn| json!({ "src": "symbol", "fqn": fqn })),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// One auto-require candidate, before it becomes an item: everything the item
+/// needs, so the pool can be ranked and capped before any edit is built.
+struct AutoRequireHit {
+    tier: u8,
+    label: String,
+    spec: String,
+    kind: CompletionItemKind,
+    doc_fqn: Option<String>,
 }
 
 /// Cap on namespace completions, so a short substring doesn't offer every
@@ -666,7 +945,7 @@ mod tests {
     }
 
     fn labels(index: &Index, prefix: &str) -> Vec<String> {
-        complete_symbols(index, prefix, "app")
+        complete_symbols(index, prefix, "app", None)
             .into_iter()
             .map(|i| i.label)
             .collect()
@@ -676,7 +955,7 @@ mod tests {
     fn completes_java_static_members_and_class_names() {
         let (index, _zip) = crate::handlers::java::test_fixture();
         let java_labels = |prefix: &str| -> Vec<String> {
-            complete_symbols(&index, prefix, "app.core")
+            complete_symbols(&index, prefix, "app.core", None)
                 .into_iter()
                 .map(|i| i.label)
                 .collect()
@@ -736,7 +1015,7 @@ mod tests {
     #[test]
     fn letgo_native_completion_is_labelled() {
         let index = letgo_index();
-        let item = complete_symbols(&index, "count", "app")
+        let item = complete_symbols(&index, "count", "app", None)
             .into_iter()
             .find(|i| i.label == "count")
             .expect("count offered");

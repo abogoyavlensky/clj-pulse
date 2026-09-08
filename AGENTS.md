@@ -9,7 +9,9 @@ and update README and this file in the same change.
 
 ## Verification (run before claiming anything works)
 
-- `bb check` — fmt + clippy `-D warnings` + all tests. CI runs the same.
+- `bb check` — fmt *check* + clippy `-D warnings` + all tests. CI runs the
+  same, so a green `bb check` means a green CI; it fails on unformatted code
+  instead of rewriting it, and `bb fmt` is the fixer.
 - `bb e2e` — end-to-end: spawns the real binary, speaks framed JSON-RPC over
   stdio like an editor (`tests/test_e2e.rs`). Covers definition (project +
   jar: URIs), Integrant keyword navigation (`config.edn` key → `ig/init-key`
@@ -144,6 +146,24 @@ and update README and this file in the same change.
   only when a handler *returns*, the guard also cancels each panicked id before
   it dispatches the next request — otherwise that id would answer
   `invalid request` for the rest of the session.
+- Keyword occurrences carry both notations: a qualified keyword under the
+  namespace it resolves to (`:my.ns/id`), an unqualified one under `:id`; a
+  namespaced map (`#:user{:id 1}`) qualifies its keys with the map's prefix.
+  Definition ignores the unqualified fqns — there is nothing to navigate to —
+  while references and keyword completion use them. `Index::keyword_counts`
+  aggregates them and is maintained at every mutation of `occurrences`
+  (`replace_occurrences`, `remove_file`), never by scanning: keyword completion
+  ranks by it on the keystroke path.
+- A cursor inside a `:`/`::` token makes completion answer with keywords alone
+  (`complete_keywords`). Each item carries a `text_edit` spanning the whole
+  token, so Clojure Pulse, Calva and Neovim replace the same span whatever
+  their word patterns say, and a `tier-scope-rank-label` `sort_text`:
+  current-namespace keywords first, then the most-used.
+- Auto-require items (a var of a namespace the file has not required) sort
+  after every in-scope item — `9-tier-label`, not the pool scheme — because
+  inserting a require is a bigger action than picking a name already in scope.
+  They come from project namespaces and `code_action::CURATED_ALIASES` only,
+  and never propose an alias the file has bound to another namespace.
 - Every completion pool filters through `handlers::matching::match_score`, the
   same matcher `workspace/symbol` uses, and each item carries a `sort_text` of
   `tier-pool-name`: tier is the match (exact 0 to subsequence 3), pool is how

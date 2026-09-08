@@ -1252,6 +1252,35 @@ fn keyword_fqn(node: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
     }
 }
 
+/// The fqn a keyword *usage* is recorded under: [`keyword_fqn`] for qualified
+/// and auto-resolved keywords, plus the unqualified case those reject —
+/// `:name` is recorded as `:name`, since completion ranks unqualified keywords
+/// by how often the project uses them and references list every usage.
+///
+/// Only usages take this path. Definition sites (`ig/init-key` dispatch) and
+/// EDN configs keep to `keyword_fqn`: an unqualified keyword is too ambiguous
+/// to define a component, and a `::name` in a file with no `ns` form resolves
+/// to no namespace at all, so it is recorded under no fqn either.
+fn keyword_occurrence_fqn(node: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
+    if let Some(fqn) = keyword_fqn(node, ns_meta, source) {
+        return Some(fqn);
+    }
+    if node.child_by_field_name("namespace").is_some() {
+        return None;
+    }
+    let auto_resolved = node
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, source) == "::")
+        .unwrap_or(false);
+    if auto_resolved {
+        return None;
+    }
+    Some(format!(
+        ":{}",
+        node_text(node.child_by_field_name("name")?, source)
+    ))
+}
+
 // --- occurrence collection -------------------------------------------------
 
 /// One local binding in the occurrence walker's scope stack: enough to
@@ -1375,10 +1404,14 @@ fn is_let_like(head: &str) -> bool {
 fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
     match node.kind() {
         "sym_lit" => record_occurrence(node, ctx, scope, out),
-        // Every qualified keyword is a usage (`:lib/x`, `::x`, `::alias/x`);
-        // unqualified ones are skipped by `keyword_fqn`. This powers keyword
-        // references and feeds Integrant component navigation.
+        // Every keyword literal is a usage: qualified ones (`:lib/x`, `::x`,
+        // `::alias/x`) under their resolved namespace, unqualified ones under
+        // `:name`. This powers keyword references and completion, and feeds
+        // Integrant component navigation.
         "kwd_lit" => record_keyword_occurrence(node, ctx, out),
+        // `#:user{:id 1}` — the reader qualifies the keys, so the keyword the
+        // user wrote is not the keyword the program sees.
+        "ns_map_lit" => walk_ns_map(node, ctx, scope, out),
         "list_lit" => walk_list(node, ctx, scope, out),
         // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
         // macros do reference real vars, so walk those.
@@ -2081,15 +2114,120 @@ fn record_occurrence(
     out.push(Occurrence { fqn, name_range });
 }
 
-/// Records a qualified keyword usage. The range spans the whole keyword token
-/// so navigation resolves from a click anywhere on `:ns/name` / `::name`
+/// Records a keyword usage. The range spans the whole keyword token so
+/// navigation resolves from a click anywhere on `:ns/name` / `::name`
 /// (keyword rename is unsupported in v1, so a name-only range buys nothing).
 fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
-    if let Some(fqn) = keyword_fqn(node, ctx.ns_meta, ctx.source) {
+    if let Some(fqn) = keyword_occurrence_fqn(node, ctx.ns_meta, ctx.source) {
         out.push(Occurrence {
             fqn,
             name_range: node_to_lsp_range(node, ctx.source),
         });
+    }
+}
+
+/// Walks a namespaced map literal (`#:user{…}`, `#::{…}`, `#::alias{…}`). The
+/// reader qualifies every *unqualified* key with the map's prefix, so
+/// `#:user{:id 1}` reads as `{:user/id 1}` and recording a bare `:id` would
+/// answer find-references for an unrelated `:id`. Values are ordinary
+/// expressions, and the prefix itself is a reader marker, not a keyword usage.
+///
+/// A splicing reader conditional (`#:user{#?@(:clj [:a 1]) :b 2}`) contributes
+/// an unknown number of entries, so nothing after it can be told apart as key
+/// or value. Such a map falls back to the ordinary walk: its unqualified
+/// keywords stay unqualified, which under-reports the keys but never invents a
+/// namespace for a value.
+fn walk_ns_map(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
+    let map_ns = ns_map_prefix(node, ctx);
+    let mut cursor = node.walk();
+    let entries: Vec<Node> = node.children_by_field_name("value", &mut cursor).collect();
+    if entries.iter().any(|n| n.kind() == "splicing_read_cond_lit") {
+        for entry in entries {
+            walk_occurrences(entry, ctx, scope, out);
+        }
+        return;
+    }
+    for pair in entries.chunks(2) {
+        match pair.first() {
+            Some(key) if key.kind() == "kwd_lit" => {
+                record_ns_map_key(*key, map_ns.as_deref(), ctx, out)
+            }
+            Some(key) => walk_occurrences(*key, ctx, scope, out),
+            None => {}
+        }
+        if let Some(value) = pair.get(1) {
+            walk_occurrences(*value, ctx, scope, out);
+        }
+    }
+}
+
+/// The namespace a namespaced map literal qualifies its keys with: the current
+/// namespace for `#::{…}`, an alias-resolved one for `#::alias{…}`, the literal
+/// prefix for `#:user{…}`. `None` when there is nothing to resolve it to (an
+/// `#::{…}` in a file with no `ns` form).
+fn ns_map_prefix(node: Node, ctx: &OccurrenceCtx) -> Option<String> {
+    let prefix = node.child_by_field_name("prefix")?;
+    match prefix.kind() {
+        "auto_res_mark" => (!ctx.ns_meta.name.is_empty()).then(|| ctx.ns_meta.name.clone()),
+        "kwd_lit" => {
+            let ns = node_text(prefix.child_by_field_name("name")?, ctx.source);
+            let auto_resolved = prefix
+                .child_by_field_name("marker")
+                .map(|m| node_text(m, ctx.source) == "::")
+                .unwrap_or(false);
+            if auto_resolved {
+                Some(
+                    ctx.ns_meta
+                        .aliases
+                        .get(ns)
+                        .cloned()
+                        .unwrap_or_else(|| ns.to_string()),
+                )
+            } else {
+                Some(ns.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Records one key of a namespaced map under the fqn the reader gives it. A key
+/// that carries its own namespace (`:other/x`, `::x`) keeps it; `:_/x` is the
+/// reader's escape from the prefix and reads as plain `:x`; anything else takes
+/// the map's namespace.
+fn record_ns_map_key(
+    key: Node,
+    map_ns: Option<&str>,
+    ctx: &OccurrenceCtx,
+    out: &mut Vec<Occurrence>,
+) {
+    let auto_resolved = key
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, ctx.source) == "::")
+        .unwrap_or(false);
+    if let Some(ns_node) = key.child_by_field_name("namespace") {
+        if !auto_resolved && node_text(ns_node, ctx.source) == "_" {
+            if let Some(name) = key.child_by_field_name("name") {
+                out.push(Occurrence {
+                    fqn: format!(":{}", node_text(name, ctx.source)),
+                    name_range: node_to_lsp_range(key, ctx.source),
+                });
+            }
+            return;
+        }
+        record_keyword_occurrence(key, ctx, out);
+        return;
+    }
+    match map_ns {
+        Some(ns) if !auto_resolved => {
+            if let Some(name) = key.child_by_field_name("name") {
+                out.push(Occurrence {
+                    fqn: format!(":{}/{}", ns, node_text(name, ctx.source)),
+                    name_range: node_to_lsp_range(key, ctx.source),
+                });
+            }
+        }
+        _ => record_keyword_occurrence(key, ctx, out),
     }
 }
 

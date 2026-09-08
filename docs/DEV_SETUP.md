@@ -41,7 +41,9 @@ installs all of them (CI's `mise-action` reads the same file).
 All of these run without an editor and are the source of truth for "does it
 work" (see also the quick reference in [AGENTS.md](../AGENTS.md)):
 
-- `bb check` — fmt + clippy `-D warnings` + all tests. CI runs the same.
+- `bb check` — fmt *check* + clippy `-D warnings` + all tests. CI runs the
+  same, so a green `bb check` means a green CI; it fails on unformatted code
+  rather than rewriting it. `bb fmt` is the fixer.
 - `bb e2e` — spawns the real binary, speaks framed JSON-RPC over stdio like an
   editor (`tests/test_e2e.rs`): definition (project + `jar:` URIs), completion,
   hover, didChange, `workspace/textDocumentContent`.

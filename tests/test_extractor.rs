@@ -599,9 +599,10 @@ fn test_occurrence_destructuring_or_defaults_are_usages() {
 }
 
 #[test]
-fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
+fn test_occurrence_keywords_recorded_in_their_own_notation() {
     // Qualified keywords (literal `:ns/name`, auto-resolved `::name`) are
-    // occurrences; unqualified ones are skipped as too ambiguous to index.
+    // occurrences of the namespace they resolve to; an unqualified `:plain` is
+    // an occurrence of `:plain` — never of the current namespace.
     let src = "(ns my.ns)\n(def x {:my.ns/a 1 :other/b ::a :plain 2})";
     let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
 
@@ -618,11 +619,49 @@ fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
         "occs: {:?}",
         occs
     );
-    // Unqualified `:plain` produces no keyword occurrence.
+    assert_eq!(occurrences_of(&occs, ":plain").len(), 1, "occs: {:?}", occs);
+    // An unqualified keyword never gains the current namespace.
     assert!(
-        occs.iter()
-            .all(|o| o.fqn != ":plain" && o.fqn != ":my.ns/plain"),
-        "unqualified keyword leaked: {:?}",
+        occs.iter().all(|o| o.fqn != ":my.ns/plain"),
+        "unqualified keyword was qualified: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_unqualified_keywords_recorded() {
+    // Unqualified keywords are the bulk of real code; completion ranks them by
+    // how often the project uses them, so each one is recorded as `:name` with
+    // a range spanning the whole token (colon included).
+    let src = "(ns my.ns)\n(def x {:id 1 :name \"x\" ::local 2})";
+    let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
+
+    for fqn in [":id", ":name", ":my.ns/local"] {
+        assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
+    }
+
+    // The range spans the whole token: `:id` is three characters wide.
+    let id = occurrences_of(&occs, ":id")[0];
+    assert_eq!(id.name_range.start.line, 1);
+    assert_eq!(
+        id.name_range.end.character - id.name_range.start.character,
+        3,
+        "range must span the whole `:id` token: {:?}",
+        id
+    );
+}
+
+#[test]
+fn test_unqualified_keyword_without_ns_form_is_recorded() {
+    // A file with no `ns` form has no current namespace, so `::local` resolves
+    // to nothing and is skipped — but `:plain` is still a keyword usage.
+    let src = "(def x {:plain 1 ::local 2})";
+    let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
+
+    assert_eq!(occurrences_of(&occs, ":plain").len(), 1, "occs: {:?}", occs);
+    assert!(
+        occs.iter().all(|o| o.fqn != ":local" && o.fqn != ":/local"),
+        "unresolvable `::local` leaked: {:?}",
         occs
     );
 }
@@ -1167,6 +1206,54 @@ fn test_declare_indexes_each_name() {
     assert!(
         occs.iter().any(|o| o.fqn == "app/helper"),
         "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_namespaced_map_keys_take_the_map_prefix() {
+    // `#:user{:id 1}` reads as `{:user/id 1}`, so the key is an occurrence of
+    // `:user/id` — recording a bare `:id` would answer find-references for
+    // every unrelated `:id` in the project. `:_/x` escapes the prefix, an
+    // explicitly qualified key keeps its own namespace, and the prefix itself
+    // is a reader marker, not a keyword usage.
+    let src = "(ns my.ns\n  (:require [other.lib :as o]))\n\
+               (def a #:user{:id 1 :_/bare 2 :other/kept 3 ::auto 4 :v :val})\n\
+               (def b #::{:local 5})\n\
+               (def c #::o{:aliased 6})";
+    let (_, _, occs) = extract_full(src, Path::new("nsmap.clj")).unwrap();
+
+    for fqn in [
+        ":user/id",
+        ":bare",
+        ":other/kept",
+        ":my.ns/auto",
+        ":user/v",
+        ":val",
+        ":my.ns/local",
+        ":other.lib/aliased",
+    ] {
+        assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
+    }
+    // Neither the bare key nor the map prefix is recorded on its own.
+    assert!(
+        occs.iter().all(|o| o.fqn != ":id" && o.fqn != ":user"),
+        "namespaced-map key or prefix leaked: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_namespaced_map_with_splicing_conditional_invents_no_namespace() {
+    // `#?@` splices an unknown number of entries, so nothing after it can be
+    // told apart as key or value. Under-reporting the keys is fine; inventing
+    // `:user/value` for what is actually a value is not.
+    let src = "(ns my.ns)\n(def a #:user{#?@(:clj [:a 1]) :b :value})";
+    let (_, _, occs) = extract_full(src, Path::new("nsmap.cljc")).unwrap();
+
+    assert!(
+        occs.iter().all(|o| !o.fqn.starts_with(":user/")),
+        "unpairable namespaced map must not invent key namespaces: {:?}",
         occs
     );
 }

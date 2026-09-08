@@ -28,9 +28,11 @@ server.rs: per project, stage 2 indexes the cached classpath (.cpcache / lgx /
 
 ## Keyword & Integrant Indexing
 
-extractor.rs: qualified keywords (`:ns/name`, `::name`, `::alias/name`) are
-  recorded as occurrences with colon-prefixed fqns (`:ns/name`), keyed disjointly
-  from var fqns. Only qualified keywords are indexed.
+extractor.rs: keywords are recorded as occurrences with colon-prefixed fqns,
+  keyed disjointly from var fqns: qualified ones (`:ns/name`, `::name`,
+  `::alias/name`) under the namespace they resolve to (`:ns/name`), unqualified
+  ones under `:name`. Definition ignores the unqualified fqns (there is nothing
+  to navigate to); references and keyword completion use them.
 extractor.rs: `(defmethod ig/init-key ::x …)` records `:ns/x` as an IntegrantKey
   *definition* (`DefKind::IntegrantKey`); the other lifecycle defmethods and all
   config uses are occurrences, so goto-definition lands on the constructor.

@@ -43,7 +43,8 @@ then the editor features users notice as missing. Guiding decisions:
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
 references, rename (vars and locals) with `prepareRename`, hover, ClojureDocs
-request, completion (fuzzy-matched and ranked, `/` trigger, lazy
+request, completion (fuzzy-matched and ranked, `/` and `:` triggers, keywords
+in the notation being typed, auto-require on accept, lazy
 `completionItem/resolve` docs), signature help, document and workspace symbols,
 add-require and clean-ns code actions, five native lints plus the clj-kondo
 bridge, indent-on-Enter, `jar:` content provider, ignored-form dimming,
@@ -53,8 +54,7 @@ support. The full ns form is understood (`:as-alias`, `:rename`,
 request fails alone instead of taking the server down, and `bb e2e-pulse` plus
 `bb bench` guard the first-priority editor and the performance baseline.
 
-Not shipped: keyword rename, completion trigger character `:`, keyword
-completion, auto-require on accept, `documentHighlight`, `selectionRange`,
+Not shipped: keyword rename, `documentHighlight`, `selectionRange`,
 `foldingRange`, formatting, semantic tokens, code lens, implementation
 provider, `executeCommand` refactors, `willRenameFiles`. The parse tree is not
 yet cached per document, so large buffers re-parse on every lint pass.
@@ -116,31 +116,31 @@ Small fixes that remove wrong answers. Each extractor change bumps
       machine, under the bar, however bad it looks on the Linux box. Cache a
       tree per document version, updated incrementally from the `didChange`
       ranges tree-sitter already accepts.
-  Plan: —
+  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — in progress
 - [ ] **Keep clj-kondo off the keystroke path for large buffers.** It costs
       ~840 ms on the same file, which is its own runtime, not ours. Options: a
       size-scaled debounce, a size threshold above which the kondo tier is
       skipped, or publishing the native tier immediately and the kondo tier
       when it lands — the last one changes the "one publish per pass"
       invariant, so decide that first.
-  Plan: —
+  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — in progress
 
 ## Milestone 2 — completion quality
 
-The feature users touch most; today it is prefix-only and fires only on
-identifier characters.
+The feature users touch most. Done: it matches fuzzily, fires on `/` and `:`,
+completes keywords, and can add the require an accepted name needs.
 
 - [x] Trigger character `/` in `CompletionOptions`.
-- [ ] Trigger character `:` in `CompletionOptions`.
+- [x] Trigger character `:` in `CompletionOptions`.
 - [x] Fuzzy matching. Extract the exact/prefix/substring/subsequence
       matcher from `handlers/symbols.rs` into a shared module and use it in
       `handlers/completion.rs`.
-- [ ] Keyword completion from the occurrence index, current-ns keywords first.
-- [ ] Auto-require on accept via `additionalTextEdits`, reusing the
+- [x] Keyword completion from the occurrence index, current-ns keywords first.
+- [x] Auto-require on accept via `additionalTextEdits`, reusing the
       add-require edit builder.
 - [x] `completionItem/resolve` for docstrings and signatures so long lists stay
       cheap.
-  Plan: [2026-09-06-0756-completion-fuzzy-resolve.md](plans/2026-09-06-0756-completion-fuzzy-resolve.md) — done (trigger `/`, fuzzy, resolve); [2026-09-06-0757-completion-keywords-auto-require.md](plans/2026-09-06-0757-completion-keywords-auto-require.md) — in progress (trigger `:`, keywords, auto-require)
+  Plan: [2026-09-06-0756-completion-fuzzy-resolve.md](plans/2026-09-06-0756-completion-fuzzy-resolve.md) — done (trigger `/`, fuzzy, resolve); [2026-09-06-0757-completion-keywords-auto-require.md](plans/2026-09-06-0757-completion-keywords-auto-require.md) — done (trigger `:`, keywords, auto-require)
 
 ## Milestone 3 — editor chrome for Calva and Neovim
 
@@ -150,12 +150,10 @@ Cheap with the tree-sitter parse resident; their absence reads as
 - [ ] `textDocument/documentHighlight`. Reuse `local_references_at` and
       the occurrence index; Read vs Write where cheap.
 - [ ] `textDocument/selectionRange`. Expand along the parse tree.
-- [ ] `textDocument/foldingRange`. Top-level forms, `(comment …)`, the ns
-      form, multi-line collections.
 - [ ] **Keyword rename**. Rewrite each occurrence in its own notation
       (`::kw`, `:ns/kw`, `::alias/kw`); include Integrant EDN files; refuse
       only when an occurrence can't be rewritten safely.
-  Plan: —
+  Plan: [2026-09-08-2229-document-highlight-selection-range.md](plans/2026-09-08-2229-document-highlight-selection-range.md) — in progress (documentHighlight, selectionRange); [2026-09-08-2230-keyword-rename.md](plans/2026-09-08-2230-keyword-rename.md) — in progress (keyword rename)
 
 ## Milestone 4 — small power features
 
@@ -201,6 +199,19 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-05 **clj-kondo `--copy-configs`** for JAR-exported lint configs.
   Deferred because it writes into the user's working tree; would need an
   explicit opt-in.
+- 2026-09-08 **`textDocument/foldingRange`.** Dropped from Milestone 3: VS Code
+  folds Clojure correctly by indentation when no server range exists, and
+  Neovim and Zed fold from tree-sitter. A server would only add semantic kinds
+  (`Comment`, `Imports`) for "fold all comments" style commands. Revisit if an
+  editor in the priority list turns out to need it.
+- 2026-09-08 **Integrant keys are offered as vars by the ordinary completion
+  pools.** `(defmethod ig/init-key ::database …)` indexes a symbol named
+  `database` with the keyword fqn `:ns/database`, so the current-namespace and
+  alias pools complete it as a bare `database` / `sys/database` — a var that
+  does not exist. Found by a review of the keyword-completion branch, which
+  fixed the auto-require pool only. One filter on `fqn.starts_with(':')` in the
+  var pools, plus a decision on whether `::database` should complete as a
+  keyword instead.
 
 ## Best effort — do when cheap or asked
 

@@ -22,7 +22,7 @@ truth**. The release CI refuses to publish if the tag and `Cargo.toml` disagree.
    - the editor setup snippets still work.
 
    Commit any corrections before tagging.
-3. **Verify** locally: `bb check` (fmt + clippy `-D warnings` + tests).
+3. **Verify** locally: `bb check` (fmt check + clippy `-D warnings` + tests).
 4. **Tag and push:**
 
    ```sh
