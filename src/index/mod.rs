@@ -188,6 +188,10 @@ pub struct Index {
     pub file_to_ns: DashMap<PathBuf, String>,
     /// Resolved symbol usages per project file (libraries excluded).
     pub occurrences: DashMap<PathBuf, Vec<Occurrence>>,
+    /// Keyword fqn → how many times the project uses it, aggregated over
+    /// `occurrences`. Maintained at every mutation point of that map so keyword
+    /// completion can rank by frequency without scanning every file.
+    keyword_counts: DashMap<String, u32>,
     pub core_symbols: Vec<CoreSymbol>,
     /// Set once let-go's built-in `core` namespace has been indexed from the
     /// fetched let-go source. Interior mutability because the `Arc<Index>` is
@@ -219,6 +223,7 @@ impl Default for Index {
             ns_symbols: DashMap::new(),
             file_to_ns: DashMap::new(),
             occurrences: DashMap::new(),
+            keyword_counts: DashMap::new(),
             core_symbols: Vec::new(),
             letgo_core: AtomicBool::new(false),
             letgo_native: RwLock::new(Vec::new()),
@@ -317,7 +322,9 @@ impl Index {
     }
 
     pub fn remove_file(&self, path: &Path) {
-        self.occurrences.remove(path);
+        if let Some((_, occs)) = self.occurrences.remove(path) {
+            self.sub_keyword_counts(&occs);
+        }
         if let Some((_, ns_name)) = self.file_to_ns.remove(path) {
             if let Some((_, fqns)) = self.ns_symbols.remove(&ns_name) {
                 for fqn in fqns {
@@ -339,7 +346,7 @@ impl Index {
         }
 
         self.ns_symbols.insert(ns_name.clone(), fqns);
-        self.occurrences.insert(file.clone(), occurrences);
+        self.replace_occurrences(file.clone(), occurrences);
         self.file_to_ns.insert(file, ns_name.clone());
         self.namespaces.insert(ns_name, meta);
     }
@@ -351,8 +358,49 @@ impl Index {
     /// deliberately leaves `namespaces`/`ns_symbols` untouched; `remove_file`
     /// no-ops cleanly on the absent sentinel ns.
     pub fn insert_edn_file(&self, file: PathBuf, occurrences: Vec<Occurrence>) {
-        self.occurrences.insert(file.clone(), occurrences);
+        self.replace_occurrences(file.clone(), occurrences);
         self.file_to_ns.insert(file, EDN_NS_SENTINEL.to_string());
+    }
+
+    /// Sets `file`'s occurrences, keeping [`Index::keyword_counts`] in step:
+    /// the vector being replaced is subtracted before the new one is added, so
+    /// re-indexing a file whose keywords did not change leaves the counts
+    /// exactly as they were. The single door onto `occurrences.insert`.
+    fn replace_occurrences(&self, file: PathBuf, occurrences: Vec<Occurrence>) {
+        self.add_keyword_counts(&occurrences);
+        if let Some(old) = self.occurrences.insert(file, occurrences) {
+            self.sub_keyword_counts(&old);
+        }
+    }
+
+    fn add_keyword_counts(&self, occurrences: &[Occurrence]) {
+        for occ in occurrences.iter().filter(|o| o.fqn.starts_with(':')) {
+            *self.keyword_counts.entry(occ.fqn.clone()).or_insert(0) += 1;
+        }
+    }
+
+    fn sub_keyword_counts(&self, occurrences: &[Occurrence]) {
+        for occ in occurrences.iter().filter(|o| o.fqn.starts_with(':')) {
+            let drop = match self.keyword_counts.get_mut(&occ.fqn) {
+                Some(mut count) => {
+                    *count = count.saturating_sub(1);
+                    *count == 0
+                }
+                None => false,
+            };
+            if drop {
+                self.keyword_counts.remove(&occ.fqn);
+            }
+        }
+    }
+
+    /// Every keyword the project uses, with its usage count — the pool keyword
+    /// completion ranks. Snapshotted so callers hold no lock on the map.
+    pub fn keyword_counts(&self) -> Vec<(String, u32)> {
+        self.keyword_counts
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect()
     }
 
     pub fn file_ns(&self, path: &Path) -> Option<String> {
@@ -413,8 +461,7 @@ impl Index {
                 .insert(entry.key().clone(), entry.value().clone());
         }
         for entry in new_index.occurrences.iter() {
-            self.occurrences
-                .insert(entry.key().clone(), entry.value().clone());
+            self.replace_occurrences(entry.key().clone(), entry.value().clone());
         }
     }
 

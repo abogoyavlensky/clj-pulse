@@ -131,3 +131,76 @@ fn test_insert_edn_file_occurrences_and_sentinel_isolation() {
         "removing an EDN file must not disturb a no-ns clj file's symbols"
     );
 }
+
+#[test]
+fn test_keyword_counts_track_insert_remove_merge() {
+    use clj_pulse::index::{Index, NsMeta, Occurrence};
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use tower_lsp::lsp_types::Range;
+
+    let file = PathBuf::from("/proj/src/a.clj");
+    let meta = || NsMeta {
+        name: "a".to_string(),
+        file: file.clone(),
+        aliases: HashMap::new(),
+        refers: HashMap::new(),
+        requires: vec![],
+        imports: HashMap::new(),
+        refer_all: vec![],
+        as_aliases: vec![],
+        core_excludes: vec![],
+    };
+    let occ = |fqn: &str| Occurrence {
+        fqn: fqn.to_string(),
+        name_range: Range::default(),
+    };
+    let count_of = |index: &Index, fqn: &str| {
+        index
+            .keyword_counts()
+            .into_iter()
+            .find(|(k, _)| k == fqn)
+            .map(|(_, n)| n)
+            .unwrap_or(0)
+    };
+
+    let index = Index::new();
+    index.insert_file(meta(), vec![], vec![occ(":id"), occ(":id"), occ(":x/y")]);
+    assert_eq!(count_of(&index, ":id"), 2);
+    assert_eq!(count_of(&index, ":x/y"), 1);
+    // Var occurrences are not keywords and never counted.
+    index.insert_file(
+        meta(),
+        vec![],
+        vec![occ(":id"), occ(":id"), occ(":x/y"), occ("a/f")],
+    );
+    assert_eq!(count_of(&index, "a/f"), 0, "var fqns must not be counted");
+
+    // Re-indexing the same file replaces its occurrences: counts must not double.
+    assert_eq!(
+        count_of(&index, ":id"),
+        2,
+        "re-index must not double counts"
+    );
+
+    index.remove_file(&file);
+    assert!(
+        index.keyword_counts().is_empty(),
+        "counts after remove: {:?}",
+        index.keyword_counts()
+    );
+
+    // A merge that re-scans the same file with fewer keywords replaces, not adds.
+    index.insert_file(meta(), vec![], vec![occ(":id"), occ(":id")]);
+    let new_index = Index::new();
+    new_index.insert_file(meta(), vec![], vec![occ(":id")]);
+    index.merge_project_from(new_index, &HashSet::new());
+    assert_eq!(count_of(&index, ":id"), 1, "merge must replace, not add");
+
+    // EDN config files contribute their keywords too, once each.
+    let edn = PathBuf::from("/proj/resources/config.edn");
+    index.insert_edn_file(edn.clone(), vec![occ(":x/y"), occ(":x/y")]);
+    assert_eq!(count_of(&index, ":x/y"), 2);
+    index.insert_edn_file(edn, vec![occ(":x/y")]);
+    assert_eq!(count_of(&index, ":x/y"), 1, "re-insert must replace");
+}
