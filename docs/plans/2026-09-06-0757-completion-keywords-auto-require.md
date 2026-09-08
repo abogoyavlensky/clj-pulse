@@ -282,3 +282,46 @@ Modify:
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Document keyword completion and auto-require"`
+
+---
+
+## Completed — 2026-09-08
+
+All six tasks are implemented, verified, and on branch
+`completion-keywords-auto-require`.
+
+**What shipped.** The extractor records unqualified keywords as `:name`
+occurrences (and qualifies the keys of a namespaced map with its prefix); the
+index keeps a `keyword_counts` aggregate at every mutation of `occurrences`;
+`DocumentStore::keyword_at` reports the keyword token under the cursor;
+completion answers a `:`/`::` token with keywords alone, in the notation being
+typed, current-namespace first and then by usage; and a var from a namespace
+the file has not required is offered as `alias/name` with the `:require` as an
+`additionalTextEdits` entry. `CompletionOptions.trigger_characters` is now
+`["/", ":"]`. README, AGENTS.md and the ROADMAP say so.
+
+**Verification.** `bb check`, `bb e2e` (136 tests), `bb e2e-nvim`,
+`bb e2e-pulse` (two new checks) and `bb e2e-calva` all pass. `bb bench` was run
+against metabase and, on the same box, against a `master` control: index time,
+per-edit diagnostics and definition latency are unchanged; RSS after project
+index rises 287 → 358 MiB, which is the new occurrence data itself. Recorded in
+[MEMORY.md](../MEMORY.md).
+
+**Issues encountered.** Every task was reviewed by codex; four rounds found
+real defects, all fixed in the same task (see the deviation notes above):
+namespaced-map keys were being recorded under the wrong fqn, the keyword-count
+decrement raced a concurrent re-index, `require_edit` re-parsed the whole buffer
+once per candidate, auto-require items dropped their lazy-documentation `data`,
+and Integrant keys were offered as if they were vars. A final branch-wide review
+also surfaced the *pre-existing* version of that last bug — the ordinary
+completion pools offer `(defmethod ig/init-key ::database …)` as a bare
+`database` — which is out of this plan's scope and is now a dated Backlog entry.
+
+**What the plan could have specified better.** It assumed `keyword_fqn` could
+be changed in place, but that function is shared with `extract_edn` and the
+Integrant definition path, both of which must keep rejecting unqualified
+keywords; the unqualified case needed its own wrapper. And it treated "record
+unqualified keywords" as a local change to one function, without asking which
+*other* readers of a keyword literal exist — namespaced map literals and
+splicing reader conditionals both change what a bare `:id` means, and both had
+to be handled before the feature was correct.

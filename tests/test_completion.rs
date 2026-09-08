@@ -799,4 +799,3 @@ fn test_no_auto_require_for_integrant_keys() {
         labels(&items)
     );
 }
-
