@@ -116,14 +116,14 @@ Small fixes that remove wrong answers. Each extractor change bumps
       machine, under the bar, however bad it looks on the Linux box. Cache a
       tree per document version, updated incrementally from the `didChange`
       ranges tree-sitter already accepts.
-  Plan: —
+  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — in progress
 - [ ] **Keep clj-kondo off the keystroke path for large buffers.** It costs
       ~840 ms on the same file, which is its own runtime, not ours. Options: a
       size-scaled debounce, a size threshold above which the kondo tier is
       skipped, or publishing the native tier immediately and the kondo tier
       when it lands — the last one changes the "one publish per pass"
       invariant, so decide that first.
-  Plan: —
+  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — in progress
 
 ## Milestone 2 — completion quality
 
@@ -150,12 +150,10 @@ Cheap with the tree-sitter parse resident; their absence reads as
 - [ ] `textDocument/documentHighlight`. Reuse `local_references_at` and
       the occurrence index; Read vs Write where cheap.
 - [ ] `textDocument/selectionRange`. Expand along the parse tree.
-- [ ] `textDocument/foldingRange`. Top-level forms, `(comment …)`, the ns
-      form, multi-line collections.
 - [ ] **Keyword rename**. Rewrite each occurrence in its own notation
       (`::kw`, `:ns/kw`, `::alias/kw`); include Integrant EDN files; refuse
       only when an occurrence can't be rewritten safely.
-  Plan: —
+  Plan: [2026-09-08-2229-document-highlight-selection-range.md](plans/2026-09-08-2229-document-highlight-selection-range.md) — in progress (documentHighlight, selectionRange); [2026-09-08-2230-keyword-rename.md](plans/2026-09-08-2230-keyword-rename.md) — in progress (keyword rename)
 
 ## Milestone 4 — small power features
 
@@ -201,6 +199,11 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-05 **clj-kondo `--copy-configs`** for JAR-exported lint configs.
   Deferred because it writes into the user's working tree; would need an
   explicit opt-in.
+- 2026-09-08 **`textDocument/foldingRange`.** Dropped from Milestone 3: VS Code
+  folds Clojure correctly by indentation when no server range exists, and
+  Neovim and Zed fold from tree-sitter. A server would only add semantic kinds
+  (`Comment`, `Imports`) for "fold all comments" style commands. Revisit if an
+  editor in the priority list turns out to need it.
 - 2026-09-08 **Integrant keys are offered as vars by the ordinary completion
   pools.** `(defmethod ig/init-key ::database …)` indexes a symbol named
   `database` with the keyword fqn `:ns/database`, so the current-namespace and
