@@ -202,25 +202,31 @@ Modify:
 - Modify: `src/handlers/completion.rs`, `src/server.rs`
 - Test: `tests/test_completion.rs`, `tests/test_e2e.rs`, `tests/fixtures/simple_project/src/keywords.clj`
 
-- [ ] **Step 1: Add the fixture file**
+- [x] **Step 1: Add the fixture file**
   `keywords.clj` in `simple.keywords` namespace, requiring `[simple.core :as c]`, using `:id` three times, `:name` once, `::local` twice, `:simple.core/x` once, and `::c/thing` once. Check that no existing test counts files or symbols in the fixture in a way this breaks (`workspace/symbol` tests search by name).
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
   Unit (`complete_keywords` with a hand-built index and `KeywordContext`): `::` empty offers `::local` and `::c/`; `::c/th` offers `::c/thing`; `:` empty offers `:id` first; `:na` offers `:name`. e2e: `test_e2e_completion_keywords_auto_resolved` and `test_e2e_completion_keywords_by_frequency`, asserting labels, `textEdit.range` spanning from the first colon to the token end, and `kind == 14` (Keyword); plus `test_e2e_completion_keyword_mid_token_replaces_whole_token`, which applies the returned `textEdit` to the buffer text in the test and asserts the result contains `:name` once, not `:nameme`. `test_e2e_completion_capabilities` (from the core plan) now expects `triggerCharacters` to contain `":"`.
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
   Run: `cargo test --test test_completion keywords && cargo test --test test_e2e completion_keywords`
   Expected: FAIL.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
   `complete_keywords`, the dispatch in `handle`, and the `:` trigger in `server.rs`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Complete keywords from project usage"`
+
+> Deviation: candidates are matched against the whole typed token, marker
+> included (`::lo` against `::local`), so the notation prefix-matches instead of
+> merely being contained; the two-character fuzzy guardrail still counts only
+> what follows the marker. The alias continuation items (`::c/`) carry
+> `alias for <ns>` as their detail rather than a use count they do not have.
 
 ### Task 5: Auto-require on accept
 

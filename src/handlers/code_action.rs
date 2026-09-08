@@ -124,8 +124,9 @@ fn add_require_actions(
 }
 
 /// Conventional aliases whose namespace is not simply the last dot-segment.
-/// Used as the first source of candidates for a missing alias.
-const CURATED_ALIASES: &[(&str, &str)] = &[
+/// Used as the first source of candidates for a missing alias, and as the only
+/// library namespaces auto-require completion offers unprompted.
+pub(crate) const CURATED_ALIASES: &[(&str, &str)] = &[
     ("str", "clojure.string"),
     ("set", "clojure.set"),
     ("io", "clojure.java.io"),
@@ -168,7 +169,23 @@ pub fn candidates(index: &Index, ns_meta: &NsMeta, token: &str) -> Vec<Candidate
     let Some((prefix, name)) = token.split_once('/') else {
         return vec![];
     };
-    if prefix.is_empty() || name.is_empty() || prefix == "clojure.core" {
+    if name.is_empty() {
+        return vec![];
+    }
+    namespaces_for_alias(index, ns_meta, prefix)
+        .into_iter()
+        .filter(|c| index.lookup_in_ns(&c.namespace, name).is_some())
+        .collect()
+}
+
+/// The namespaces `prefix` could refer to once required, with the alias to use,
+/// best first: a curated alias, then the namespace spelled in full, then any
+/// namespace whose last segment is `prefix`. Empty when the prefix already
+/// resolves in this file. Shared by the add-require code action (which then
+/// keeps only namespaces defining the name in question) and by auto-require
+/// completion.
+pub fn namespaces_for_alias(index: &Index, ns_meta: &NsMeta, prefix: &str) -> Vec<Candidate> {
+    if prefix.is_empty() || prefix == "clojure.core" {
         return vec![];
     }
 
@@ -204,12 +221,12 @@ pub fn candidates(index: &Index, ns_meta: &NsMeta, token: &str) -> Vec<Candidate
         }
     }
 
-    // Keep only namespaces that actually define `name`, never the file's own
-    // namespace (a last-segment match can resolve back to it), then order by
-    // rank (curated first), breaking ties by namespace for determinism.
+    // Never the file's own namespace (a last-segment match can resolve back to
+    // it), then order by rank (curated first), breaking ties by namespace for
+    // determinism.
     let mut ranked: Vec<(u8, Candidate)> = best
         .into_iter()
-        .filter(|(ns, _)| ns != &ns_meta.name && index.lookup_in_ns(ns, name).is_some())
+        .filter(|(ns, _)| ns != &ns_meta.name)
         .map(|(namespace, (rank, alias))| (rank, Candidate { namespace, alias }))
         .collect();
     ranked.sort_by(|a, b| {
