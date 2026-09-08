@@ -98,14 +98,19 @@ fn add_require_actions(
         .cloned()
         .collect();
 
+    // One parse for every candidate: they all insert at the same place.
+    let Some(anchor) = require_anchor(text) else {
+        return vec![];
+    };
+
     candidates(index, &ns_meta, &token)
         .into_iter()
-        .filter_map(|candidate| {
+        .map(|candidate| {
             let spec = candidate.spec();
-            let edit = require_edit(text, &spec)?;
+            let edit = anchor.edit(&spec);
             let mut changes = HashMap::new();
             changes.insert(uri.clone(), vec![edit]);
-            Some(CodeActionOrCommand::CodeAction(CodeAction {
+            CodeActionOrCommand::CodeAction(CodeAction {
                 title: format!("Add require `{}`", spec),
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: if fixed.is_empty() {
@@ -118,7 +123,7 @@ fn add_require_actions(
                     ..Default::default()
                 }),
                 ..Default::default()
-            }))
+            })
         })
         .collect()
 }
@@ -236,12 +241,36 @@ pub fn namespaces_for_alias(index: &Index, ns_meta: &NsMeta, prefix: &str) -> Ve
     ranked.into_iter().map(|(_, c)| c).collect()
 }
 
-/// Builds the edit that inserts `spec` (e.g. `[clojure.string :as str]`) into
-/// `source`'s `ns` form. Appends to an existing `(:require …)` clause when one
-/// is present, otherwise inserts a new `(:require …)` clause after the ns
-/// form's last element (name / docstring / attr-map). Returns `None` when
-/// there is no `ns` form to edit.
-pub fn require_edit(source: &str, spec: &str) -> Option<TextEdit> {
+/// Where a new `:require` spec goes in a file's `ns` form. Computed once per
+/// buffer so a caller adding several specs — the add-require action, the
+/// auto-require completion pool — parses the source once instead of once per
+/// candidate.
+pub struct RequireAnchor {
+    position: Position,
+    /// Column the existing clause's specs are indented to, or `None` when the
+    /// file has no `(:require …)` clause and the edit must create one.
+    indent: Option<usize>,
+}
+
+impl RequireAnchor {
+    /// The edit inserting `spec` (e.g. `[clojure.string :as str]`) here.
+    pub fn edit(&self, spec: &str) -> TextEdit {
+        let new_text = match self.indent {
+            Some(indent) => format!("\n{}{}", " ".repeat(indent), spec),
+            None => format!("\n  (:require {})", spec),
+        };
+        TextEdit {
+            range: empty_range(self.position),
+            new_text,
+        }
+    }
+}
+
+/// The insertion point for a new require in `source`: the end of an existing
+/// `(:require …)` clause when there is one, otherwise the end of the ns form's
+/// last element (name / docstring / attr-map). `None` when there is no `ns`
+/// form to edit.
+pub fn require_anchor(source: &str) -> Option<RequireAnchor> {
     let mut parser = Parser::new();
     parser.set_language(extractor::language()).ok()?;
     let tree = parser.parse(source, None)?;
@@ -263,24 +292,26 @@ pub fn require_edit(source: &str, spec: &str) -> Option<TextEdit> {
             Some(first) => (*specs.last().unwrap(), first.start_position().column),
             None => (kids[0], require.start_position().column + 1),
         };
-        let pos = end_position(anchor, source);
-        let new_text = format!("\n{}{}", " ".repeat(indent), spec);
-        Some(TextEdit {
-            range: empty_range(pos),
-            new_text,
+        Some(RequireAnchor {
+            position: end_position(anchor, source),
+            indent: Some(indent),
         })
     } else {
         let last = named_children(ns_form)
             .into_iter()
             .last()
             .unwrap_or(ns_form);
-        let pos = end_position(last, source);
-        let new_text = format!("\n  (:require {})", spec);
-        Some(TextEdit {
-            range: empty_range(pos),
-            new_text,
+        Some(RequireAnchor {
+            position: end_position(last, source),
+            indent: None,
         })
     }
+}
+
+/// Builds the edit that inserts `spec` (e.g. `[clojure.string :as str]`) into
+/// `source`'s `ns` form. Returns `None` when there is no `ns` form to edit.
+pub fn require_edit(source: &str, spec: &str) -> Option<TextEdit> {
+    Some(require_anchor(source)?.edit(spec))
 }
 
 /// What to do with one `:require` spec when cleaning the namespace.

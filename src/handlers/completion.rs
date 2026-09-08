@@ -644,7 +644,7 @@ fn auto_require_items(
     prefix: &str,
     source: Option<&str>,
 ) -> Vec<CompletionItem> {
-    let mut hits: Vec<(u8, String, String, String)> = Vec::new();
+    let mut hits: Vec<AutoRequireHit> = Vec::new();
     for (ns, alias) in pool {
         let Some(fqns) = index.ns_symbols.get(ns) else {
             continue;
@@ -657,36 +657,51 @@ fn auto_require_items(
                 continue;
             }
             if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {
-                hits.push((
+                hits.push(AutoRequireHit {
                     tier,
-                    format!("{}/{}", alias, sym.name),
-                    ns.clone(),
-                    alias.clone(),
-                ));
+                    label: format!("{}/{}", alias, sym.name),
+                    spec: super::code_action::Candidate {
+                        namespace: ns.clone(),
+                        alias: Some(alias.clone()),
+                    }
+                    .spec(),
+                    kind: defkind_to_completion_kind(&sym.kind),
+                    doc_fqn: sym.doc.as_ref().map(|_| sym.fqn.clone()),
+                });
             }
         }
     }
-    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    hits.sort_by(|a, b| a.tier.cmp(&b.tier).then_with(|| a.label.cmp(&b.label)));
     hits.truncate(AUTO_REQUIRE_LIMIT);
 
+    // One parse for the whole pool: every candidate inserts at the same place.
+    let anchor = source.and_then(super::code_action::require_anchor);
+
     hits.into_iter()
-        .map(|(tier, label, ns, alias)| {
-            let spec = crate::handlers::code_action::Candidate {
-                namespace: ns,
-                alias: Some(alias),
-            }
-            .spec();
-            let edit = source.and_then(|text| super::code_action::require_edit(text, &spec));
-            CompletionItem {
-                sort_text: Some(format!("9-{}-{}", tier, label)),
-                label,
-                detail: Some(format!("requires {}", spec)),
-                kind: Some(CompletionItemKind::FUNCTION),
-                additional_text_edits: edit.map(|e| vec![e]),
-                ..Default::default()
-            }
+        .map(|hit| CompletionItem {
+            sort_text: Some(format!("9-{}-{}", hit.tier, hit.label)),
+            label: hit.label,
+            detail: Some(format!("requires {}", hit.spec)),
+            kind: Some(hit.kind),
+            additional_text_edits: anchor.as_ref().map(|a| vec![a.edit(&hit.spec)]),
+            // Same lazy documentation as an ordinary symbol item: the user can
+            // read the docstring before deciding to add the require.
+            data: hit
+                .doc_fqn
+                .map(|fqn| json!({ "src": "symbol", "fqn": fqn })),
+            ..Default::default()
         })
         .collect()
+}
+
+/// One auto-require candidate, before it becomes an item: everything the item
+/// needs, so the pool can be ranked and capped before any edit is built.
+struct AutoRequireHit {
+    tier: u8,
+    label: String,
+    spec: String,
+    kind: CompletionItemKind,
+    doc_fqn: Option<String>,
 }
 
 /// Cap on namespace completions, so a short substring doesn't offer every

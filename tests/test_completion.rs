@@ -757,3 +757,27 @@ fn test_auto_require_without_source_still_offers_the_item() {
     let item = item_named(&items, "str/join");
     assert!(item.additional_text_edits.is_none());
 }
+
+#[test]
+fn test_auto_require_item_resolves_documentation() {
+    // The docstring is readable before the require is inserted, like any other
+    // symbol item.
+    let index = auto_require_index();
+    let mut sym = defn_sym("slugify", "app.util");
+    sym.doc = Some("Slugs a string.".to_string());
+    index.insert_file(ns_meta("app.util"), vec![sym], vec![]);
+
+    let items = complete_symbols(&index, "slug", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let item = item_named(&items, "util/slugify");
+    assert!(item.documentation.is_none(), "docs travel lazily");
+    let resolved = resolve(&index, item);
+    assert!(
+        matches!(
+            resolved.documentation,
+            Some(tower_lsp::lsp_types::Documentation::MarkupContent(ref m))
+                if m.value.contains("Slugs a string.")
+        ),
+        "resolve must fill the docstring: {:?}",
+        resolved.documentation
+    );
+}
