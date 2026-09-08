@@ -462,3 +462,128 @@ fn test_resolve_ignores_malformed_data() {
         );
     }
 }
+
+// --- keyword completion -----------------------------------------------------
+
+use clj_pulse::document::KeywordContext;
+use clj_pulse::handlers::completion::complete_keywords;
+use tower_lsp::lsp_types::Position;
+
+/// A keyword context as `DocumentStore::keyword_at` would build it, with the
+/// span the item replaces taken from the typed text alone.
+fn kw_ctx(auto_resolved: bool, text: &str) -> KeywordContext {
+    let marker = if auto_resolved { 2 } else { 1 };
+    let end = marker + text.chars().count() as u32;
+    KeywordContext {
+        auto_resolved,
+        text: text.to_string(),
+        start: Position::new(0, 0),
+        end: Position::new(0, end),
+    }
+}
+
+fn kw_labels(index: &Index, ctx: &KeywordContext, current_ns: &str) -> Vec<String> {
+    let meta = index.ns_meta(current_ns);
+    complete_keywords(index, ctx, current_ns, meta.as_ref())
+        .into_iter()
+        .map(|i| i.label)
+        .collect()
+}
+
+#[test]
+fn test_keywords_auto_resolved_offers_current_ns_and_aliases() {
+    // `::` offers this namespace's own keywords in `::name` form, plus every
+    // alias as `::alias/` so the user can carry on typing.
+    let index = build_test_index();
+    let labels = kw_labels(&index, &kw_ctx(true, ""), "simple.keywords");
+    assert!(labels.contains(&"::local".to_string()), "{:?}", labels);
+    assert!(labels.contains(&"::c/".to_string()), "{:?}", labels);
+    // A keyword of another namespace is not reachable through a bare `::`.
+    assert!(
+        !labels.iter().any(|l| l.contains("thing")),
+        "foreign keyword offered on bare `::`: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_keywords_auto_resolved_through_alias() {
+    let index = build_test_index();
+    let labels = kw_labels(&index, &kw_ctx(true, "c/th"), "simple.keywords");
+    assert_eq!(labels, vec!["::c/thing".to_string()]);
+}
+
+#[test]
+fn test_keywords_single_colon_ranks_by_frequency() {
+    // `:` offers every keyword the project uses; the fixture writes `:id`
+    // three times and `:name` once, so `:id` comes first.
+    let index = build_test_index();
+    let labels = kw_labels(&index, &kw_ctx(false, ""), "simple.utils");
+    let id = labels.iter().position(|l| l == ":id").expect("no :id");
+    let name = labels.iter().position(|l| l == ":name").expect("no :name");
+    assert!(id < name, "`:id` is used more often: {:?}", labels);
+    // Qualified keywords keep their own notation under a single colon.
+    assert!(
+        labels.contains(&":simple.keywords/local".to_string()),
+        "{:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_keywords_single_colon_prefix_filters() {
+    let index = build_test_index();
+    let labels = kw_labels(&index, &kw_ctx(false, "na"), "simple.utils");
+    assert!(labels.contains(&":name".to_string()), "{:?}", labels);
+    assert!(!labels.contains(&":id".to_string()), "{:?}", labels);
+}
+
+#[test]
+fn test_keywords_current_ns_sorts_before_foreign() {
+    // Within a match tier, this namespace's keywords come first.
+    let index = build_test_index();
+    let meta = index.ns_meta("simple.keywords");
+    let items = complete_keywords(&index, &kw_ctx(false, ""), "simple.keywords", meta.as_ref());
+    let sort_of = |label: &str| {
+        items
+            .iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("{} not offered", label))
+            .sort_text
+            .clone()
+            .expect("sort_text")
+    };
+    assert!(
+        sort_of(":simple.keywords/local") < sort_of(":id"),
+        "current-ns keyword must sort first"
+    );
+}
+
+#[test]
+fn test_keyword_item_replaces_the_whole_token() {
+    // The edit spans the token, not just the typed half, and the item carries
+    // its usage count and a KEYWORD kind.
+    let index = build_test_index();
+    let ctx = KeywordContext {
+        auto_resolved: false,
+        text: "na".to_string(),
+        start: Position::new(3, 5),
+        end: Position::new(3, 11),
+    };
+    let items = complete_keywords(&index, &ctx, "simple.utils", None);
+    let item = items
+        .iter()
+        .find(|i| i.label == ":name")
+        .unwrap_or_else(|| panic!("`:name` not offered: {:?}", items));
+    assert_eq!(item.kind, Some(CompletionItemKind::KEYWORD));
+    assert_eq!(item.detail.as_deref(), Some("keyword, 1 use"));
+    assert_eq!(item.filter_text.as_deref(), Some(":name"));
+    match item.text_edit.as_ref().expect("text_edit") {
+        tower_lsp::lsp_types::CompletionTextEdit::Edit(edit) => {
+            assert_eq!(edit.new_text, ":name");
+            assert_eq!(edit.range.start, Position::new(3, 5));
+            assert_eq!(edit.range.end, Position::new(3, 11));
+        }
+        other => panic!("expected a plain edit: {:?}", other),
+    }
+}

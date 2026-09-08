@@ -7,8 +7,8 @@ use serde_json::json;
 
 use super::builtins;
 use super::matching::match_score;
-use crate::document::DocumentStore;
-use crate::index::{extractor, CoreSymbol, DefKind, Index};
+use crate::document::{DocumentStore, KeywordContext};
+use crate::index::{extractor, CoreSymbol, DefKind, Index, NsMeta};
 
 pub fn handle(
     index: &Index,
@@ -26,6 +26,21 @@ pub fn handle(
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
+
+    // A keyword is being typed: `:`/`::` is not an identifier character, so the
+    // `word_at` prefix would silently drop the notation and offer vars. Keyword
+    // completion answers on its own, with keywords only.
+    if let Some(ctx) = documents.keyword_at(&uri, pos) {
+        let ns_meta = index.ns_meta(&current_ns);
+        let items = complete_keywords(index, &ctx, &current_ns, ns_meta.as_ref());
+        if items.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(CompletionResponse::List(CompletionList {
+            is_incomplete: true,
+            items,
+        })));
+    }
 
     let mut items = complete_symbols(index, &prefix, &current_ns);
 
@@ -150,6 +165,135 @@ fn push(items: &mut Vec<CompletionItem>, item: CompletionItem, tier: u8, pool: P
         sort_text: Some(format!("{}-{}-{}", tier, pool.digit(), item.label)),
         ..item
     });
+}
+
+/// Cap on keyword completions: a bare `:` matches every keyword the project
+/// uses, and the ranking below puts the ones worth seeing at the top.
+const KEYWORD_LIMIT: usize = 100;
+
+/// Keyword candidates for the token being typed, in the notation being typed:
+/// `::name` and `::alias/` under a bare `::`, `::alias/name` once an alias is
+/// spelled, every keyword as written under a single `:`. Ranked by match tier,
+/// then by whether the keyword belongs to this namespace, then by how often the
+/// project uses it.
+pub fn complete_keywords(
+    index: &Index,
+    ctx: &KeywordContext,
+    current_ns: &str,
+    ns_meta: Option<&NsMeta>,
+) -> Vec<CompletionItem> {
+    // Candidates are matched against the whole token, marker included, so a
+    // typed `::lo` prefix-matches `::local` instead of merely containing it.
+    let typed = format!("{}{}", if ctx.auto_resolved { "::" } else { ":" }, ctx.text);
+    let counts = index.keyword_counts();
+    let mut items = Vec::new();
+    let mut push = |label: String, detail: String, count: u32, own_ns: bool| {
+        let Some(tier) = keyword_tier(&label, &typed, &ctx.text) else {
+            return;
+        };
+        items.push(keyword_item(label, detail, tier, own_ns, count, ctx));
+    };
+
+    match (ctx.auto_resolved, ctx.text.split_once('/')) {
+        // `::alias/name` — the alias decides the namespace; an alias this file
+        // does not bind resolves to nothing, so there is nothing to offer.
+        (true, Some((alias, _))) => {
+            let Some(full_ns) = ns_meta.and_then(|m| m.aliases.get(alias)) else {
+                return Vec::new();
+            };
+            let ns_prefix = format!(":{}/", full_ns);
+            for (fqn, count) in &counts {
+                if let Some(name) = fqn.strip_prefix(&ns_prefix) {
+                    push(format!("::{}/{}", alias, name), uses(*count), *count, false);
+                }
+            }
+        }
+        // Bare `::` — this namespace's own keywords, plus every alias as
+        // `::alias/` so the user can carry on into another namespace.
+        (true, None) => {
+            let ns_prefix = format!(":{}/", current_ns);
+            for (fqn, count) in &counts {
+                if let Some(name) = fqn.strip_prefix(&ns_prefix) {
+                    push(format!("::{}", name), uses(*count), *count, true);
+                }
+            }
+            if let Some(meta) = ns_meta {
+                for (alias, full_ns) in &meta.aliases {
+                    push(
+                        format!("::{}/", alias),
+                        format!("alias for {}", full_ns),
+                        0,
+                        false,
+                    );
+                }
+            }
+        }
+        // A single colon takes keywords exactly as they are indexed, qualified
+        // (`:ns/name`) or not (`:name`).
+        (false, _) => {
+            let own = format!(":{}/", current_ns);
+            for (fqn, count) in &counts {
+                let own_ns = !current_ns.is_empty() && fqn.starts_with(&own);
+                push(fqn.clone(), uses(*count), *count, own_ns);
+            }
+        }
+    }
+
+    // Sorted here as well as in `sort_text`, so the cap keeps the items the
+    // ranking actually put first.
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    items.truncate(KEYWORD_LIMIT);
+    items
+}
+
+fn uses(count: u32) -> String {
+    if count == 1 {
+        "keyword, 1 use".to_string()
+    } else {
+        format!("keyword, {} uses", count)
+    }
+}
+
+/// The match tier a keyword label earns, with the same guardrail the symbol
+/// pools use: one typed character is too little to fuzzy-match on. The `:`/`::`
+/// marker is not typing, so it does not count toward that minimum.
+fn keyword_tier(label: &str, typed: &str, text: &str) -> Option<u8> {
+    let tier = match_score(label, typed)?;
+    (tier < 2 || text.chars().count() >= 2).then_some(tier)
+}
+
+/// A keyword item. The edit spans the whole token (`ctx.start..ctx.end`) rather
+/// than relying on the client's word pattern: `:` is a word character to
+/// Clojure Pulse and not to Calva, and both must replace the same span.
+fn keyword_item(
+    label: String,
+    detail: String,
+    tier: u8,
+    own_ns: bool,
+    count: u32,
+    ctx: &KeywordContext,
+) -> CompletionItem {
+    CompletionItem {
+        sort_text: Some(format!(
+            "{}-{}-{:010}-{}",
+            tier,
+            u8::from(!own_ns),
+            u32::MAX - count,
+            label
+        )),
+        filter_text: Some(label.clone()),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: Range {
+                start: ctx.start,
+                end: ctx.end,
+            },
+            new_text: label.clone(),
+        })),
+        kind: Some(CompletionItemKind::KEYWORD),
+        detail: Some(detail),
+        label,
+        ..Default::default()
+    }
 }
 
 pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<CompletionItem> {

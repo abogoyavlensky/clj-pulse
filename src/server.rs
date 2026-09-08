@@ -2012,9 +2012,10 @@ impl LanguageServer for Backend {
                     },
                 )),
                 completion_provider: Some(CompletionOptions {
-                    // `/` closes an alias, so completion has to fire on it —
-                    // it is not an identifier character to the editor.
-                    trigger_characters: Some(vec!["/".to_string()]),
+                    // `/` closes an alias and `:` opens a keyword; neither is an
+                    // identifier character to the editor, so completion has to
+                    // fire on them explicitly.
+                    trigger_characters: Some(vec!["/".to_string(), ":".to_string()]),
                     // Documentation is fetched per item, so a long list stays cheap.
                     resolve_provider: Some(true),
                     ..Default::default()

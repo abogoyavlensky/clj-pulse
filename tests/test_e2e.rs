@@ -1052,8 +1052,9 @@ fn test_e2e_completion_list_is_incomplete() {
 
 #[test]
 fn test_e2e_completion_capabilities() {
-    // `/` retriggers completion after an alias, and documentation is fetched
-    // per item — both have to reach the client through `initialize`.
+    // `/` retriggers completion after an alias, `:` opens keyword completion,
+    // and documentation is fetched per item — all three have to reach the
+    // client through `initialize`.
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
 
@@ -1063,7 +1064,7 @@ fn test_e2e_completion_capabilities() {
     let provider = &result["capabilities"]["completionProvider"];
     assert_eq!(
         provider["triggerCharacters"],
-        serde_json::json!(["/"]),
+        serde_json::json!(["/", ":"]),
         "completion trigger characters: {}",
         provider
     );
@@ -5786,4 +5787,116 @@ fn test_e2e_panicked_request_id_can_be_reused() {
         "reused id returned no hover: {}",
         reused
     );
+}
+
+#[test]
+fn test_e2e_completion_keywords_auto_resolved() {
+    // `::` in a file that uses `::local` offers it back, as `::local` — the
+    // notation being typed — with an edit that replaces the marker too.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let last_line = std::fs::read_to_string(&keywords).unwrap().lines().count() as u32;
+    client.did_change_insert(&keywords, last_line, 0, "(def z ::lo)");
+    let items = client.completion_items(&keywords, last_line, 11);
+
+    let item = items
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .find(|i| i["label"] == "::local")
+        .unwrap_or_else(|| panic!("`::local` not offered: {}", items));
+    assert_eq!(item["kind"], 14, "keyword kind: {}", item);
+    let range = &item["textEdit"]["range"];
+    assert_eq!(
+        range["start"]["character"], 7,
+        "edit starts at `::`: {}",
+        item
+    );
+    assert_eq!(
+        range["end"]["character"], 11,
+        "edit spans the token: {}",
+        item
+    );
+    assert_eq!(item["textEdit"]["newText"], "::local");
+}
+
+#[test]
+fn test_e2e_completion_keywords_by_frequency() {
+    // The `:` trigger with nothing typed: every keyword the project uses,
+    // most-used first (`:id` three times, `:name` once).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(def z :)");
+    let items = client.completion_items(&utils, last_line, 8);
+
+    let labels: Vec<&str> = items
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    let id = labels.iter().position(|l| *l == ":id");
+    let name = labels.iter().position(|l| *l == ":name");
+    assert!(
+        id.is_some() && name.is_some() && id < name,
+        "expected `:id` before `:name`: {:?}",
+        labels
+    );
+    // Keyword completion answers with keywords only — no vars.
+    assert!(
+        labels.iter().all(|l| l.starts_with(':')),
+        "non-keyword offered after `:`: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_e2e_completion_keyword_mid_token_replaces_whole_token() {
+    // Cursor mid-token (`:na|me`): applying the edit must yield `:name`, not
+    // `:nameme`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let line_text = "(def z :name)";
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, line_text);
+    // Right after `:na`.
+    let items = client.completion_items(&utils, last_line, 10);
+
+    let item = items
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .find(|i| i["label"] == ":name")
+        .unwrap_or_else(|| panic!("`:name` not offered: {}", items));
+    let range = &item["textEdit"]["range"];
+    let start = range["start"]["character"].as_u64().unwrap() as usize;
+    let end = range["end"]["character"].as_u64().unwrap() as usize;
+    let new_text = item["textEdit"]["newText"].as_str().unwrap();
+    let applied = format!("{}{}{}", &line_text[..start], new_text, &line_text[end..]);
+    assert_eq!(applied, "(def z :name)", "applying the edit: {}", item);
 }

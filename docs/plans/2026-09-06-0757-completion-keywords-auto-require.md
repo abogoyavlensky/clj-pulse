@@ -163,26 +163,37 @@ Modify:
 - [x] **Step 5: Commit**
   `git commit -m "Maintain keyword usage counts in the index"`
 
+> Deviation: `insert_file`, `insert_edn_file` and `merge_project_from` all go
+> through one private `replace_occurrences`, the single door onto
+> `occurrences.insert`, so no future call site can bypass the counters.
+
+> Deviation: the codex review flagged the decrement/remove pair as racy against
+> a concurrent re-index; `sub_keyword_counts` now decrements and drops the zero
+> entry under one DashMap entry lock (commit `995d56b`). The same review found
+> that a splicing reader conditional inside a namespaced map (`#:user{#?@(…)
+> :b :value}`) makes key/value pairing impossible — such a map now falls back to
+> the ordinary walk rather than inventing `:user/value`.
+
 ### Task 3: Keyword context in the document store
 
 **Files:**
 - Modify: `src/document.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In `src/document.rs` `mod tests`, next to `test_word_at_utf16_after_emoji`: the six cases from the design, a mid-token case (`:na|me` gives `text == "na"` and `end` past `me`), and a UTF-16 case with an emoji earlier on the line so `start` and `end` are correct UTF-16 columns.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --lib document::tests::keyword_at`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `KeywordContext` and `keyword_at`, sharing the backward walk with `is_keyword_at` (refactor `is_keyword_at` to call it).
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Detect the keyword token under the cursor"`
 
 ### Task 4: Keyword completion
