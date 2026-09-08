@@ -3,6 +3,22 @@ use dashmap::DashMap;
 use ropey::Rope;
 use tower_lsp::lsp_types::{Position, TextDocumentContentChangeEvent, Url};
 
+/// The keyword token under the cursor, as completion needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeywordContext {
+    /// Whether the token is auto-resolved (`::name`, `::alias/name`) rather
+    /// than plain (`:name`, `:ns/name`).
+    pub auto_resolved: bool,
+    /// What follows the marker up to the cursor — the text candidates are
+    /// matched against. May contain `/` (`alias/na`), and is empty when the
+    /// cursor sits right after a bare `:` or `::`.
+    pub text: String,
+    /// Position of the first `:` of the token.
+    pub start: Position,
+    /// End of the whole token, past the cursor when it sits mid-token.
+    pub end: Position,
+}
+
 pub struct DocumentStore {
     docs: DashMap<Url, Rope>,
     /// Latest LSP version per open document, used to discard superseded
@@ -110,23 +126,50 @@ impl DocumentStore {
     /// immediately preceded by `:` (covers `:kw`, `::kw`, `:ns/kw`, `::ns/kw`).
     /// Used by goto-definition to avoid resolving a keyword to a same-named var.
     pub fn is_keyword_at(&self, uri: &Url, pos: Position) -> bool {
-        let Some(rope) = self.docs.get(uri) else {
-            return false;
-        };
+        self.keyword_at(uri, pos).is_some()
+    }
+
+    /// The keyword token being typed at `pos`, or `None` when the cursor is not
+    /// inside one. Completion needs more than [`DocumentStore::is_keyword_at`]
+    /// reports: which notation is being typed, what has been typed so far, and
+    /// the span an accepted item replaces.
+    pub fn keyword_at(&self, uri: &Url, pos: Position) -> Option<KeywordContext> {
+        let rope = self.docs.get(uri)?;
         let line_idx = pos.line as usize;
         if line_idx >= rope.len_lines() {
-            return false;
+            return None;
         }
         let chars: Vec<char> = rope.line(line_idx).chars().collect();
         let col = utf16_col_to_char(&chars, pos.character as usize).min(chars.len());
 
         // Walk to the start of the ident token (same boundary rule as word_at),
-        // then check the character just before it.
+        // then require the `:` (or `::`) that makes it a keyword.
         let mut start = col;
         while start > 0 && is_clj_ident_char(chars[start - 1]) {
             start -= 1;
         }
-        start > 0 && chars[start - 1] == ':'
+        if start == 0 || chars[start - 1] != ':' {
+            return None;
+        }
+        let mut marker = start - 1;
+        let auto_resolved = marker > 0 && chars[marker - 1] == ':';
+        if auto_resolved {
+            marker -= 1;
+        }
+
+        // The token may continue past the cursor (`:na|me`): an accepted item
+        // replaces the whole of it, never just the half before the cursor.
+        let mut end = col;
+        while end < chars.len() && is_clj_ident_char(chars[end]) {
+            end += 1;
+        }
+
+        Some(KeywordContext {
+            auto_resolved,
+            text: chars[start..col].iter().collect(),
+            start: Position::new(pos.line, char_col_to_utf16(&chars, marker)),
+            end: Position::new(pos.line, char_col_to_utf16(&chars, end)),
+        })
     }
 
     /// Returns the full text of an open document.
@@ -166,6 +209,15 @@ fn position_to_char(rope: &Rope, pos: Position) -> Option<usize> {
     let chars: Vec<char> = rope.line(line_idx).chars().collect();
     let col = utf16_col_to_char(&chars, pos.character as usize);
     Some(rope.line_to_char(line_idx) + col)
+}
+
+/// Converts a char offset within a line to a UTF-16 column — the inverse of
+/// [`utf16_col_to_char`], for ranges handed back to the editor.
+fn char_col_to_utf16(chars: &[char], col: usize) -> u32 {
+    chars[..col.min(chars.len())]
+        .iter()
+        .map(|c| c.len_utf16() as u32)
+        .sum()
 }
 
 /// Converts a UTF-16 column to a char offset within a line, clamping to
@@ -249,6 +301,89 @@ mod tests {
             store.line_text(&uri, 0).unwrap().trim_end(),
             "(str \"😀\" :x)"
         );
+    }
+
+    /// The cursor position, in UTF-16 units, right after `needle` in `line`.
+    fn after(line: &str, needle: &str) -> Position {
+        let idx = line.find(needle).expect("needle not in line") + needle.len();
+        Position::new(0, line[..idx].encode_utf16().count() as u32)
+    }
+
+    #[test]
+    fn test_keyword_at_notations() {
+        let line = "(f :id ::local :ns/x ::al/y)";
+        let (store, uri) = store_with(line);
+
+        let ctx = store.keyword_at(&uri, after(line, ":i")).unwrap();
+        assert!(!ctx.auto_resolved);
+        assert_eq!(ctx.text, "i");
+        assert_eq!(ctx.start.character, 3);
+        assert_eq!(ctx.end.character, 6, "end spans the whole `:id`");
+
+        let ctx = store.keyword_at(&uri, after(line, "::loc")).unwrap();
+        assert!(ctx.auto_resolved);
+        assert_eq!(ctx.text, "loc");
+
+        let ctx = store.keyword_at(&uri, after(line, ":ns/")).unwrap();
+        assert!(!ctx.auto_resolved);
+        assert_eq!(ctx.text, "ns/");
+
+        let ctx = store.keyword_at(&uri, after(line, "::al/")).unwrap();
+        assert!(ctx.auto_resolved);
+        assert_eq!(ctx.text, "al/");
+    }
+
+    #[test]
+    fn test_keyword_at_bare_markers_have_empty_text() {
+        let line = "(f : ::)";
+        let (store, uri) = store_with(line);
+
+        let ctx = store.keyword_at(&uri, after(line, "(f :")).unwrap();
+        assert!(!ctx.auto_resolved);
+        assert_eq!(ctx.text, "");
+        assert_eq!(ctx.start.character, 3, "start is the colon");
+        assert_eq!(ctx.end.character, 4, "the colon itself is replaced");
+
+        let ctx = store.keyword_at(&uri, after(line, "::")).unwrap();
+        assert!(ctx.auto_resolved);
+        assert_eq!(ctx.text, "");
+        assert_eq!(ctx.start.character, 5, "start is the first colon");
+    }
+
+    #[test]
+    fn test_keyword_at_mid_token_spans_whole_token() {
+        // `:na|me`: only `na` is matched against, but the accepted item replaces
+        // the whole `:name` — otherwise the buffer ends up with `:nameme`.
+        let line = "(f :name)";
+        let (store, uri) = store_with(line);
+
+        let ctx = store.keyword_at(&uri, after(line, ":na")).unwrap();
+        assert_eq!(ctx.text, "na");
+        assert_eq!(ctx.start.character, 3);
+        assert_eq!(ctx.end.character, 8);
+    }
+
+    #[test]
+    fn test_keyword_at_rejects_non_keywords() {
+        let line = "(inc x)";
+        let (store, uri) = store_with(line);
+        assert!(store.keyword_at(&uri, after(line, "(in")).is_none());
+        // A bare `(` with nothing before it must not walk off the line start.
+        assert!(store.keyword_at(&uri, Position::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn test_keyword_at_utf16_after_emoji() {
+        // LSP columns are UTF-16 units: the returned range has to be, too.
+        let line = "(str \"😀\" :id)";
+        let (store, uri) = store_with(line);
+
+        let ctx = store.keyword_at(&uri, after(line, ":i")).unwrap();
+        assert_eq!(ctx.text, "i");
+        // `(str "😀" ` is ten UTF-16 units: six chars, the two-unit emoji, then
+        // the quote and the space.
+        assert_eq!(ctx.start.character, 10);
+        assert_eq!(ctx.end.character, 13);
     }
 
     #[test]
