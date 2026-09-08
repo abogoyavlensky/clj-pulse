@@ -5900,3 +5900,83 @@ fn test_e2e_completion_keyword_mid_token_replaces_whole_token() {
     let applied = format!("{}{}{}", &line_text[..start], new_text, &line_text[end..]);
     assert_eq!(applied, "(def z :name)", "applying the edit: {}", item);
 }
+
+#[test]
+fn test_e2e_completion_auto_require_inserts_require() {
+    // `str/jo` in a file that never required clojure.string: the item comes
+    // with the edit that inserts the require into the ns form.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.wait_for_log("library indexing complete");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(str/jo)");
+    let items = client.completion_items(&utils, last_line, 7);
+
+    let item = items
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .find(|i| i["label"] == "str/join")
+        .unwrap_or_else(|| panic!("`str/join` not offered: {}", items));
+    let edits = item["additionalTextEdits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no additionalTextEdits: {}", item));
+    assert_eq!(edits.len(), 1, "one require edit: {}", item);
+    assert!(
+        edits[0]["newText"]
+            .as_str()
+            .unwrap()
+            .contains("[clojure.string :as str]"),
+        "edit text: {}",
+        edits[0]
+    );
+    // The ns form is the first two lines of utils.clj; the edit appends to its
+    // `(:require …)` clause rather than landing in the body.
+    assert_eq!(edits[0]["range"]["start"]["line"], 1, "edit: {}", edits[0]);
+}
+
+#[test]
+fn test_e2e_completion_no_auto_require_when_already_required() {
+    // The same completion in a file that already requires clojure.string comes
+    // through the ordinary alias path, with no edit attached.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let f = root.join("src/has_str.clj");
+    std::fs::write(
+        &f,
+        "(ns simple.has-str\n  (:require [clojure.string :as str]))\n\n\
+         (defn shout [xs] (str/join xs))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.wait_for_log("library indexing complete");
+    client.did_open(&f);
+
+    let last_line = std::fs::read_to_string(&f).unwrap().lines().count() as u32;
+    client.did_change_insert(&f, last_line, 0, "(str/jo)");
+    let items = client.completion_items(&f, last_line, 7);
+
+    let item = items
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .find(|i| i["label"] == "str/join")
+        .unwrap_or_else(|| panic!("`str/join` not offered: {}", items));
+    assert!(
+        item["additionalTextEdits"].is_null(),
+        "an already-required namespace must carry no require edit: {}",
+        item
+    );
+}

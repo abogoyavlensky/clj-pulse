@@ -151,7 +151,41 @@ exports.run = async () => {
     JSON.stringify(labels.slice(0, 20))
   );
 
-  // 6. Diagnostics: lint.clj requires clojure.set and never uses it. The code
+  // 6. Keyword completion, in the notation being typed: `:` in a file that
+  //    uses `:id` offers it back.
+  const autoreqUri = vscode.Uri.file(`${root}/src/autoreq.clj`);
+  const autoreqDoc = await vscode.workspace.openTextDocument(autoreqUri);
+  await vscode.window.showTextDocument(autoreqDoc);
+  const kwItems = await completionsAt(autoreqUri, positionOf(autoreqDoc, "{:id", 2), 30000);
+  const kwLabels = kwItems.map((i) => (typeof i.label === "string" ? i.label : i.label?.label));
+  check(
+    kwLabels.some((l) => l === ":id"),
+    "completion: `:` offers the project's own keywords",
+    JSON.stringify(kwLabels.slice(0, 20))
+  );
+
+  // 7. Auto-require: `slugi` names a var of a namespace this file never
+  //    required, so the item carries the edit that inserts the require. VS Code
+  //    applies additionalTextEdits only on accept, which this API cannot drive,
+  //    so the assertion is on the item the provider returns.
+  const arItems = await completionsAt(autoreqUri, positionOf(autoreqDoc, "(slugi", 6), 30000);
+  const arItem = arItems.find(
+    (i) => (typeof i.label === "string" ? i.label : i.label?.label) === "text/slugify"
+  );
+  check(
+    arItem !== undefined,
+    "completion: an unrequired namespace's var is offered as text/slugify",
+    JSON.stringify(
+      arItems.map((i) => (typeof i.label === "string" ? i.label : i.label?.label)).slice(0, 20)
+    )
+  );
+  check(
+    (arItem?.additionalTextEdits ?? []).some((e) => e.newText.includes("[util.text :as text]")),
+    "completion: accepting it would insert [util.text :as text]",
+    JSON.stringify((arItem?.additionalTextEdits ?? []).map((e) => e.newText))
+  );
+
+  // 8. Diagnostics: lint.clj requires clojure.set and never uses it. The code
   //    is the assertion — the source is clj-kondo when it is installed and
   //    clj-pulse when it is not, and both are correct.
   const lintUri = vscode.Uri.file(`${root}/src/lint.clj`);

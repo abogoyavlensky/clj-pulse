@@ -42,13 +42,16 @@ pub fn handle(
         })));
     }
 
-    let mut items = complete_symbols(index, &prefix, &current_ns);
+    // The live buffer, for the locals walk and for the require edit an
+    // auto-require item carries.
+    let source = documents.text(&uri);
+    let mut items = complete_symbols(index, &prefix, &current_ns, source.as_deref());
 
     // Locals (let/fn/loop/… bound names) in scope at the cursor. They shadow
     // globals, so offer them ahead of the index symbols. Qualified prefixes
     // (`alias/…`) can't name a local, so skip the walk there.
     if !prefix.contains('/') {
-        let mut merged = local_completions(documents, &uri, pos, &prefix);
+        let mut merged = local_completions(source.as_deref(), pos, &prefix);
         merged.extend(items);
         items = merged;
     }
@@ -71,18 +74,13 @@ pub fn handle(
 /// In-scope local bindings at `pos` whose name matches `prefix`, innermost-first
 /// and de-duplicated by name (an inner binding shadows an outer one). Locals are
 /// pool 0, so within a match tier they rank above every var and core name.
-fn local_completions(
-    documents: &DocumentStore,
-    uri: &Url,
-    pos: Position,
-    prefix: &str,
-) -> Vec<CompletionItem> {
-    let Some(text) = documents.text(uri) else {
+fn local_completions(source: Option<&str>, pos: Position, prefix: &str) -> Vec<CompletionItem> {
+    let Some(text) = source else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for binding in extractor::locals_in_scope_at(&text, pos).into_iter().rev() {
+    for binding in extractor::locals_in_scope_at(text, pos).into_iter().rev() {
         let Some(tier) = matched(&binding.name, prefix, Pool::Local) else {
             continue;
         };
@@ -296,7 +294,15 @@ fn keyword_item(
     }
 }
 
-pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<CompletionItem> {
+/// Completion candidates for `prefix` in `current_ns`. `source` is the live
+/// buffer, needed only to build the `:require` edit an auto-require item
+/// carries; without it those items are still offered, without their edit.
+pub fn complete_symbols(
+    index: &Index,
+    prefix: &str,
+    current_ns: &str,
+    source: Option<&str>,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let ns_meta = index.ns_meta(current_ns);
 
@@ -350,6 +356,16 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     }
                 }
             }
+        } else if let Some(meta) = &ns_meta {
+            // Neither an alias of this file nor a class: the user is naming a
+            // namespace they have not required yet. Offer its vars and let
+            // accepting one insert the require.
+            let pool: Vec<(String, String)> =
+                super::code_action::namespaces_for_alias(index, meta, alias)
+                    .into_iter()
+                    .map(|c| (c.namespace, c.alias.unwrap_or_else(|| alias.to_string())))
+                    .collect();
+            items.extend(auto_require_items(index, &pool, name_prefix, source));
         }
     } else {
         // Pool A: current namespace symbols
@@ -566,10 +582,111 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     }
                 }
             }
+
+            // Pool G: vars of namespaces this file has not required. Two typed
+            // characters minimum — a one-character prefix over every project
+            // namespace is noise, and inserting a require is a big enough
+            // action to deserve a real prefix.
+            if prefix.chars().count() >= 2 {
+                if let Some(meta) = &ns_meta {
+                    let pool = auto_require_pool(index, meta);
+                    items.extend(auto_require_items(index, &pool, prefix, source));
+                }
+            }
         }
     }
 
     items
+}
+
+/// Cap on auto-require completions, so a short prefix doesn't turn the list
+/// into a catalogue of every namespace in the workspace.
+const AUTO_REQUIRE_LIMIT: usize = 30;
+
+/// The namespaces auto-require completion may propose for a bare prefix, each
+/// with the alias it would be required under: every project namespace by its
+/// last segment, plus the curated aliases. Library namespaces outside that
+/// table are deliberately absent — the pool stays small and the aliases stay
+/// the conventional ones. Namespaces this file already reaches, and aliases it
+/// has already bound to something else, are dropped here.
+fn auto_require_pool(index: &Index, meta: &NsMeta) -> Vec<(String, String)> {
+    let mut pool: Vec<(String, String)> = Vec::new();
+    for entry in index.namespaces.iter() {
+        if !index.is_project_path(&entry.value().file) {
+            continue;
+        }
+        let ns = entry.key();
+        let alias = ns.rsplit('.').next().unwrap_or(ns);
+        pool.push((ns.clone(), alias.to_string()));
+    }
+    for (alias, ns) in super::code_action::CURATED_ALIASES {
+        pool.push((ns.to_string(), alias.to_string()));
+    }
+    pool.retain(|(ns, alias)| {
+        // Already reachable from here, or the alias is taken: inserting the
+        // require would be a no-op or a conflict.
+        ns != &meta.name
+            && !meta.resolves_prefix(ns)
+            && !meta.aliases.contains_key(alias)
+            && !meta.requires.iter().any(|r| r == ns)
+    });
+    pool
+}
+
+/// Auto-require items for `prefix` over `pool` (namespace, alias) pairs: every
+/// public var whose name matches, labelled `alias/name` and carrying the edit
+/// that inserts the require. Ranked and capped here, then sorted after every
+/// in-scope item — picking a name already in scope always beats editing the ns
+/// form, whatever the match tiers say.
+fn auto_require_items(
+    index: &Index,
+    pool: &[(String, String)],
+    prefix: &str,
+    source: Option<&str>,
+) -> Vec<CompletionItem> {
+    let mut hits: Vec<(u8, String, String, String)> = Vec::new();
+    for (ns, alias) in pool {
+        let Some(fqns) = index.ns_symbols.get(ns) else {
+            continue;
+        };
+        for fqn in fqns.iter() {
+            let Some(sym) = index.symbols.get(fqn) else {
+                continue;
+            };
+            if sym.private || sym.kind == DefKind::DefnPrivate {
+                continue;
+            }
+            if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {
+                hits.push((
+                    tier,
+                    format!("{}/{}", alias, sym.name),
+                    ns.clone(),
+                    alias.clone(),
+                ));
+            }
+        }
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    hits.truncate(AUTO_REQUIRE_LIMIT);
+
+    hits.into_iter()
+        .map(|(tier, label, ns, alias)| {
+            let spec = crate::handlers::code_action::Candidate {
+                namespace: ns,
+                alias: Some(alias),
+            }
+            .spec();
+            let edit = source.and_then(|text| super::code_action::require_edit(text, &spec));
+            CompletionItem {
+                sort_text: Some(format!("9-{}-{}", tier, label)),
+                label,
+                detail: Some(format!("requires {}", spec)),
+                kind: Some(CompletionItemKind::FUNCTION),
+                additional_text_edits: edit.map(|e| vec![e]),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 /// Cap on namespace completions, so a short substring doesn't offer every
@@ -810,7 +927,7 @@ mod tests {
     }
 
     fn labels(index: &Index, prefix: &str) -> Vec<String> {
-        complete_symbols(index, prefix, "app")
+        complete_symbols(index, prefix, "app", None)
             .into_iter()
             .map(|i| i.label)
             .collect()
@@ -820,7 +937,7 @@ mod tests {
     fn completes_java_static_members_and_class_names() {
         let (index, _zip) = crate::handlers::java::test_fixture();
         let java_labels = |prefix: &str| -> Vec<String> {
-            complete_symbols(&index, prefix, "app.core")
+            complete_symbols(&index, prefix, "app.core", None)
                 .into_iter()
                 .map(|i| i.label)
                 .collect()
@@ -880,7 +997,7 @@ mod tests {
     #[test]
     fn letgo_native_completion_is_labelled() {
         let index = letgo_index();
-        let item = complete_symbols(&index, "count", "app")
+        let item = complete_symbols(&index, "count", "app", None)
             .into_iter()
             .find(|i| i.label == "count")
             .expect("count offered");
