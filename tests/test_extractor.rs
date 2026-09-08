@@ -1209,3 +1209,36 @@ fn test_declare_indexes_each_name() {
         occs
     );
 }
+
+#[test]
+fn test_namespaced_map_keys_take_the_map_prefix() {
+    // `#:user{:id 1}` reads as `{:user/id 1}`, so the key is an occurrence of
+    // `:user/id` — recording a bare `:id` would answer find-references for
+    // every unrelated `:id` in the project. `:_/x` escapes the prefix, an
+    // explicitly qualified key keeps its own namespace, and the prefix itself
+    // is a reader marker, not a keyword usage.
+    let src = "(ns my.ns\n  (:require [other.lib :as o]))\n\
+               (def a #:user{:id 1 :_/bare 2 :other/kept 3 ::auto 4 :v :val})\n\
+               (def b #::{:local 5})\n\
+               (def c #::o{:aliased 6})";
+    let (_, _, occs) = extract_full(src, Path::new("nsmap.clj")).unwrap();
+
+    for fqn in [
+        ":user/id",
+        ":bare",
+        ":other/kept",
+        ":my.ns/auto",
+        ":user/v",
+        ":val",
+        ":my.ns/local",
+        ":other.lib/aliased",
+    ] {
+        assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
+    }
+    // Neither the bare key nor the map prefix is recorded on its own.
+    assert!(
+        occs.iter().all(|o| o.fqn != ":id" && o.fqn != ":user"),
+        "namespaced-map key or prefix leaked: {:?}",
+        occs
+    );
+}

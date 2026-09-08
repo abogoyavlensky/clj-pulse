@@ -1409,6 +1409,9 @@ fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mu
         // `:name`. This powers keyword references and completion, and feeds
         // Integrant component navigation.
         "kwd_lit" => record_keyword_occurrence(node, ctx, out),
+        // `#:user{:id 1}` — the reader qualifies the keys, so the keyword the
+        // user wrote is not the keyword the program sees.
+        "ns_map_lit" => walk_ns_map(node, ctx, scope, out),
         "list_lit" => walk_list(node, ctx, scope, out),
         // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
         // macros do reference real vars, so walk those.
@@ -2120,6 +2123,99 @@ fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occu
             fqn,
             name_range: node_to_lsp_range(node, ctx.source),
         });
+    }
+}
+
+/// Walks a namespaced map literal (`#:user{…}`, `#::{…}`, `#::alias{…}`). The
+/// reader qualifies every *unqualified* key with the map's prefix, so
+/// `#:user{:id 1}` reads as `{:user/id 1}` and recording a bare `:id` would
+/// answer find-references for an unrelated `:id`. Values are ordinary
+/// expressions, and the prefix itself is a reader marker, not a keyword usage.
+fn walk_ns_map(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
+    let map_ns = ns_map_prefix(node, ctx);
+    let mut cursor = node.walk();
+    let entries: Vec<Node> = node.children_by_field_name("value", &mut cursor).collect();
+    for pair in entries.chunks(2) {
+        match pair.first() {
+            Some(key) if key.kind() == "kwd_lit" => {
+                record_ns_map_key(*key, map_ns.as_deref(), ctx, out)
+            }
+            Some(key) => walk_occurrences(*key, ctx, scope, out),
+            None => {}
+        }
+        if let Some(value) = pair.get(1) {
+            walk_occurrences(*value, ctx, scope, out);
+        }
+    }
+}
+
+/// The namespace a namespaced map literal qualifies its keys with: the current
+/// namespace for `#::{…}`, an alias-resolved one for `#::alias{…}`, the literal
+/// prefix for `#:user{…}`. `None` when there is nothing to resolve it to (an
+/// `#::{…}` in a file with no `ns` form).
+fn ns_map_prefix(node: Node, ctx: &OccurrenceCtx) -> Option<String> {
+    let prefix = node.child_by_field_name("prefix")?;
+    match prefix.kind() {
+        "auto_res_mark" => (!ctx.ns_meta.name.is_empty()).then(|| ctx.ns_meta.name.clone()),
+        "kwd_lit" => {
+            let ns = node_text(prefix.child_by_field_name("name")?, ctx.source);
+            let auto_resolved = prefix
+                .child_by_field_name("marker")
+                .map(|m| node_text(m, ctx.source) == "::")
+                .unwrap_or(false);
+            if auto_resolved {
+                Some(
+                    ctx.ns_meta
+                        .aliases
+                        .get(ns)
+                        .cloned()
+                        .unwrap_or_else(|| ns.to_string()),
+                )
+            } else {
+                Some(ns.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Records one key of a namespaced map under the fqn the reader gives it. A key
+/// that carries its own namespace (`:other/x`, `::x`) keeps it; `:_/x` is the
+/// reader's escape from the prefix and reads as plain `:x`; anything else takes
+/// the map's namespace.
+fn record_ns_map_key(
+    key: Node,
+    map_ns: Option<&str>,
+    ctx: &OccurrenceCtx,
+    out: &mut Vec<Occurrence>,
+) {
+    let auto_resolved = key
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, ctx.source) == "::")
+        .unwrap_or(false);
+    if let Some(ns_node) = key.child_by_field_name("namespace") {
+        if !auto_resolved && node_text(ns_node, ctx.source) == "_" {
+            if let Some(name) = key.child_by_field_name("name") {
+                out.push(Occurrence {
+                    fqn: format!(":{}", node_text(name, ctx.source)),
+                    name_range: node_to_lsp_range(key, ctx.source),
+                });
+            }
+            return;
+        }
+        record_keyword_occurrence(key, ctx, out);
+        return;
+    }
+    match map_ns {
+        Some(ns) if !auto_resolved => {
+            if let Some(name) = key.child_by_field_name("name") {
+                out.push(Occurrence {
+                    fqn: format!(":{}/{}", ns, node_text(name, ctx.source)),
+                    name_range: node_to_lsp_range(key, ctx.source),
+                });
+            }
+        }
+        _ => record_keyword_occurrence(key, ctx, out),
     }
 }
 
