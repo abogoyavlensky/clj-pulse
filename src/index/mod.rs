@@ -380,16 +380,18 @@ impl Index {
     }
 
     fn sub_keyword_counts(&self, occurrences: &[Occurrence]) {
+        use dashmap::mapref::entry::Entry;
+
         for occ in occurrences.iter().filter(|o| o.fqn.starts_with(':')) {
-            let drop = match self.keyword_counts.get_mut(&occ.fqn) {
-                Some(mut count) => {
-                    *count = count.saturating_sub(1);
-                    *count == 0
+            // Decrement and drop under one entry lock: a concurrent re-index of
+            // another file may add the same keyword back, and a separate
+            // `remove` would delete that live count.
+            if let Entry::Occupied(mut e) = self.keyword_counts.entry(occ.fqn.clone()) {
+                let count = e.get_mut();
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    e.remove();
                 }
-                None => false,
-            };
-            if drop {
-                self.keyword_counts.remove(&occ.fqn);
             }
         }
     }

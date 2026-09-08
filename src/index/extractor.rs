@@ -2131,10 +2131,22 @@ fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occu
 /// `#:user{:id 1}` reads as `{:user/id 1}` and recording a bare `:id` would
 /// answer find-references for an unrelated `:id`. Values are ordinary
 /// expressions, and the prefix itself is a reader marker, not a keyword usage.
+///
+/// A splicing reader conditional (`#:user{#?@(:clj [:a 1]) :b 2}`) contributes
+/// an unknown number of entries, so nothing after it can be told apart as key
+/// or value. Such a map falls back to the ordinary walk: its unqualified
+/// keywords stay unqualified, which under-reports the keys but never invents a
+/// namespace for a value.
 fn walk_ns_map(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
     let map_ns = ns_map_prefix(node, ctx);
     let mut cursor = node.walk();
     let entries: Vec<Node> = node.children_by_field_name("value", &mut cursor).collect();
+    if entries.iter().any(|n| n.kind() == "splicing_read_cond_lit") {
+        for entry in entries {
+            walk_occurrences(entry, ctx, scope, out);
+        }
+        return;
+    }
     for pair in entries.chunks(2) {
         match pair.first() {
             Some(key) if key.kind() == "kwd_lit" => {

@@ -1242,3 +1242,18 @@ fn test_namespaced_map_keys_take_the_map_prefix() {
         occs
     );
 }
+
+#[test]
+fn test_namespaced_map_with_splicing_conditional_invents_no_namespace() {
+    // `#?@` splices an unknown number of entries, so nothing after it can be
+    // told apart as key or value. Under-reporting the keys is fine; inventing
+    // `:user/value` for what is actually a value is not.
+    let src = "(ns my.ns)\n(def a #:user{#?@(:clj [:a 1]) :b :value})";
+    let (_, _, occs) = extract_full(src, Path::new("nsmap.cljc")).unwrap();
+
+    assert!(
+        occs.iter().all(|o| !o.fqn.starts_with(":user/")),
+        "unpairable namespaced map must not invent key namespaces: {:?}",
+        occs
+    );
+}

@@ -110,22 +110,35 @@ Modify:
 - Modify: `src/index/extractor.rs`, `ARCHITECTURE.md`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   `test_unqualified_keywords_recorded`: a snippet with `{:id 1 :name "x" ::local 2}` yields occurrences with fqns `:id`, `:name`, and `:<ns>/local`, each spanning the whole token.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor unqualified_keywords`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `keyword_fqn` returns `Some(format!(":{name}"))` for the unqualified, non-auto-resolved case. Update its doc comment, the `Occurrence` doc in `src/index/mod.rs`, and ARCHITECTURE's keyword section. Run the full suite: references tests that counted keyword occurrences may need their expectations adjusted deliberately.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Record unqualified keyword occurrences"`
+
+> Deviation: the unqualified case lives in a new `keyword_occurrence_fqn`
+> wrapper rather than in `keyword_fqn` itself. `keyword_fqn` is shared with
+> `extract_edn` and with the `ig/init-key` definition path, both of which must
+> keep rejecting unqualified keywords; only occurrence recording takes the new
+> fqn.
+
+> Deviation: the codex review caught that `#:user{:id 1}` reads as `:user/id`,
+> so recording a bare `:id` would answer find-references for every unrelated
+> `:id`. Fixed in the same task (commit `40396f9`): `walk_ns_map` resolves a
+> namespaced map's prefix (`#:user`, `#::`, `#::alias`), qualifies its
+> unqualified keys, honors the `:_/x` escape, and stops recording the prefix
+> itself as a keyword usage.
 
 ### Task 2: Keyword counts in the index
 
@@ -133,21 +146,21 @@ Modify:
 - Modify: `src/index/mod.rs`
 - Test: `tests/test_index.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   `test_keyword_counts_track_insert_remove_merge`: build an `Index`, `insert_file` with occurrences for `:id` twice and `:x/y` once, assert counts; `insert_file` the same path again with the same occurrences, assert the counts did not double; `remove_file`, assert empty; insert again, then `merge_project_from` a new index where the file has `:id` once, assert 1; `insert_edn_file` with `:x/y` twice for one path, assert it counts once.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_index keyword_counts`
   Expected: FAIL (no such method).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Field, two private helpers `add_keyword_counts(&[Occurrence])` and `sub_keyword_counts(&[Occurrence])`, calls at the four mutation points, and the public read API.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Maintain keyword usage counts in the index"`
 
 ### Task 3: Keyword context in the document store
