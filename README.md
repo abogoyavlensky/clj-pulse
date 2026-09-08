@@ -23,7 +23,10 @@ Language features:
   and source-directory deps (git deps in `~/.gitlibs`, `:local/root`).
 - **Autocomplete** - locals, project symbols, `:refer`red and alias-qualified
   vars (including `:refer :all` and `:use`), namespace and alias names,
-  `clojure.core`, special forms, and JDK classes.
+  `clojure.core`, special forms, and JDK classes. Names match fuzzily (exact,
+  prefix, substring, subsequence) and rank by match quality first, then by how
+  local the name is. Docstrings load per item through `completionItem/resolve`,
+  so a long list stays cheap.
 - **Hover** - docstrings and signatures for the symbol under the cursor.
 - **ClojureDocs** - the `clojurePulse/clojureDocs` request returns the
   [ClojureDocs](https://clojuredocs.org) entry (docstring, arglists, community

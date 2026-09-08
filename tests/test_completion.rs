@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use clj_pulse::handlers::completion::complete_symbols;
+use clj_pulse::handlers::completion::{complete_symbols, resolve};
 use clj_pulse::index::scanner;
 use clj_pulse::index::Index;
 
@@ -39,11 +39,13 @@ fn test_completes_clojure_core_builtins() {
 
 #[test]
 fn test_completion_item_has_doc_and_detail() {
+    // The item carries its signature up front and its docstring only after
+    // `completionItem/resolve`.
     let index = build_test_index();
     let completions = complete_symbols(&index, "add", "simple.core");
     let item = completions.iter().find(|c| c.label == "add").unwrap();
     assert!(item.detail.is_some());
-    assert!(item.documentation.is_some());
+    assert!(resolve(&index, item.clone()).documentation.is_some());
 }
 
 #[test]
@@ -78,10 +80,11 @@ fn test_empty_prefix_excludes_namespace_dump() {
     assert!(!completions.iter().any(|c| c.label == "simple.core"));
 }
 
+use clj_pulse::index::CoreSymbol;
 use clj_pulse::index::{DefKind, NsMeta, Symbol, SymbolSource};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tower_lsp::lsp_types::{CompletionItemKind, Range};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Range};
 
 /// A namespace with no requires beyond what the caller fills in.
 fn ns_meta(name: &str) -> NsMeta {
@@ -222,4 +225,240 @@ fn test_core_exclude_hides_core_symbol() {
         "own update missing: {:?}",
         labels(&items)
     );
+}
+
+/// A plain project defn, so tests can hand-build a namespace's symbol set.
+fn defn_sym(name: &str, ns: &str) -> Symbol {
+    Symbol {
+        name: name.to_string(),
+        fqn: format!("{}/{}", ns, name),
+        ns: ns.to_string(),
+        kind: DefKind::Defn,
+        params: vec!["[x]".to_string()],
+        doc: None,
+        file: PathBuf::from(format!("{}.clj", ns)),
+        source: SymbolSource::Project,
+        range: Range::default(),
+        name_range: Range::default(),
+        private: false,
+    }
+}
+
+#[test]
+fn test_fuzzy_substring_match() {
+    // `dd` matches `add` in the middle: a tier-2 (substring) hit from the
+    // current-namespace pool (1).
+    let index = build_test_index();
+    let items = complete_symbols(&index, "dd", "simple.core");
+    let add = items
+        .iter()
+        .find(|i| i.label == "add")
+        .unwrap_or_else(|| panic!("add not offered for `dd`: {:?}", labels(&items)));
+    assert_eq!(add.sort_text.as_deref(), Some("2-1-add"));
+}
+
+#[test]
+fn test_fuzzy_subsequence_ranks_below_prefix() {
+    // `add` prefix-matches `add-more` (tier 1) and subsequence-matches `a-d-d`
+    // (tier 3); both live in the current namespace, so sort_text orders them.
+    let index = Index::new();
+    index.insert_file(
+        ns_meta("a.x"),
+        vec![defn_sym("add-more", "a.x"), defn_sym("a-d-d", "a.x")],
+        vec![],
+    );
+
+    let items = complete_symbols(&index, "add", "a.x");
+    let sort_text = |label: &str| -> String {
+        items
+            .iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("{} not offered: {:?}", label, labels(&items)))
+            .sort_text
+            .clone()
+            .unwrap_or_else(|| panic!("{} has no sort_text", label))
+    };
+    let prefix = sort_text("add-more");
+    let subsequence = sort_text("a-d-d");
+    assert!(
+        prefix < subsequence,
+        "prefix match must rank first: {} vs {}",
+        prefix,
+        subsequence
+    );
+}
+
+#[test]
+fn test_fuzzy_single_char_prefix_is_prefix_only() {
+    // One character is too little to fuzzy-match on: `d` stays a prefix search,
+    // so `add` (a substring hit) is not offered.
+    let index = build_test_index();
+    let items = complete_symbols(&index, "d", "simple.core");
+    assert!(
+        !items.iter().any(|i| i.label == "add"),
+        "single-char prefix fuzzy-matched: {:?}",
+        labels(&items)
+    );
+}
+
+#[test]
+fn test_fuzzy_namespace_pool_is_capped() {
+    // Substring matching over namespaces would offer every library namespace
+    // sharing the typed text; the pool is capped.
+    let index = Index::new();
+    for i in 0..60 {
+        index.insert_file(ns_meta(&format!("lib{:02}.widget", i)), vec![], vec![]);
+    }
+    index.insert_file(ns_meta("a.x"), vec![], vec![]);
+
+    let items = complete_symbols(&index, "widget", "a.x");
+    let namespaces = items
+        .iter()
+        .filter(|i| i.detail.as_deref() == Some("namespace"))
+        .count();
+    assert!(
+        namespaces > 0 && namespaces <= 50,
+        "namespace pool not capped: {} items",
+        namespaces
+    );
+}
+
+#[test]
+fn test_fuzzy_namespace_pool_skips_subsequence() {
+    // `str` subsequence-matches hundreds of library namespaces; only prefix and
+    // substring hits are namespace candidates.
+    let index = Index::new();
+    index.insert_file(ns_meta("s.t.r"), vec![], vec![]);
+    index.insert_file(ns_meta("clojure.string"), vec![], vec![]);
+    index.insert_file(ns_meta("a.x"), vec![], vec![]);
+
+    let names = labels(&complete_symbols(&index, "str", "a.x"));
+    assert!(
+        names.contains(&"clojure.string".to_string()),
+        "substring namespace missing: {:?}",
+        names
+    );
+    assert!(
+        !names.contains(&"s.t.r".to_string()),
+        "subsequence namespace offered: {:?}",
+        names
+    );
+}
+
+/// The Markdown body of a resolved item's documentation.
+fn doc_value(item: &tower_lsp::lsp_types::CompletionItem) -> String {
+    match item.documentation.as_ref() {
+        Some(tower_lsp::lsp_types::Documentation::MarkupContent(m)) => m.value.clone(),
+        other => panic!("expected markup documentation, got {:?}", other),
+    }
+}
+
+fn item_named(items: &[tower_lsp::lsp_types::CompletionItem], label: &str) -> CompletionItem {
+    items
+        .iter()
+        .find(|i| i.label == label)
+        .unwrap_or_else(|| panic!("{} not offered: {:?}", label, labels(items)))
+        .clone()
+}
+
+/// A let-go project: special forms, native core fns and the live `.lg` `core`.
+fn letgo_index() -> Index {
+    let mut index = Index::new();
+    index.insert_file(ns_meta("app"), vec![], vec![]);
+    index.insert_lib_file(ns_meta("core"), vec![]);
+    index.core_symbols = vec![CoreSymbol {
+        name: "count".to_string(),
+        params: "([coll])".to_string(),
+        doc: "Returns the number of items in the collection.".to_string(),
+    }];
+    index.mark_letgo_core();
+    index.set_letgo_native(vec!["count".to_string()]);
+    index
+}
+
+#[test]
+fn test_items_carry_data_not_documentation() {
+    let index = build_test_index();
+    let item = item_named(&complete_symbols(&index, "add", "simple.core"), "add");
+    assert!(
+        item.documentation.is_none(),
+        "documentation sent up front: {:?}",
+        item.documentation
+    );
+    assert_eq!(
+        item.data,
+        Some(serde_json::json!({ "src": "symbol", "fqn": "simple.core/add" }))
+    );
+}
+
+#[test]
+fn test_resolve_fills_symbol_documentation() {
+    let index = build_test_index();
+    let item = item_named(&complete_symbols(&index, "add", "simple.core"), "add");
+    assert!(
+        doc_value(&resolve(&index, item)).contains("Adds two numbers"),
+        "docstring missing after resolve"
+    );
+}
+
+#[test]
+fn test_resolve_fills_core_documentation() {
+    let index = Index::new_with_core();
+    let item = item_named(&complete_symbols(&index, "map", "any.ns"), "map");
+    assert!(item.documentation.is_none());
+    assert!(!doc_value(&resolve(&index, item)).is_empty());
+}
+
+#[test]
+fn test_resolve_fills_special_form_documentation() {
+    let index = Index::new_with_core();
+    let item = item_named(&complete_symbols(&index, "if", "any.ns"), "if");
+    assert!(item.documentation.is_none());
+    assert!(
+        doc_value(&resolve(&index, item)).contains("Evaluates"),
+        "special form doc missing after resolve"
+    );
+}
+
+#[test]
+fn test_resolve_fills_letgo_native_documentation() {
+    let index = letgo_index();
+    let item = item_named(&complete_symbols(&index, "count", "app"), "count");
+    assert!(item.documentation.is_none());
+    assert!(doc_value(&resolve(&index, item)).contains("number of items"));
+}
+
+#[test]
+fn test_resolve_passes_unknown_item_through() {
+    // A namespace item has nothing to resolve, so it comes back untouched.
+    let index = build_test_index();
+    let item = item_named(
+        &complete_symbols(&index, "simple.", "simple.utils"),
+        "simple.core",
+    );
+    assert_eq!(item.data, None);
+    assert_eq!(resolve(&index, item.clone()), item);
+}
+
+#[test]
+fn test_resolve_ignores_malformed_data() {
+    let index = build_test_index();
+    let base = item_named(&complete_symbols(&index, "add", "simple.core"), "add");
+    for data in [
+        serde_json::json!("simple.core/add"),
+        serde_json::json!({ "fqn": "simple.core/add" }),
+        serde_json::json!({ "src": "nonsense", "fqn": "simple.core/add" }),
+        serde_json::json!({ "src": "symbol", "fqn": "simple.core/nope" }),
+    ] {
+        let item = CompletionItem {
+            data: Some(data.clone()),
+            ..base.clone()
+        };
+        assert_eq!(
+            resolve(&index, item.clone()),
+            item,
+            "malformed data changed the item: {}",
+            data
+        );
+    }
 }

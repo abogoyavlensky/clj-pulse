@@ -127,16 +127,17 @@ Small fixes that remove wrong answers. Each extractor change bumps
 The feature users touch most; today it is prefix-only and fires only on
 identifier characters.
 
-- [ ] Trigger characters `:` and `/` in `CompletionOptions`.
-- [ ] Fuzzy matching. Extract the exact/prefix/substring/subsequence
+- [x] Trigger character `/` in `CompletionOptions`.
+- [ ] Trigger character `:` in `CompletionOptions`.
+- [x] Fuzzy matching. Extract the exact/prefix/substring/subsequence
       matcher from `handlers/symbols.rs` into a shared module and use it in
       `handlers/completion.rs`.
 - [ ] Keyword completion from the occurrence index, current-ns keywords first.
 - [ ] Auto-require on accept via `additionalTextEdits`, reusing the
       add-require edit builder.
-- [ ] `completionItem/resolve` for docstrings and signatures so long lists stay
+- [x] `completionItem/resolve` for docstrings and signatures so long lists stay
       cheap.
-  Plan: —
+  Plan: [2026-09-06-0756-completion-fuzzy-resolve.md](plans/2026-09-06-0756-completion-fuzzy-resolve.md) — done (trigger `/`, fuzzy, resolve); [2026-09-06-0757-completion-keywords-auto-require.md](plans/2026-09-06-0757-completion-keywords-auto-require.md) — in progress (trigger `:`, keywords, auto-require)
 
 ## Milestone 3 — editor chrome for Calva and Neovim
 

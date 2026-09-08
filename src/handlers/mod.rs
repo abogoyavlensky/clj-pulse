@@ -8,6 +8,7 @@ pub mod ignored_forms;
 pub mod indent;
 pub mod java;
 mod letgo_native_names;
+pub mod matching;
 pub mod references;
 pub mod signature;
 pub mod symbols;

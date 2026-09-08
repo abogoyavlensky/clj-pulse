@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
+use serde_json::json;
+
 use super::builtins;
+use super::matching::match_score;
 use crate::document::DocumentStore;
 use crate::index::{extractor, CoreSymbol, DefKind, Index};
 
@@ -39,12 +42,20 @@ pub fn handle(
         return Ok(None);
     }
 
-    Ok(Some(CompletionResponse::Array(items)))
+    // Incomplete on purpose: the guardrails in `tier_allowed` and the namespace
+    // cap mean a longer prefix can yield candidates this list does not hold
+    // (`d` is prefix-only, `dd` substring-matches `add`). A complete list would
+    // let the client filter its cache instead of asking again, and those
+    // candidates would never appear.
+    Ok(Some(CompletionResponse::List(CompletionList {
+        is_incomplete: true,
+        items,
+    })))
 }
 
 /// In-scope local bindings at `pos` whose name matches `prefix`, innermost-first
-/// and de-duplicated by name (an inner binding shadows an outer one). A
-/// `sort_text` floats them above vars/core so the most local names rank first.
+/// and de-duplicated by name (an inner binding shadows an outer one). Locals are
+/// pool 0, so within a match tier they rank above every var and core name.
 fn local_completions(
     documents: &DocumentStore,
     uri: &Url,
@@ -57,17 +68,88 @@ fn local_completions(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for binding in extractor::locals_in_scope_at(&text, pos).into_iter().rev() {
-        if binding.name.starts_with(prefix) && seen.insert(binding.name.clone()) {
-            out.push(CompletionItem {
-                label: binding.name.clone(),
-                detail: Some("local".to_string()),
-                kind: Some(CompletionItemKind::VARIABLE),
-                sort_text: Some(format!("0-{}", binding.name)),
-                ..Default::default()
-            });
+        let Some(tier) = matched(&binding.name, prefix, Pool::Local) else {
+            continue;
+        };
+        if seen.insert(binding.name.clone()) {
+            push(
+                &mut out,
+                CompletionItem {
+                    label: binding.name.clone(),
+                    detail: Some("local".to_string()),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    ..Default::default()
+                },
+                tier,
+                Pool::Local,
+            );
         }
     }
     out
+}
+
+/// The candidate pools, ordered by how local their names are. The digit goes
+/// into `sort_text` after the match tier, so an exact match anywhere beats a
+/// prefix match anywhere, and within a tier the most local pool wins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pool {
+    Local,
+    CurrentNs,
+    Referred,
+    Core,
+    Alias,
+    Namespace,
+    Java,
+}
+
+impl Pool {
+    fn digit(self) -> u8 {
+        match self {
+            Pool::Local => 0,
+            Pool::CurrentNs => 1,
+            Pool::Referred => 2,
+            Pool::Core => 3,
+            // Aliases and namespaces are the same rank; they differ only in the
+            // guardrails `tier_allowed` applies to them.
+            Pool::Alias | Pool::Namespace => 4,
+            Pool::Java => 5,
+        }
+    }
+}
+
+/// The match tier `name` earns for `prefix` in `pool`, or `None` when it is no
+/// candidate there.
+fn matched(name: &str, prefix: &str, pool: Pool) -> Option<u8> {
+    let tier = match_score(name, prefix)?;
+    tier_allowed(tier, prefix, pool).then_some(tier)
+}
+
+/// Guardrails on the loose tiers. An empty prefix is exempt: `match_score`
+/// scores everything tier 3 there, and the pools that would flood the list
+/// (aliases, namespaces) skip an empty prefix entirely.
+fn tier_allowed(tier: u8, prefix: &str, pool: Pool) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    // One character is too little to fuzzy-match on: `d` would substring-match
+    // most of clojure.core. A single char stays a prefix search.
+    if tier >= 2 && prefix.chars().count() < 2 {
+        return false;
+    }
+    // `str` subsequence-matches hundreds of library namespaces; requiring a
+    // substring keeps require completion readable.
+    if pool == Pool::Namespace && tier >= 3 {
+        return false;
+    }
+    true
+}
+
+/// Adds `item` with the `tier-pool-label` `sort_text` that ranks it.
+fn push(items: &mut Vec<CompletionItem>, item: CompletionItem, tier: u8, pool: Pool) {
+    items.push(CompletionItem {
+        sort_text: Some(format!("{}-{}-{}", tier, pool.digit(), item.label)),
+        ..item
+    });
 }
 
 pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<CompletionItem> {
@@ -82,8 +164,13 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             if let Some(fqns) = index.ns_symbols.get(&full_ns) {
                 for fqn in fqns.iter() {
                     if let Some(sym) = index.symbols.get(fqn) {
-                        if sym.name.starts_with(name_prefix) {
-                            items.push(symbol_to_completion(&sym, Some(alias)));
+                        if let Some(tier) = matched(&sym.name, name_prefix, Pool::CurrentNs) {
+                            push(
+                                &mut items,
+                                symbol_to_completion(&sym, Some(alias)),
+                                tier,
+                                Pool::CurrentNs,
+                            );
                         }
                     }
                 }
@@ -93,13 +180,29 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             // class, not a Clojure require alias).
             if let Some(info) = index.jdk().and_then(|j| j.class(&class_fqn)) {
                 for m in &info.methods {
-                    if m.is_static && m.name.starts_with(name_prefix) {
-                        items.push(java_member_completion(alias, &m.name, &class_fqn, true));
+                    if !m.is_static {
+                        continue;
+                    }
+                    if let Some(tier) = matched(&m.name, name_prefix, Pool::Java) {
+                        push(
+                            &mut items,
+                            java_member_completion(alias, &m.name, &class_fqn, true),
+                            tier,
+                            Pool::Java,
+                        );
                     }
                 }
                 for f in &info.fields {
-                    if f.is_static && f.name.starts_with(name_prefix) {
-                        items.push(java_member_completion(alias, &f.name, &class_fqn, false));
+                    if !f.is_static {
+                        continue;
+                    }
+                    if let Some(tier) = matched(&f.name, name_prefix, Pool::Java) {
+                        push(
+                            &mut items,
+                            java_member_completion(alias, &f.name, &class_fqn, false),
+                            tier,
+                            Pool::Java,
+                        );
                     }
                 }
             }
@@ -109,8 +212,13 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
         if let Some(fqns) = index.ns_symbols.get(current_ns) {
             for fqn in fqns.iter() {
                 if let Some(sym) = index.symbols.get(fqn) {
-                    if sym.name.starts_with(prefix) {
-                        items.push(symbol_to_completion(&sym, None));
+                    if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {
+                        push(
+                            &mut items,
+                            symbol_to_completion(&sym, None),
+                            tier,
+                            Pool::CurrentNs,
+                        );
                     }
                 }
             }
@@ -121,13 +229,14 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             // whether or not its namespace is indexed yet — the clojure JAR may
             // still be loading — so offer it bare when the fqn misses.
             for (refer_name, fqn) in &meta.refers {
-                if !refer_name.starts_with(prefix) {
+                let Some(tier) = matched(refer_name, prefix, Pool::Referred) else {
                     continue;
-                }
-                match index.symbols.get(fqn) {
-                    Some(sym) => items.push(symbol_to_completion(&sym, None)),
-                    None => items.push(referred_completion(refer_name, fqn)),
-                }
+                };
+                let item = match index.symbols.get(fqn) {
+                    Some(sym) => symbol_to_completion(&sym, None),
+                    None => referred_completion(refer_name, fqn),
+                };
+                push(&mut items, item, tier, Pool::Referred);
             }
 
             // Pool B2: `:refer :all` / `(:use ns)` namespaces — every public var
@@ -141,11 +250,16 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                 };
                 for fqn in fqns.iter() {
                     if let Some(sym) = index.symbols.get(fqn) {
-                        if sym.kind != DefKind::DefnPrivate
-                            && sym.name.starts_with(prefix)
-                            && !meta.refers.contains_key(&sym.name)
-                        {
-                            items.push(symbol_to_completion(&sym, None));
+                        if sym.kind == DefKind::DefnPrivate || meta.refers.contains_key(&sym.name) {
+                            continue;
+                        }
+                        if let Some(tier) = matched(&sym.name, prefix, Pool::Referred) {
+                            push(
+                                &mut items,
+                                symbol_to_completion(&sym, None),
+                                tier,
+                                Pool::Referred,
+                            );
                         }
                     }
                 }
@@ -158,8 +272,13 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
         // mislabel the ones it has. Clojure projects keep the clojure.core list.
         if index.letgo_core() {
             for sf in builtins::special_forms(true) {
-                if sf.name.starts_with(prefix) {
-                    items.push(special_form_to_completion(sf));
+                if let Some(tier) = matched(sf.name, prefix, Pool::Core) {
+                    push(
+                        &mut items,
+                        special_form_to_completion(sf, true),
+                        tier,
+                        Pool::Core,
+                    );
                 }
             }
             // Native (Go `ns.Def`) names: the set harvested from this let-go
@@ -172,16 +291,29 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                 None => builtins::native_names().to_vec(),
             };
             for &name in &native_names {
-                if name.starts_with(prefix) && index.lookup_in_ns("core", name).is_none() {
+                let Some(tier) = matched(name, prefix, Pool::Core) else {
+                    continue;
+                };
+                if index.lookup_in_ns("core", name).is_none() {
                     let core = index.core_symbols.iter().find(|c| c.name == name);
-                    items.push(letgo_native_to_completion(name, core));
+                    push(
+                        &mut items,
+                        letgo_native_to_completion(name, core),
+                        tier,
+                        Pool::Core,
+                    );
                 }
             }
             if let Some(fqns) = index.ns_symbols.get("core") {
                 for fqn in fqns.iter() {
                     if let Some(sym) = index.symbols.get(fqn) {
-                        if sym.name.starts_with(prefix) {
-                            items.push(symbol_to_completion(&sym, None));
+                        if let Some(tier) = matched(&sym.name, prefix, Pool::Core) {
+                            push(
+                                &mut items,
+                                symbol_to_completion(&sym, None),
+                                tier,
+                                Pool::Core,
+                            );
                         }
                     }
                 }
@@ -194,14 +326,27 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                     .is_some_and(|m| m.core_excludes.iter().any(|e| e == name))
             };
             for core_sym in &index.core_symbols {
-                if core_sym.name.starts_with(prefix) && !excluded(&core_sym.name) {
-                    items.push(core_symbol_to_completion(core_sym));
+                if excluded(&core_sym.name) {
+                    continue;
+                }
+                if let Some(tier) = matched(&core_sym.name, prefix, Pool::Core) {
+                    push(
+                        &mut items,
+                        core_symbol_to_completion(core_sym),
+                        tier,
+                        Pool::Core,
+                    );
                 }
             }
             // Clojure special forms aren't clojure.core vars, so offer them too.
             for sf in builtins::special_forms(false) {
-                if sf.name.starts_with(prefix) {
-                    items.push(special_form_to_completion(sf));
+                if let Some(tier) = matched(sf.name, prefix, Pool::Core) {
+                    push(
+                        &mut items,
+                        special_form_to_completion(sf, false),
+                        tier,
+                        Pool::Core,
+                    );
                 }
             }
         }
@@ -213,13 +358,18 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             // to "metrics" lets the user then complete "metrics/…"
             if let Some(meta) = &ns_meta {
                 for (alias, full_ns) in &meta.aliases {
-                    if alias.starts_with(prefix) {
-                        items.push(CompletionItem {
-                            label: alias.clone(),
-                            detail: Some(format!("alias for {}", full_ns)),
-                            kind: Some(CompletionItemKind::MODULE),
-                            ..Default::default()
-                        });
+                    if let Some(tier) = matched(alias, prefix, Pool::Alias) {
+                        push(
+                            &mut items,
+                            CompletionItem {
+                                label: alias.clone(),
+                                detail: Some(format!("alias for {}", full_ns)),
+                                kind: Some(CompletionItemKind::MODULE),
+                                ..Default::default()
+                            },
+                            tier,
+                            Pool::Alias,
+                        );
                     }
                 }
             }
@@ -227,22 +377,38 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
             // Pool E: namespace names (project + libraries) — makes
             // completion inside (:require …) work. Library-internal
             // `.impl`/`.internal` namespaces are indexed for navigation but
-            // omitted here to keep require completion clean.
+            // omitted here to keep require completion clean. Capped, since a
+            // substring match reaches far more namespaces than a prefix did.
+            let mut ns_hits: Vec<(u8, String)> = Vec::new();
             for entry in index.namespaces.iter() {
                 let ns = entry.key();
-                if ns.starts_with(prefix) && !is_internal_ns(ns) {
-                    items.push(CompletionItem {
-                        label: ns.clone(),
+                if is_internal_ns(ns) {
+                    continue;
+                }
+                if let Some(tier) = matched(ns, prefix, Pool::Namespace) {
+                    ns_hits.push((tier, ns.clone()));
+                }
+            }
+            ns_hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            ns_hits.truncate(NAMESPACE_LIMIT);
+            for (tier, ns) in ns_hits {
+                push(
+                    &mut items,
+                    CompletionItem {
+                        label: ns,
                         detail: Some("namespace".to_string()),
                         kind: Some(CompletionItemKind::MODULE),
                         ..Default::default()
-                    });
-                }
+                    },
+                    tier,
+                    Pool::Namespace,
+                );
             }
 
             // Pool F: built-in Java class names. Gated on a PascalCase prefix so
             // ordinary (lowercase) completion isn't flooded with JDK classes, and
-            // capped for short prefixes.
+            // capped for short prefixes. Prefix-only: fuzzy matching over the
+            // whole JDK would cost more than it is worth.
             if prefix.chars().next().is_some_and(|c| c.is_uppercase()) {
                 if let Some(jdk) = index.jdk() {
                     for fqn in jdk
@@ -250,7 +416,9 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
                         .into_iter()
                         .take(JAVA_CLASS_LIMIT)
                     {
-                        items.push(java_class_completion(fqn));
+                        let item = java_class_completion(fqn);
+                        let tier = match_score(&item.label, prefix).unwrap_or(1);
+                        push(&mut items, item, tier, Pool::Java);
                     }
                 }
             }
@@ -259,6 +427,10 @@ pub fn complete_symbols(index: &Index, prefix: &str, current_ns: &str) -> Vec<Co
 
     items
 }
+
+/// Cap on namespace completions, so a short substring doesn't offer every
+/// library namespace that happens to contain it.
+const NAMESPACE_LIMIT: usize = 50;
 
 /// Cap on Java class-name completions, so a short PascalCase prefix doesn't dump
 /// hundreds of JDK classes into the list.
@@ -314,15 +486,17 @@ fn symbol_to_completion(sym: &crate::index::Symbol, alias: Option<&str>) -> Comp
     CompletionItem {
         label,
         detail: Some(format!("{} ({})", sym.ns, params_display(&sym.params))),
-        documentation: sym.doc.as_ref().map(|d| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: d.clone(),
-            })
-        }),
         kind: Some(defkind_to_completion_kind(&sym.kind)),
+        data: sym
+            .doc
+            .as_ref()
+            .map(|_| json!({ "src": "symbol", "fqn": sym.fqn })),
         ..Default::default()
     }
+}
+
+fn symbol_documentation(sym: &crate::index::Symbol) -> Option<Documentation> {
+    sym.doc.as_deref().map(markdown)
 }
 
 /// A `:refer`red name whose namespace is not indexed yet: the user named it in
@@ -342,28 +516,22 @@ fn core_symbol_to_completion(sym: &crate::index::CoreSymbol) -> CompletionItem {
     CompletionItem {
         label: sym.name.clone(),
         detail: Some(format!("clojure.core ({})", sym.params)),
-        documentation: if sym.doc.is_empty() {
-            None
-        } else {
-            Some(Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: sym.doc.clone(),
-            }))
-        },
         kind: Some(CompletionItemKind::FUNCTION),
+        data: core_documentation(sym).map(|_| json!({ "src": "core", "name": sym.name })),
         ..Default::default()
     }
 }
 
-fn special_form_to_completion(sf: &builtins::SpecialForm) -> CompletionItem {
+fn core_documentation(sym: &CoreSymbol) -> Option<Documentation> {
+    (!sym.doc.is_empty()).then(|| markdown(&sym.doc))
+}
+
+fn special_form_to_completion(sf: &builtins::SpecialForm, letgo: bool) -> CompletionItem {
     CompletionItem {
         label: sf.name.to_string(),
         detail: Some(format!("special form {}", sf.usage)),
-        documentation: Some(Documentation::MarkupContent(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: sf.doc.to_string(),
-        })),
         kind: Some(CompletionItemKind::KEYWORD),
+        data: Some(json!({ "src": "special", "name": sf.name, "letgo": letgo })),
         ..Default::default()
     }
 }
@@ -381,15 +549,54 @@ fn letgo_native_to_completion(name: &str, core: Option<&CoreSymbol>) -> Completi
     CompletionItem {
         label: name.to_string(),
         detail: Some(detail),
-        documentation: core.filter(|c| !c.doc.is_empty()).map(|c| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: c.doc.clone(),
-            })
-        }),
         kind: Some(CompletionItemKind::FUNCTION),
+        data: core
+            .and_then(core_documentation)
+            .map(|_| json!({ "src": "native", "name": name })),
         ..Default::default()
     }
+}
+
+/// Fills in the documentation of the one item the client is about to show,
+/// from the `data` its builder attached. Items with no `data`, and data that
+/// names nothing this index holds, come back untouched.
+pub fn resolve(index: &Index, item: CompletionItem) -> CompletionItem {
+    let Some(documentation) = item
+        .data
+        .as_ref()
+        .and_then(|data| documentation_for(index, data))
+    else {
+        return item;
+    };
+    CompletionItem {
+        documentation: Some(documentation),
+        ..item
+    }
+}
+
+fn documentation_for(index: &Index, data: &serde_json::Value) -> Option<Documentation> {
+    let name = || data.get("name")?.as_str();
+    match data.get("src")?.as_str()? {
+        "symbol" => symbol_documentation(&index.lookup(data.get("fqn")?.as_str()?)?),
+        // A let-go native borrows its doc from the clojure.core table, the same
+        // table the `core` source reads.
+        "core" | "native" => {
+            let name = name()?;
+            core_documentation(index.core_symbols.iter().find(|c| c.name == name)?)
+        }
+        "special" => {
+            let letgo = data.get("letgo").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(markdown(builtins::special_form(name()?, letgo)?.doc))
+        }
+        _ => None,
+    }
+}
+
+fn markdown(value: &str) -> Documentation {
+    Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: value.to_string(),
+    })
 }
 
 fn defkind_to_completion_kind(kind: &DefKind) -> CompletionItemKind {

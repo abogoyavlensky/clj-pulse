@@ -144,6 +144,15 @@ and update README and this file in the same change.
   only when a handler *returns*, the guard also cancels each panicked id before
   it dispatches the next request — otherwise that id would answer
   `invalid request` for the rest of the session.
+- Every completion pool filters through `handlers::matching::match_score`, the
+  same matcher `workspace/symbol` uses, and each item carries a `sort_text` of
+  `tier-pool-name`: tier is the match (exact 0 to subsequence 3), pool is how
+  local the name is (locals 0, current ns 1, refers 2, core and special forms 3,
+  aliases and namespaces 4, Java 5). The response is always `isIncomplete`,
+  because `tier_allowed` (no fuzzy tiers below two typed characters, no
+  subsequence for namespaces) and the 50-item namespace cap withhold candidates
+  a longer prefix needs. Items ship without `documentation`; `data` records
+  which source to read and `completion::resolve` renders the doc on demand.
 - `rename` and `prepareRename` share `references::rename_target`, so every
   rejection carries the same message from both. Only the checks that need the
   new name (validity, local capture) live in `rename`.

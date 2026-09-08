@@ -2011,7 +2011,14 @@ impl LanguageServer for Backend {
                         ..Default::default()
                     },
                 )),
-                completion_provider: Some(CompletionOptions::default()),
+                completion_provider: Some(CompletionOptions {
+                    // `/` closes an alias, so completion has to fire on it —
+                    // it is not an identifier character to the editor.
+                    trigger_characters: Some(vec!["/".to_string()]),
+                    // Documentation is fetched per item, so a long list stays cheap.
+                    resolve_provider: Some(true),
+                    ..Default::default()
+                }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
@@ -2559,6 +2566,10 @@ impl LanguageServer for Backend {
             tracing::error!("completion error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
+    }
+
+    async fn completion_resolve(&self, params: CompletionItem) -> Result<CompletionItem> {
+        Ok(handlers::completion::resolve(&self.index, params))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
