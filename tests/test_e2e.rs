@@ -5911,8 +5911,10 @@ fn write_clojure_string_jar(root: &std::path::Path) {
     let mut zip = zip::ZipWriter::new(jar_file);
     let opts = zip::write::SimpleFileOptions::default();
     zip.start_file("clojure/string.clj", opts).unwrap();
-    zip.write_all(b"(ns clojure.string)\n\n(defn join\n  \"Joins a collection.\"\n  [sep coll]\n  sep)\n")
-        .unwrap();
+    zip.write_all(
+        b"(ns clojure.string)\n\n(defn join\n  \"Joins a collection.\"\n  [sep coll]\n  sep)\n",
+    )
+    .unwrap();
     zip.finish().unwrap();
 
     let cpcache = root.join(".cpcache");
