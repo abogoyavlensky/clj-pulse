@@ -38,23 +38,26 @@ then the editor features users notice as missing. Guiding decisions:
    same day, one line with the date. Promote it into a milestone when it is
    scheduled; delete it when it is rejected, with the reason in Not planned.
 
-## Where we stand (September 2026, v0.3.0)
+## Where we stand (September 2026, v0.4.0)
 
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
-references, rename (vars and locals), hover, ClojureDocs request, completion
-(prefix-matched), signature help, document and workspace symbols, add-require
-and clean-ns code actions, five native lints plus the clj-kondo bridge,
-indent-on-Enter, `jar:` content provider, ignored-form dimming, multi-project
-workspaces with graduated classpath resolution, let-go/lgx support.
+references, rename (vars and locals) with `prepareRename`, hover, ClojureDocs
+request, completion (fuzzy-matched and ranked, `/` trigger, lazy
+`completionItem/resolve` docs), signature help, document and workspace symbols,
+add-require and clean-ns code actions, five native lints plus the clj-kondo
+bridge, indent-on-Enter, `jar:` content provider, ignored-form dimming,
+multi-project workspaces with graduated classpath resolution, let-go/lgx
+support. The full ns form is understood (`:as-alias`, `:rename`,
+`:refer-clojure :exclude`/`:rename`, prefix lists, `declare`). A panicking
+request fails alone instead of taking the server down, and `bb e2e-pulse` plus
+`bb bench` guard the first-priority editor and the performance baseline.
 
-Not shipped: `prepareRename`, keyword rename, `:as-alias`/`:rename`/
-`:refer-clojure`/prefix-list/`declare` in ns forms, completion trigger
-characters and fuzzy matching, keyword completion, auto-require on accept,
-`documentHighlight`, `selectionRange`, `foldingRange`, formatting, semantic
-tokens, code lens, implementation provider, `executeCommand` refactors,
-`willRenameFiles`, a Clojure Pulse e2e gate, panic safety, performance
-baselines.
+Not shipped: keyword rename, completion trigger character `:`, keyword
+completion, auto-require on accept, `documentHighlight`, `selectionRange`,
+`foldingRange`, formatting, semantic tokens, code lens, implementation
+provider, `executeCommand` refactors, `willRenameFiles`. The parse tree is not
+yet cached per document, so large buffers re-parse on every lint pass.
 
 ## Milestone 0 — release gates
 
