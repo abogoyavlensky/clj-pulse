@@ -599,9 +599,10 @@ fn test_occurrence_destructuring_or_defaults_are_usages() {
 }
 
 #[test]
-fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
+fn test_occurrence_keywords_recorded_in_their_own_notation() {
     // Qualified keywords (literal `:ns/name`, auto-resolved `::name`) are
-    // occurrences; unqualified ones are skipped as too ambiguous to index.
+    // occurrences of the namespace they resolve to; an unqualified `:plain` is
+    // an occurrence of `:plain` — never of the current namespace.
     let src = "(ns my.ns)\n(def x {:my.ns/a 1 :other/b ::a :plain 2})";
     let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
 
@@ -618,11 +619,49 @@ fn test_occurrence_qualified_keywords_recorded_unqualified_skipped() {
         "occs: {:?}",
         occs
     );
-    // Unqualified `:plain` produces no keyword occurrence.
+    assert_eq!(occurrences_of(&occs, ":plain").len(), 1, "occs: {:?}", occs);
+    // An unqualified keyword never gains the current namespace.
     assert!(
-        occs.iter()
-            .all(|o| o.fqn != ":plain" && o.fqn != ":my.ns/plain"),
-        "unqualified keyword leaked: {:?}",
+        occs.iter().all(|o| o.fqn != ":my.ns/plain"),
+        "unqualified keyword was qualified: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_unqualified_keywords_recorded() {
+    // Unqualified keywords are the bulk of real code; completion ranks them by
+    // how often the project uses them, so each one is recorded as `:name` with
+    // a range spanning the whole token (colon included).
+    let src = "(ns my.ns)\n(def x {:id 1 :name \"x\" ::local 2})";
+    let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
+
+    for fqn in [":id", ":name", ":my.ns/local"] {
+        assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
+    }
+
+    // The range spans the whole token: `:id` is three characters wide.
+    let id = occurrences_of(&occs, ":id")[0];
+    assert_eq!(id.name_range.start.line, 1);
+    assert_eq!(
+        id.name_range.end.character - id.name_range.start.character,
+        3,
+        "range must span the whole `:id` token: {:?}",
+        id
+    );
+}
+
+#[test]
+fn test_unqualified_keyword_without_ns_form_is_recorded() {
+    // A file with no `ns` form has no current namespace, so `::local` resolves
+    // to nothing and is skipped — but `:plain` is still a keyword usage.
+    let src = "(def x {:plain 1 ::local 2})";
+    let (_, _, occs) = extract_full(src, Path::new("kw.clj")).unwrap();
+
+    assert_eq!(occurrences_of(&occs, ":plain").len(), 1, "occs: {:?}", occs);
+    assert!(
+        occs.iter().all(|o| o.fqn != ":local" && o.fqn != ":/local"),
+        "unresolvable `::local` leaked: {:?}",
         occs
     );
 }

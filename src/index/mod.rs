@@ -124,7 +124,9 @@ pub struct Symbol {
 /// covers only the name part of a qualified usage (`core/add` → just `add`), so
 /// rename edits never touch the alias. Keyword occurrences (fqn starts with
 /// `:`) instead span the whole keyword token — navigation-only in v1; keyword
-/// rename is rejected.
+/// rename is rejected. Both notations are recorded: a qualified keyword under
+/// the namespace it resolves to (`:my.ns/id`), an unqualified one under
+/// `:id`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Occurrence {
     pub fqn: String,

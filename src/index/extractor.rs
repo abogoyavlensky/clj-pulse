@@ -1252,6 +1252,35 @@ fn keyword_fqn(node: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
     }
 }
 
+/// The fqn a keyword *usage* is recorded under: [`keyword_fqn`] for qualified
+/// and auto-resolved keywords, plus the unqualified case those reject —
+/// `:name` is recorded as `:name`, since completion ranks unqualified keywords
+/// by how often the project uses them and references list every usage.
+///
+/// Only usages take this path. Definition sites (`ig/init-key` dispatch) and
+/// EDN configs keep to `keyword_fqn`: an unqualified keyword is too ambiguous
+/// to define a component, and a `::name` in a file with no `ns` form resolves
+/// to no namespace at all, so it is recorded under no fqn either.
+fn keyword_occurrence_fqn(node: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
+    if let Some(fqn) = keyword_fqn(node, ns_meta, source) {
+        return Some(fqn);
+    }
+    if node.child_by_field_name("namespace").is_some() {
+        return None;
+    }
+    let auto_resolved = node
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, source) == "::")
+        .unwrap_or(false);
+    if auto_resolved {
+        return None;
+    }
+    Some(format!(
+        ":{}",
+        node_text(node.child_by_field_name("name")?, source)
+    ))
+}
+
 // --- occurrence collection -------------------------------------------------
 
 /// One local binding in the occurrence walker's scope stack: enough to
@@ -1375,9 +1404,10 @@ fn is_let_like(head: &str) -> bool {
 fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
     match node.kind() {
         "sym_lit" => record_occurrence(node, ctx, scope, out),
-        // Every qualified keyword is a usage (`:lib/x`, `::x`, `::alias/x`);
-        // unqualified ones are skipped by `keyword_fqn`. This powers keyword
-        // references and feeds Integrant component navigation.
+        // Every keyword literal is a usage: qualified ones (`:lib/x`, `::x`,
+        // `::alias/x`) under their resolved namespace, unqualified ones under
+        // `:name`. This powers keyword references and completion, and feeds
+        // Integrant component navigation.
         "kwd_lit" => record_keyword_occurrence(node, ctx, out),
         "list_lit" => walk_list(node, ctx, scope, out),
         // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
@@ -2081,11 +2111,11 @@ fn record_occurrence(
     out.push(Occurrence { fqn, name_range });
 }
 
-/// Records a qualified keyword usage. The range spans the whole keyword token
-/// so navigation resolves from a click anywhere on `:ns/name` / `::name`
+/// Records a keyword usage. The range spans the whole keyword token so
+/// navigation resolves from a click anywhere on `:ns/name` / `::name`
 /// (keyword rename is unsupported in v1, so a name-only range buys nothing).
 fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
-    if let Some(fqn) = keyword_fqn(node, ctx.ns_meta, ctx.source) {
+    if let Some(fqn) = keyword_occurrence_fqn(node, ctx.ns_meta, ctx.source) {
         out.push(Occurrence {
             fqn,
             name_range: node_to_lsp_range(node, ctx.source),
