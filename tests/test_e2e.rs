@@ -5901,12 +5901,36 @@ fn test_e2e_completion_keyword_mid_token_replaces_whole_token() {
     assert_eq!(applied, "(def z :name)", "applying the edit: {}", item);
 }
 
+/// Puts a minimal `clojure.string` on the project's cached classpath. The
+/// committed fixture `.cpcache` names jars from the machine that generated it,
+/// so a test needing a library on the classpath supplies its own — otherwise
+/// stage 2 finds nothing and never reports `library indexing complete`.
+fn write_clojure_string_jar(root: &std::path::Path) {
+    let jar_path = root.join("clojure-string.jar");
+    let jar_file = std::fs::File::create(&jar_path).unwrap();
+    let mut zip = zip::ZipWriter::new(jar_file);
+    let opts = zip::write::SimpleFileOptions::default();
+    zip.start_file("clojure/string.clj", opts).unwrap();
+    zip.write_all(b"(ns clojure.string)\n\n(defn join\n  \"Joins a collection.\"\n  [sep coll]\n  sep)\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(
+        cpcache.join("clojure-string.cp"),
+        jar_path.display().to_string(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn test_e2e_completion_auto_require_inserts_require() {
     // `str/jo` in a file that never required clojure.string: the item comes
     // with the edit that inserts the require into the ns form.
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
+    write_clojure_string_jar(&root);
 
     let mut client = LspClient::start(&root);
     client.initialize(&root);
@@ -5949,6 +5973,8 @@ fn test_e2e_completion_no_auto_require_when_already_required() {
     // through the ordinary alias path, with no edit attached.
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
+
+    write_clojure_string_jar(&root);
 
     let f = root.join("src/has_str.clj");
     std::fs::write(
