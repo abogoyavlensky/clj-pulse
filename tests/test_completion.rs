@@ -781,3 +781,22 @@ fn test_auto_require_item_resolves_documentation() {
         resolved.documentation
     );
 }
+
+#[test]
+fn test_no_auto_require_for_integrant_keys() {
+    // `(defmethod ig/init-key ::database …)` defines a keyword, not a var:
+    // `sys/database` would name nothing, and the require would be pointless.
+    let index = auto_require_index();
+    let mut key = defn_sym("database", "app.system");
+    key.kind = DefKind::IntegrantKey;
+    key.fqn = ":app.system/database".to_string();
+    index.insert_file(ns_meta("app.system"), vec![key], vec![]);
+
+    let items = complete_symbols(&index, "datab", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    assert!(
+        !labels(&items).contains(&"system/database".to_string()),
+        "an Integrant key is not a requireable var: {:?}",
+        labels(&items)
+    );
+}
+

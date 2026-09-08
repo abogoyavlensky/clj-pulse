@@ -653,7 +653,10 @@ fn auto_require_items(
             let Some(sym) = index.symbols.get(fqn) else {
                 continue;
             };
-            if sym.private || sym.kind == DefKind::DefnPrivate {
+            // Private vars are not referable, and an Integrant key is a
+            // keyword definition, not a var: `alias/database` would name
+            // nothing (see `DefKind::IntegrantKey`).
+            if sym.private || sym.kind == DefKind::DefnPrivate || sym.fqn.starts_with(':') {
                 continue;
             }
             if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {

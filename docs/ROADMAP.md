@@ -201,6 +201,14 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-05 **clj-kondo `--copy-configs`** for JAR-exported lint configs.
   Deferred because it writes into the user's working tree; would need an
   explicit opt-in.
+- 2026-09-08 **Integrant keys are offered as vars by the ordinary completion
+  pools.** `(defmethod ig/init-key ::database …)` indexes a symbol named
+  `database` with the keyword fqn `:ns/database`, so the current-namespace and
+  alias pools complete it as a bare `database` / `sys/database` — a var that
+  does not exist. Found by a review of the keyword-completion branch, which
+  fixed the auto-require pool only. One filter on `fqn.starts_with(':')` in the
+  var pools, plus a decision on whether `::database` should complete as a
+  keyword instead.
 
 ## Best effort — do when cheap or asked
 
