@@ -234,35 +234,51 @@ Modify:
 - Modify: `src/handlers/code_action.rs`, `src/handlers/completion.rs`, `src/server.rs`
 - Test: `tests/test_completion.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Extract `namespaces_for_alias`**
+- [x] **Step 1: Extract `namespaces_for_alias`**
   Refactor `candidates` so the ranking (curated, fully qualified, last segment) lives in `namespaces_for_alias` and `candidates` only adds the "defines `name`" filter. Run `bb check`: the add-require tests stay green. Commit: `git commit -m "Share add-require namespace ranking"`.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
   Unit: `test_auto_require_qualified_unknown_alias` (`str/jo` in a namespace without `clojure.string` offers `str/join` with an `additional_text_edits` entry whose text contains `[clojure.string :as str]`, given a source with an ns form); `test_auto_require_bare_prefix_project_ns` (a prefix matching a var in another project namespace offers `alias/name` with the edit); `test_no_auto_require_when_already_required`; `test_no_auto_require_on_alias_collision` (`[other.lib :as str]` present, `str/join` absent); `test_auto_require_sorts_after_in_scope` (an exact auto-require match has a `sort_text` greater than an in-scope prefix match); `test_auto_require_pool_capped`. e2e: `test_e2e_completion_auto_require_inserts_require` on a file in the fixture that lacks `clojure.string`, asserting the `additionalTextEdits` range sits inside the ns form; and the negative case in a file that has it.
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
   Run: `cargo test --test test_completion auto_require && cargo test --test test_e2e auto_require`
   Expected: FAIL.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
   Pool G, the unknown-alias branch, the live-text parameter, and the `server.rs` call site. Keep the caps and the two-character minimum.
 
-- [ ] **Step 5: Run every gate**
+- [x] **Step 5: Run every gate**
   Run: `bb check && bb e2e && bb e2e-nvim && bb e2e-pulse`
   Expected: PASS. In the Pulse run, add a check that accepting a completion item with `additionalTextEdits` applies both edits (VS Code applies them through `vscode.executeCompletionItemProvider` results only on accept; if that is not observable through the API, assert on the item's `additionalTextEdits` field instead and say so in the test).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Insert the missing require when completing an unrequired var"`
+
+> Deviation: `complete_symbols` takes the live buffer as a fourth `source:
+> Option<&str>` parameter, as the plan allowed; every existing call site passes
+> `None`.
+
+> Deviation: the codex review found `require_edit` re-parsing the whole buffer
+> once per candidate — up to 30 parses per keystroke on a large file. The
+> insertion point is now computed once (`code_action::RequireAnchor`), which the
+> add-require action shares. The same review found auto-require items dropping
+> the `data` that `completionItem/resolve` needs, so they now carry the symbol
+> fqn and its real kind (commit `2373ec3`).
+
+> Deviation: `bb e2e-pulse` grew two checks (keyword completion, and the
+> auto-require item's `additionalTextEdits`) against two new fixture files;
+> VS Code applies those edits only on accept, which `executeCompletionItemProvider`
+> cannot drive, so the assertion is on the item, as the plan allowed.
 
 ### Task 6: Docs and roadmap
 
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   README Autocomplete bullet: keywords from project usage in the notation being typed, and auto-require on accept with its scope (project namespaces and the curated aliases). AGENTS.md invariants: unqualified keywords are recorded as `:name` occurrences (navigation ignores them, references include them); `keyword_counts` is maintained at every occurrence mutation point, never scanned. ROADMAP Milestone 2: tick the remaining items and set `Plan:` to `done`. Use /writing-clearly.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Document keyword completion and auto-require"`

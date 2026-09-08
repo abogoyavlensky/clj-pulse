@@ -43,7 +43,8 @@ then the editor features users notice as missing. Guiding decisions:
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
 references, rename (vars and locals) with `prepareRename`, hover, ClojureDocs
-request, completion (fuzzy-matched and ranked, `/` trigger, lazy
+request, completion (fuzzy-matched and ranked, `/` and `:` triggers, keywords
+in the notation being typed, auto-require on accept, lazy
 `completionItem/resolve` docs), signature help, document and workspace symbols,
 add-require and clean-ns code actions, five native lints plus the clj-kondo
 bridge, indent-on-Enter, `jar:` content provider, ignored-form dimming,
@@ -53,8 +54,7 @@ support. The full ns form is understood (`:as-alias`, `:rename`,
 request fails alone instead of taking the server down, and `bb e2e-pulse` plus
 `bb bench` guard the first-priority editor and the performance baseline.
 
-Not shipped: keyword rename, completion trigger character `:`, keyword
-completion, auto-require on accept, `documentHighlight`, `selectionRange`,
+Not shipped: keyword rename, `documentHighlight`, `selectionRange`,
 `foldingRange`, formatting, semantic tokens, code lens, implementation
 provider, `executeCommand` refactors, `willRenameFiles`. The parse tree is not
 yet cached per document, so large buffers re-parse on every lint pass.
@@ -127,20 +127,20 @@ Small fixes that remove wrong answers. Each extractor change bumps
 
 ## Milestone 2 — completion quality
 
-The feature users touch most; today it is prefix-only and fires only on
-identifier characters.
+The feature users touch most. Done: it matches fuzzily, fires on `/` and `:`,
+completes keywords, and can add the require an accepted name needs.
 
 - [x] Trigger character `/` in `CompletionOptions`.
-- [ ] Trigger character `:` in `CompletionOptions`.
+- [x] Trigger character `:` in `CompletionOptions`.
 - [x] Fuzzy matching. Extract the exact/prefix/substring/subsequence
       matcher from `handlers/symbols.rs` into a shared module and use it in
       `handlers/completion.rs`.
-- [ ] Keyword completion from the occurrence index, current-ns keywords first.
-- [ ] Auto-require on accept via `additionalTextEdits`, reusing the
+- [x] Keyword completion from the occurrence index, current-ns keywords first.
+- [x] Auto-require on accept via `additionalTextEdits`, reusing the
       add-require edit builder.
 - [x] `completionItem/resolve` for docstrings and signatures so long lists stay
       cheap.
-  Plan: [2026-09-06-0756-completion-fuzzy-resolve.md](plans/2026-09-06-0756-completion-fuzzy-resolve.md) — done (trigger `/`, fuzzy, resolve); [2026-09-06-0757-completion-keywords-auto-require.md](plans/2026-09-06-0757-completion-keywords-auto-require.md) — in progress (trigger `:`, keywords, auto-require)
+  Plan: [2026-09-06-0756-completion-fuzzy-resolve.md](plans/2026-09-06-0756-completion-fuzzy-resolve.md) — done (trigger `/`, fuzzy, resolve); [2026-09-06-0757-completion-keywords-auto-require.md](plans/2026-09-06-0757-completion-keywords-auto-require.md) — done (trigger `:`, keywords, auto-require)
 
 ## Milestone 3 — editor chrome for Calva and Neovim
 
