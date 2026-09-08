@@ -45,8 +45,11 @@
              :task (do (shell "cargo build")
                        (shell {:dir "scripts/pulse-e2e"} "xvfb-run -a node runner.js"))}
 
-  check {:doc "Run all code checks and tests"
-         :depends [fmt lint test]}
+  ;; fmt-check, not fmt: this is the gate CI runs (the `lint-fmt` job), so it
+  ;; must fail on unformatted code rather than quietly rewriting it and passing.
+  ;; `bb fmt` is the fixer.
+  check {:doc "Run all code checks and tests (formatting is checked, not fixed)"
+         :depends [fmt-check lint test]}
 
   outdated {:doc "Check for outdated dependencies"
             :task (shell "cargo outdated")}

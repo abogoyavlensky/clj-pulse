@@ -9,7 +9,9 @@ and update README and this file in the same change.
 
 ## Verification (run before claiming anything works)
 
-- `bb check` — fmt + clippy `-D warnings` + all tests. CI runs the same.
+- `bb check` — fmt *check* + clippy `-D warnings` + all tests. CI runs the
+  same, so a green `bb check` means a green CI; it fails on unformatted code
+  instead of rewriting it, and `bb fmt` is the fixer.
 - `bb e2e` — end-to-end: spawns the real binary, speaks framed JSON-RPC over
   stdio like an editor (`tests/test_e2e.rs`). Covers definition (project +
   jar: URIs), Integrant keyword navigation (`config.edn` key → `ig/init-key`

@@ -363,7 +363,7 @@ bb fmt        # fix code formatting
 bb fmt-check  # check formatting without fixing
 bb lint       # run clippy linter
 bb test       # run tests
-bb check      # run all checks (fmt + lint + test)
+bb check      # run all checks (fmt-check + lint + test), exactly as CI does
 bb bench      # index a large real project and report timings and memory
 bb outdated   # check outdated deps 
 bb build      # build the dev binary
