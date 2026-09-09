@@ -715,3 +715,68 @@ pub fn occurrences_for(
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(line: u32, start: u32, end: u32) -> Range {
+        Range {
+            start: Position {
+                line,
+                character: start,
+            },
+            end: Position {
+                line,
+                character: end,
+            },
+        }
+    }
+
+    /// The range a token of `text` would have if it started at column `col`.
+    fn token_range(col: u32, text: &str) -> Range {
+        at(4, col, col + text.encode_utf16().count() as u32)
+    }
+
+    #[test]
+    fn name_suffix_range_covers_the_name_in_every_notation() {
+        // `::db`, `::ig/db` and `:readx.db/db` all end with the name, so one
+        // rule rewrites every notation and leaves the notation itself alone.
+        for token in ["::db", "::ig/db", ":readx.db/db"] {
+            let range = token_range(20, token);
+            let suffix = name_suffix_range(range, token, "db")
+                .unwrap_or_else(|| panic!("no suffix for {}", token));
+            assert_eq!(suffix.end, range.end, "{}", token);
+            assert_eq!(suffix.start.character, range.end.character - 2, "{}", token);
+        }
+    }
+
+    #[test]
+    fn name_suffix_range_counts_utf16_units_not_bytes() {
+        // `naïve` is 5 UTF-16 units but 6 bytes; the edit covers 5 columns.
+        let token = ":naïve.ns/naïve";
+        let range = token_range(3, token);
+        let suffix = name_suffix_range(range, token, "naïve").unwrap();
+        assert_eq!(suffix.start.character, range.end.character - 5);
+    }
+
+    #[test]
+    fn name_suffix_range_refuses_what_it_cannot_rewrite() {
+        // A `{::keys [db]}` / `{:keys [app/db]}` entry reads the keyword but is
+        // written as a symbol, and binds a local of that name besides.
+        assert!(name_suffix_range(token_range(0, "db"), "db", "db").is_none());
+        assert!(name_suffix_range(token_range(0, "app/db"), "app/db", "db").is_none());
+        // A longer name that merely ends the same is a different keyword.
+        assert!(name_suffix_range(token_range(0, ":ns/mydb"), ":ns/mydb", "db").is_none());
+    }
+
+    #[test]
+    fn token_at_slices_by_utf16_columns() {
+        let text = "(def x :naïve/db)\n";
+        // `:naïve/db` starts at column 7 and is 9 UTF-16 units long.
+        assert_eq!(token_at(text, at(0, 7, 16)).as_deref(), Some(":naïve/db"));
+        // A range past the end of the line is not a token.
+        assert_eq!(token_at(text, at(0, 7, 99)), None);
+        assert_eq!(token_at(text, at(9, 0, 1)), None);
+    }
+}

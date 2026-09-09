@@ -157,22 +157,33 @@ Modify:
 - Modify: `src/handlers/references.rs`
 - Test: `tests/test_e2e.rs`, `tests/fixtures/simple_project/src/kw_destructure.clj`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Unit tests for `name_suffix_range` on `::db`, `::ig/db`, `:readx.db/db`, and a bare `db` token (returns `None`). e2e: `test_e2e_rename_keyword_across_clj_and_edn` (the integrant case from the design, asserting every edit's range and text), `test_e2e_rename_keyword_refuses_colon_in_new_name`, `test_e2e_rename_keyword_refuses_keys_destructuring` with the new fixture file.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e rename_keyword`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   The `Keyword` branch of `rename`: validate the new name, map `sites` to `TextEdit`s grouped by URI, return the `WorkspaceEdit`. All site validation already happened in `rename_target`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e && bb e2e-pulse`
   Expected: PASS. In the Pulse gate, add a check that renames `::db` in the fixture through `vscode.executeDocumentRenameProvider`, applies the returned `WorkspaceEdit` with `vscode.workspace.applyEdit`, then reads both documents back and asserts `::store` in the `.clj` and `:readx.db/store` in the `.edn` (the Pulse fixture needs an Integrant-style pair; copy the two files from `integrant_project` into `scripts/pulse-e2e/fixture/`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Rename qualified keywords across Clojure and EDN files"`
+
+> Deviation: `test_e2e_rename_keyword_refuses_keys_destructuring` is folded into
+> `test_e2e_prepare_rename_refuses_keys_destructuring`, which asserts that
+> `rename` and `prepareRename` refuse with the *same* message — the invariant
+> worth pinning. Two extra e2e tests came out of the codex reviews:
+> `test_e2e_rename_refuses_qualified_keys_destructuring` and
+> `test_e2e_rename_keyword_sees_unsaved_definition`.
+>
+> Deviation: the namespaced-map key case is in scope after all —
+> `record_ns_map_key` already records `#:readx.db{:db 1}` as `:readx.db/db`, so
+> `test_e2e_rename_keyword_rewrites_namespaced_map_keys` covers it.
 
 ### Task 4: Docs and roadmap
 

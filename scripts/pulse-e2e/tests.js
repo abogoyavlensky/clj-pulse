@@ -197,6 +197,45 @@ exports.run = async () => {
     JSON.stringify(diags.map((d) => ({ code: codeOf(d), source: d.source, message: d.message })))
   );
 
+  // 9. Keyword rename applied by VS Code itself: one WorkspaceEdit spanning a
+  //    .clj and the Integrant .edn, each site rewritten in its own notation.
+  const dbUri = vscode.Uri.file(`${root}/src/readx/db.clj`);
+  const dbDoc = await vscode.workspace.openTextDocument(dbUri);
+  await vscode.window.showTextDocument(dbDoc);
+  const cfgUri = vscode.Uri.file(`${root}/resources/config.edn`);
+  const cfgDoc = await vscode.workspace.openTextDocument(cfgUri);
+
+  const edit = await poll(60000, async () => {
+    const e = await vscode.commands.executeCommand(
+      "vscode.executeDocumentRenameProvider",
+      dbUri,
+      positionOf(dbDoc, "::db", 3),
+      "store"
+    );
+    return e && e.size > 0 ? e : undefined;
+  });
+  check(
+    edit?.size === 2,
+    "rename ::db returns one WorkspaceEdit spanning db.clj and config.edn",
+    edit === undefined ? "rename provider returned nothing" : `${edit.size} file(s)`
+  );
+  if (edit) {
+    check(await vscode.workspace.applyEdit(edit), "VS Code applies the keyword rename");
+    const dbText = dbDoc.getText();
+    check(
+      !dbText.includes("::db") && (dbText.match(/::store/g) ?? []).length === 3,
+      "db.clj: all three ::db dispatch keywords became ::store",
+      JSON.stringify(dbText)
+    );
+    const cfgText = cfgDoc.getText();
+    check(
+      !cfgText.includes(":readx.db/db") &&
+        (cfgText.match(/:readx\.db\/store/g) ?? []).length === 2,
+      "config.edn: the map key and the #ig/ref became :readx.db/store",
+      JSON.stringify(cfgText)
+    );
+  }
+
   const failed = checks.filter((c) => !c.cond);
   if (failed.length > 0) {
     throw new Error(`${failed.length} check(s) failed: ${failed.map((c) => c.msg).join("; ")}`);
