@@ -234,5 +234,7 @@ The Clojure Pulse extension setting `clojurePulse.kondo.liveMaxKb` is a one-line
 - Definition is 22 ms, not under 20 ms; see the Task 5 note. Analysis caching is a Backlog item.
 - The session had no TaskCreate/TaskUpdate tools, so this document was the only tracking surface.
 
+**Added after the plan, on the same PR (commit c9ba4a8).** Tool discovery for clj-kondo and the clojure CLI in well-known install directories (mise shims, Homebrew, `~/.cargo/bin`, …), a "not found" message that says where it looked and how to fix it, `detail` on `clojurePulse/lintStatus`, and a fix for a latent bug the new tests exposed: tower-lsp drops custom notifications before `initialized`, so an instant probe result lost its lint status. Requested by the maintainer after hitting the Dock PATH problem with mise; reviewed by codex separately.
+
 **What the plan could have specified better.** The `parsed=0` assertion assumed `wait_for_log` could see tracing output; only explicit `window/logMessage` calls reach the client, so the plan needed to say where the line goes and how a test reads it. It also missed that the threshold introduces a second trigger for the same document version, so the staleness guard needed a key beyond the version; a plan that names every guard the lint pass relies on would have caught the save-during-debounce race before review did.
 

@@ -5151,14 +5151,53 @@ fn test_e2e_kondo_not_found_says_where_it_looked() {
     );
     assert!(line.contains("clojurePulse.kondo.path"), "{line}");
 
-    // The same reason rides the lint status, for the editor to show.
-    let status = client.wait_for_notification("clojurePulse/lintStatus");
-    assert_eq!(status["engine"], json!("native"));
-    assert!(
-        status["detail"]
+    // The same reason rides the lint status, for the editor to show. An
+    // earlier status without it is legitimate: `initialized` sends the
+    // current state, which may predate the probe.
+    let status = client.wait_for_notification_where("clojurePulse/lintStatus", |p| {
+        p["detail"]
             .as_str()
-            .is_some_and(|d| d.contains("clj-kondo not found")),
-        "{status}"
+            .is_some_and(|d| d.contains("clj-kondo not found"))
+    });
+    assert_eq!(status["engine"], json!("native"));
+}
+
+#[test]
+fn test_e2e_kondo_workspace_relative_path_lints_files_in_subdirectories() {
+    // `:path "./bin/clj-kondo"` is anchored to the workspace. A lint runs from
+    // the file's own directory (so mise shims see the project's pin), which
+    // must not turn that path into `src/bin/clj-kondo`.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let target = root.join("bin/clj-kondo");
+    std::fs::copy(LspClient::fake_kondo_dir().join("clj-kondo"), &target).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:path \"./bin/clj-kondo\"}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::spawn(&root, &[("PATH", Path::new(BARE_PATH))], true, Kondo::Real);
+    client.initialize(&root);
+    client.wait_for_log(&format!(
+        "clj-kondo v0.0.0-fake found ({})",
+        root.join("./bin/clj-kondo").display()
+    ));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "the lint from src/ must still run the workspace's bin/clj-kondo"
     );
 }
 

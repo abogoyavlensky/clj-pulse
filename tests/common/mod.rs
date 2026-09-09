@@ -308,10 +308,16 @@ impl LspClient {
         self.notifications.push(msg);
     }
 
-    /// Waits for the first notification with `method` and returns its
-    /// `params` (checks already-stashed notifications first).
-    pub fn wait_for_notification(&mut self, method: &str) -> Value {
-        if let Some(m) = self.notifications.iter().find(|m| m["method"] == method) {
+    /// Waits for the first notification with `method` whose `params` satisfy
+    /// `accept`, and returns those params (checks already-stashed
+    /// notifications first).
+    pub fn wait_for_notification_where(
+        &mut self,
+        method: &str,
+        accept: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let matches = |m: &Value| m["method"] == method && accept(&m["params"]);
+        if let Some(m) = self.notifications.iter().find(|m| matches(m)) {
             return m["params"].clone();
         }
         let deadline = Instant::now() + TIMEOUT;
@@ -323,7 +329,7 @@ impl LspClient {
                 .incoming
                 .recv_timeout(remaining)
                 .unwrap_or_else(|_| panic!("timed out waiting for notification: {method}"));
-            let found = msg["method"] == method;
+            let found = matches(&msg);
             let params = msg["params"].clone();
             self.stash(msg);
             if found {

@@ -89,15 +89,19 @@ pub fn apply_env(cmd: &mut tokio::process::Command) {
     cmd.env("PATH", augmented_path());
 }
 
-/// Where a bare program name resolves, over the augmented PATH — `None` when
-/// no directory holds an executable of that name. A name with a path
-/// separator is the user's explicit choice and is returned as given.
-pub fn resolve(program: &str) -> Option<PathBuf> {
+/// Where a program resolves, as an absolute path — `None` when no directory
+/// holds an executable of that name. A name with a path separator is the
+/// user's explicit choice and is taken as given, relative to `base` when it
+/// is relative; a bare name is searched over the augmented PATH, where a
+/// relative entry is also read against `base`. Absolute, because the child
+/// may run from another directory than the one the name was written for.
+pub fn resolve(program: &str, base: &Path) -> Option<PathBuf> {
     if program.contains('/') || program.contains(std::path::MAIN_SEPARATOR) {
-        return Some(PathBuf::from(program));
+        return Some(base.join(program));
     }
     let path = augmented_path();
     std::env::split_paths(&path)
+        .map(|dir| base.join(dir))
         .flat_map(|dir| candidates_in(&dir, program))
         .find(|p| is_executable(p))
 }
@@ -177,22 +181,27 @@ mod tests {
     }
 
     #[test]
-    fn explicit_paths_resolve_to_themselves() {
+    fn explicit_paths_resolve_against_the_base() {
+        let base = Path::new("/ws");
         assert_eq!(
-            resolve("/nowhere/clj-kondo"),
+            resolve("/nowhere/clj-kondo", base),
             Some(PathBuf::from("/nowhere/clj-kondo"))
         );
+        // A workspace-relative path stays valid when the child runs from a
+        // subdirectory: it is anchored to the workspace, not to the cwd.
         assert_eq!(
-            resolve("./bin/clj-kondo"),
-            Some(PathBuf::from("./bin/clj-kondo"))
+            resolve("./bin/clj-kondo", base),
+            Some(PathBuf::from("/ws/./bin/clj-kondo"))
         );
     }
 
     #[test]
     fn bare_names_resolve_only_to_executables() {
-        assert!(resolve("clj-pulse-tool-that-does-not-exist").is_none());
-        // `sh` is on every Unix PATH; the resolved file must be executable.
+        let base = std::env::current_dir().unwrap();
+        assert!(resolve("clj-pulse-tool-that-does-not-exist", &base).is_none());
+        // `sh` is on every Unix PATH; the resolved file must be executable
+        // and absolute.
         #[cfg(unix)]
-        assert!(resolve("sh").is_some_and(|p| is_executable(&p)));
+        assert!(resolve("sh", &base).is_some_and(|p| p.is_absolute() && is_executable(&p)));
     }
 }

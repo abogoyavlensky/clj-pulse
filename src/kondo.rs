@@ -440,10 +440,16 @@ pub struct Probe {
 /// discovery), it fails, it times out, or it is some *other* tool whose
 /// `--version` we would otherwise happily accept.
 pub async fn probe_version(bin: &str, cwd: Option<&Path>) -> Result<Probe, String> {
-    // Resolve a bare name ourselves so the answer names the file that ran —
-    // the one thing a user with two installs needs to know — and so "not
-    // found" can say where it looked.
-    let Some(resolved) = crate::tools::resolve(bin) else {
+    // Resolve the name ourselves, to an absolute path, so the answer names the
+    // file that ran — the one thing a user with two installs needs to know —
+    // so "not found" can say where it looked, and so a workspace-relative
+    // `:path` still works when a lint runs from the file's own directory.
+    let base = cwd
+        .filter(|d| d.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let Some(resolved) = crate::tools::resolve(bin, &base) else {
         return Err(format!(
             "`{bin}` not found on {}",
             crate::tools::describe_search()
