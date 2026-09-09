@@ -138,6 +138,18 @@ Modify:
 > Deviation: `test_e2e_prepare_rename_rejects_what_rename_rejects` used
 > `::cfg/port` as its keyword case, which is now renameable; it checks the
 > unqualified `:id` instead.
+>
+> Deviation (codex review): a keyword token must now *start* with `:` as well as
+> end with the name. A qualified destructuring entry (`{:keys [app/id]}`) ends
+> with `/id` but binds the local `id`, so rewriting its suffix would rename the
+> binding and orphan every usage of it; it is refused with the destructuring
+> message, like the bare entry.
+>
+> Deviation (codex review): definition sites are collected from every open
+> project buffer, not only from `index.lookup`. A dispatch keyword typed but not
+> yet saved has no indexed symbol and is not an occurrence, so it would have been
+> left dispatching on the old key — and, with the cursor on it, `prepareRename`
+> would have refused what `rename` accepts.
 
 ### Task 3: Keyword edits
 

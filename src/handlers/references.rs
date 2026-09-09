@@ -230,12 +230,46 @@ fn keyword_target(index: &Index, documents: &DocumentStore, fqn: String) -> Resu
         anyhow::bail!("cannot rename a keyword of library namespace {}", ns);
     }
 
-    // The definition site (an `ig/init-key` dispatch keyword, an `s/def` name)
-    // is a symbol rather than an occurrence, so it needs its own entry.
+    // A definition site (an `ig/init-key` dispatch keyword, an `s/def` name) is
+    // a symbol rather than an occurrence, so it needs a pass of its own: live
+    // from every open project buffer, since one just typed has no indexed
+    // symbol and unsaved edits move the indexed one, plus the index for the
+    // file that holds it when it is not open. Missing it would edit every other
+    // site and, when the cursor sits on it, make `prepareRename` refuse what
+    // `rename` would accept.
     let mut candidates: Vec<(PathBuf, Range)> = Vec::new();
+    let mut open_files: Vec<PathBuf> = Vec::new();
+    for uri in documents.open_uris() {
+        let Some(path) = crate::uri::to_index_path(&uri) else {
+            continue;
+        };
+        open_files.push(path.clone());
+        // EDN configs hold occurrences only; extracting them as Clojure would
+        // read a system map as code.
+        if crate::config::is_edn(&path) {
+            continue;
+        }
+        let Some(snapshot) = documents.snapshot(&uri) else {
+            continue;
+        };
+        let Ok((_, syms, _)) = extractor::extract_full_tree(
+            &snapshot.tree,
+            &snapshot.text,
+            &path,
+            &index.extract_config(),
+        ) else {
+            continue;
+        };
+        candidates.extend(
+            syms.into_iter()
+                .filter(|sym| sym.fqn == fqn)
+                .map(|sym| (path.clone(), sym.name_range)),
+        );
+    }
     if let Some(sym) = index.lookup(&fqn) {
-        let range = live_definition_range(index, documents, &sym, &fqn);
-        candidates.push((sym.file, range));
+        if !open_files.contains(&sym.file) {
+            candidates.push((sym.file, sym.name_range));
+        }
     }
     for (file, occs) in occurrences_for(index, documents, &fqn) {
         candidates.extend(occs.into_iter().map(|occ| (file.clone(), occ.name_range)));
@@ -263,12 +297,12 @@ fn keyword_target(index: &Index, documents: &DocumentStore, fqn: String) -> Resu
         let Some(name_range) = name_suffix_range(token, &text, &name) else {
             // All-or-nothing: rewriting the sites that do conform would leave
             // this one reading the old key, which is worse than refusing.
-            if text == name {
+            if !text.starts_with(':') {
                 anyhow::bail!(
                     "cannot rename {}: the {{:keys [{}]}} destructuring at {}:{} would keep \
                      reading the old key; rewrite it as {{{} {}}} first",
                     fqn,
-                    name,
+                    text,
                     path.display(),
                     token.start.line + 1,
                     name,
@@ -352,7 +386,11 @@ fn token_at(text: &str, range: Range) -> Option<String> {
 /// rewrite is refused rather than corrupted.
 fn name_suffix_range(range: Range, token: &str, name: &str) -> Option<Range> {
     let head = token.strip_suffix(name)?;
-    if !head.ends_with('/') && !head.ends_with(':') {
+    // A keyword token always opens with its colon. A destructuring entry is a
+    // bare symbol (`id`, `app/id`) that *reads* the keyword while binding a
+    // local of the same name, so rewriting its suffix would rename the binding
+    // and leave every usage of it behind.
+    if !head.starts_with(':') || (!head.ends_with('/') && !head.ends_with(':')) {
         return None;
     }
     let len = name.encode_utf16().count() as u32;

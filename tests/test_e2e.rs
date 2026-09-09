@@ -6074,6 +6074,104 @@ fn test_e2e_prepare_rename_refuses_keys_destructuring() {
 }
 
 #[test]
+fn test_e2e_rename_refuses_qualified_keys_destructuring() {
+    // `{:keys [simple.core/x]}` reads `:simple.core/x` while binding the local
+    // `x`. Rewriting the entry's suffix would rename that binding and orphan
+    // every usage of it, so this is refused like a bare `{::keys [x]}` entry.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/qualified_keys.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.qualified-keys)\n\n(defn f [{:keys [simple.core/x]}]\n  x)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, ":simple.core/x");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", keywords.display()) },
+            "position": { "line": line, "character": col + 3 },
+            "newName": "scoped"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("destructuring") && msg.contains("qualified_keys.clj"),
+        "expected the destructuring refusal, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_e2e_rename_keyword_sees_unsaved_definition() {
+    // A dispatch keyword is a *symbol*, not an occurrence, so it needs its own
+    // collection pass — and one typed but never saved has no indexed symbol at
+    // all. Missing it would edit every other site and leave this defmethod
+    // dispatching on the old key.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+    let extra = root.join("src/readx/extra.clj");
+    std::fs::write(
+        &extra,
+        "(ns readx.extra\n  (:require [integrant.core :as ig]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+    client.did_open(&extra);
+    client.did_change_insert(
+        &extra,
+        2,
+        0,
+        "\n(defmethod ig/init-key :readx.db/db\n  [_ o] o)\n",
+    );
+
+    // prepareRename on the unsaved definition must not refuse what rename accepts.
+    let prepared = client.prepare_rename(&extra, 3, 30);
+    assert_eq!(
+        prepared["start"],
+        json!({ "line": 3, "character": 33 }),
+        "{}",
+        prepared
+    );
+
+    let text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&text, "::db");
+    let result = client.rename(&db, line, col + 2, "store");
+    let changes = result["changes"].as_object().unwrap();
+    let edits = changes
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/readx/extra.clj"))
+        .unwrap_or_else(|| panic!("unsaved defmethod not edited: {}", result))
+        .1;
+    assert_eq!(
+        edits[0]["range"],
+        json!({
+            "start": { "line": 3, "character": 33 },
+            "end": { "line": 3, "character": 35 }
+        }),
+        "{}",
+        edits
+    );
+    assert_eq!(edits[0]["newText"], json!("store"));
+}
+
+#[test]
 fn test_e2e_rename_refuses_unqualified_keyword() {
     // `:id` in one map and `:id` in another are not one thing, so there is
     // nothing project-wide to rename.
