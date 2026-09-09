@@ -126,6 +126,14 @@ and update README and this file in the same change.
   *before* the fqn path, so a param shadowing a global only ever edits itself;
   a `:keys`/`:strs`/`:syms`-destructured binding is rejected, since its name is
   also the key being read.
+- Child processes (`clj-kondo`, the classpath shell) get PATH plus the
+  well-known install directories in `tools::well_known_dirs` (mise shims,
+  Homebrew, `~/.cargo/bin`, …), appended after the user's entries, so a
+  Dock-launched editor's bare PATH still finds them. `CLJ_PULSE_TOOL_DIRS`
+  (PATH-style) replaces that list; the discovery e2e tests set it, so they
+  never depend on what the host has installed. A bare `:kondo {:path}` is
+  resolved to a full path at probe time and that file is what lints; the
+  probe's failure reason travels as `detail` on `clojurePulse/lintStatus`.
 - `CLJ_PULSE_DISABLE_KONDO` (non-empty) forces `:kondo {:enabled false}`, the
   twin of `CLJ_PULSE_DISABLE_CLASSPATH_CLI`. `LspClient::start` sets it, so no
   test depends on a host clj-kondo; kondo tests opt in with

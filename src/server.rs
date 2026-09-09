@@ -847,6 +847,10 @@ pub(crate) struct LintStatusParams {
     version: Option<String>,
     /// Whether a dependency-cache warm is running right now.
     warming: bool,
+    /// Why clj-kondo is not in use when it was wanted: the same line the log
+    /// carries, for an editor to show beside "native lints only".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 /// The editor layer's `:kondo` overrides (`initializationOptions` /
@@ -875,13 +879,18 @@ type SharedClojureDocs = Arc<std::sync::Mutex<ClojureDocsState>>;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct KondoState {
     config: kondo::KondoConfig,
-    found: Option<String>,
+    found: Option<kondo::Probe>,
+    /// Why the probe failed, when it did: the `detail` the lint status
+    /// carries so an editor can show it next to "native lints only".
+    detail: Option<String>,
 }
 
 impl KondoState {
     /// The binary to spawn, or `None` when clj-kondo is disabled or absent.
+    /// The probe resolved a bare name to a full path, so a later PATH change
+    /// cannot swap the binary under a running session.
     fn bin(&self) -> Option<&str> {
-        self.found.is_some().then_some(self.config.path.as_str())
+        self.found.as_ref().map(|p| p.bin.as_str())
     }
 }
 
@@ -916,16 +925,32 @@ async fn probe_and_announce(
     let config = kondo::resolve_config(&file, &editor);
 
     // A disabled kondo is never probed — no spawn, no PATH lookup, nothing.
-    let found = match config.enabled {
-        true => kondo::probe_version(&config.path).await,
-        false => None,
+    // The probe runs from the workspace root so a mise shim resolves the
+    // version the project pins.
+    let probed = match config.enabled {
+        true => kondo::probe_version(&config.path, root).await,
+        false => Err("clj-kondo disabled".to_string()),
+    };
+    let msg = match (&probed, config.enabled) {
+        (Ok(probe), _) => format!(
+            "clj-kondo {} found ({}) — linting: clj-kondo + native",
+            probe.version, probe.bin
+        ),
+        (Err(reason), true) => kondo::not_found_message(&config.path, reason),
+        (Err(_), false) => "clj-kondo disabled — linting: native lints only".to_string(),
+    };
+    let (found, detail) = match probed {
+        Ok(probe) => (Some(probe), None),
+        Err(_) if !config.enabled => (None, None),
+        Err(_) => (None, Some(msg.clone())),
     };
 
     let engine_changed = {
         let mut state = kondo_state.lock().unwrap();
         let next = KondoState {
             config: config.clone(),
-            found: found.clone(),
+            found,
+            detail,
         };
         // Compare the whole resolved state, not just "is clj-kondo active":
         // switching `:path` from one working binary to another, or picking up
@@ -935,14 +960,6 @@ async fn probe_and_announce(
         changed
     };
 
-    let msg = match (&found, config.enabled) {
-        (Some(version), _) => format!(
-            "clj-kondo {version} found ({}) — linting: clj-kondo + native",
-            config.path
-        ),
-        (None, true) => "clj-kondo not found — linting: native lints only".to_string(),
-        (None, false) => "clj-kondo disabled — linting: native lints only".to_string(),
-    };
     tracing::info!("{}", msg);
     client.log_message(MessageType::INFO, msg).await;
     send_lint_status(client, kondo_state, false).await;
@@ -953,7 +970,13 @@ async fn probe_and_announce(
 /// Pushes the current lint engine to the client. `warming` is passed in rather
 /// than stored: it is a property of the moment, not of the probe.
 async fn send_lint_status(client: &Client, kondo_state: &SharedKondoState, warming: bool) {
-    let version = kondo_state.lock().unwrap().found.clone();
+    let (version, detail) = {
+        let state = kondo_state.lock().unwrap();
+        (
+            state.found.as_ref().map(|p| p.version.clone()),
+            state.detail.clone(),
+        )
+    };
     client
         .send_notification::<LintStatus>(LintStatusParams {
             engine: match version {
@@ -962,6 +985,7 @@ async fn send_lint_status(client: &Client, kondo_state: &SharedKondoState, warmi
             },
             version,
             warming,
+            detail,
         })
         .await;
 }
@@ -2121,6 +2145,13 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         tracing::info!("clj-pulse initialized");
+
+        // tower-lsp suppresses custom notifications until this point, and the
+        // clj-kondo probe spawned from `initialize` can finish before it — a
+        // missing binary fails in microseconds. Its lint status would then be
+        // lost, so send the current one now; if the probe is still running,
+        // its own send follows and supersedes this one.
+        send_lint_status(&self.client, &self.kondo.state, false).await;
 
         // Watch source files so git pulls / branch switches keep the index
         // fresh without editor saves. Clients without dynamic registration

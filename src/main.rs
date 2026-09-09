@@ -20,6 +20,7 @@ mod panic_guard;
 mod projects;
 mod server;
 mod settings;
+mod tools;
 mod uri;
 
 use server::Backend;

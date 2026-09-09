@@ -5064,6 +5064,122 @@ fn test_e2e_kondo_threshold_zero_means_no_limit() {
     );
 }
 
+/// A directory holding a copy of the fake clj-kondo, standing in for a mise
+/// shims or Homebrew bin directory the editor's PATH does not list.
+fn well_known_dir_with_fake_kondo() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join("clj-kondo");
+    std::fs::copy(LspClient::fake_kondo_dir().join("clj-kondo"), &target).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+/// A PATH holding only the system directories the fake needs (`sh`, `cat`),
+/// and no clj-kondo — what a Dock-launched editor hands the server.
+const BARE_PATH: &str = "/usr/bin:/bin";
+
+#[test]
+fn test_e2e_kondo_found_in_a_well_known_dir_off_path() {
+    // Homebrew and mise install directories are searched after PATH, so a
+    // clj-kondo the editor's PATH does not list is still found — and the
+    // announcement names the file that ran.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let shims = well_known_dir_with_fake_kondo();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", shims.path()),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log(&format!(
+        "clj-kondo v0.0.0-fake found ({})",
+        shims.path().join("clj-kondo").display()
+    ));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+}
+
+#[test]
+fn test_e2e_kondo_not_found_says_where_it_looked() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let empty = tempfile::TempDir::new().unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", empty.path()),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo not found — linting: native lints only");
+    let line = client
+        .notifications
+        .iter()
+        .filter(|m| m["method"] == "window/logMessage")
+        .map(|m| {
+            m["params"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .find(|m| m.contains("clj-kondo not found"))
+        .unwrap();
+    assert!(line.contains("PATH (2 entries)"), "{line}");
+    assert!(
+        line.contains(&empty.path().display().to_string()),
+        "names the well-known dirs it tried: {line}"
+    );
+    assert!(line.contains("clojurePulse.kondo.path"), "{line}");
+
+    // The same reason rides the lint status, for the editor to show.
+    let status = client.wait_for_notification("clojurePulse/lintStatus");
+    assert_eq!(status["engine"], json!("native"));
+    assert!(
+        status["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("clj-kondo not found")),
+        "{status}"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_path_that_is_a_command_line_is_explained() {
+    // `mise exec -- clj-kondo` is a natural thing to type into a "path"
+    // setting; it is spawned as one program name and cannot work. Say so.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:path \"mise exec -- clj-kondo\"}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("names a program, not a command line");
+}
+
 #[test]
 fn test_e2e_kondo_run_drops_native_unused_binding() {
     // A successful clj-kondo run owns `unused-binding` too: the fake returns

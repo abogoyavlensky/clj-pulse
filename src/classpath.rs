@@ -56,6 +56,9 @@ pub async fn resolve_via_cmd(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // A `clojure` from Homebrew or mise that a Dock-launched editor's PATH
+    // does not list is still found (`tools`).
+    crate::tools::apply_env(&mut cmd);
     // A dropped future (timeout) must not orphan a JVM mid-download. On Unix
     // the explicit group kill below is the real cleanup; kill_on_drop is the
     // fallback (and all Windows has).

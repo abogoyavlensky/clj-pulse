@@ -308,6 +308,30 @@ impl LspClient {
         self.notifications.push(msg);
     }
 
+    /// Waits for the first notification with `method` and returns its
+    /// `params` (checks already-stashed notifications first).
+    pub fn wait_for_notification(&mut self, method: &str) -> Value {
+        if let Some(m) = self.notifications.iter().find(|m| m["method"] == method) {
+            return m["params"].clone();
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for notification: {method}"));
+            let msg = self
+                .incoming
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("timed out waiting for notification: {method}"));
+            let found = msg["method"] == method;
+            let params = msg["params"].clone();
+            self.stash(msg);
+            if found {
+                return params;
+            }
+        }
+    }
+
     /// Waits until a `window/logMessage` whose text contains `needle` has
     /// been received (checks already-stashed notifications first).
     pub fn wait_for_log(&mut self, needle: &str) {

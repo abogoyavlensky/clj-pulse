@@ -14,4 +14,5 @@ pub mod libraries;
 pub mod panic_guard;
 pub mod projects;
 pub mod settings;
+pub mod tools;
 pub mod uri;
