@@ -6741,7 +6741,10 @@ fn test_e2e_malformed_non_utf8_file_is_skipped() {
         hover
     );
 
-    let log = std::fs::read_to_string(root.join(".clj-pulse/server.log")).unwrap_or_default();
+    // The log is written by a non-blocking appender, so the skip line trails
+    // the indexing it describes by a few milliseconds.
+    LspClient::wait_for_server_log(&root, "bad_bytes.clj");
+    let log = LspClient::server_log(&root);
     assert!(
         log.contains("failed to read") && log.contains("bad_bytes.clj"),
         "the unreadable file was not logged as skipped: {}",

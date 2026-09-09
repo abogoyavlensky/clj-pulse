@@ -38,7 +38,7 @@ then the editor features users notice as missing. Guiding decisions:
    same day, one line with the date. Promote it into a milestone when it is
    scheduled; delete it when it is rejected, with the reason in Not planned.
 
-## Where we stand (September 2026, v0.4.0)
+## Where we stand (September 2026, v0.5.0)
 
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
