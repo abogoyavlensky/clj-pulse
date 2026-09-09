@@ -2074,6 +2074,7 @@ fn collect_binding_names(
                         }
                     } else {
                         // :keys/:strs/:syms vectors, :as name, …
+                        record_destructuring_keys(*k, *v, ctx, out);
                         collect_binding_names(*v, ctx, scope, out, names);
                     }
                 } else {
@@ -2091,6 +2092,76 @@ fn collect_binding_names(
                 collect_binding_names(child, ctx, scope, out, names);
             }
         }
+    }
+}
+
+/// Records the key each entry of a namespaced `:keys`/`:syms` destructuring
+/// vector reads. `{::keys [a]}`, `{:my.ns/keys [a]}`, `{::alias/keys [a]}` and
+/// the qualified entries of a plain `{:keys [my.ns/a]}` all read `:my.ns/a`, so
+/// the entry symbol is a usage of that keyword as well as a binding site: find
+/// references lists it, and a keyword rename sees it instead of silently
+/// leaving it reading the old key. `:strs` reads string keys, and an
+/// unqualified entry of a plain `{:keys [a]}` reads `:a`, which no rename can
+/// target — neither contributes an occurrence.
+fn record_destructuring_keys(
+    directive: Node,
+    entries: Node,
+    ctx: &OccurrenceCtx,
+    out: &mut Vec<Occurrence>,
+) {
+    let reads_keywords = directive
+        .child_by_field_name("name")
+        .map(|n| matches!(node_text(n, ctx.source), "keys" | "syms"))
+        .unwrap_or(false);
+    if !reads_keywords || entries.kind() != "vec_lit" {
+        return;
+    }
+    let directive_ns = destructuring_key_ns(directive, ctx);
+    for entry in named_children(entries) {
+        if entry.kind() != "sym_lit" {
+            continue;
+        }
+        // A qualified entry carries its own namespace verbatim: destructuring
+        // reads `{:keys [o/a]}` as `:o/a` whatever `o` is aliased to, since
+        // only `::` auto-resolves.
+        let ns = match entry.child_by_field_name("namespace") {
+            Some(node) => node_text(node, ctx.source).to_string(),
+            None => match &directive_ns {
+                Some(ns) => ns.clone(),
+                None => continue,
+            },
+        };
+        out.push(Occurrence {
+            fqn: format!(":{}/{}", ns, node_text(sym_name_node(entry), ctx.source)),
+            name_range: node_to_lsp_range(entry, ctx.source),
+        });
+    }
+}
+
+/// The namespace a `:keys`/`:syms` directive qualifies its unqualified entries
+/// with: the current namespace for `::keys`, the alias-resolved one for
+/// `::alias/keys`, the literal prefix for `:my.ns/keys`. `None` for a plain
+/// `:keys`, whose entries carry their own namespace or none at all.
+fn destructuring_key_ns(directive: Node, ctx: &OccurrenceCtx) -> Option<String> {
+    let auto_resolved = directive
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, ctx.source) == "::")
+        .unwrap_or(false);
+    match directive.child_by_field_name("namespace") {
+        Some(ns_node) => {
+            let ns = node_text(ns_node, ctx.source);
+            Some(if auto_resolved {
+                ctx.ns_meta
+                    .aliases
+                    .get(ns)
+                    .cloned()
+                    .unwrap_or_else(|| ns.to_string())
+            } else {
+                ns.to_string()
+            })
+        }
+        None if auto_resolved => (!ctx.ns_meta.name.is_empty()).then(|| ctx.ns_meta.name.clone()),
+        None => None,
     }
 }
 

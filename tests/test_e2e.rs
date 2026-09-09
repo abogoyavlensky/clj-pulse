@@ -4043,6 +4043,48 @@ fn test_e2e_integrant_references_span_defmethods_and_config() {
 }
 
 #[test]
+fn test_e2e_references_list_namespaced_keys_destructuring() {
+    // `{::db/keys [db]}` reads the key `:readx.db/db`, so find-references on
+    // the component keyword lists the destructuring entry too — the site a
+    // keyword rename would otherwise leave reading the old key.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+    let consumer = root.join("src/readx/consumer.clj");
+    std::fs::write(
+        &consumer,
+        "(ns readx.consumer\n  (:require [readx.db :as db]))\n\n(defn start [{::db/keys [db]}]\n  db)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db_file = root.join("src/readx/db.clj");
+    client.did_open(&db_file);
+
+    let (line, ch) = position_of(&db_file, "::db");
+    let result = client.references(&db_file, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", result));
+    let entry = locs
+        .iter()
+        .find(|l| {
+            l["uri"]
+                .as_str()
+                .unwrap()
+                .ends_with("/src/readx/consumer.clj")
+        })
+        .unwrap_or_else(|| panic!("destructuring entry missing: {:?}", locs));
+
+    let text = std::fs::read_to_string(&consumer).unwrap();
+    let (entry_line, entry_col) = start_of(&text, "db]}");
+    assert_eq!(entry["range"]["start"]["line"], json!(entry_line));
+    assert_eq!(entry["range"]["start"]["character"], json!(entry_col));
+}
+
+#[test]
 fn test_e2e_keyword_does_not_navigate_to_same_named_var() {
     // A namespaced keyword must never goto-def to a same-named var. With no
     // keyword definition, goto-def yields nothing rather than a wrong jump

@@ -70,21 +70,21 @@ Modify:
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Extractor: `test_namespaced_keys_entries_are_keyword_occurrences` covering the four forms in the design and the `:strs` exclusion, asserting fqn and that `name_range` is the entry symbol. e2e: references on `::db` in a fixture file that destructures it lists the entry.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor namespaced_keys_entries`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In the walker where the namespaced directive is recognized, push an `Occurrence` per entry alongside the binding it already records. Check that `unused-private-var` and references counts in existing tests still hold; adjust deliberately if a fixture now has one more occurrence.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Record namespaced destructuring entries as keyword occurrences"`
 
 ### Task 2: Keyword target, sites, and prepareRename

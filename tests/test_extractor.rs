@@ -1244,6 +1244,64 @@ fn test_namespaced_map_keys_take_the_map_prefix() {
 }
 
 #[test]
+fn test_namespaced_keys_entries_are_keyword_occurrences() {
+    // `{::keys [a]}`, `{:my.ns/keys [b]}`, `{::alias/keys [e]}` and the
+    // qualified entry of `{:keys [other.lib/c]}` all read a namespaced key, so
+    // the entry symbol is a usage of that keyword as well as a binding site —
+    // otherwise a keyword rename would rewrite every other site and leave these
+    // reading the old key. `:strs` reads string keys and contributes nothing.
+    let src = "(ns my.ns\n  (:require [other.lib :as o]))\n\
+               (defn f [{::keys [a]}] a)\n\
+               (defn g [{:my.ns/keys [b]}] b)\n\
+               (defn h [{:keys [other.lib/c]}] c)\n\
+               (defn i [{::syms [d]}] d)\n\
+               (defn j [{::o/keys [e]}] e)\n\
+               (defn k [{:strs [s]}] s)\n\
+               (defn l [{:keys [plain]}] plain)";
+    let (_, _, occs) = extract_full(src, Path::new("keys.clj")).unwrap();
+
+    for fqn in [
+        ":my.ns/a",
+        ":my.ns/b",
+        ":other.lib/c",
+        ":my.ns/d",
+        ":other.lib/e",
+    ] {
+        assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
+    }
+    // A string key is a different thing, and a plain `{:keys [plain]}` entry
+    // reads the unqualified `:plain`, which no rename can target.
+    assert!(
+        occs.iter()
+            .all(|o| o.fqn != ":my.ns/s" && o.fqn != ":s" && !o.fqn.ends_with("/plain")),
+        "string or unqualified destructuring key recorded: {:?}",
+        occs
+    );
+
+    // The range is the entry symbol itself, namespace included where it has
+    // one — that is the token a rename rewrites.
+    let a = occurrences_of(&occs, ":my.ns/a")[0];
+    let line = "(defn f [{::keys [a]}] a)";
+    assert_eq!(a.name_range.start.line, 2);
+    assert_eq!(
+        a.name_range.start.character,
+        line.find("[a]").unwrap() as u32 + 1
+    );
+    assert_eq!(a.name_range.end.character, a.name_range.start.character + 1);
+
+    let c = occurrences_of(&occs, ":other.lib/c")[0];
+    let line = "(defn h [{:keys [other.lib/c]}] c)";
+    assert_eq!(
+        c.name_range.start.character,
+        line.find("other.lib/c").unwrap() as u32
+    );
+    assert_eq!(
+        c.name_range.end.character,
+        c.name_range.start.character + "other.lib/c".len() as u32
+    );
+}
+
+#[test]
 fn test_namespaced_map_with_splicing_conditional_invents_no_namespace() {
     // `#?@` splices an unknown number of entries, so nothing after it can be
     // told apart as key or value. Under-reporting the keys is fine; inventing
