@@ -1,5 +1,7 @@
 # Keyword Rename Implementation Plan
 
+**Status: complete** (2026-09-09, branch `keyword-rename`).
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rename a qualified keyword across the project, rewriting every occurrence in its own notation (`::name`, `::alias/name`, `:ns/name`), Integrant EDN files included, and refusing only what cannot be rewritten safely (ROADMAP Milestone 3, part 2 of 2).
@@ -213,3 +215,64 @@ Modify:
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Document keyword rename"`
+
+---
+
+## Completion summary
+
+All four tasks are done. `bb check` (448 unit + 162 e2e), `bb e2e`, `bb e2e-real`,
+`bb e2e-pulse`, `bb e2e-calva`, `bb e2e-nvim` and `bb bench` all pass.
+
+**What shipped.** A qualified project keyword renames across the whole project.
+Each site is rewritten in the notation it was written in, because the edit
+replaces only the name the token ends with: `::db`, `::alias/db` and
+`:my.app/db` become `::store`, `::alias/store` and `:my.app/store`. Integrant
+`config.edn` files are rewritten with the sources, `#ig/ref` values and
+namespaced-map keys included. Sites come from occurrences, the `IntegrantKey`
+definition, and the live definitions of every open buffer. `rename_target` holds
+every refusal that does not need the new name, so `prepareRename` refuses
+exactly what `rename` would: unqualified keywords, keywords of a library
+namespace, and any site a suffix edit cannot rewrite (a `{::keys [db]}` or
+`{:keys [app/db]}` entry, which reads the key while binding a local of that
+name). A refusal is whole; nothing is half-renamed.
+
+**Verified by hand.** The real binary was driven over stdio against a copy of
+the Integrant fixture: renaming `::db` from its `assert-key` defmethod returned
+7 edits across 3 files, and applying them produced exactly the three notations
+rewritten in place with the unqualified `:db` key in `config.edn` untouched. The
+same project with a `{::db/keys [db]}` consumer refused with the destructuring
+message instead.
+
+**Issues encountered.** All were found by the codex review checkpoints, none by
+the plan's own tests:
+
+1. `:syms` reads quoted symbol keys, not keywords, so recording its entries as
+   keyword occurrences was wrong (the plan asked for it).
+2. `clojure.core/destructure` builds the key as
+   `(keyword (or directive-ns (namespace entry)) (name entry))`, so a qualified
+   directive wins over a qualified entry. The first implementation had it
+   backwards.
+3. A qualified `:keys` entry (`{:keys [app/id]}`) *ends* with the name, so the
+   suffix rule accepted it and would have renamed the local binding while
+   leaving its usages behind. A keyword token must also *start* with `:`.
+4. A dispatch keyword typed but not yet saved has no indexed symbol and is not
+   an occurrence, so it was missed — and with the cursor on it, `prepareRename`
+   refused what `rename` accepted.
+5. `extract_edn` never applied namespaced-map prefixes, so `#:my.app{:db …}` in
+   an Integrant config was invisible to references *and* rename. Its gate
+   (`has_namespaced_top_level_key`) did not recognise such a config either, so
+   fixing one without the other would have been dead code.
+
+Every deviation note is inline under its task above.
+
+**What the plan could have specified better.** The design derived the suffix
+rule from what keyword notations have in common (they all *end* with the name)
+and never stated what they have in common at the front — that a keyword token
+always *starts* with a colon. That missing half is what let a qualified
+destructuring entry through, and it is also what made the plan treat
+`token == name` as the way to recognise a destructuring site. A rule stated from
+both ends would have been correct as written. Relatedly, the plan asserted the
+extractor facts it depended on ("`:syms` entries read the same key", "the
+`IntegrantKey` symbol is also an occurrence", "namespaced-map keys are already
+recorded") without pinning any of them to a test or a line of code; three of the
+five issues above are one of those assertions being false.
