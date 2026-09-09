@@ -1143,17 +1143,12 @@ async fn relint_open_documents(
     kondo_state: &SharedKondoState,
 ) {
     for uri in documents.open_uris() {
-        let version = documents.current_version(&uri).unwrap_or(0);
-        lint_and_publish_doc(
-            client,
-            documents,
-            index,
-            kondo_state,
-            uri,
-            version,
-            LintTrigger::EngineChange,
-        )
-        .await;
+        let pass = LintPass {
+            version: documents.current_version(&uri).unwrap_or(0),
+            epoch: documents.lint_epoch(&uri),
+            trigger: LintTrigger::EngineChange,
+        };
+        lint_and_publish_doc(client, documents, index, kondo_state, uri, pass).await;
     }
 }
 
@@ -1167,6 +1162,18 @@ enum LintTrigger {
     Save,
     Change,
     EngineChange,
+}
+
+/// One lint pass as its trigger captured it: the document version and lint
+/// epoch the result is valid for, and what started it. Captured at the
+/// trigger, never re-read inside the pass — a save that lands between a change
+/// pass's debounce check and its start must retire that pass, not be adopted
+/// by it.
+#[derive(Debug, Clone, Copy)]
+struct LintPass {
+    version: i32,
+    epoch: u64,
+    trigger: LintTrigger,
 }
 
 /// Caps concurrent clj-kondo processes. Each spawn costs ~54 MB RSS, so
@@ -1187,16 +1194,19 @@ async fn lint_and_publish_doc(
     index: &Index,
     kondo_state: &SharedKondoState,
     uri: Url,
-    version: i32,
-    trigger: LintTrigger,
+    pass: LintPass,
 ) {
+    let LintPass {
+        version,
+        epoch,
+        trigger,
+    } = pass;
     let Some(snapshot) = documents.snapshot(&uri) else {
         return;
     };
     let Ok(path) = uri.to_file_path() else {
         return;
     };
-    let epoch = documents.lint_epoch(&uri);
     // The tree comes from the document store, already updated for every edit
     // so far: a pass never parses. `parsed=0` is what the e2e suite looks for.
     tracing::debug!(
@@ -1803,15 +1813,14 @@ impl Backend {
     }
 
     /// Computes diagnostics from the live buffer and publishes them for `uri`.
-    async fn lint_and_publish(&self, uri: Url, version: i32, trigger: LintTrigger) {
+    async fn lint_and_publish(&self, uri: Url, pass: LintPass) {
         lint_and_publish_doc(
             &self.client,
             &self.documents,
             &self.index,
             &self.kondo.state,
             uri,
-            version,
-            trigger,
+            pass,
         )
         .await;
     }
@@ -2269,7 +2278,12 @@ impl LanguageServer for Backend {
             }
         }
 
-        self.lint_and_publish(uri, version, LintTrigger::Open).await;
+        let pass = LintPass {
+            version,
+            epoch: self.documents.lint_epoch(&uri),
+            trigger: LintTrigger::Open,
+        };
+        self.lint_and_publish(uri, pass).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -2321,9 +2335,12 @@ impl LanguageServer for Backend {
 
         // A save runs the full engine whatever the buffer size, so a change
         // pass still waiting out its debounce must not publish after it.
-        self.documents.bump_lint_epoch(&uri);
-        let version = self.documents.current_version(&uri).unwrap_or(0);
-        self.lint_and_publish(uri, version, LintTrigger::Save).await;
+        let pass = LintPass {
+            epoch: self.documents.bump_lint_epoch(&uri),
+            version: self.documents.current_version(&uri).unwrap_or(0),
+            trigger: LintTrigger::Save,
+        };
+        self.lint_and_publish(uri, pass).await;
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -2628,16 +2645,12 @@ impl LanguageServer for Backend {
             {
                 return;
             }
-            lint_and_publish_doc(
-                &client,
-                &documents,
-                &index,
-                &kondo_state,
-                uri,
+            let pass = LintPass {
                 version,
-                LintTrigger::Change,
-            )
-            .await;
+                epoch,
+                trigger: LintTrigger::Change,
+            };
+            lint_and_publish_doc(&client, &documents, &index, &kondo_state, uri, pass).await;
         });
     }
 
