@@ -139,7 +139,9 @@ pub fn is_integrant_edn(path: &Path, source: &str) -> bool {
 
 /// Whether the first top-level map in `source` has any namespaced-keyword key —
 /// the structural signature of an Integrant system map. (Manifests like
-/// `deps.edn`/`bb.edn` use unqualified top-level keys.)
+/// `deps.edn`/`bb.edn` use unqualified top-level keys.) A namespaced map
+/// (`#:my.app{:db …}`) qualifies every key it holds through its prefix, so the
+/// map literal is itself the signature.
 fn has_namespaced_top_level_key(source: &str) -> bool {
     let mut parser = Parser::new();
     if parser.set_language(language()).is_err() {
@@ -149,14 +151,23 @@ fn has_namespaced_top_level_key(source: &str) -> bool {
         return false;
     };
     for top in named_children(tree.root_node()) {
-        if top.kind() != "map_lit" {
-            continue;
+        match top.kind() {
+            // `#::{…}` resolves against an `ns` form an EDN file does not have,
+            // so only a literal prefix counts.
+            "ns_map_lit" => {
+                return top
+                    .child_by_field_name("prefix")
+                    .map(|prefix| prefix.kind() == "kwd_lit")
+                    .unwrap_or(false)
+            }
+            // map_lit children alternate key, value, …; keys are the even indices.
+            "map_lit" => {
+                return named_children(top).iter().step_by(2).any(|key| {
+                    key.kind() == "kwd_lit" && key.child_by_field_name("namespace").is_some()
+                })
+            }
+            _ => continue,
         }
-        // map_lit children alternate key, value, …; keys are the even indices.
-        return named_children(top)
-            .iter()
-            .step_by(2)
-            .any(|key| key.kind() == "kwd_lit" && key.child_by_field_name("namespace").is_some());
     }
     false
 }

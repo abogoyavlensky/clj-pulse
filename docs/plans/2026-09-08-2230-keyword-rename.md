@@ -194,6 +194,12 @@ Modify:
 > Two assertions codex called weak were tightened: the unsaved-edit test now
 > pins all three edits to exact shifted ranges, and the `#ig/ref` assertion pins
 > the edit column rather than only its line.
+>
+> Deviation (codex review, round 3): the Integrant-config gate
+> (`has_namespaced_top_level_key`) only recognised `map_lit`, so a ref-less
+> config written as `#:my.app{…}` was never scanned at all — the previous fix
+> would have been dead code for exactly that file. A top-level namespaced map
+> with a literal prefix now counts as the signature.
 
 ### Task 4: Docs and roadmap
 

@@ -851,6 +851,17 @@ fn test_file_occurrences_gates_non_integrant_edn() {
     // An Integrant config (has #ig/ref) still contributes occurrences.
     let cfg = "{:my.app/db {} :sys {:db #ig/ref :my.app/db}}";
     assert!(!file_occurrences(cfg, Path::new("config.edn")).is_empty());
+
+    // So does a ref-less one written as a namespaced map, whose keys are
+    // qualified by the prefix rather than spelled out.
+    let short = "#:my.app{:db {:url \"x\"}}";
+    assert_eq!(
+        file_occurrences(short, Path::new("config.edn"))
+            .iter()
+            .map(|o| o.fqn.clone())
+            .collect::<Vec<_>>(),
+        vec![":my.app/db".to_string()]
+    );
 }
 
 #[test]
@@ -873,6 +884,13 @@ fn test_is_integrant_edn_detection() {
         Path::new("bb.edn"),
         "{:tasks {} :deps {}}"
     ));
+
+    // A ref-less system written as a namespaced map: the prefix qualifies every
+    // key, so the map literal is the signature.
+    let ns_map = "#:my.app{:db {:url \"x\"}\n :server {:port 8080}}";
+    assert!(is_integrant_edn(Path::new("resources/config.edn"), ns_map));
+    // `#::{…}` resolves against an `ns` form EDN does not have.
+    assert!(!is_integrant_edn(Path::new("config.edn"), "#::{:db {}}"));
 
     // A plain EDN data file with only unqualified top-level keys is not a config.
     assert!(!is_integrant_edn(Path::new("data.edn"), "{:a 1 :b 2}"));
