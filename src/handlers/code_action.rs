@@ -5,7 +5,7 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 use tree_sitter::Node;
 
-use crate::document::DocumentStore;
+use crate::document::{DocumentStore, Snapshot};
 use crate::index::{extractor, Index, NsMeta};
 
 /// Aggregates the file's code actions: an "Add require …" quickfix when the
@@ -18,7 +18,7 @@ pub fn handle(
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     let uri = params.text_document.uri.clone();
-    let Some(text) = documents.text(&uri) else {
+    let Some(snapshot) = documents.snapshot(&uri) else {
         return Ok(None);
     };
     let Ok(path) = uri.to_file_path() else {
@@ -30,12 +30,12 @@ pub fn handle(
 
     if kind_allowed(only, &CodeActionKind::QUICKFIX) {
         actions.extend(add_require_actions(
-            index, documents, &uri, &text, &path, &params,
+            index, documents, &uri, &snapshot, &path, &params,
         ));
     }
 
     if kind_allowed(only, &CodeActionKind::SOURCE_ORGANIZE_IMPORTS) {
-        if let Some(edits) = clean_ns_edits(&text) {
+        if let Some(edits) = clean_ns_edits_tree(&snapshot.tree, &snapshot.text) {
             let mut changes = HashMap::new();
             changes.insert(uri.clone(), edits);
             actions.push(CodeActionOrCommand::CodeAction(CodeAction {
@@ -76,7 +76,7 @@ fn add_require_actions(
     index: &Index,
     documents: &DocumentStore,
     uri: &Url,
-    text: &str,
+    snapshot: &Snapshot,
     path: &Path,
     params: &CodeActionParams,
 ) -> Vec<CodeActionOrCommand> {
@@ -84,7 +84,12 @@ fn add_require_actions(
         return vec![];
     };
     // Resolve against the live buffer: its requires may differ from the index.
-    let Ok((ns_meta, _)) = extractor::extract(text, path) else {
+    let Ok((ns_meta, _, _)) = extractor::extract_full_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        path,
+        &index.extract_config(),
+    ) else {
         return vec![];
     };
 
@@ -98,8 +103,8 @@ fn add_require_actions(
         .cloned()
         .collect();
 
-    // One parse for every candidate: they all insert at the same place.
-    let Some(anchor) = require_anchor(text) else {
+    // One anchor for every candidate: they all insert at the same place.
+    let Some(anchor) = require_anchor_tree(&snapshot.tree, &snapshot.text) else {
         return vec![];
     };
 

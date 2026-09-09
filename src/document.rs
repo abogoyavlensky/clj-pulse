@@ -35,6 +35,18 @@ pub struct Snapshot {
     pub tree: Tree,
 }
 
+impl Snapshot {
+    /// A snapshot of `text` parsed on the spot, for callers with no document
+    /// store (tests, mostly). `None` only if tree-sitter refuses to parse.
+    pub fn parse(text: &str) -> Option<Self> {
+        let tree = extractor::parse_tree(text)?;
+        Some(Self {
+            text: text.to_string(),
+            tree,
+        })
+    }
+}
+
 /// The per-document state: the rope and the tree parsed from exactly its
 /// current contents. `apply_changes` keeps them in step by editing the tree and
 /// reparsing incrementally before it returns, so the tree never lags the rope.

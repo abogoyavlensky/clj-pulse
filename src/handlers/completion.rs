@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::builtins;
 use super::matching::match_score;
-use crate::document::{DocumentStore, KeywordContext};
+use crate::document::{DocumentStore, KeywordContext, Snapshot};
 use crate::index::{extractor, CoreSymbol, DefKind, Index, NsMeta};
 
 pub fn handle(
@@ -42,16 +42,16 @@ pub fn handle(
         })));
     }
 
-    // The live buffer, for the locals walk and for the require edit an
-    // auto-require item carries.
-    let source = documents.text(&uri);
-    let mut items = complete_symbols(index, &prefix, &current_ns, source.as_deref());
+    // The live buffer and its tree, for the locals walk and for the require
+    // edit an auto-require item carries.
+    let snapshot = documents.snapshot(&uri);
+    let mut items = complete_symbols(index, &prefix, &current_ns, snapshot.as_ref());
 
     // Locals (let/fn/loop/… bound names) in scope at the cursor. They shadow
     // globals, so offer them ahead of the index symbols. Qualified prefixes
     // (`alias/…`) can't name a local, so skip the walk there.
     if !prefix.contains('/') {
-        let mut merged = local_completions(source.as_deref(), pos, &prefix);
+        let mut merged = local_completions(snapshot.as_ref(), pos, &prefix);
         merged.extend(items);
         items = merged;
     }
@@ -74,13 +74,20 @@ pub fn handle(
 /// In-scope local bindings at `pos` whose name matches `prefix`, innermost-first
 /// and de-duplicated by name (an inner binding shadows an outer one). Locals are
 /// pool 0, so within a match tier they rank above every var and core name.
-fn local_completions(source: Option<&str>, pos: Position, prefix: &str) -> Vec<CompletionItem> {
-    let Some(text) = source else {
+fn local_completions(
+    snapshot: Option<&Snapshot>,
+    pos: Position,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let Some(snapshot) = snapshot else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for binding in extractor::locals_in_scope_at(text, pos).into_iter().rev() {
+    for binding in extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, pos)
+        .into_iter()
+        .rev()
+    {
         let Some(tier) = matched(&binding.name, prefix, Pool::Local) else {
             continue;
         };
@@ -294,14 +301,14 @@ fn keyword_item(
     }
 }
 
-/// Completion candidates for `prefix` in `current_ns`. `source` is the live
+/// Completion candidates for `prefix` in `current_ns`. `snapshot` is the live
 /// buffer, needed only to build the `:require` edit an auto-require item
 /// carries; without it those items are still offered, without their edit.
 pub fn complete_symbols(
     index: &Index,
     prefix: &str,
     current_ns: &str,
-    source: Option<&str>,
+    snapshot: Option<&Snapshot>,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let ns_meta = index.ns_meta(current_ns);
@@ -365,7 +372,7 @@ pub fn complete_symbols(
                     .into_iter()
                     .map(|c| (c.namespace, c.alias.unwrap_or_else(|| alias.to_string())))
                     .collect();
-            items.extend(auto_require_items(index, &pool, name_prefix, source));
+            items.extend(auto_require_items(index, &pool, name_prefix, snapshot));
         }
     } else {
         // Pool A: current namespace symbols
@@ -590,7 +597,7 @@ pub fn complete_symbols(
             if prefix.chars().count() >= 2 {
                 if let Some(meta) = &ns_meta {
                     let pool = auto_require_pool(index, meta);
-                    items.extend(auto_require_items(index, &pool, prefix, source));
+                    items.extend(auto_require_items(index, &pool, prefix, snapshot));
                 }
             }
         }
@@ -642,7 +649,7 @@ fn auto_require_items(
     index: &Index,
     pool: &[(String, String)],
     prefix: &str,
-    source: Option<&str>,
+    snapshot: Option<&Snapshot>,
 ) -> Vec<CompletionItem> {
     let mut hits: Vec<AutoRequireHit> = Vec::new();
     for (ns, alias) in pool {
@@ -677,8 +684,8 @@ fn auto_require_items(
     hits.sort_by(|a, b| a.tier.cmp(&b.tier).then_with(|| a.label.cmp(&b.label)));
     hits.truncate(AUTO_REQUIRE_LIMIT);
 
-    // One parse for the whole pool: every candidate inserts at the same place.
-    let anchor = source.and_then(super::code_action::require_anchor);
+    // One anchor for the whole pool: every candidate inserts at the same place.
+    let anchor = snapshot.and_then(|s| super::code_action::require_anchor_tree(&s.tree, &s.text));
 
     hits.into_iter()
         .map(|hit| CompletionItem {

@@ -6,8 +6,8 @@ use crate::document::DocumentStore;
 use crate::index::{extractor, DefKind, Index, Symbol, SymbolSource};
 
 /// Outline for a single file. Prefers the live (possibly unsaved) document
-/// text over the index so the outline tracks edits; extraction of one file
-/// costs ~1ms.
+/// over the index so the outline tracks edits; extraction over the cached
+/// tree of one file costs well under a millisecond.
 pub fn document_symbols(
     index: &Index,
     documents: &DocumentStore,
@@ -18,14 +18,19 @@ pub fn document_symbols(
     // index entry but can still be outlined from their open text.
     let path = uri.to_file_path().ok();
 
-    let symbols: Vec<Symbol> = match documents.text(&uri) {
-        Some(text) => {
+    let symbols: Vec<Symbol> = match documents.snapshot(&uri) {
+        Some(snapshot) => {
             let extract_path = path
                 .clone()
                 .unwrap_or_else(|| std::path::PathBuf::from(uri.path()));
-            extractor::extract_full_with(&text, &extract_path, &index.extract_config())
-                .map(|(_, syms, _)| syms)
-                .unwrap_or_default()
+            extractor::extract_full_tree(
+                &snapshot.tree,
+                &snapshot.text,
+                &extract_path,
+                &index.extract_config(),
+            )
+            .map(|(_, syms, _)| syms)
+            .unwrap_or_default()
         }
         None => path
             .map(|path| {

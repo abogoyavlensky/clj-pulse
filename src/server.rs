@@ -1168,22 +1168,34 @@ async fn lint_and_publish_doc(
     uri: Url,
     version: i32,
 ) {
-    let Some(text) = documents.text(&uri) else {
+    let Some(snapshot) = documents.snapshot(&uri) else {
         return;
     };
     let Ok(path) = uri.to_file_path() else {
         return;
     };
+    // The tree comes from the document store, already updated for every edit
+    // so far: a pass never parses. `parsed=0` is what the e2e suite looks for.
+    tracing::debug!(
+        "lint pass {} v{} parsed=0 ({} bytes, cached tree)",
+        path.display(),
+        version,
+        snapshot.text.len()
+    );
+    let text = Arc::new(snapshot.text);
     // The two tiers are independent, so they run at the same time rather than
     // one after the other — on a large buffer each costs hundreds of
     // milliseconds, and this is the path every keystroke takes. The native pass
     // is CPU-bound, so it goes to a blocking thread instead of holding a tokio
-    // worker for the whole parse.
+    // worker for the whole walk.
     let native_pass = {
         let text = text.clone();
+        let tree = snapshot.tree;
         let path = path.clone();
         let cfg = index.extract_config();
-        tokio::task::spawn_blocking(move || crate::diagnostics::compute(&text, &path, &cfg))
+        tokio::task::spawn_blocking(move || {
+            crate::diagnostics::compute_tree(&tree, &text, &path, &cfg)
+        })
     };
 
     let engine = kondo_state.lock().unwrap().clone();
@@ -1385,10 +1397,13 @@ impl Backend {
         let Ok(uri) = Url::parse(&params.uri) else {
             return Ok(Vec::new());
         };
-        let Some(text) = self.documents.text(&uri) else {
+        let Some(snapshot) = self.documents.snapshot(&uri) else {
             return Ok(Vec::new());
         };
-        Ok(handlers::ignored_forms::ignored_form_ranges(&text))
+        Ok(handlers::ignored_forms::ignored_form_ranges_tree(
+            &snapshot.tree,
+            &snapshot.text,
+        ))
     }
 
     /// clj-pulse custom `clojurePulse/clojureDocs`: the ClojureDocs entry for
@@ -2173,12 +2188,23 @@ impl LanguageServer for Backend {
         let text = params.text_document.text;
         let version = params.text_document.version;
 
+        // The store parses the buffer once on open; the on-open indexing below
+        // and the first lint pass both run on that tree.
+        self.documents.open(uri.clone(), text);
+        self.documents.set_version(&uri, version);
+
         // Files outside deps.edn :paths (dev/, scratch files, test dirs that
         // only appear in alias :extra-paths) are not indexed at startup;
         // index them on open so navigation from them works.
-        if let Ok(path) = uri.to_file_path() {
+        if let (Ok(path), Some(snapshot)) = (uri.to_file_path(), self.documents.snapshot(&uri)) {
+            let text = &snapshot.text;
             if config::is_clojure_source(&path) && self.index.file_ns(&path).is_none() {
-                match extractor::extract_full_with(&text, &path, &self.index.extract_config()) {
+                match extractor::extract_full_tree(
+                    &snapshot.tree,
+                    text,
+                    &path,
+                    &self.index.extract_config(),
+                ) {
                     Ok((meta, symbols, occurrences)) => {
                         tracing::info!("indexed opened file {}", path.display());
                         self.index.insert_file(meta, symbols, occurrences);
@@ -2187,18 +2213,18 @@ impl LanguageServer for Backend {
                         tracing::debug!("failed to index opened {}: {}", path.display(), e)
                     }
                 }
-            } else if extractor::is_integrant_edn(&path, &text)
+            } else if extractor::is_integrant_edn(&path, text)
                 && self.index.file_ns(&path).is_none()
             {
                 // Integrant config opened from outside the scanned paths.
                 tracing::info!("indexed opened EDN config {}", path.display());
-                self.index
-                    .insert_edn_file(path.clone(), extractor::extract_edn(&text));
+                self.index.insert_edn_file(
+                    path.clone(),
+                    extractor::extract_edn_tree(&snapshot.tree, text),
+                );
             }
         }
 
-        self.documents.open(uri.clone(), text);
-        self.documents.set_version(&uri, version);
         self.lint_and_publish(uri, version).await;
     }
 
@@ -2422,10 +2448,13 @@ impl LanguageServer for Backend {
                             if !config::is_clojure_source(&path) || !index.is_project_path(&path) {
                                 continue;
                             }
-                            if let Some(text) = documents.text(&uri) {
-                                if let Ok((meta, symbols, occ)) =
-                                    extractor::extract_full_with(&text, &path, &cfg)
-                                {
+                            if let Some(snapshot) = documents.snapshot(&uri) {
+                                if let Ok((meta, symbols, occ)) = extractor::extract_full_tree(
+                                    &snapshot.tree,
+                                    &snapshot.text,
+                                    &path,
+                                    &cfg,
+                                ) {
                                     index.remove_file(&path);
                                     index.insert_file(meta, symbols, occ);
                                 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
-use crate::document::DocumentStore;
+use crate::document::{DocumentStore, Snapshot};
 use crate::index::{extractor, DefKind, Index, Occurrence, Symbol, SymbolSource};
 
 pub fn references(
@@ -106,8 +106,8 @@ fn local_refs_at(
     if word.contains('/') {
         return None;
     }
-    let text = documents.text(uri)?;
-    let refs = extractor::local_references_at(&text, pos, &word)?;
+    let snapshot = documents.snapshot(uri)?;
+    let refs = extractor::local_references_at_tree(&snapshot.tree, &snapshot.text, pos, &word)?;
     Some((word, refs))
 }
 
@@ -117,14 +117,14 @@ fn local_refs_at(
 /// means something else. A new name that merely shadows a *var* is allowed —
 /// that is ordinary Clojure, and the local wins by design.
 fn reject_local_capture(
-    text: &str,
+    snapshot: &Snapshot,
     refs: &extractor::LocalRefs,
     word: &str,
     new_name: &str,
 ) -> Result<()> {
     let sites = std::iter::once(refs.declaration).chain(refs.usages.iter().copied());
     for site in sites {
-        let taken = extractor::locals_in_scope_at(text, site.start)
+        let taken = extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, site.start)
             .into_iter()
             .any(|b| b.name == new_name);
         if taken {
@@ -236,10 +236,19 @@ fn occurrence_range_at(
     fqn: &str,
 ) -> Option<Range> {
     let path = crate::uri::to_index_path(uri)?;
-    let text = documents.text(uri)?;
-    let (_, syms, occs) =
-        extractor::extract_full_with(&text, &path, &index.extract_config()).ok()?;
-    let line = text.lines().nth(pos.line as usize).unwrap_or_default();
+    let snapshot = documents.snapshot(uri)?;
+    let (_, syms, occs) = extractor::extract_full_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        &path,
+        &index.extract_config(),
+    )
+    .ok()?;
+    let line = snapshot
+        .text
+        .lines()
+        .nth(pos.line as usize)
+        .unwrap_or_default();
     syms.iter()
         .filter(|s| s.fqn == fqn)
         .map(|s| s.name_range)
@@ -280,8 +289,8 @@ pub fn rename(
 
     let (fqn, sym) = match rename_target(index, documents, &uri, pos)? {
         RenameTarget::Local { word, refs } => {
-            if let Some(text) = documents.text(&uri) {
-                reject_local_capture(&text, &refs, &word, &new_name)?;
+            if let Some(snapshot) = documents.snapshot(&uri) {
+                reject_local_capture(&snapshot, &refs, &word, &new_name)?;
             }
             let mut edits = vec![TextEdit {
                 range: refs.declaration,
@@ -306,15 +315,20 @@ pub fn rename(
     let decl_uri = Url::from_file_path(&sym.file)
         .map_err(|_| anyhow::anyhow!("invalid path: {:?}", sym.file))?;
     let decl_range = documents
-        .text(&decl_uri)
-        .and_then(|text| {
-            extractor::extract_full_with(&text, &sym.file, &index.extract_config())
-                .ok()
-                .and_then(|(_, syms, _)| {
-                    syms.into_iter()
-                        .find(|s| s.fqn == fqn)
-                        .map(|s| s.name_range)
-                })
+        .snapshot(&decl_uri)
+        .and_then(|snapshot| {
+            extractor::extract_full_tree(
+                &snapshot.tree,
+                &snapshot.text,
+                &sym.file,
+                &index.extract_config(),
+            )
+            .ok()
+            .and_then(|(_, syms, _)| {
+                syms.into_iter()
+                    .find(|s| s.fqn == fqn)
+                    .map(|s| s.name_range)
+            })
         })
         .unwrap_or(sym.name_range);
     changes.entry(decl_uri).or_default().push(TextEdit {
@@ -367,23 +381,26 @@ pub fn resolve_fqn_at(
     let path = crate::uri::to_index_path(uri)?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
 
-    // Resolve against live text so unsaved edits use current ranges. Position
-    // matching (below) runs without a word token, so a cursor on a keyword's
-    // `:`/`::` marker still resolves — the occurrence/definition range spans it.
-    let text = documents.text(uri)?;
+    // Resolve against the live buffer so unsaved edits use current ranges.
+    // Position matching (below) runs without a word token, so a cursor on a
+    // keyword's `:`/`::` marker still resolves — the occurrence/definition
+    // range spans it.
+    let snapshot = documents.snapshot(uri)?;
+    let cfg = index.extract_config();
 
     // EDN config files (Integrant systems) have no symbols or aliases; match
     // the cursor against keyword occurrences only. `file_occurrences` applies
     // the `#ig/ref` gate, so a cursor in a non-Integrant manifest resolves to
     // nothing.
     if crate::config::is_edn(&path) {
-        return extractor::file_occurrences_with(&text, &path, &index.extract_config())
+        return extractor::file_occurrences_tree(&snapshot.tree, &snapshot.text, &path, &cfg)
             .into_iter()
             .find(|occ| range_contains(&occ.name_range, pos))
             .map(|occ| occ.fqn);
     }
 
-    if let Ok((_, syms, occs)) = extractor::extract_full_with(&text, &path, &index.extract_config())
+    if let Ok((_, syms, occs)) =
+        extractor::extract_full_tree(&snapshot.tree, &snapshot.text, &path, &cfg)
     {
         for sym in &syms {
             // A `defmethod` head names the multimethod it extends, not a new
@@ -427,8 +444,8 @@ fn range_contains(range: &Range, pos: Position) -> bool {
 }
 
 /// All occurrences of `fqn`, per file. Files currently open in the editor
-/// are re-extracted from live text so unsaved edits produce correct ranges;
-/// everything else comes from the index.
+/// are re-extracted from their cached tree so unsaved edits produce correct
+/// ranges; everything else comes from the index.
 pub fn occurrences_for(
     index: &Index,
     documents: &DocumentStore,
@@ -441,10 +458,15 @@ pub fn occurrences_for(
         let Some(path) = crate::uri::to_index_path(&uri) else {
             continue;
         };
-        let Some(text) = documents.text(&uri) else {
+        let Some(snapshot) = documents.snapshot(&uri) else {
             continue;
         };
-        let occs = extractor::file_occurrences_with(&text, &path, &index.extract_config());
+        let occs = extractor::file_occurrences_tree(
+            &snapshot.tree,
+            &snapshot.text,
+            &path,
+            &index.extract_config(),
+        );
         live.insert(path, occs);
     }
 

@@ -594,6 +594,11 @@ fn test_keyword_item_replaces_the_whole_token() {
 /// their edit against.
 const AUTO_REQUIRE_SOURCE: &str = "(ns app.core)\n\n(defn go [] nil)\n";
 
+/// The live-buffer snapshot the auto-require tests hand to `complete_symbols`.
+fn auto_require_snapshot() -> clj_pulse::document::Snapshot {
+    clj_pulse::document::Snapshot::parse(AUTO_REQUIRE_SOURCE).unwrap()
+}
+
 /// An index holding one project file (`app.core`) and `clojure.string` as a
 /// library namespace, the shape the curated-alias path needs.
 fn auto_require_index() -> Index {
@@ -619,7 +624,7 @@ fn test_auto_require_qualified_unknown_alias() {
     // to nothing today, so offer the var and the require that would make it
     // resolve.
     let index = auto_require_index();
-    let items = complete_symbols(&index, "str/jo", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "str/jo", "app.core", Some(&auto_require_snapshot()));
     let item = item_named(&items, "str/join");
     assert_eq!(
         item.detail.as_deref(),
@@ -642,7 +647,7 @@ fn test_auto_require_bare_prefix_project_ns() {
         vec![],
     );
 
-    let items = complete_symbols(&index, "slug", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "slug", "app.core", Some(&auto_require_snapshot()));
     let item = item_named(&items, "util/slugify");
     assert_eq!(item.detail.as_deref(), Some("requires [app.util :as util]"));
     assert!(
@@ -663,7 +668,7 @@ fn test_no_auto_require_when_already_required() {
     meta.requires.push("clojure.string".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "str/jo", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "str/jo", "app.core", Some(&auto_require_snapshot()));
     let item = item_named(&items, "str/join");
     assert!(
         item.additional_text_edits.is_none(),
@@ -672,7 +677,7 @@ fn test_no_auto_require_when_already_required() {
     );
 
     // The same through a bare prefix.
-    let items = complete_symbols(&index, "joi", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "joi", "app.core", Some(&auto_require_snapshot()));
     assert!(
         !labels(&items).contains(&"str/join".to_string()),
         "already required: {:?}",
@@ -692,7 +697,7 @@ fn test_no_auto_require_on_alias_collision() {
     meta.requires.push("other.lib".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "joi", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "joi", "app.core", Some(&auto_require_snapshot()));
     assert!(
         !labels(&items).contains(&"str/join".to_string()),
         "alias `str` is taken: {:?}",
@@ -716,7 +721,7 @@ fn test_auto_require_sorts_after_in_scope() {
     meta.requires.push("clojure.string".to_string());
     index.insert_file(meta, vec![defn_sym("joiner", "app.core")], vec![]);
 
-    let items = complete_symbols(&index, "join", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "join", "app.core", Some(&auto_require_snapshot()));
     let in_scope = item_named(&items, "joiner").sort_text.unwrap();
     let auto = item_named(&items, "util/join").sort_text.unwrap();
     assert!(
@@ -734,7 +739,7 @@ fn test_auto_require_pool_capped() {
         let ns = format!("app.mod{}", i);
         index.insert_file(ns_meta(&ns), vec![defn_sym("widget", &ns)], vec![]);
     }
-    let items = complete_symbols(&index, "widg", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "widg", "app.core", Some(&auto_require_snapshot()));
     let auto: Vec<String> = items
         .iter()
         .filter(|i| i.sort_text.as_deref().is_some_and(|s| s.starts_with("9-")))
@@ -767,7 +772,7 @@ fn test_auto_require_item_resolves_documentation() {
     sym.doc = Some("Slugs a string.".to_string());
     index.insert_file(ns_meta("app.util"), vec![sym], vec![]);
 
-    let items = complete_symbols(&index, "slug", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "slug", "app.core", Some(&auto_require_snapshot()));
     let item = item_named(&items, "util/slugify");
     assert!(item.documentation.is_none(), "docs travel lazily");
     let resolved = resolve(&index, item);
@@ -792,7 +797,7 @@ fn test_no_auto_require_for_integrant_keys() {
     key.fqn = ":app.system/database".to_string();
     index.insert_file(ns_meta("app.system"), vec![key], vec![]);
 
-    let items = complete_symbols(&index, "datab", "app.core", Some(AUTO_REQUIRE_SOURCE));
+    let items = complete_symbols(&index, "datab", "app.core", Some(&auto_require_snapshot()));
     assert!(
         !labels(&items).contains(&"system/database".to_string()),
         "an Integrant key is not a requireable var: {:?}",
