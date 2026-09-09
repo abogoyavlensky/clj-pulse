@@ -4043,6 +4043,48 @@ fn test_e2e_integrant_references_span_defmethods_and_config() {
 }
 
 #[test]
+fn test_e2e_references_list_namespaced_keys_destructuring() {
+    // `{::db/keys [db]}` reads the key `:readx.db/db`, so find-references on
+    // the component keyword lists the destructuring entry too — the site a
+    // keyword rename would otherwise leave reading the old key.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+    let consumer = root.join("src/readx/consumer.clj");
+    std::fs::write(
+        &consumer,
+        "(ns readx.consumer\n  (:require [readx.db :as db]))\n\n(defn start [{::db/keys [db]}]\n  db)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db_file = root.join("src/readx/db.clj");
+    client.did_open(&db_file);
+
+    let (line, ch) = position_of(&db_file, "::db");
+    let result = client.references(&db_file, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", result));
+    let entry = locs
+        .iter()
+        .find(|l| {
+            l["uri"]
+                .as_str()
+                .unwrap()
+                .ends_with("/src/readx/consumer.clj")
+        })
+        .unwrap_or_else(|| panic!("destructuring entry missing: {:?}", locs));
+
+    let text = std::fs::read_to_string(&consumer).unwrap();
+    let (entry_line, entry_col) = start_of(&text, "db]}");
+    assert_eq!(entry["range"]["start"]["line"], json!(entry_line));
+    assert_eq!(entry["range"]["start"]["character"], json!(entry_col));
+}
+
+#[test]
 fn test_e2e_keyword_does_not_navigate_to_same_named_var() {
     // A namespaced keyword must never goto-def to a same-named var. With no
     // keyword definition, goto-def yields nothing rather than a wrong jump
@@ -5916,18 +5958,18 @@ fn test_e2e_prepare_rename_rejects_what_rename_rejects() {
     .unwrap();
 
     let utils = root.join("src/utils.clj");
-    let file = root.join("src/ns_options.clj");
+    let file = root.join("src/keywords.clj");
     for path in [&utils, &file, &probe] {
         client.did_open(path);
     }
 
     let (str_line, str_ch) = position_of(&utils, "(str \"Hello");
-    let (kw_line, kw_ch) = start_of(&std::fs::read_to_string(&file).unwrap(), "::cfg/port");
+    let (kw_line, kw_ch) = start_of(&std::fs::read_to_string(&file).unwrap(), ":id 0");
     let (bind_line, bind_ch) = start_of(&std::fs::read_to_string(&probe).unwrap(), "amount]");
 
     let cases = [
         (&utils, str_line, str_ch + 1, "rename"),
-        (&file, kw_line, kw_ch + 3, "keyword"),
+        (&file, kw_line, kw_ch + 1, "unqualified keyword"),
         (&probe, bind_line, bind_ch + 2, ":keys"),
     ];
     for (path, line, ch, needle) in cases {
@@ -5956,6 +5998,550 @@ fn test_e2e_prepare_rename_rejects_what_rename_rejects() {
             ch
         );
     }
+}
+
+#[test]
+fn test_e2e_prepare_rename_keyword_returns_name_suffix() {
+    // A keyword rename rewrites only the name at the end of the token — the
+    // notation (`::db`, `::alias/db`, `:readx.db/db`) takes care of itself — so
+    // the range the editor pre-selects is `db`, not the whole `::db`.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    let text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&text, "::db");
+    // Cursor on the second colon: still inside the token, outside the suffix.
+    let range = client.prepare_rename(&db, line, col + 1);
+    assert_eq!(
+        range["start"],
+        json!({ "line": line, "character": col + 2 }),
+        "{}",
+        range
+    );
+    assert_eq!(
+        range["end"],
+        json!({ "line": line, "character": col + 4 }),
+        "{}",
+        range
+    );
+}
+
+#[test]
+fn test_e2e_prepare_rename_refuses_keys_destructuring() {
+    // `{::kw/keys [local]}` reads `:simple.keywords/local` through a bare
+    // symbol, so no suffix edit can rewrite it. The rename is refused whole
+    // rather than rewriting every other site and leaving this one reading the
+    // old key — and prepareRename refuses it with the same message.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, "::local true");
+    let prepared = client.prepare_rename_error(&keywords, line, col + 3);
+    assert!(
+        prepared.contains("destructuring") && prepared.contains("kw_destructure.clj"),
+        "expected the destructuring refusal, got: {}",
+        prepared
+    );
+
+    let renamed = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", keywords.display()) },
+            "position": { "line": line, "character": col + 3 },
+            "newName": "scoped"
+        }),
+    );
+    assert_eq!(
+        renamed["message"].as_str().unwrap(),
+        prepared,
+        "prepareRename and rename must reject alike"
+    );
+}
+
+/// Every edit of `edits` must cover exactly `expected` in `text`.
+fn assert_edits_cover(text: &str, edits: &[serde_json::Value], expected: &str, new_text: &str) {
+    let lines: Vec<&str> = text.lines().collect();
+    for edit in edits {
+        let range = &edit["range"];
+        let line = range["start"]["line"].as_u64().unwrap() as usize;
+        assert_eq!(
+            range["start"]["line"], range["end"]["line"],
+            "a keyword edit never spans lines: {}",
+            edit
+        );
+        let units: Vec<u16> = lines[line].encode_utf16().collect();
+        let from = range["start"]["character"].as_u64().unwrap() as usize;
+        let to = range["end"]["character"].as_u64().unwrap() as usize;
+        assert_eq!(
+            String::from_utf16_lossy(&units[from..to]),
+            expected,
+            "edit {} covers the wrong text in {:?}",
+            edit,
+            lines[line]
+        );
+        assert_eq!(edit["newText"], json!(new_text), "{}", edit);
+    }
+}
+
+#[test]
+fn test_e2e_rename_keyword_across_clj_and_edn() {
+    // The headline case: `::db` renamed from its `defmethod` rewrites all three
+    // lifecycle dispatch keywords and both `:readx.db/db` sites in the Integrant
+    // config — the `#ig/ref` one included — each in its own notation, because
+    // every edit replaces only the name the token ends with.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    let config = root.join("resources/config.edn");
+    client.did_open(&db);
+
+    let db_text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&db_text, "::db");
+    let result = client.rename(&db, line, col + 2, "store");
+    let changes = result["changes"].as_object().unwrap();
+    assert_eq!(changes.len(), 2, "db.clj and config.edn: {}", result);
+
+    let db_edits = changes
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/readx/db.clj"))
+        .unwrap_or_else(|| panic!("no db.clj edits: {}", result))
+        .1
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        db_edits.len(),
+        3,
+        "assert-key, init-key and halt-key!: {:?}",
+        db_edits
+    );
+    assert_edits_cover(&db_text, db_edits, "db", "store");
+    // Pinned: the `::db` this rename started from keeps its `::` notation.
+    assert_eq!(
+        db_edits
+            .iter()
+            .filter(|e| e["range"]["start"] == json!({ "line": line, "character": col + 2 }))
+            .count(),
+        1,
+        "the dispatch keyword at the cursor: {:?}",
+        db_edits
+    );
+
+    let config_text = std::fs::read_to_string(&config).unwrap();
+    let config_edits = changes
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/resources/config.edn"))
+        .unwrap_or_else(|| panic!("no config.edn edits: {}", result))
+        .1
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        config_edits.len(),
+        2,
+        "the map key and the #ig/ref: {:?}",
+        config_edits
+    );
+    assert_edits_cover(&config_text, config_edits, "db", "store");
+    // The `#ig/ref` value is rewritten at its own suffix; the unqualified `:db`
+    // key of the server component sits on the same line and is a different
+    // keyword, so it stays put.
+    let (ref_line, ref_col) = start_of(&config_text, "#ig/ref :readx.db/db");
+    let ref_suffix = ref_col + "#ig/ref :readx.db/".len() as u32;
+    assert_eq!(
+        config_edits
+            .iter()
+            .filter(|e| e["range"]["start"]["line"] == json!(ref_line))
+            .map(|e| e["range"]["start"]["character"].as_u64().unwrap() as u32)
+            .collect::<Vec<_>>(),
+        vec![ref_suffix],
+        "only the #ig/ref value on that line: {:?}",
+        config_edits
+    );
+}
+
+#[test]
+fn test_e2e_rename_keyword_reaches_config_outside_source_paths() {
+    // Reported from VS Code: renaming an Integrant key from the `.clj` rewrote
+    // the sources and left `config.edn` alone, while renaming the same key
+    // *from* the `.edn` worked everywhere. The config sat under no declared
+    // source path — `resources` missing from `:paths`, as it is in every
+    // Leiningen project, whose `:resource-paths` are not read — so it was never
+    // scanned, and only entered the index when the user opened it.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+    let config = root.join("resources/config.edn");
+    std::fs::write(root.join("deps.edn"), "{:paths [\"src\"]}\n").unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    // Only the source is open: the config must come from the index, not from a
+    // live buffer.
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    let db_text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&db_text, "::db");
+    let result = client.rename(&db, line, col + 2, "store");
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/resources/config.edn"))
+        .unwrap_or_else(|| panic!("config outside :paths not edited: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(edits.len(), 2, "the map key and the #ig/ref: {:?}", edits);
+    let config_text = std::fs::read_to_string(&config).unwrap();
+    assert_edits_cover(&config_text, &edits, "db", "store");
+}
+
+#[test]
+fn test_e2e_rename_keyword_rewrites_namespaced_map_keys() {
+    // `#:readx.db{:db 1}` reads `:readx.db/db` through a bare `:db` key, so the
+    // edit replaces `db` and the map prefix carries the namespace as before.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+    let nsmap = root.join("src/readx/nsmap.clj");
+    std::fs::write(
+        &nsmap,
+        "(ns readx.nsmap)\n\n(def system #:readx.db{:db 1})\n",
+    )
+    .unwrap();
+    // The same shape in an Integrant config, where it is idiomatic.
+    let short = root.join("resources/short.edn");
+    std::fs::write(
+        &short,
+        "{:readx.short/thing {:db #ig/ref :readx.db/db}\n :extra #:readx.db{:db 1}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    let db_text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&db_text, "::db");
+    let result = client.rename(&db, line, col + 2, "store");
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/readx/nsmap.clj"))
+        .unwrap_or_else(|| panic!("namespaced-map key not edited: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(edits.len(), 1, "{:?}", edits);
+    let nsmap_text = std::fs::read_to_string(&nsmap).unwrap();
+    assert_edits_cover(&nsmap_text, &edits, "db", "store");
+    let (key_line, key_col) = start_of(&nsmap_text, "{:db 1}");
+    assert_eq!(
+        edits[0]["range"]["start"],
+        json!({ "line": key_line, "character": key_col + 2 }),
+        "{:?}",
+        edits
+    );
+
+    let short_edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/resources/short.edn"))
+        .unwrap_or_else(|| panic!("EDN namespaced-map key not edited: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    let short_text = std::fs::read_to_string(&short).unwrap();
+    assert_eq!(
+        short_edits.len(),
+        2,
+        "the #ig/ref and the #:readx.db{{:db …}} key: {:?}",
+        short_edits
+    );
+    assert_edits_cover(&short_text, &short_edits, "db", "store");
+    let (ns_line, ns_col) = start_of(&short_text, "#:readx.db{:db 1}");
+    assert!(
+        short_edits.iter().any(|e| e["range"]["start"]
+            == json!({ "line": ns_line, "character": ns_col + "#:readx.db{:".len() as u32 })),
+        "the prefixed key itself: {:?}",
+        short_edits
+    );
+}
+
+#[test]
+fn test_e2e_rename_keyword_uses_unsaved_edits() {
+    // An unsaved insertion above the keyword moves every site below it; the
+    // edits must land on the ranges the buffer has now, not the indexed ones.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+    client.did_change_insert(&db, 2, 0, ";; shifts every form below by one line\n");
+
+    let db_text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&db_text, "::db");
+    let result = client.rename(&db, line + 1, col + 2, "store");
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/readx/db.clj"))
+        .unwrap_or_else(|| panic!("no db.clj edits: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    // Every dispatch keyword, at the line it has *now* — one below where the
+    // index put it — and at the exact columns of its `db` suffix.
+    let expected: Vec<serde_json::Value> = [
+        "ig/assert-key ::db",
+        "ig/init-key ::db",
+        "ig/halt-key! ::db",
+    ]
+    .iter()
+    .map(|dispatch| {
+        let (l, c) = start_of(&db_text, dispatch);
+        let suffix = c + (dispatch.len() - 2) as u32;
+        json!({
+            "range": {
+                "start": { "line": l + 1, "character": suffix },
+                "end": { "line": l + 1, "character": suffix + 2 }
+            },
+            "newText": "store"
+        })
+    })
+    .collect();
+    let mut got: Vec<serde_json::Value> = edits.to_vec();
+    got.sort_by_key(|e| e["range"]["start"]["line"].as_u64().unwrap());
+    assert_eq!(got, expected, "edits must use the buffer's current ranges");
+}
+
+#[test]
+fn test_e2e_rename_keyword_refuses_colon_in_new_name() {
+    // The notation at each site supplies the colon, so the new name is the bare
+    // name — said plainly rather than as "not a valid symbol name".
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    let db_text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&db_text, "::db");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", db.display()) },
+            "position": { "line": line, "character": col + 2 },
+            "newName": "::store"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("without the colon") && msg.contains("'store'"),
+        "expected the colon message, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_e2e_rename_refuses_qualified_keys_destructuring() {
+    // `{:keys [simple.core/x]}` reads `:simple.core/x` while binding the local
+    // `x`. Rewriting the entry's suffix would rename that binding and orphan
+    // every usage of it, so this is refused like a bare `{::keys [x]}` entry.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/qualified_keys.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.qualified-keys)\n\n(defn f [{:keys [simple.core/x]}]\n  x)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, ":simple.core/x");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", keywords.display()) },
+            "position": { "line": line, "character": col + 3 },
+            "newName": "scoped"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("destructuring") && msg.contains("qualified_keys.clj"),
+        "expected the destructuring refusal, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_e2e_rename_keyword_sees_unsaved_definition() {
+    // A dispatch keyword is a *symbol*, not an occurrence, so it needs its own
+    // collection pass — and one typed but never saved has no indexed symbol at
+    // all. Missing it would edit every other site and leave this defmethod
+    // dispatching on the old key.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+    let extra = root.join("src/readx/extra.clj");
+    std::fs::write(
+        &extra,
+        "(ns readx.extra\n  (:require [integrant.core :as ig]))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+    client.did_open(&extra);
+    client.did_change_insert(
+        &extra,
+        2,
+        0,
+        "\n(defmethod ig/init-key :readx.db/db\n  [_ o] o)\n",
+    );
+
+    // prepareRename on the unsaved definition must not refuse what rename accepts.
+    let prepared = client.prepare_rename(&extra, 3, 30);
+    assert_eq!(
+        prepared["start"],
+        json!({ "line": 3, "character": 33 }),
+        "{}",
+        prepared
+    );
+
+    let text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&text, "::db");
+    let result = client.rename(&db, line, col + 2, "store");
+    let changes = result["changes"].as_object().unwrap();
+    let edits = changes
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/readx/extra.clj"))
+        .unwrap_or_else(|| panic!("unsaved defmethod not edited: {}", result))
+        .1;
+    assert_eq!(
+        edits[0]["range"],
+        json!({
+            "start": { "line": 3, "character": 33 },
+            "end": { "line": 3, "character": 35 }
+        }),
+        "{}",
+        edits
+    );
+    assert_eq!(edits[0]["newText"], json!("store"));
+}
+
+#[test]
+fn test_e2e_rename_refuses_unqualified_keyword() {
+    // `:id` in one map and `:id` in another are not one thing, so there is
+    // nothing project-wide to rename.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, ":id 0");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", keywords.display()) },
+            "position": { "line": line, "character": col + 1 },
+            "newName": "ident"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("unqualified keyword"),
+        "expected the unqualified refusal, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_e2e_rename_refuses_library_keyword() {
+    // `:clojure.string/x` is namespaced to a library: its sites are not ours
+    // to edit, the same rule library *symbols* already follow.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    write_clojure_string_jar(&root);
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.wait_for_log("library indexing complete");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(def k :clojure.string/x)\n");
+
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", utils.display()) },
+            "position": { "line": last_line, "character": 10 },
+            "newName": "y"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("library namespace") && msg.contains("clojure.string"),
+        "expected the library-namespace refusal, got: {}",
+        msg
+    );
 }
 
 #[test]

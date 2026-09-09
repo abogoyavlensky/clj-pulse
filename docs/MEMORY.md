@@ -82,6 +82,30 @@ collection). Nothing parses. The next lever, if a large file ever needs it, is
 caching the `Analysis` per document version so a request walks nothing; it is
 in the ROADMAP Backlog, not scheduled.
 
+### After keyword rename (2026-09-09)
+
+Same box and corpus, the release binary at commit 8e530c7. The extractor gained
+one pass over `:keys` destructuring vectors and namespaced maps in EDN configs,
+so the bench was re-run to price it: 3.7-4.0 s to project index, 365 MiB RSS,
+390 ms per edit, 24-30 ms per definition (median of two runs). That is the tree
+cache table within run-to-run noise — the new work is proportional to
+destructuring forms, not to file size, and does not show up.
+
+### Integrant configs are searched project-wide (2026-09-09)
+
+The EDN scan used to be limited to `:paths`, so a config the classpath does not
+name — `resources/config.edn` with `:paths ["src"]`, a Leiningen
+`:resource-paths`, a `system.edn` at the project root — was never indexed, and
+references and keyword rename silently skipped it. It now walks each project dir
+as well. Unbounded, that extra walk costs ~700 ms on metabase (27 556 files in
+5 111 dirs) for the 73 `.edn` files it finds: the traversal, not the reads.
+Bounded at `EDN_SCAN_MAX_DEPTH = 5` it costs nothing measurable — project index
+3.6 s, against 3.2-3.4 s in the table above and 3.7-4.0 s measured on this box
+the same afternoon — and still reaches every layout in the wild. The declared
+source roots are still walked in full alongside it, since one can sit outside
+the project dir (`:paths ["../shared/resources"]`) or below the bound. Deeper or
+gitignored configs fall back to `didOpen` indexing.
+
 ### On the maintainer's machine (macOS)
 
 The table above is a Linux CI-shaped box. The numbers users actually see are

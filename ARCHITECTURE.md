@@ -40,9 +40,23 @@ extractor.rs: keywords are recorded as occurrences with colon-prefixed fqns,
 extractor.rs: `(defmethod ig/init-key ::x …)` records `:ns/x` as an IntegrantKey
   *definition* (`DefKind::IntegrantKey`); the other lifecycle defmethods and all
   config uses are occurrences, so goto-definition lands on the constructor.
-scanner.rs: EDN files under `:paths` containing `#ig/ref` are scanned for keyword
-  occurrences (`extract_edn`) and inserted via `Index::insert_edn_file`
-  (occurrences only) — this links a `config.edn` component key to its defmethod.
+scanner.rs: EDN files anywhere in a project (to `EDN_SCAN_MAX_DEPTH`, gitignore
+  respected) containing `#ig/ref` are scanned for keyword occurrences
+  (`extract_edn`) and inserted via `Index::insert_edn_file` (occurrences only) —
+  this links a `config.edn` component key to its defmethod. The search is *not*
+  limited to `:paths`: where the config lives is a project convention, not a
+  classpath decision, and a Leiningen `:resource-paths` never becomes a source
+  root at all.
+  A ref-less config counts too when its top level is keyed by namespaced
+  keywords, `#:my.app{:db …}` included: the prefix qualifies the keys that carry
+  no namespace of their own (`:other/db` keeps its, `:_/db` escapes to plain
+  `:db`), exactly as the reader does.
+handlers/references.rs: keyword rename (`rename_target` → `RenameTarget::Keyword`)
+  collects every site — occurrences, the `IntegrantKey` definition, and the
+  definitions of open buffers — and edits only the name each token ends with.
+  A site it cannot rewrite that way (a `{::keys [db]}` entry, which is a symbol
+  binding a local) refuses the whole rename rather than leave it reading the
+  old key.
 
 ## Index Re-population (on file save)
 
@@ -87,7 +101,10 @@ word under cursor (from DocumentStore / ropey)
 - All LSP Position/Range values come from ropey, never manual byte arithmetic
 - On any parse failure: log warning, return Ok(empty) — never crash
 - Keyword fqns are colon-prefixed (`:ns/name`) so they never collide with var
-  fqns; keyword occurrences span the whole keyword token (navigation-only — the
-  rename path rejects keyword fqns).
+  fqns; keyword occurrences span the whole keyword token, and the rename path
+  replaces only the name that token ends with, so each site keeps its notation.
+  The one occurrence that is not a keyword token is a `:keys` destructuring
+  entry (`db`, `app/db`), which reads the key while binding a local of that
+  name — it can only refuse the rename, never take an edit.
 - EDN config files contribute occurrences only (no namespace, no symbols),
   registered under a NUL sentinel ns in `file_to_ns` so re-scans keep them.

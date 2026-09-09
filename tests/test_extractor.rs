@@ -712,6 +712,50 @@ fn test_non_integrant_defmethod_keyword_is_only_an_occurrence() {
 }
 
 #[test]
+fn test_extract_edn_namespaced_map_keys_take_the_map_prefix() {
+    // An Integrant config written short: `#:readx.db{:db …}` reads as
+    // `{:readx.db/db …}`. Walking the keys blindly would record nothing, and a
+    // keyword rename that cannot see a site leaves it reading the old key.
+    let src = "#:readx.db{:db {:url \"x\"}\n \
+               :_/bare 1\n \
+               :other.ns/kept 2\n \
+               :ref #ig/ref :readx.db/db}";
+    let occs = extract_edn(src);
+
+    // The prefixed key plus the `#ig/ref` value.
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/ref").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    // `:_/x` escapes the prefix and an explicitly qualified key keeps its own.
+    assert_eq!(
+        occurrences_of(&occs, ":other.ns/kept").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    assert!(
+        occs.iter()
+            .all(|o| o.fqn != ":readx.db/bare" && o.fqn != ":readx.db"),
+        "escaped key or map prefix recorded: {:?}",
+        occs
+    );
+
+    // The range is the key token, which the rename rewrites the suffix of.
+    let key = occurrences_of(&occs, ":readx.db/db")[0];
+    assert_eq!(key.name_range.start.line, 0);
+    assert_eq!(key.name_range.start.character, "#:readx.db{".len() as u32);
+}
+
+#[test]
 fn test_extract_edn_records_qualified_keywords_including_ig_ref() {
     let src = "{:readx.db/db {:url \"x\"}\n \
                :readx.server/server {:db #ig/ref :readx.db/db}}";
@@ -807,6 +851,17 @@ fn test_file_occurrences_gates_non_integrant_edn() {
     // An Integrant config (has #ig/ref) still contributes occurrences.
     let cfg = "{:my.app/db {} :sys {:db #ig/ref :my.app/db}}";
     assert!(!file_occurrences(cfg, Path::new("config.edn")).is_empty());
+
+    // So does a ref-less one written as a namespaced map, whose keys are
+    // qualified by the prefix rather than spelled out.
+    let short = "#:my.app{:db {:url \"x\"}}";
+    assert_eq!(
+        file_occurrences(short, Path::new("config.edn"))
+            .iter()
+            .map(|o| o.fqn.clone())
+            .collect::<Vec<_>>(),
+        vec![":my.app/db".to_string()]
+    );
 }
 
 #[test]
@@ -829,6 +884,13 @@ fn test_is_integrant_edn_detection() {
         Path::new("bb.edn"),
         "{:tasks {} :deps {}}"
     ));
+
+    // A ref-less system written as a namespaced map: the prefix qualifies every
+    // key, so the map literal is the signature.
+    let ns_map = "#:my.app{:db {:url \"x\"}\n :server {:port 8080}}";
+    assert!(is_integrant_edn(Path::new("resources/config.edn"), ns_map));
+    // `#::{…}` resolves against an `ns` form EDN does not have.
+    assert!(!is_integrant_edn(Path::new("config.edn"), "#::{:db {}}"));
 
     // A plain EDN data file with only unqualified top-level keys is not a config.
     assert!(!is_integrant_edn(Path::new("data.edn"), "{:a 1 :b 2}"));
@@ -1240,6 +1302,72 @@ fn test_namespaced_map_keys_take_the_map_prefix() {
         occs.iter().all(|o| o.fqn != ":id" && o.fqn != ":user"),
         "namespaced-map key or prefix leaked: {:?}",
         occs
+    );
+}
+
+#[test]
+fn test_namespaced_keys_entries_are_keyword_occurrences() {
+    // `{::keys [a]}`, `{:my.ns/keys [b]}`, `{::alias/keys [e]}` and the
+    // qualified entry of `{:keys [other.lib/c]}` all read a namespaced key, so
+    // the entry symbol is a usage of that keyword as well as a binding site —
+    // otherwise a keyword rename would rewrite every other site and leave these
+    // reading the old key. `:syms` reads quoted symbols and `:strs` strings, so
+    // neither contributes a keyword occurrence.
+    let src = "(ns my.ns\n  (:require [other.lib :as o]))\n\
+               (defn f [{::keys [a]}] a)\n\
+               (defn g [{:my.ns/keys [b]}] b)\n\
+               (defn h [{:keys [other.lib/c]}] c)\n\
+               (defn i [{::syms [d]}] d)\n\
+               (defn j [{::o/keys [e]}] e)\n\
+               (defn k [{:strs [s]}] s)\n\
+               (defn l [{:keys [plain]}] plain)\n\
+               (defn m [{:my.ns/keys [ignored.ns/n]}] n)";
+    let (_, _, occs) = extract_full(src, Path::new("keys.clj")).unwrap();
+
+    for fqn in [":my.ns/a", ":my.ns/b", ":other.lib/c", ":other.lib/e"] {
+        assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
+    }
+    // `clojure.core/destructure` reads the key as
+    // `(keyword (or directive-ns (namespace entry)) (name entry))`, so a
+    // qualified directive wins over a qualified entry.
+    assert_eq!(
+        occurrences_of(&occs, ":my.ns/n").len(),
+        1,
+        "directive namespace must win: {:?}",
+        occs
+    );
+    // A symbol key, a string key and a plain `{:keys [plain]}` entry (which
+    // reads the unqualified `:plain`) are not keyword occurrences.
+    assert!(
+        occs.iter().all(|o| !o.fqn.ends_with("/d")
+            && !o.fqn.ends_with("/s")
+            && o.fqn != ":s"
+            && !o.fqn.ends_with("/plain")
+            && !o.fqn.starts_with(":ignored.ns/")),
+        "symbol, string or unqualified destructuring key recorded: {:?}",
+        occs
+    );
+
+    // The range is the entry symbol itself, namespace included where it has
+    // one — that is the token a rename rewrites.
+    let a = occurrences_of(&occs, ":my.ns/a")[0];
+    let line = "(defn f [{::keys [a]}] a)";
+    assert_eq!(a.name_range.start.line, 2);
+    assert_eq!(
+        a.name_range.start.character,
+        line.find("[a]").unwrap() as u32 + 1
+    );
+    assert_eq!(a.name_range.end.character, a.name_range.start.character + 1);
+
+    let c = occurrences_of(&occs, ":other.lib/c")[0];
+    let line = "(defn h [{:keys [other.lib/c]}] c)";
+    assert_eq!(
+        c.name_range.start.character,
+        line.find("other.lib/c").unwrap() as u32
+    );
+    assert_eq!(
+        c.name_range.end.character,
+        c.name_range.start.character + "other.lib/c".len() as u32
     );
 }
 

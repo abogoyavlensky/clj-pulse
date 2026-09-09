@@ -1,5 +1,7 @@
 # Keyword Rename Implementation Plan
 
+**Status: complete** (2026-09-09, branch `keyword-rename`).
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rename a qualified keyword across the project, rewriting every occurrence in its own notation (`::name`, `::alias/name`, `:ns/name`), Integrant EDN files included, and refusing only what cannot be rewritten safely (ROADMAP Milestone 3, part 2 of 2).
@@ -70,22 +72,32 @@ Modify:
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Extractor: `test_namespaced_keys_entries_are_keyword_occurrences` covering the four forms in the design and the `:strs` exclusion, asserting fqn and that `name_range` is the entry symbol. e2e: references on `::db` in a fixture file that destructures it lists the entry.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor namespaced_keys_entries`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In the walker where the namespaced directive is recognized, push an `Occurrence` per entry alongside the binding it already records. Check that `unused-private-var` and references counts in existing tests still hold; adjust deliberately if a fixture now has one more occurrence.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Record namespaced destructuring entries as keyword occurrences"`
+
+> Deviation: `:syms` vectors are excluded alongside `:strs`. `clojure.core/destructure`
+> reads a `:syms` entry as a quoted *symbol* key, so `{::syms [a]}` never reads the
+> keyword `::a` — recording it would put unrelated sites in find-references and make
+> keyword rename refuse for a site it does not touch. Only `:keys` is recorded.
+>
+> Deviation: when both the directive and the entry are qualified, the directive's
+> namespace wins — `destructure` builds the key as
+> `(keyword (or directive-ns (namespace entry)) (name entry))`, so `{:foo/keys [bar/a]}`
+> reads `:foo/a`. Both found by the codex review of the task commit.
 
 ### Task 2: Keyword target, sites, and prepareRename
 
@@ -93,22 +105,53 @@ Modify:
 - Modify: `src/handlers/references.rs`, `src/index/mod.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   e2e: `test_e2e_prepare_rename_keyword_returns_name_suffix` on `::db` in `integrant_project/src/readx/db.clj`; `test_e2e_rename_refuses_unqualified_keyword`; `test_e2e_rename_refuses_library_keyword` (`:clojure.string/x` typed into an open buffer of `simple_project`).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e rename_keyword`
   Expected: FAIL (keywords still refused with the old message).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `RenameTarget::Keyword { fqn, sites }`, the two scope rules, the project-path filter, and the site collection with token checks in `rename_target` (`fn name_suffix_range(range: Range, token: &str, name: &str) -> Option<Range>`, UTF-16 lengths), `is_library_namespace`, and `prepare_rename` answering with the site at the cursor. Add `test_e2e_prepare_rename_refuses_keys_destructuring` here as well.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS; existing `rename` tests for vars and locals unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Accept qualified project keywords as rename targets"`
+
+> Deviation: the `Keyword` branch of `rename` and the colon-in-new-name message
+> (Task 3, step 3) landed here — the `match` on `RenameTarget` does not compile
+> without the branch, and Task 2's own refusal tests go through `rename`. Task 3
+> keeps its tests, the fixture and the Pulse gate.
+>
+> Deviation: `tests/fixtures/simple_project/src/kw_destructure.clj` was added here
+> rather than in Task 3, since `test_e2e_prepare_rename_refuses_keys_destructuring`
+> needs it.
+>
+> Deviation: `RenameTarget::Keyword` carries `sites: Vec<KeywordSite>` — each site
+> holds the whole token range as well as the name sub-range — instead of
+> `{ fqn, sites: Vec<(Url, Range)> }`. `prepareRename` needs the token range: a
+> cursor on the `::` marker sits outside the suffix the edit replaces. `fqn` had no
+> reader left once the refusals moved into `rename_target`.
+>
+> Deviation: `test_e2e_prepare_rename_rejects_what_rename_rejects` used
+> `::cfg/port` as its keyword case, which is now renameable; it checks the
+> unqualified `:id` instead.
+>
+> Deviation (codex review): a keyword token must now *start* with `:` as well as
+> end with the name. A qualified destructuring entry (`{:keys [app/id]}`) ends
+> with `/id` but binds the local `id`, so rewriting its suffix would rename the
+> binding and orphan every usage of it; it is refused with the destructuring
+> message, like the bare entry.
+>
+> Deviation (codex review): definition sites are collected from every open
+> project buffer, not only from `index.lookup`. A dispatch keyword typed but not
+> yet saved has no indexed symbol and is not an occurrence, so it would have been
+> left dispatching on the old key — and, with the cursor on it, `prepareRename`
+> would have refused what `rename` accepts.
 
 ### Task 3: Keyword edits
 
@@ -116,32 +159,120 @@ Modify:
 - Modify: `src/handlers/references.rs`
 - Test: `tests/test_e2e.rs`, `tests/fixtures/simple_project/src/kw_destructure.clj`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Unit tests for `name_suffix_range` on `::db`, `::ig/db`, `:readx.db/db`, and a bare `db` token (returns `None`). e2e: `test_e2e_rename_keyword_across_clj_and_edn` (the integrant case from the design, asserting every edit's range and text), `test_e2e_rename_keyword_refuses_colon_in_new_name`, `test_e2e_rename_keyword_refuses_keys_destructuring` with the new fixture file.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e rename_keyword`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   The `Keyword` branch of `rename`: validate the new name, map `sites` to `TextEdit`s grouped by URI, return the `WorkspaceEdit`. All site validation already happened in `rename_target`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e && bb e2e-pulse`
   Expected: PASS. In the Pulse gate, add a check that renames `::db` in the fixture through `vscode.executeDocumentRenameProvider`, applies the returned `WorkspaceEdit` with `vscode.workspace.applyEdit`, then reads both documents back and asserts `::store` in the `.clj` and `:readx.db/store` in the `.edn` (the Pulse fixture needs an Integrant-style pair; copy the two files from `integrant_project` into `scripts/pulse-e2e/fixture/`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Rename qualified keywords across Clojure and EDN files"`
+
+> Deviation: `test_e2e_rename_keyword_refuses_keys_destructuring` is folded into
+> `test_e2e_prepare_rename_refuses_keys_destructuring`, which asserts that
+> `rename` and `prepareRename` refuse with the *same* message — the invariant
+> worth pinning. Two extra e2e tests came out of the codex reviews:
+> `test_e2e_rename_refuses_qualified_keys_destructuring` and
+> `test_e2e_rename_keyword_sees_unsaved_definition`.
+>
+> Deviation: the namespaced-map key case is in scope after all —
+> `record_ns_map_key` already records `#:readx.db{:db 1}` as `:readx.db/db`, so
+> `test_e2e_rename_keyword_rewrites_namespaced_map_keys` covers it.
+>
+> Deviation (codex review): `extract_edn` now applies namespaced-map prefixes
+> too (`collect_edn_ns_map`). It did not, so `#:my.app{:db …}` in an Integrant
+> config was invisible to references *and* to rename — the silent-miss the
+> all-or-nothing rule exists to prevent, on the very file type this plan is
+> about. Pre-existing, fixed here because the feature makes it user-visible.
+>
+> Two assertions codex called weak were tightened: the unsaved-edit test now
+> pins all three edits to exact shifted ranges, and the `#ig/ref` assertion pins
+> the edit column rather than only its line.
+>
+> Deviation (codex review, round 3): the Integrant-config gate
+> (`has_namespaced_top_level_key`) only recognised `map_lit`, so a ref-less
+> config written as `#:my.app{…}` was never scanned at all — the previous fix
+> would have been dead code for exactly that file. A top-level namespaced map
+> with a literal prefix now counts as the signature.
 
 ### Task 4: Docs and roadmap
 
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   README Rename bullet: qualified keywords, every notation, EDN included, what is refused. AGENTS.md invariants: replace the "keyword rename is rejected" sentence with the suffix rule and the two refusals. ARCHITECTURE keyword section likewise. ROADMAP Milestone 3: tick keyword rename, set `Plan:` to `done`. Use /writing-clearly.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Document keyword rename"`
+
+---
+
+## Completion summary
+
+All four tasks are done. `bb check` (448 unit + 162 e2e), `bb e2e`, `bb e2e-real`,
+`bb e2e-pulse`, `bb e2e-calva`, `bb e2e-nvim` and `bb bench` all pass.
+
+**What shipped.** A qualified project keyword renames across the whole project.
+Each site is rewritten in the notation it was written in, because the edit
+replaces only the name the token ends with: `::db`, `::alias/db` and
+`:my.app/db` become `::store`, `::alias/store` and `:my.app/store`. Integrant
+`config.edn` files are rewritten with the sources, `#ig/ref` values and
+namespaced-map keys included. Sites come from occurrences, the `IntegrantKey`
+definition, and the live definitions of every open buffer. `rename_target` holds
+every refusal that does not need the new name, so `prepareRename` refuses
+exactly what `rename` would: unqualified keywords, keywords of a library
+namespace, and any site a suffix edit cannot rewrite (a `{::keys [db]}` or
+`{:keys [app/db]}` entry, which reads the key while binding a local of that
+name). A refusal is whole; nothing is half-renamed.
+
+**Verified by hand.** The real binary was driven over stdio against a copy of
+the Integrant fixture: renaming `::db` from its `assert-key` defmethod returned
+7 edits across 3 files, and applying them produced exactly the three notations
+rewritten in place with the unqualified `:db` key in `config.edn` untouched. The
+same project with a `{::db/keys [db]}` consumer refused with the destructuring
+message instead.
+
+**Issues encountered.** All were found by the codex review checkpoints, none by
+the plan's own tests:
+
+1. `:syms` reads quoted symbol keys, not keywords, so recording its entries as
+   keyword occurrences was wrong (the plan asked for it).
+2. `clojure.core/destructure` builds the key as
+   `(keyword (or directive-ns (namespace entry)) (name entry))`, so a qualified
+   directive wins over a qualified entry. The first implementation had it
+   backwards.
+3. A qualified `:keys` entry (`{:keys [app/id]}`) *ends* with the name, so the
+   suffix rule accepted it and would have renamed the local binding while
+   leaving its usages behind. A keyword token must also *start* with `:`.
+4. A dispatch keyword typed but not yet saved has no indexed symbol and is not
+   an occurrence, so it was missed — and with the cursor on it, `prepareRename`
+   refused what `rename` accepted.
+5. `extract_edn` never applied namespaced-map prefixes, so `#:my.app{:db …}` in
+   an Integrant config was invisible to references *and* rename. Its gate
+   (`has_namespaced_top_level_key`) did not recognise such a config either, so
+   fixing one without the other would have been dead code.
+
+Every deviation note is inline under its task above.
+
+**What the plan could have specified better.** The design derived the suffix
+rule from what keyword notations have in common (they all *end* with the name)
+and never stated what they have in common at the front — that a keyword token
+always *starts* with a colon. That missing half is what let a qualified
+destructuring entry through, and it is also what made the plan treat
+`token == name` as the way to recognise a destructuring site. A rule stated from
+both ends would have been correct as written. Relatedly, the plan asserted the
+extractor facts it depended on ("`:syms` entries read the same key", "the
+`IntegrantKey` symbol is also an occurrence", "namespaced-map keys are already
+recorded") without pinning any of them to a test or a line of code; three of the
+five issues above are one of those assertions being false.

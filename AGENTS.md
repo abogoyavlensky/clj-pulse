@@ -143,6 +143,15 @@ and update README and this file in the same change.
   via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
+- Integrant EDN configs are found project-wide, not under `:paths`: the scan
+  walks each project dir to `scanner::EDN_SCAN_MAX_DEPTH` (gitignore respected)
+  and keeps what `is_integrant_edn` accepts. `:paths` is a classpath decision
+  and the config's location is not one — `resources/config.edn` is routinely
+  absent from it, and Leiningen `:resource-paths` never becomes a source root.
+  A config that is gitignored or deeper than that is indexed on `didOpen`, and
+  the `**/*.edn` watcher keeps every indexed one fresh. A config the scan
+  cannot see makes references skip it and a keyword rename silently leave it
+  pointing at the old key.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
 - Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
   first, then the built-in table `DefKind::from_macro_fqn`
@@ -168,7 +177,10 @@ and update README and this file in the same change.
   `invalid request` for the rest of the session.
 - Keyword occurrences carry both notations: a qualified keyword under the
   namespace it resolves to (`:my.ns/id`), an unqualified one under `:id`; a
-  namespaced map (`#:user{:id 1}`) qualifies its keys with the map's prefix.
+  namespaced map (`#:user{:id 1}`) qualifies its keys with the map's prefix, in
+  EDN configs as well as in Clojure sources. A namespaced `:keys` destructuring
+  entry (`{::keys [id]}`, `{:keys [user/id]}`) is an occurrence of the key it
+  reads; `:syms` and `:strs` read symbols and strings, so they are not.
   Definition ignores the unqualified fqns — there is nothing to navigate to —
   while references and keyword completion use them. `Index::keyword_counts`
   aggregates them and is maintained at every mutation of `occurrences`
@@ -195,7 +207,20 @@ and update README and this file in the same change.
   which source to read and `completion::resolve` renders the doc on demand.
 - `rename` and `prepareRename` share `references::rename_target`, so every
   rejection carries the same message from both. Only the checks that need the
-  new name (validity, local capture) live in `rename`.
+  new name (validity, local capture, the colon a keyword's new name must not
+  carry) live in `rename`.
+- A keyword rename edits the name its token *ends* with, never the token:
+  `::db`, `::alias/db` and `:my.app/db` all end in `db`, so one rule rewrites
+  every notation and the notation takes care of itself. Columns are UTF-16
+  units, and a token that is not a keyword ending in that name refuses the whole
+  rename — all-or-nothing, since rewriting the rest would leave that site
+  reading the old key. The known such shape is a `{::keys [db]}` /
+  `{:keys [app/db]}` entry: a symbol that reads the key *and* binds a local of
+  that name, so it gets the destructuring message. Sites come from occurrences,
+  the `IntegrantKey`-style definition, and the live definitions of every open
+  project buffer (one just typed has no indexed symbol); library files and
+  unqualified or library-namespaced keywords are refused or filtered out in
+  `rename_target`, so `prepareRename` refuses exactly what `rename` would.
 - `documentHighlight` resolves in the same order references does:
   `references::local_refs_at` first and authoritatively, then
   `resolve_fqn_at`. It never leaves the buffer — occurrences and definitions

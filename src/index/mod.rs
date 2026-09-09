@@ -416,6 +416,17 @@ impl Index {
         self.occurrences.contains_key(path)
     }
 
+    /// Whether `ns` is an indexed namespace that lives outside the project — a
+    /// JAR entry or a dir-library source. Keyword rename refuses these: the
+    /// keyword belongs to the library, and its sites are not ours to edit.
+    /// An unknown namespace is not a library one; there is nothing to protect.
+    pub fn is_library_namespace(&self, ns: &str) -> bool {
+        self.namespaces
+            .get(ns)
+            .map(|meta| !self.is_project_path(&meta.file))
+            .unwrap_or(false)
+    }
+
     /// Merges a freshly built project index into this one, removing project
     /// files that no longer exist in the new scan (e.g. source roots dropped
     /// from deps.edn `:paths`). Files in `keep` (currently open documents,

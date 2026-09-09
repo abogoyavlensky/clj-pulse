@@ -139,7 +139,9 @@ pub fn is_integrant_edn(path: &Path, source: &str) -> bool {
 
 /// Whether the first top-level map in `source` has any namespaced-keyword key —
 /// the structural signature of an Integrant system map. (Manifests like
-/// `deps.edn`/`bb.edn` use unqualified top-level keys.)
+/// `deps.edn`/`bb.edn` use unqualified top-level keys.) A namespaced map
+/// (`#:my.app{:db …}`) qualifies every key it holds through its prefix, so the
+/// map literal is itself the signature.
 fn has_namespaced_top_level_key(source: &str) -> bool {
     let mut parser = Parser::new();
     if parser.set_language(language()).is_err() {
@@ -149,14 +151,23 @@ fn has_namespaced_top_level_key(source: &str) -> bool {
         return false;
     };
     for top in named_children(tree.root_node()) {
-        if top.kind() != "map_lit" {
-            continue;
+        match top.kind() {
+            // `#::{…}` resolves against an `ns` form an EDN file does not have,
+            // so only a literal prefix counts.
+            "ns_map_lit" => {
+                return top
+                    .child_by_field_name("prefix")
+                    .map(|prefix| prefix.kind() == "kwd_lit")
+                    .unwrap_or(false)
+            }
+            // map_lit children alternate key, value, …; keys are the even indices.
+            "map_lit" => {
+                return named_children(top).iter().step_by(2).any(|key| {
+                    key.kind() == "kwd_lit" && key.child_by_field_name("namespace").is_some()
+                })
+            }
+            _ => continue,
         }
-        // map_lit children alternate key, value, …; keys are the even indices.
-        return named_children(top)
-            .iter()
-            .step_by(2)
-            .any(|key| key.kind() == "kwd_lit" && key.child_by_field_name("namespace").is_some());
     }
     false
 }
@@ -165,7 +176,8 @@ fn has_namespaced_top_level_key(source: &str) -> bool {
 /// system configs). EDN has no `ns` form or `::` auto-resolution, so only
 /// literal `:ns/name` keywords qualify — an empty `NsMeta` makes `keyword_fqn`
 /// drop `::`/unqualified keywords. Keywords nested in tagged literals
-/// (`#ig/ref :ns/x`), maps, and vectors are all reached by the generic descent.
+/// (`#ig/ref :ns/x`), maps, and vectors are all reached by the generic descent;
+/// a namespaced map (`#:my.app{:db …}`) qualifies its keys with its prefix.
 pub fn extract_edn(source: &str) -> Vec<Occurrence> {
     match parse_tree(source) {
         Some(tree) => extract_edn_tree(&tree, source),
@@ -201,8 +213,53 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
         }
         return;
     }
+    // `#:my.app{:db {…}}` is an ordinary Integrant config written short: the
+    // reader qualifies each unqualified key with the map's prefix, so walking
+    // the keys blindly would miss `:my.app/db` entirely — and a keyword rename
+    // that cannot see a site silently leaves it reading the old key.
+    if node.kind() == "ns_map_lit" {
+        collect_edn_ns_map(node, source, ns_meta, out);
+        return;
+    }
     for child in named_children(node) {
         collect_edn_keywords(child, source, ns_meta, out);
+    }
+}
+
+/// The keys of a namespaced map in an EDN config, under the fqns the reader
+/// gives them. Mirrors [`walk_ns_map`] with no scope to track: an EDN file has
+/// no `ns` form, so `#::{…}` and `#::alias{…}` resolve to nothing and their keys
+/// stay unqualified (recorded under no fqn), while `#:my.app{…}` qualifies its
+/// own. A splicing reader conditional makes keys and values indistinguishable,
+/// so such a map falls back to the ordinary walk.
+fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<Occurrence>) {
+    static NO_LINT_AS: OnceLock<HashMap<String, DefKind>> = OnceLock::new();
+    let ctx = OccurrenceCtx {
+        source,
+        ns_meta,
+        def_names: HashSet::new(),
+        lint_as: NO_LINT_AS.get_or_init(HashMap::new),
+    };
+    let map_ns = ns_map_prefix(node, &ctx);
+    let mut cursor = node.walk();
+    let entries: Vec<Node> = node.children_by_field_name("value", &mut cursor).collect();
+    if entries.iter().any(|n| n.kind() == "splicing_read_cond_lit") {
+        for entry in entries {
+            collect_edn_keywords(entry, source, ns_meta, out);
+        }
+        return;
+    }
+    for pair in entries.chunks(2) {
+        match pair.first() {
+            Some(key) if key.kind() == "kwd_lit" => {
+                record_ns_map_key(*key, map_ns.as_deref(), &ctx, out)
+            }
+            Some(key) => collect_edn_keywords(*key, source, ns_meta, out),
+            None => {}
+        }
+        if let Some(value) = pair.get(1) {
+            collect_edn_keywords(*value, source, ns_meta, out);
+        }
     }
 }
 
@@ -2074,6 +2131,7 @@ fn collect_binding_names(
                         }
                     } else {
                         // :keys/:strs/:syms vectors, :as name, …
+                        record_destructuring_keys(*k, *v, ctx, out);
                         collect_binding_names(*v, ctx, scope, out, names);
                     }
                 } else {
@@ -2091,6 +2149,78 @@ fn collect_binding_names(
                 collect_binding_names(child, ctx, scope, out, names);
             }
         }
+    }
+}
+
+/// Records the key each entry of a namespaced `:keys` destructuring vector
+/// reads. `{::keys [a]}`, `{:my.ns/keys [a]}`, `{::alias/keys [a]}` and the
+/// qualified entry of a plain `{:keys [my.ns/a]}` all read `:my.ns/a`, so the
+/// entry symbol is a usage of that keyword as well as a binding site: find
+/// references lists it, and a keyword rename sees it instead of silently
+/// leaving it reading the old key.
+///
+/// Only `:keys` reads keywords — `:syms` reads quoted symbols and `:strs`
+/// strings — and an unqualified entry of a plain `{:keys [a]}` reads `:a`,
+/// which no rename can target. None of those contribute an occurrence.
+fn record_destructuring_keys(
+    directive: Node,
+    entries: Node,
+    ctx: &OccurrenceCtx,
+    out: &mut Vec<Occurrence>,
+) {
+    let reads_keywords = directive
+        .child_by_field_name("name")
+        .map(|n| node_text(n, ctx.source) == "keys")
+        .unwrap_or(false);
+    if !reads_keywords || entries.kind() != "vec_lit" {
+        return;
+    }
+    let directive_ns = destructuring_key_ns(directive, ctx);
+    for entry in named_children(entries) {
+        if entry.kind() != "sym_lit" {
+            continue;
+        }
+        // `clojure.core/destructure` builds the key as
+        // `(keyword (or directive-ns (namespace entry)) (name entry))`, so a
+        // qualified directive wins over a qualified entry: `{:foo/keys [bar/a]}`
+        // reads `:foo/a`. An entry's own namespace is taken verbatim — only
+        // `::` auto-resolves, and only on the directive.
+        let ns = match (&directive_ns, entry.child_by_field_name("namespace")) {
+            (Some(ns), _) => ns.clone(),
+            (None, Some(node)) => node_text(node, ctx.source).to_string(),
+            (None, None) => continue,
+        };
+        out.push(Occurrence {
+            fqn: format!(":{}/{}", ns, node_text(sym_name_node(entry), ctx.source)),
+            name_range: node_to_lsp_range(entry, ctx.source),
+        });
+    }
+}
+
+/// The namespace a `:keys` directive qualifies its entries with: the current
+/// namespace for `::keys`, the alias-resolved one for `::alias/keys`, the
+/// literal prefix for `:my.ns/keys`. `None` for a plain `:keys`, whose entries
+/// carry their own namespace or none at all.
+fn destructuring_key_ns(directive: Node, ctx: &OccurrenceCtx) -> Option<String> {
+    let auto_resolved = directive
+        .child_by_field_name("marker")
+        .map(|m| node_text(m, ctx.source) == "::")
+        .unwrap_or(false);
+    match directive.child_by_field_name("namespace") {
+        Some(ns_node) => {
+            let ns = node_text(ns_node, ctx.source);
+            Some(if auto_resolved {
+                ctx.ns_meta
+                    .aliases
+                    .get(ns)
+                    .cloned()
+                    .unwrap_or_else(|| ns.to_string())
+            } else {
+                ns.to_string()
+            })
+        }
+        None if auto_resolved => (!ctx.ns_meta.name.is_empty()).then(|| ctx.ns_meta.name.clone()),
+        None => None,
     }
 }
 
