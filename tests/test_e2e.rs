@@ -4916,6 +4916,98 @@ fn test_e2e_unused_private_var_diagnostic() {
     );
 }
 
+/// A buffer over 1 KiB carrying the fake kondo's error marker, so both tiers
+/// have something to say and the `:live-max-kb 1` threshold applies.
+fn write_large_kondo_file(root: &Path) -> std::path::PathBuf {
+    let big = root.join("src/big.clj");
+    let mut source = String::from(
+        "(ns kondo.big)\n;; kondo-finding-here\n(defn run []\n  (helpers/greet \"world\"))\n",
+    );
+    while source.len() <= 1024 {
+        source.push_str(";; padding so the buffer is larger than one kibibyte\n");
+    }
+    std::fs::write(&big, source).unwrap();
+    big
+}
+
+#[test]
+fn test_e2e_kondo_threshold_skips_keystrokes_on_large_buffers() {
+    // Above `:live-max-kb`, clj-kondo sits out the didChange pass — the native
+    // set publishes alone — but still runs on open and on save. The engine
+    // itself stays active: no lint-status change, no re-probe.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:live-max-kb 1}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let big = write_large_kondo_file(&root);
+    client.did_open(&big);
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "didOpen always runs clj-kondo"
+    );
+
+    client.clear_notifications();
+    client.did_change_insert(&big, 1, 0, ";; typing\n");
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())],
+        "a keystroke on a buffer above the threshold publishes native lints only"
+    );
+
+    client.clear_notifications();
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": format!("file://{}", big.display()) } }),
+    );
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "didSave always runs clj-kondo"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_threshold_zero_means_no_limit() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:live-max-kb 0}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let big = write_large_kondo_file(&root);
+    client.did_open(&big);
+    client.wait_for_diagnostics("/src/big.clj");
+
+    client.clear_notifications();
+    client.did_change_insert(&big, 1, 0, ";; typing\n");
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "with no limit, a keystroke runs clj-kondo too"
+    );
+}
+
 #[test]
 fn test_e2e_kondo_run_drops_native_unused_binding() {
     // A successful clj-kondo run owns `unused-binding` too: the fake returns

@@ -158,6 +158,7 @@ pub const DEFAULT_BIN: &str = "clj-kondo";
 pub struct KondoOverride {
     pub enabled: Option<bool>,
     pub path: Option<String>,
+    pub live_max_kb: Option<u32>,
 }
 
 /// The resolved clj-kondo settings: both layers merged over the defaults.
@@ -169,14 +170,33 @@ pub struct KondoOverride {
 pub struct KondoConfig {
     pub enabled: bool,
     pub path: String,
+    /// Buffers larger than this many KiB skip clj-kondo on keystrokes (the
+    /// debounced didChange pass) and get it back on open and save. `0` means
+    /// no limit. clj-kondo costs close to a second on a 450 KiB file, which
+    /// is its own runtime; this is the one lever we have over when it runs.
+    pub live_max_kb: u32,
 }
+
+/// The default [`KondoConfig::live_max_kb`]: a quarter megabyte, well above
+/// any ordinary namespace and below the test files that take clj-kondo the
+/// better part of a second.
+pub const DEFAULT_LIVE_MAX_KB: u32 = 256;
 
 impl Default for KondoConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             path: DEFAULT_BIN.to_string(),
+            live_max_kb: DEFAULT_LIVE_MAX_KB,
         }
+    }
+}
+
+impl KondoConfig {
+    /// Whether a buffer of `bytes` is too large for clj-kondo to run on a
+    /// keystroke under this config.
+    pub fn exceeds_live_max(&self, bytes: usize) -> bool {
+        self.live_max_kb != 0 && bytes > self.live_max_kb as usize * 1024
     }
 }
 
@@ -199,6 +219,10 @@ pub fn parse_config_edn(contents: &str) -> KondoOverride {
             Some(Value::String(s)) => Some(s.clone()),
             _ => None,
         },
+        live_max_kb: match get(spec, kw("live-max-kb")) {
+            Some(Value::Integer(n)) => u32::try_from(*n).ok(),
+            _ => None,
+        },
     }
 }
 
@@ -219,6 +243,10 @@ pub fn parse_config_json(v: &serde_json::Value) -> KondoOverride {
             .get("path")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        live_max_kb: spec
+            .get("liveMaxKb")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok()),
     }
 }
 
@@ -244,6 +272,9 @@ fn resolve_config_with_disable(
         }
         if let Some(path) = &layer.path {
             cfg.path = path.clone();
+        }
+        if let Some(kb) = layer.live_max_kb {
+            cfg.live_max_kb = kb;
         }
     }
     if disable {
@@ -898,11 +929,67 @@ exit 3
         KondoOverride {
             enabled,
             path: path.map(str::to_string),
+            live_max_kb: None,
         }
     }
 
     fn resolved(file: KondoOverride, editor: KondoOverride) -> KondoConfig {
         resolve_config_with_disable(&file, &editor, false)
+    }
+
+    #[test]
+    fn live_max_kb_defaults_to_256_and_merges_per_key() {
+        let cfg = resolved(KondoOverride::default(), KondoOverride::default());
+        assert_eq!(cfg.live_max_kb, 256);
+        // The file sets it; an editor layer that says nothing keeps it.
+        let file = KondoOverride {
+            live_max_kb: Some(64),
+            ..KondoOverride::default()
+        };
+        assert_eq!(
+            resolved(file.clone(), KondoOverride::default()).live_max_kb,
+            64
+        );
+        // The editor overrides it — `0` (no limit) included.
+        let editor = KondoOverride {
+            live_max_kb: Some(0),
+            ..KondoOverride::default()
+        };
+        assert_eq!(resolved(file, editor).live_max_kb, 0);
+    }
+
+    #[test]
+    fn parses_live_max_kb_from_edn_and_json() {
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb 128}}"#).live_max_kb,
+            Some(128)
+        );
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb 0}}"#).live_max_kb,
+            Some(0)
+        );
+        // Wrong type or negative: no override.
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb "big"}}"#).live_max_kb,
+            None
+        );
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb -1}}"#).live_max_kb,
+            None
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"kondo": {"liveMaxKb": 512}})).live_max_kb,
+            Some(512)
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"clojurePulse": {"kondo": {"liveMaxKb": 0}}}))
+                .live_max_kb,
+            Some(0)
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"kondo": {"liveMaxKb": "big"}})).live_max_kb,
+            None
+        );
     }
 
     #[test]

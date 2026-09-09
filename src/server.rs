@@ -1144,8 +1144,29 @@ async fn relint_open_documents(
 ) {
     for uri in documents.open_uris() {
         let version = documents.current_version(&uri).unwrap_or(0);
-        lint_and_publish_doc(client, documents, index, kondo_state, uri, version).await;
+        lint_and_publish_doc(
+            client,
+            documents,
+            index,
+            kondo_state,
+            uri,
+            version,
+            LintTrigger::EngineChange,
+        )
+        .await;
     }
+}
+
+/// What started a lint pass. Only `Change` is subject to the clj-kondo size
+/// threshold: a keystroke on a very large buffer gets the native set alone,
+/// while open, save, and an engine change always run clj-kondo, so the buffer
+/// is never more than a save away from its full findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LintTrigger {
+    Open,
+    Save,
+    Change,
+    EngineChange,
 }
 
 /// Caps concurrent clj-kondo processes. Each spawn costs ~54 MB RSS, so
@@ -1167,6 +1188,7 @@ async fn lint_and_publish_doc(
     kondo_state: &SharedKondoState,
     uri: Url,
     version: i32,
+    trigger: LintTrigger,
 ) {
     let Some(snapshot) = documents.snapshot(&uri) else {
         return;
@@ -1203,12 +1225,26 @@ async fn lint_and_publish_doc(
         .bin()
         .filter(|_| kondo::lints_file(&path))
         .map(str::to_string);
+    // The size threshold applies to keystrokes only. It is the same "no say in
+    // this pass" outcome as a missing binary, so one publish still goes out,
+    // carrying the native set — never a native publish and then a kondo one.
+    let over_live_max =
+        trigger == LintTrigger::Change && engine.config.exceeds_live_max(text.len());
     let kondo_pass = async {
         let Some(bin) = bin else {
             // Not an error the user should see — just "clj-kondo has no say in
             // this pass", which `merge` reads as "keep the native set".
             return Err("clj-kondo not in use".to_string());
         };
+        if over_live_max {
+            tracing::debug!(
+                "clj-kondo skipped on change: {} is {} bytes, over live-max-kb {}",
+                path.display(),
+                text.len(),
+                engine.config.live_max_kb
+            );
+            return Err("clj-kondo skipped: buffer over live-max-kb".to_string());
+        }
         let _permit = KONDO_LIMIT.acquire().await;
         let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
         if let Err(e) = &result {
@@ -1760,7 +1796,7 @@ impl Backend {
     }
 
     /// Computes diagnostics from the live buffer and publishes them for `uri`.
-    async fn lint_and_publish(&self, uri: Url, version: i32) {
+    async fn lint_and_publish(&self, uri: Url, version: i32, trigger: LintTrigger) {
         lint_and_publish_doc(
             &self.client,
             &self.documents,
@@ -1768,6 +1804,7 @@ impl Backend {
             &self.kondo.state,
             uri,
             version,
+            trigger,
         )
         .await;
     }
@@ -2225,7 +2262,7 @@ impl LanguageServer for Backend {
             }
         }
 
-        self.lint_and_publish(uri, version).await;
+        self.lint_and_publish(uri, version, LintTrigger::Open).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -2276,7 +2313,7 @@ impl LanguageServer for Backend {
         }
 
         let version = self.documents.current_version(&uri).unwrap_or(0);
-        self.lint_and_publish(uri, version).await;
+        self.lint_and_publish(uri, version, LintTrigger::Save).await;
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -2577,7 +2614,16 @@ impl LanguageServer for Backend {
             if documents.current_version(&uri) != Some(version) {
                 return;
             }
-            lint_and_publish_doc(&client, &documents, &index, &kondo_state, uri, version).await;
+            lint_and_publish_doc(
+                &client,
+                &documents,
+                &index,
+                &kondo_state,
+                uri,
+                version,
+                LintTrigger::Change,
+            )
+            .await;
         });
     }
 
