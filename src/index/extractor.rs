@@ -1219,7 +1219,7 @@ fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
     &source[node.start_byte()..node.end_byte()]
 }
 
-fn node_to_lsp_range(node: Node, source: &str) -> Range {
+pub(crate) fn node_to_lsp_range(node: Node, source: &str) -> Range {
     Range {
         start: point_to_position(node.start_position(), node.start_byte(), source),
         end: point_to_position(node.end_position(), node.end_byte(), source),
@@ -1242,6 +1242,62 @@ pub(crate) fn point_to_position(
         line: point.row as u32,
         character: character as u32,
     }
+}
+
+/// The tree-sitter point (row, *byte* column) for an LSP position, the inverse
+/// of [`point_to_position`]. Walks the line's chars counting UTF-16 units;
+/// a column past the end of the line clamps to the line end. `None` when the
+/// line does not exist.
+pub fn position_to_point(source: &str, pos: Position) -> Option<tree_sitter::Point> {
+    let line = source.split('\n').nth(pos.line as usize)?;
+    let mut utf16 = 0usize;
+    let mut column = line.len();
+    for (byte, ch) in line.char_indices() {
+        if utf16 >= pos.character as usize {
+            column = byte;
+            break;
+        }
+        utf16 += ch.len_utf16();
+    }
+    Some(tree_sitter::Point {
+        row: pos.line as usize,
+        column,
+    })
+}
+
+/// Named nodes containing `pos`, innermost first, stopping before the root
+/// `source` node.
+///
+/// Token-internal nodes are normalized away: the grammar gives `sym_lit` and
+/// `kwd_lit` named children for their namespace and name parts
+/// (`sym_ns`/`sym_name`, `kwd_ns`/`kwd_name`), and the descendant lookup can
+/// land on one of them, so the path starts at the enclosing literal instead.
+/// Callers that want the name part ask for it explicitly
+/// (`child_by_field_name("name")`).
+pub fn node_path_at<'a>(root: Node<'a>, source: &str, pos: Position) -> Vec<Node<'a>> {
+    let Some(pt) = position_to_point(source, pos) else {
+        return Vec::new();
+    };
+    let Some(leaf) = root.named_descendant_for_point_range(pt, pt) else {
+        return Vec::new();
+    };
+
+    let mut path = Vec::new();
+    let mut node = Some(leaf);
+    while let Some(current) = node {
+        if current.id() == root.id() {
+            break;
+        }
+        // Skip the parts of a token: the enclosing literal is the first step.
+        if !matches!(
+            current.kind(),
+            "sym_ns" | "sym_name" | "kwd_ns" | "kwd_name"
+        ) {
+            path.push(current);
+        }
+        node = current.parent();
+    }
+    path
 }
 
 // --- keyword resolution ----------------------------------------------------
@@ -3408,5 +3464,67 @@ mod tests {
         // even though `x` is lexically in scope.
         let src = "(ns y)\n(defn f []\n  (let [x 1]\n    'x))";
         assert!(local_references_at(src, pos_of(src, "'x", 0, 1), "x").is_none());
+    }
+
+    #[test]
+    fn position_to_point_counts_utf16() {
+        // The emoji is one UTF-16 surrogate pair (2 units) and 4 bytes, so the
+        // LSP column right after "😀 " is 3 while the byte column is 5.
+        let src = "😀 (foo bar)";
+        let pt = position_to_point(
+            src,
+            Position {
+                line: 0,
+                character: 3,
+            },
+        )
+        .expect("line 0 exists");
+        assert_eq!(pt, tree_sitter::Point { row: 0, column: 5 });
+    }
+
+    #[test]
+    fn position_to_point_clamps_past_end() {
+        let src = "(foo)\n(bar)";
+        let pt = position_to_point(
+            src,
+            Position {
+                line: 1,
+                character: 99,
+            },
+        )
+        .expect("line 1 exists");
+        assert_eq!(pt, tree_sitter::Point { row: 1, column: 5 });
+        assert!(position_to_point(
+            src,
+            Position {
+                line: 7,
+                character: 0
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn node_path_at_lists_innermost_first() {
+        let src = "(defn f [x] (let [y 1] y))";
+        let tree = parse(src);
+        let kinds: Vec<&str> = node_path_at(tree.root_node(), src, pos_of(src, "] y))", 0, 2))
+            .iter()
+            .map(|n| n.kind())
+            .collect();
+        assert_eq!(kinds, vec!["sym_lit", "list_lit", "list_lit"]);
+    }
+
+    #[test]
+    fn node_path_at_normalizes_token_parts() {
+        // The descendant lookup lands on `sym_ns`; the path must start at the
+        // enclosing `sym_lit` instead.
+        let src = "(str/join x)";
+        let tree = parse(src);
+        let kinds: Vec<&str> = node_path_at(tree.root_node(), src, pos_of(src, "str/join", 0, 1))
+            .iter()
+            .map(|n| n.kind())
+            .collect();
+        assert_eq!(kinds, vec!["sym_lit", "list_lit"]);
     }
 }

@@ -3,6 +3,7 @@ pub mod clojuredocs;
 pub mod code_action;
 pub mod completion;
 pub mod definition;
+pub mod highlight;
 pub mod hover;
 pub mod ignored_forms;
 pub mod indent;
@@ -10,6 +11,7 @@ pub mod java;
 mod letgo_native_names;
 pub mod matching;
 pub mod references;
+pub mod selection;
 pub mod signature;
 pub mod symbols;
 

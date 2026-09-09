@@ -87,6 +87,31 @@ for _, item in ipairs(comp.items or comp) do
 end
 check(found, "completion: core/add offered")
 
+resp = vim.lsp.buf_request_sync(buf, "textDocument/documentHighlight", params, 10000) or {}
+local hl = resp[client_id] and resp[client_id].result
+check(
+  hl ~= nil and #hl > 0 and hl[1].range ~= nil,
+  "documentHighlight: core/add highlighted in the buffer"
+)
+
+resp = vim.lsp.buf_request_sync(buf, "textDocument/selectionRange", {
+  textDocument = params.textDocument,
+  positions = { params.position },
+}, 10000) or {}
+local sel = resp[client_id] and resp[client_id].result
+local innermost = sel and sel[1]
+local outermost = innermost
+while outermost and outermost.parent do
+  outermost = outermost.parent
+end
+check(
+  innermost ~= nil
+    and outermost ~= innermost
+    and (outermost.range["end"].line - outermost.range.start.line)
+      > (innermost.range["end"].line - innermost.range.start.line),
+  "selectionRange: the chain expands past the line the cursor is on"
+)
+
 if failures > 0 then
   print(failures .. " check(s) FAILED")
   os.exit(1)

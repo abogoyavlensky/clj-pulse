@@ -93,8 +93,9 @@ fn local_references(
 /// The local under the cursor, as `(word, refs)`. `None` when the cursor is on
 /// a keyword, a qualified word (locals are never qualified), or a word that
 /// resolves to no local — the callers then fall back to the fqn path. Shared by
-/// find-references and rename so both agree on what counts as a local.
-fn local_refs_at(
+/// find-references, rename and document highlight so they all agree on what
+/// counts as a local.
+pub(crate) fn local_refs_at(
     documents: &DocumentStore,
     uri: &Url,
     pos: Position,

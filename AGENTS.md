@@ -196,6 +196,19 @@ and update README and this file in the same change.
 - `rename` and `prepareRename` share `references::rename_target`, so every
   rejection carries the same message from both. Only the checks that need the
   new name (validity, local capture) live in `rename`.
+- `documentHighlight` resolves in the same order references does:
+  `references::local_refs_at` first and authoritatively, then
+  `resolve_fqn_at`. It never leaves the buffer — occurrences and definitions
+  come from one `extract_full_tree` of the open document, so an unsaved edit
+  highlights at its current ranges. A definition in the file is `WRITE`, a
+  usage `READ`; a keyword fqn (leading `:`) is `TEXT` throughout, since a
+  keyword has no read/write distinction.
+- `selectionRange` answers one chain per requested position, built from
+  `extractor::node_path_at` over the cached tree. A qualified `sym_lit` or
+  `kwd_lit` adds its `name` child as the innermost step only when the cursor
+  is inside that child, so `al|ias/name` has no namespace-only step; equal
+  consecutive ranges collapse, and a position with no containing named node
+  gets a single zero-width range rather than being dropped.
 
 ## Releasing
 

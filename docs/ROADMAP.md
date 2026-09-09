@@ -55,10 +55,12 @@ request fails alone instead of taking the server down, and `bb e2e-pulse` plus
 `bb bench` guard the first-priority editor and the performance baseline. Open
 buffers keep one incrementally updated parse tree, so no request or lint pass
 parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
+`documentHighlight` underlines the symbol under the cursor, and
+`selectionRange` expands the selection along the parse tree.
 
-Not shipped: keyword rename, `documentHighlight`, `selectionRange`,
-`foldingRange`, formatting, semantic tokens, code lens, implementation
-provider, `executeCommand` refactors, `willRenameFiles`.
+Not shipped: keyword rename, `foldingRange`, formatting, semantic tokens,
+code lens, implementation provider, `executeCommand` refactors,
+`willRenameFiles`.
 
 ## Milestone 0 — release gates
 
@@ -150,13 +152,13 @@ completes keywords, and can add the require an accepted name needs.
 Cheap with the tree-sitter parse resident; their absence reads as
 "unfinished" in Neovim.
 
-- [ ] `textDocument/documentHighlight`. Reuse `local_references_at` and
+- [x] `textDocument/documentHighlight`. Reuse `local_references_at` and
       the occurrence index; Read vs Write where cheap.
-- [ ] `textDocument/selectionRange`. Expand along the parse tree.
+- [x] `textDocument/selectionRange`. Expand along the parse tree.
 - [ ] **Keyword rename**. Rewrite each occurrence in its own notation
       (`::kw`, `:ns/kw`, `::alias/kw`); include Integrant EDN files; refuse
       only when an occurrence can't be rewritten safely.
-  Plan: [2026-09-08-2229-document-highlight-selection-range.md](plans/2026-09-08-2229-document-highlight-selection-range.md) — in progress (documentHighlight, selectionRange); [2026-09-08-2230-keyword-rename.md](plans/2026-09-08-2230-keyword-rename.md) — in progress (keyword rename)
+  Plan: [2026-09-08-2229-document-highlight-selection-range.md](plans/2026-09-08-2229-document-highlight-selection-range.md) — done (documentHighlight, selectionRange); [2026-09-08-2230-keyword-rename.md](plans/2026-09-08-2230-keyword-rename.md) — in progress (keyword rename)
 
 ## Milestone 4 — small power features
 

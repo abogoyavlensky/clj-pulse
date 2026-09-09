@@ -6521,3 +6521,172 @@ fn test_e2e_completion_no_auto_require_when_already_required() {
         item
     );
 }
+
+#[test]
+fn test_e2e_capabilities_advertise_highlight_and_selection() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let result = client.initialize(&root);
+
+    assert_eq!(
+        result["capabilities"]["documentHighlightProvider"], true,
+        "documentHighlight capability: {}",
+        result["capabilities"]
+    );
+    assert_eq!(
+        result["capabilities"]["selectionRangeProvider"], true,
+        "selectionRange capability: {}",
+        result["capabilities"]
+    );
+}
+
+#[test]
+fn test_e2e_document_highlight_local() {
+    // `base` is bound once and read twice in `locals.clj`; the binding site is
+    // a Write, the usages Reads.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+
+    let (line, ch) = position_of(&locals, "base");
+    let result = client.document_highlight(&locals, line, ch);
+    let items = result
+        .as_array()
+        .unwrap_or_else(|| panic!("documentHighlight returned null: {}", result));
+    assert_eq!(items.len(), 3, "binding + 2 usages: {}", result);
+    // DocumentHighlightKind: 1 = Text, 2 = Read, 3 = Write.
+    assert_eq!(items[0]["kind"], 3, "binding site is a Write: {}", result);
+    assert!(
+        items[1..].iter().all(|h| h["kind"] == 2),
+        "usages are Reads: {}",
+        result
+    );
+}
+
+#[test]
+fn test_e2e_document_highlight_var_usages() {
+    // `core/add` is defined in another file, so this buffer holds usages only.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    let result = client.document_highlight(&utils, line, ch);
+    let items = result
+        .as_array()
+        .unwrap_or_else(|| panic!("documentHighlight returned null: {}", result));
+    assert_eq!(items.len(), 1, "one usage in utils.clj: {}", result);
+    assert_eq!(items[0]["kind"], 2, "usage is a Read: {}", result);
+}
+
+#[test]
+fn test_e2e_document_highlight_uses_the_live_buffer() {
+    // An unsaved edit that pushes the usage down a line must move the
+    // highlight with it: highlights come from the buffer, never the index.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let (line, ch) = position_of(&utils, "core/add");
+    client.did_change_insert(&utils, 0, 0, "\n");
+
+    let result = client.document_highlight(&utils, line + 1, ch);
+    let items = result
+        .as_array()
+        .unwrap_or_else(|| panic!("documentHighlight returned null: {}", result));
+    assert_eq!(items.len(), 1, "one usage after the edit: {}", result);
+    assert_eq!(
+        items[0]["range"]["start"]["line"],
+        line + 1,
+        "range follows the unsaved edit: {}",
+        result
+    );
+}
+
+#[test]
+fn test_e2e_selection_range_qualified_symbol() {
+    // Expanding from inside `add` walks the name part, the whole qualified
+    // token, then the enclosing call.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    // `position_of` lands on the `/`; step past it, into the name half.
+    let (line, ch) = position_of(&utils, "core/add");
+    let result = client.selection_range(&utils, &[(line, ch + 2)]);
+    let chains = result
+        .as_array()
+        .unwrap_or_else(|| panic!("selectionRange returned null: {}", result));
+    assert_eq!(chains.len(), 1, "one chain per position: {}", result);
+
+    // Innermost `add`, then `core/add`, then the enclosing `(core/add x y)`.
+    let name = &chains[0]["range"];
+    let token = &chains[0]["parent"]["range"];
+    let call = &chains[0]["parent"]["parent"]["range"];
+    let source = std::fs::read_to_string(&utils).unwrap();
+    let text_at = |range: &serde_json::Value| -> String {
+        let line = source
+            .lines()
+            .nth(range["start"]["line"].as_u64().unwrap() as usize)
+            .unwrap();
+        line[range["start"]["character"].as_u64().unwrap() as usize
+            ..range["end"]["character"].as_u64().unwrap() as usize]
+            .to_string()
+    };
+    assert_eq!(text_at(name), "add", "{}", result);
+    assert_eq!(text_at(token), "core/add", "{}", result);
+    assert_eq!(text_at(call), "(core/add x y)", "{}", result);
+}
+
+#[test]
+fn test_e2e_selection_range_blank_line() {
+    // Whitespace between top-level forms still owes the client one entry.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let result = client.selection_range(&utils, &[(2, 0)]);
+    let chains = result
+        .as_array()
+        .unwrap_or_else(|| panic!("selectionRange returned null: {}", result));
+    assert_eq!(chains.len(), 1, "one chain per position: {}", result);
+    assert_eq!(
+        chains[0]["range"]["start"], chains[0]["range"]["end"],
+        "zero-width range on a blank line: {}",
+        result
+    );
+    assert!(
+        chains[0]["parent"].is_null(),
+        "no expansion from a blank line: {}",
+        result
+    );
+}
