@@ -154,22 +154,33 @@ Modify:
 - Modify: `src/handlers/mod.rs`, `src/server.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Unit tests in `selection.rs` for the four chains in the design, asserting the exact sequence of ranges. e2e: `selection_range(path, positions: &[(u32, u32)]) -> Value` helper; `test_e2e_selection_range_qualified_symbol` and `test_e2e_selection_range_blank_line`; extend the capabilities test.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e selection_range`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   The handler and wiring; parse once per request.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Add textDocument/selectionRange"`
+
+> Deviation: reads the cached tree via `DocumentStore::snapshot` rather than
+> parsing per request, for the same reason as Task 2. `node_to_lsp_range` in
+> the extractor became `pub(crate)` so the handler can turn a node into a
+> range.
+>
+> Deviation: the "cursor right after a closing paren" case resolves to the
+> *enclosing* form (tree-sitter does not count a position at a node's end as
+> inside it), so the chain there starts at the outer form, not the one just
+> closed. The test asserts that.
+
 
 ### Task 4: Editor gates
 
