@@ -783,6 +783,16 @@ impl LspClient {
         )
     }
 
+    pub fn document_highlight(&mut self, path: &Path, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/documentHighlight",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
     pub fn prepare_rename(&mut self, path: &Path, line: u32, character: u32) -> Value {
         self.request(
             "textDocument/prepareRename",

@@ -89,22 +89,26 @@ Modify:
 **Files:**
 - Modify: `src/index/extractor.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In `extractor.rs` `mod tests`: `position_to_point_counts_utf16` (a line `"😀 (foo bar)"`, LSP column after the emoji and space maps to byte column 5), `position_to_point_clamps_past_end`, `node_path_at_lists_innermost_first` (in `(defn f [x] (let [y 1] y))`, the cursor on the second `y` yields `sym_lit`, `list_lit` (the `let`), `list_lit` (the `defn`)), and `node_path_at_normalizes_token_parts` (cursor on `str` in `(str/join x)` yields `sym_lit` first, then `list_lit`).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --lib extractor::tests::position_to_point`
   Expected: FAIL (no such function).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   The three functions from the design. `node_path_at` walks `parent()` from `named_descendant_for_point_range(pt, pt)`, collecting named nodes and stopping at the root.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Add LSP position to tree-sitter node helpers"`
+
+> Deviation: `parse_tree` was already `pub` (the tree-cache work landed in
+> dec1175), so only `position_to_point` and `node_path_at` were added.
+
 
 ### Task 2: documentHighlight
 

@@ -3,6 +3,7 @@ pub mod clojuredocs;
 pub mod code_action;
 pub mod completion;
 pub mod definition;
+pub mod highlight;
 pub mod hover;
 pub mod ignored_forms;
 pub mod indent;
