@@ -1,4 +1,4 @@
-# Document Highlight and Selection Range Implementation Plan
+# Document Highlight and Selection Range Implementation Plan — completed
 
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -202,10 +202,71 @@ Modify:
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   README: two feature bullets. AGENTS.md invariants: highlight reuses `local_refs_at` before `resolve_fqn_at` exactly as references does, and both handlers parse the live buffer per request until the tree cache lands. ROADMAP Milestone 3: tick both items, set the `Plan:` status to `done`. Use /writing-clearly.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Document highlight and selection range"`
+
+---
+
+## Completion summary
+
+**Status: complete.** Branch `feat/document-highlight-selection-range`,
+commits `32d7463`, `d04ce11`, `ab25143`, `71e00f2`, `f225ecc`.
+
+Implemented:
+
+- `extractor::position_to_point` and `extractor::node_path_at`, the inverse of
+  the existing `point_to_position` plus the innermost-first node path a
+  position sits in.
+- `handlers::highlight::document_highlight`: locals resolve structurally
+  through `references::local_refs_at` (declaration `WRITE`, usages `READ`),
+  everything else through `resolve_fqn_at` against one extraction of the open
+  buffer. Keyword fqns are `TEXT` throughout; results are sorted in document
+  order and de-duplicated by range, definition ahead of a usage sharing its
+  span.
+- `handlers::selection::selection_ranges`: one chain per requested position,
+  built from `node_path_at` with an optional name-part step for a qualified
+  `sym_lit`/`kwd_lit`, equal consecutive ranges collapsed, and a zero-width
+  range where no named node contains the position.
+- Capabilities `documentHighlightProvider` and `selectionRangeProvider`, both
+  wired in `src/server.rs` with the `internal_error` mapping the other
+  handlers use.
+
+Verification: `bb check` (all 281 tests), `bb e2e` (151), `bb e2e-nvim` (two
+new checks), `bb e2e-pulse`, and `bb e2e-calva` all pass. Both features were
+also hand-driven through a headless Neovim client against `src/locals.clj`:
+highlighting `base` returns kind 3 at the binding and kind 2 at both usages,
+and the selection chain expands `base` → binding vector → `let` → `defn`.
+Codex reviewed every task commit and found no actionable defects.
+
+### Deviations
+
+1. **Task 1** — `parse_tree` was already `pub`, so only the two new helpers
+   were added.
+2. **Tasks 2 and 3** — the tree-cache work landed before this plan ran
+   (`dec1175`), and AGENTS.md now requires handlers to read
+   `DocumentStore::snapshot` and call the extractor's `_tree` variants. Both
+   handlers do that instead of parsing per request, as the plan's design
+   assumed. `extractor::node_to_lsp_range` became `pub(crate)` so the
+   selection handler can turn a node into a range.
+3. **Task 2** — added a fourth e2e test,
+   `test_e2e_document_highlight_uses_the_live_buffer`, for the design's
+   unsaved-`didChange` requirement, which the task steps had omitted.
+4. **Task 3** — with the cursor immediately after a closing paren, tree-sitter
+   does not count the position as inside the form it closed, so the chain
+   starts at the *enclosing* form. The test asserts that behavior, which is
+   what the plan's parenthetical called for.
+
+### What the plan could have specified better
+
+It was written before the tree-cache plan landed and asserted "both handlers
+parse per request, as every handler does today" as settled fact. A plan that
+overlaps a sibling plan should state which one lands first and what changes if
+the order flips, rather than pinning an API that a concurrent plan is about to
+replace. Two other small gaps: the Task 2 steps dropped an e2e test the design
+section listed, and the closing-paren selection case was described ambiguously
+enough ("the enclosing form comes first") to admit two opposite expectations.
