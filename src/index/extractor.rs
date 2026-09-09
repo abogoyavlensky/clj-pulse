@@ -1219,7 +1219,7 @@ fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
     &source[node.start_byte()..node.end_byte()]
 }
 
-fn node_to_lsp_range(node: Node, source: &str) -> Range {
+pub(crate) fn node_to_lsp_range(node: Node, source: &str) -> Range {
     Range {
         start: point_to_position(node.start_position(), node.start_byte(), source),
         end: point_to_position(node.end_position(), node.end_byte(), source),

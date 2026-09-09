@@ -117,22 +117,35 @@ Modify:
 - Modify: `src/handlers/mod.rs`, `src/handlers/references.rs`, `src/server.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Unit tests in `highlight.rs` for the four cases in the design. e2e: `document_highlight(path, line, character) -> Value` helper; `test_e2e_document_highlight_local` and `test_e2e_document_highlight_var_usages`; `test_e2e_capabilities_advertise_highlight_and_selection` (extend when Task 3 lands).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e document_highlight`
   Expected: FAIL (method not found).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   The handler, `local_refs_at` visibility, `server.rs` wiring with the same `internal_error` mapping `references` uses, and the capability.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Add textDocument/documentHighlight"`
+
+> Deviation: the tree cache landed before this plan ran (dec1175), and
+> AGENTS.md now requires handlers to read `DocumentStore::snapshot` and the
+> extractor's `_tree` variants. The handler therefore uses
+> `file_occurrences_tree` / `extract_full_tree` off the cached tree instead of
+> the plan's `file_occurrences_with` / `extract_full_with` per-request parse.
+> Same behavior, no extra parse.
+>
+> Deviation: added a fourth e2e test,
+> `test_e2e_document_highlight_uses_the_live_buffer`, covering the design's
+> unsaved-`didChange` requirement (listed under Testing but not in Task 2's
+> steps).
+
 
 ### Task 3: selectionRange
 

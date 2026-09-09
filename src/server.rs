@@ -2123,6 +2123,7 @@ impl LanguageServer for Backend {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
@@ -2754,6 +2755,16 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<DocumentHighlight>>> {
         handlers::highlight::document_highlight(&self.index, &self.documents, params).map_err(|e| {
             tracing::error!("document highlight error: {}", e);
+            tower_lsp::jsonrpc::Error::internal_error()
+        })
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        handlers::selection::selection_ranges(&self.documents, params).map_err(|e| {
+            tracing::error!("selection range error: {}", e);
             tower_lsp::jsonrpc::Error::internal_error()
         })
     }

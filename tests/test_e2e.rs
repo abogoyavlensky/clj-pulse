@@ -6535,6 +6535,11 @@ fn test_e2e_capabilities_advertise_highlight_and_selection() {
         "documentHighlight capability: {}",
         result["capabilities"]
     );
+    assert_eq!(
+        result["capabilities"]["selectionRangeProvider"], true,
+        "selectionRange capability: {}",
+        result["capabilities"]
+    );
 }
 
 #[test]
@@ -6613,6 +6618,75 @@ fn test_e2e_document_highlight_uses_the_live_buffer() {
         items[0]["range"]["start"]["line"],
         line + 1,
         "range follows the unsaved edit: {}",
+        result
+    );
+}
+
+#[test]
+fn test_e2e_selection_range_qualified_symbol() {
+    // Expanding from inside `add` walks the name part, the whole qualified
+    // token, then the enclosing call.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    // `position_of` lands on the `/`; step past it, into the name half.
+    let (line, ch) = position_of(&utils, "core/add");
+    let result = client.selection_range(&utils, &[(line, ch + 2)]);
+    let chains = result
+        .as_array()
+        .unwrap_or_else(|| panic!("selectionRange returned null: {}", result));
+    assert_eq!(chains.len(), 1, "one chain per position: {}", result);
+
+    // Innermost `add`, then `core/add`, then the enclosing `(core/add x y)`.
+    let name = &chains[0]["range"];
+    let token = &chains[0]["parent"]["range"];
+    let call = &chains[0]["parent"]["parent"]["range"];
+    let source = std::fs::read_to_string(&utils).unwrap();
+    let text_at = |range: &serde_json::Value| -> String {
+        let line = source
+            .lines()
+            .nth(range["start"]["line"].as_u64().unwrap() as usize)
+            .unwrap();
+        line[range["start"]["character"].as_u64().unwrap() as usize
+            ..range["end"]["character"].as_u64().unwrap() as usize]
+            .to_string()
+    };
+    assert_eq!(text_at(name), "add", "{}", result);
+    assert_eq!(text_at(token), "core/add", "{}", result);
+    assert_eq!(text_at(call), "(core/add x y)", "{}", result);
+}
+
+#[test]
+fn test_e2e_selection_range_blank_line() {
+    // Whitespace between top-level forms still owes the client one entry.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+
+    let result = client.selection_range(&utils, &[(2, 0)]);
+    let chains = result
+        .as_array()
+        .unwrap_or_else(|| panic!("selectionRange returned null: {}", result));
+    assert_eq!(chains.len(), 1, "one chain per position: {}", result);
+    assert_eq!(
+        chains[0]["range"]["start"], chains[0]["range"]["end"],
+        "zero-width range on a blank line: {}",
+        result
+    );
+    assert!(
+        chains[0]["parent"].is_null(),
+        "no expansion from a blank line: {}",
         result
     );
 }

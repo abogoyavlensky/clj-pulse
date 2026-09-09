@@ -793,6 +793,20 @@ impl LspClient {
         )
     }
 
+    pub fn selection_range(&mut self, path: &Path, positions: &[(u32, u32)]) -> Value {
+        let positions: Vec<Value> = positions
+            .iter()
+            .map(|(line, character)| json!({ "line": line, "character": character }))
+            .collect();
+        self.request(
+            "textDocument/selectionRange",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) },
+                "positions": positions
+            }),
+        )
+    }
+
     pub fn prepare_rename(&mut self, path: &Path, line: u32, character: u32) -> Value {
         self.request(
             "textDocument/prepareRename",
