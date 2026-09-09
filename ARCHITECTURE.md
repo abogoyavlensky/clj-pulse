@@ -44,7 +44,9 @@ scanner.rs: EDN files under `:paths` containing `#ig/ref` are scanned for keywor
   occurrences (`extract_edn`) and inserted via `Index::insert_edn_file`
   (occurrences only) — this links a `config.edn` component key to its defmethod.
   A ref-less config counts too when its top level is keyed by namespaced
-  keywords, `#:my.app{:db …}` included: the prefix qualifies every key it holds.
+  keywords, `#:my.app{:db …}` included: the prefix qualifies the keys that carry
+  no namespace of their own (`:other/db` keeps its, `:_/db` escapes to plain
+  `:db`), exactly as the reader does.
 handlers/references.rs: keyword rename (`rename_target` → `RenameTarget::Keyword`)
   collects every site — occurrences, the `IntegrantKey` definition, and the
   definitions of open buffers — and edits only the name each token ends with.
@@ -97,5 +99,8 @@ word under cursor (from DocumentStore / ropey)
 - Keyword fqns are colon-prefixed (`:ns/name`) so they never collide with var
   fqns; keyword occurrences span the whole keyword token, and the rename path
   replaces only the name that token ends with, so each site keeps its notation.
+  The one occurrence that is not a keyword token is a `:keys` destructuring
+  entry (`db`, `app/db`), which reads the key while binding a local of that
+  name — it can only refuse the rename, never take an edit.
 - EDN config files contribute occurrences only (no namespace, no symbols),
   registered under a NUL sentinel ns in `file_to_ns` so re-scans keep them.

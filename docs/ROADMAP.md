@@ -100,7 +100,8 @@ Small fixes that remove wrong answers. Each extractor change bumps
   Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — done
 - [x] **`prepareRename`**. Advertise `prepareProvider: true`; return the
       token range for renameable symbols and a clean rejection (not a server
-      error) for library, built-in, keyword, and `:keys`-destructured names.
+      error) for library, built-in, and `:keys`-destructured names. (Keywords
+      were rejected too until the keyword-rename item below shipped.)
       Plan: [2026-09-05-1537-ns-form-remainder-and-prepare-rename.md](plans/2026-09-05-1537-ns-form-remainder-and-prepare-rename.md) — done
 - [x] **Reliability floor**
   - [x] Panic hook that logs to `server.log`; verify how tower-lsp behaves

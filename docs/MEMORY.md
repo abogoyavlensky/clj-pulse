@@ -82,6 +82,15 @@ collection). Nothing parses. The next lever, if a large file ever needs it, is
 caching the `Analysis` per document version so a request walks nothing; it is
 in the ROADMAP Backlog, not scheduled.
 
+### After keyword rename (2026-09-09)
+
+Same box and corpus, the release binary at commit 8e530c7. The extractor gained
+one pass over `:keys` destructuring vectors and namespaced maps in EDN configs,
+so the bench was re-run to price it: 3.7-4.0 s to project index, 365 MiB RSS,
+390 ms per edit, 24-30 ms per definition (median of two runs). That is the tree
+cache table within run-to-run noise — the new work is proportional to
+destructuring forms, not to file size, and does not show up.
+
 ### On the maintainer's machine (macOS)
 
 The table above is a Linux CI-shaped box. The numbers users actually see are
