@@ -187,14 +187,14 @@ Modify:
 **Files:**
 - Modify: `scripts/e2e_nvim.lua`
 
-- [ ] **Step 1: Extend the Neovim script**
+- [x] **Step 1: Extend the Neovim script**
   After the existing completion check: a `textDocument/documentHighlight` request on `core/add` expecting at least one result, and a `textDocument/selectionRange` request expecting a chain whose outermost range spans more lines than the innermost.
 
-- [ ] **Step 2: Run the gates**
+- [x] **Step 2: Run the gates**
   Run: `bb e2e-nvim && bb e2e-pulse`
   Expected: both pass. Pulse needs no new check; it proves the changed capabilities still negotiate and existing features work.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Cover highlight and selection range in the Neovim gate"`
 
 ### Task 5: Docs and roadmap

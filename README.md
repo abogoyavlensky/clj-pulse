@@ -57,6 +57,13 @@ Language features:
 - **Java interop (built-in/JDK)** - go to definition, Javadoc hover, completion,
   and signature help for JDK classes, static members, and constructors. (Instance methods
   (`(.foo obj)`), library classes, and decompilation aren't supported yet.)
+- **Highlight occurrences** - the editor underlines every occurrence of the
+  symbol under the cursor in the current buffer, marking its definition as a
+  write and each usage as a read. Locals resolve by scope, so a parameter that
+  shadows a var highlights only itself.
+- **Expand selection** - `textDocument/selectionRange` grows the selection one
+  form at a time along the parse tree: the name half of `str/join`, then the
+  whole symbol, then the call, then the enclosing `defn`.
 - **Document symbols** - outline of the definitions in the current file.
 - **Workspace symbols** - fuzzy symbol search across the whole project.
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
