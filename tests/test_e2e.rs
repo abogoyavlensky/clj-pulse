@@ -6179,6 +6179,46 @@ fn test_e2e_rename_keyword_across_clj_and_edn() {
 }
 
 #[test]
+fn test_e2e_rename_keyword_reaches_config_outside_source_paths() {
+    // Reported from VS Code: renaming an Integrant key from the `.clj` rewrote
+    // the sources and left `config.edn` alone, while renaming the same key
+    // *from* the `.edn` worked everywhere. The config sat under no declared
+    // source path — `resources` missing from `:paths`, as it is in every
+    // Leiningen project, whose `:resource-paths` are not read — so it was never
+    // scanned, and only entered the index when the user opened it.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+    let config = root.join("resources/config.edn");
+    std::fs::write(root.join("deps.edn"), "{:paths [\"src\"]}\n").unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    // Only the source is open: the config must come from the index, not from a
+    // live buffer.
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    let db_text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&db_text, "::db");
+    let result = client.rename(&db, line, col + 2, "store");
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/resources/config.edn"))
+        .unwrap_or_else(|| panic!("config outside :paths not edited: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(edits.len(), 2, "the map key and the #ig/ref: {:?}", edits);
+    let config_text = std::fs::read_to_string(&config).unwrap();
+    assert_edits_cover(&config_text, &edits, "db", "store");
+}
+
+#[test]
 fn test_e2e_rename_keyword_rewrites_namespaced_map_keys() {
     // `#:readx.db{:db 1}` reads `:readx.db/db` through a bare `:db` key, so the
     // edit replaces `db` and the map prefix carries the namespace as before.

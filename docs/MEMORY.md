@@ -91,6 +91,19 @@ so the bench was re-run to price it: 3.7-4.0 s to project index, 365 MiB RSS,
 cache table within run-to-run noise — the new work is proportional to
 destructuring forms, not to file size, and does not show up.
 
+### Integrant configs are searched project-wide (2026-09-09)
+
+The EDN scan used to be limited to `:paths`, so a config the classpath does not
+name — `resources/config.edn` with `:paths ["src"]`, a Leiningen
+`:resource-paths`, a `system.edn` at the project root — was never indexed, and
+references and keyword rename silently skipped it. It now walks each project dir
+instead. Unbounded, that walk costs ~700 ms on metabase (27 556 files in 5 111
+dirs) for the 73 `.edn` files it finds: the traversal, not the reads. Bounded at
+`EDN_SCAN_MAX_DEPTH = 5` it costs nothing measurable (project index 2.85 s,
+median of two runs, against 3.2-3.4 s in the table above), and still reaches
+every layout in the wild. Deeper or gitignored configs fall back to `didOpen`
+indexing.
+
 ### On the maintainer's machine (macOS)
 
 The table above is a Linux CI-shaped box. The numbers users actually see are

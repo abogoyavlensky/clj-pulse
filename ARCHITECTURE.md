@@ -40,9 +40,13 @@ extractor.rs: keywords are recorded as occurrences with colon-prefixed fqns,
 extractor.rs: `(defmethod ig/init-key ::x …)` records `:ns/x` as an IntegrantKey
   *definition* (`DefKind::IntegrantKey`); the other lifecycle defmethods and all
   config uses are occurrences, so goto-definition lands on the constructor.
-scanner.rs: EDN files under `:paths` containing `#ig/ref` are scanned for keyword
-  occurrences (`extract_edn`) and inserted via `Index::insert_edn_file`
-  (occurrences only) — this links a `config.edn` component key to its defmethod.
+scanner.rs: EDN files anywhere in a project (to `EDN_SCAN_MAX_DEPTH`, gitignore
+  respected) containing `#ig/ref` are scanned for keyword occurrences
+  (`extract_edn`) and inserted via `Index::insert_edn_file` (occurrences only) —
+  this links a `config.edn` component key to its defmethod. The search is *not*
+  limited to `:paths`: where the config lives is a project convention, not a
+  classpath decision, and a Leiningen `:resource-paths` never becomes a source
+  root at all.
   A ref-less config counts too when its top level is keyed by namespaced
   keywords, `#:my.app{:db …}` included: the prefix qualifies the keys that carry
   no namespace of their own (`:other/db` keeps its, `:_/db` escapes to plain

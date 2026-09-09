@@ -143,6 +143,15 @@ and update README and this file in the same change.
   via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
+- Integrant EDN configs are found project-wide, not under `:paths`: the scan
+  walks each project dir to `scanner::EDN_SCAN_MAX_DEPTH` (gitignore respected)
+  and keeps what `is_integrant_edn` accepts. `:paths` is a classpath decision
+  and the config's location is not one — `resources/config.edn` is routinely
+  absent from it, and Leiningen `:resource-paths` never becomes a source root.
+  A config that is gitignored or deeper than that is indexed on `didOpen`, and
+  the `**/*.edn` watcher keeps every indexed one fresh. A config the scan
+  cannot see makes references skip it and a keyword rename silently leave it
+  pointing at the old key.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
 - Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
   first, then the built-in table `DefKind::from_macro_fqn`

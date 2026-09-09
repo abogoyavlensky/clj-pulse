@@ -91,15 +91,39 @@ pub fn build_index_scoped(roots: &[ScanRoot], cfg: &ExtractConfig) -> Result<Ind
     Ok(index)
 }
 
-/// Collects `.edn` files under the given source roots (Integrant configs live
-/// in `:paths`/resources). Mirrors [`collect_clojure_files`].
+/// Collects `.edn` files anywhere in each project, *not* only under its
+/// `:paths`. Where an Integrant config lives is a project convention, not a
+/// classpath decision: `dev/resources/config.edn` reached through an alias's
+/// `:extra-paths` is as common as `resources/config.edn`, and only top-level
+/// `:paths` counts here. A config the scan cannot see is one that
+/// goto-definition and references skip and, worse, that a keyword rename
+/// silently leaves pointing at the old key.
+///
+/// The [`is_integrant_edn`](extractor::is_integrant_edn) gate keeps build
+/// manifests and plain data files out, so the widening costs a read per `.edn`
+/// file and nothing in the index. Gitignore still applies, as it does to
+/// sources; an ignored config is indexed when the user opens it.
 fn collect_edn_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
-    let mut files = Vec::new();
+    let mut project_dirs: Vec<PathBuf> = Vec::new();
     for root in roots {
-        if !root.path.exists() {
+        let dir = normalize_lexically(&root.project_dir);
+        if !project_dirs.contains(&dir) {
+            project_dirs.push(dir);
+        }
+    }
+
+    let mut files = Vec::new();
+    for dir in project_dirs {
+        if !dir.exists() {
             continue;
         }
-        for entry in scoped_walker(root) {
+        // A whole-project walk: same gitignore scoping as a source root whose
+        // path *is* the project dir.
+        let root = ScanRoot {
+            project_dir: dir.clone(),
+            path: dir,
+        };
+        for entry in scoped_walker_max_depth(&root, EDN_SCAN_MAX_DEPTH) {
             let Ok(entry) = entry else {
                 continue;
             };
@@ -118,7 +142,19 @@ fn collect_edn_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
 /// every gitignore from there down with real git precedence, negations
 /// included — and prunes everything off the path to the source root.
 /// `parents(false)` cuts the ancestry discovery above the project dir.
+/// How deep below a project dir an Integrant config is looked for.
+/// `config.edn` (1), `resources/config.edn` (2), `dev/resources/config.edn` (3)
+/// and `env/dev/resources/config.edn` (4) are the layouts in the wild; 5 leaves
+/// headroom without walking a large repo's whole source tree, which costs real
+/// startup time and finds nothing. A config deeper than this is still indexed
+/// when it is opened.
+const EDN_SCAN_MAX_DEPTH: usize = 5;
+
 fn scoped_walker(root: &ScanRoot) -> ignore::Walk {
+    scoped_walker_max_depth(root, usize::MAX)
+}
+
+fn scoped_walker_max_depth(root: &ScanRoot, max_depth: usize) -> ignore::Walk {
     // Normalize `..`/`.` away first: `:paths ["../shared/src"]` joins to
     // `project/../shared/src`, which lexically starts_with the project dir
     // while the walker's real paths never would — the filter must compare
@@ -133,6 +169,9 @@ fn scoped_walker(root: &ScanRoot) -> ignore::Walk {
     };
     let mut builder = ignore::WalkBuilder::new(&walk_from);
     builder.parents(false).require_git(false);
+    if max_depth != usize::MAX {
+        builder.max_depth(Some(max_depth));
+    }
     if walk_from != target {
         // Keep only the target subtree and the dirs leading down to it.
         builder.filter_entry(move |entry| {
@@ -362,6 +401,77 @@ mod tests {
         assert!(
             !index.namespaces.contains_key("gen"),
             "the project's own .gitignore must still apply"
+        );
+    }
+
+    #[test]
+    fn integrant_configs_outside_source_paths_are_indexed() {
+        // `dev/resources/config.edn` reached through an alias's `:extra-paths`
+        // is an ordinary Integrant layout, and only top-level `:paths` becomes
+        // a scan root. Missing the config makes goto-definition and references
+        // skip it and a keyword rename leave it pointing at the old key.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path();
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(project.join("dev/resources")).unwrap();
+        fs::write(project.join("src/db.clj"), "(ns app.db)\n").unwrap();
+        fs::write(
+            project.join("dev/resources/config.edn"),
+            "{:app.db/db {:url \"x\"} :app/sys {:db #ig/ref :app.db/db}}",
+        )
+        .unwrap();
+        // A build manifest outside :paths must stay out, gate or no gate.
+        fs::write(project.join("deps.edn"), "{:paths [\"src\"]}").unwrap();
+
+        let roots = [ScanRoot {
+            project_dir: project.to_path_buf(),
+            path: project.join("src"),
+        }];
+        let index = build_index_scoped(&roots, &ExtractConfig::default()).unwrap();
+
+        let config = project.join("dev/resources/config.edn");
+        let occs = index
+            .occurrences
+            .get(&config)
+            .unwrap_or_else(|| panic!("config outside :paths not indexed"));
+        assert_eq!(
+            occs.iter().filter(|o| o.fqn == ":app.db/db").count(),
+            2,
+            "the map key and the #ig/ref: {:?}",
+            occs.value()
+        );
+        assert!(
+            !index.occurrences.contains_key(&project.join("deps.edn")),
+            "build manifests must never be indexed"
+        );
+    }
+
+    #[test]
+    fn gitignored_integrant_configs_are_left_to_did_open() {
+        // Sources under a gitignored dir are skipped; EDN configs follow the
+        // same rule, and `didOpen` indexes one when the user opens it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path();
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(project.join("secrets")).unwrap();
+        fs::write(project.join(".gitignore"), "secrets/\n").unwrap();
+        fs::write(project.join("src/db.clj"), "(ns app.db)\n").unwrap();
+        fs::write(
+            project.join("secrets/config.edn"),
+            "{:app.db/db {:url \"x\"} :app/sys {:db #ig/ref :app.db/db}}",
+        )
+        .unwrap();
+
+        let roots = [ScanRoot {
+            project_dir: project.to_path_buf(),
+            path: project.join("src"),
+        }];
+        let index = build_index_scoped(&roots, &ExtractConfig::default()).unwrap();
+        assert!(
+            !index
+                .occurrences
+                .contains_key(&project.join("secrets/config.edn")),
+            "a gitignored config is not scanned"
         );
     }
 
