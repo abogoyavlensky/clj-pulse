@@ -42,7 +42,8 @@ then the editor features users notice as missing. Guiding decisions:
 
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
-references, rename (vars and locals) with `prepareRename`, hover, ClojureDocs
+references, rename (vars, locals and qualified keywords) with `prepareRename`,
+hover, ClojureDocs
 request, completion (fuzzy-matched and ranked, `/` and `:` triggers, keywords
 in the notation being typed, auto-require on accept, lazy
 `completionItem/resolve` docs), signature help, document and workspace symbols,
@@ -58,9 +59,8 @@ parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 `documentHighlight` underlines the symbol under the cursor, and
 `selectionRange` expands the selection along the parse tree.
 
-Not shipped: keyword rename, `foldingRange`, formatting, semantic tokens,
-code lens, implementation provider, `executeCommand` refactors,
-`willRenameFiles`.
+Not shipped: `foldingRange`, formatting, semantic tokens, code lens,
+implementation provider, `executeCommand` refactors, `willRenameFiles`.
 
 ## Milestone 0 — release gates
 
@@ -155,10 +155,10 @@ Cheap with the tree-sitter parse resident; their absence reads as
 - [x] `textDocument/documentHighlight`. Reuse `local_references_at` and
       the occurrence index; Read vs Write where cheap.
 - [x] `textDocument/selectionRange`. Expand along the parse tree.
-- [ ] **Keyword rename**. Rewrite each occurrence in its own notation
+- [x] **Keyword rename**. Rewrite each occurrence in its own notation
       (`::kw`, `:ns/kw`, `::alias/kw`); include Integrant EDN files; refuse
       only when an occurrence can't be rewritten safely.
-  Plan: [2026-09-08-2229-document-highlight-selection-range.md](plans/2026-09-08-2229-document-highlight-selection-range.md) — done (documentHighlight, selectionRange); [2026-09-08-2230-keyword-rename.md](plans/2026-09-08-2230-keyword-rename.md) — in progress (keyword rename)
+  Plan: [2026-09-08-2229-document-highlight-selection-range.md](plans/2026-09-08-2229-document-highlight-selection-range.md) — done (documentHighlight, selectionRange); [2026-09-08-2230-keyword-rename.md](plans/2026-09-08-2230-keyword-rename.md) — done (keyword rename)
 
 ## Milestone 4 — small power features
 

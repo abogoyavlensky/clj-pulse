@@ -43,6 +43,14 @@ extractor.rs: `(defmethod ig/init-key ::x …)` records `:ns/x` as an IntegrantK
 scanner.rs: EDN files under `:paths` containing `#ig/ref` are scanned for keyword
   occurrences (`extract_edn`) and inserted via `Index::insert_edn_file`
   (occurrences only) — this links a `config.edn` component key to its defmethod.
+  A ref-less config counts too when its top level is keyed by namespaced
+  keywords, `#:my.app{:db …}` included: the prefix qualifies every key it holds.
+handlers/references.rs: keyword rename (`rename_target` → `RenameTarget::Keyword`)
+  collects every site — occurrences, the `IntegrantKey` definition, and the
+  definitions of open buffers — and edits only the name each token ends with.
+  A site it cannot rewrite that way (a `{::keys [db]}` entry, which is a symbol
+  binding a local) refuses the whole rename rather than leave it reading the
+  old key.
 
 ## Index Re-population (on file save)
 
@@ -87,7 +95,7 @@ word under cursor (from DocumentStore / ropey)
 - All LSP Position/Range values come from ropey, never manual byte arithmetic
 - On any parse failure: log warning, return Ok(empty) — never crash
 - Keyword fqns are colon-prefixed (`:ns/name`) so they never collide with var
-  fqns; keyword occurrences span the whole keyword token (navigation-only — the
-  rename path rejects keyword fqns).
+  fqns; keyword occurrences span the whole keyword token, and the rename path
+  replaces only the name that token ends with, so each site keeps its notation.
 - EDN config files contribute occurrences only (no namespace, no symbols),
   registered under a NUL sentinel ns in `file_to_ns` so re-scans keep them.

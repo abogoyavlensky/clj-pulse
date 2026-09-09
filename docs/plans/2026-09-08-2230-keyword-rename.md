@@ -206,10 +206,10 @@ Modify:
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
   README Rename bullet: qualified keywords, every notation, EDN included, what is refused. AGENTS.md invariants: replace the "keyword rename is rejected" sentence with the suffix rule and the two refusals. ARCHITECTURE keyword section likewise. ROADMAP Milestone 3: tick keyword rename, set `Plan:` to `done`. Use /writing-clearly.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Document keyword rename"`

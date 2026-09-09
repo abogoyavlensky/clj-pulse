@@ -49,8 +49,15 @@ Language features:
 - **Rename** - rename a project symbol and all of its references, or a local
   binding (params, `let`/`loop`/`for` bindings, destructured names) within
   its scope. The editor's rename box opens on the exact token that will change,
-  and names that cannot be renamed - library and built-in symbols, keywords,
+  and names that cannot be renamed - library and built-in symbols,
   `:keys`-destructured bindings - are refused up front with a reason.
+- **Keyword rename** - rename a qualified keyword across the project. Each site
+  keeps the notation it was written in, because only the name at the end of the
+  token is replaced: `::db`, `::alias/db` and `:my.app/db` all become `::store`,
+  `::alias/store` and `:my.app/store`. Integrant `config.edn` files are rewritten
+  with the sources. Unqualified keywords, keywords of a library namespace, and
+  keywords read through `{::keys [db]}` destructuring (where the name is also the
+  binding) are refused rather than half-renamed.
 - **Keyword navigation** - go to definition and find references on namespaced
   keywords, including Integrant component keys: jump from `:my.app/db` in a
   `config.edn` system map (or an `#ig/ref`) to its `(defmethod ig/init-key ::db …)`.
