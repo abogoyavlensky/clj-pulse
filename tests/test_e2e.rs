@@ -6161,15 +6161,18 @@ fn test_e2e_rename_keyword_across_clj_and_edn() {
         config_edits
     );
     assert_edits_cover(&config_text, config_edits, "db", "store");
-    // The unqualified `:db` key of the server component is a different keyword
-    // and stays put.
-    let (ref_line, _) = start_of(&config_text, "#ig/ref");
+    // The `#ig/ref` value is rewritten at its own suffix; the unqualified `:db`
+    // key of the server component sits on the same line and is a different
+    // keyword, so it stays put.
+    let (ref_line, ref_col) = start_of(&config_text, "#ig/ref :readx.db/db");
+    let ref_suffix = ref_col + "#ig/ref :readx.db/".len() as u32;
     assert_eq!(
         config_edits
             .iter()
             .filter(|e| e["range"]["start"]["line"] == json!(ref_line))
-            .count(),
-        1,
+            .map(|e| e["range"]["start"]["character"].as_u64().unwrap() as u32)
+            .collect::<Vec<_>>(),
+        vec![ref_suffix],
         "only the #ig/ref value on that line: {:?}",
         config_edits
     );
@@ -6185,6 +6188,13 @@ fn test_e2e_rename_keyword_rewrites_namespaced_map_keys() {
     std::fs::write(
         &nsmap,
         "(ns readx.nsmap)\n\n(def system #:readx.db{:db 1})\n",
+    )
+    .unwrap();
+    // The same shape in an Integrant config, where it is idiomatic.
+    let short = root.join("resources/short.edn");
+    std::fs::write(
+        &short,
+        "{:readx.short/thing {:db #ig/ref :readx.db/db}\n :extra #:readx.db{:db 1}}\n",
     )
     .unwrap();
 
@@ -6218,6 +6228,32 @@ fn test_e2e_rename_keyword_rewrites_namespaced_map_keys() {
         "{:?}",
         edits
     );
+
+    let short_edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/resources/short.edn"))
+        .unwrap_or_else(|| panic!("EDN namespaced-map key not edited: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    let short_text = std::fs::read_to_string(&short).unwrap();
+    assert_eq!(
+        short_edits.len(),
+        2,
+        "the #ig/ref and the #:readx.db{{:db …}} key: {:?}",
+        short_edits
+    );
+    assert_edits_cover(&short_text, &short_edits, "db", "store");
+    let (ns_line, ns_col) = start_of(&short_text, "#:readx.db{:db 1}");
+    assert!(
+        short_edits.iter().any(|e| e["range"]["start"]
+            == json!({ "line": ns_line, "character": ns_col + "#:readx.db{:".len() as u32 })),
+        "the prefixed key itself: {:?}",
+        short_edits
+    );
 }
 
 #[test]
@@ -6248,15 +6284,29 @@ fn test_e2e_rename_keyword_uses_unsaved_edits() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(edits.len(), 3, "{:?}", edits);
-    assert!(
-        edits
-            .iter()
-            .all(|e| e["range"]["start"]["line"].as_u64().unwrap() > line as u64),
-        "every edit must sit below the inserted line {}: {:?}",
-        line,
-        edits
-    );
+    // Every dispatch keyword, at the line it has *now* — one below where the
+    // index put it — and at the exact columns of its `db` suffix.
+    let expected: Vec<serde_json::Value> = [
+        "ig/assert-key ::db",
+        "ig/init-key ::db",
+        "ig/halt-key! ::db",
+    ]
+    .iter()
+    .map(|dispatch| {
+        let (l, c) = start_of(&db_text, dispatch);
+        let suffix = c + (dispatch.len() - 2) as u32;
+        json!({
+            "range": {
+                "start": { "line": l + 1, "character": suffix },
+                "end": { "line": l + 1, "character": suffix + 2 }
+            },
+            "newText": "store"
+        })
+    })
+    .collect();
+    let mut got: Vec<serde_json::Value> = edits.to_vec();
+    got.sort_by_key(|e| e["range"]["start"]["line"].as_u64().unwrap());
+    assert_eq!(got, expected, "edits must use the buffer's current ranges");
 }
 
 #[test]

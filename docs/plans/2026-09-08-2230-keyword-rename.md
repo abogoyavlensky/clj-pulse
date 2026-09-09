@@ -184,6 +184,16 @@ Modify:
 > Deviation: the namespaced-map key case is in scope after all —
 > `record_ns_map_key` already records `#:readx.db{:db 1}` as `:readx.db/db`, so
 > `test_e2e_rename_keyword_rewrites_namespaced_map_keys` covers it.
+>
+> Deviation (codex review): `extract_edn` now applies namespaced-map prefixes
+> too (`collect_edn_ns_map`). It did not, so `#:my.app{:db …}` in an Integrant
+> config was invisible to references *and* to rename — the silent-miss the
+> all-or-nothing rule exists to prevent, on the very file type this plan is
+> about. Pre-existing, fixed here because the feature makes it user-visible.
+>
+> Two assertions codex called weak were tightened: the unsaved-edit test now
+> pins all three edits to exact shifted ranges, and the `#ig/ref` assertion pins
+> the edit column rather than only its line.
 
 ### Task 4: Docs and roadmap
 

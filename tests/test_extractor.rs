@@ -712,6 +712,50 @@ fn test_non_integrant_defmethod_keyword_is_only_an_occurrence() {
 }
 
 #[test]
+fn test_extract_edn_namespaced_map_keys_take_the_map_prefix() {
+    // An Integrant config written short: `#:readx.db{:db …}` reads as
+    // `{:readx.db/db …}`. Walking the keys blindly would record nothing, and a
+    // keyword rename that cannot see a site leaves it reading the old key.
+    let src = "#:readx.db{:db {:url \"x\"}\n \
+               :_/bare 1\n \
+               :other.ns/kept 2\n \
+               :ref #ig/ref :readx.db/db}";
+    let occs = extract_edn(src);
+
+    // The prefixed key plus the `#ig/ref` value.
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/db").len(),
+        2,
+        "occs: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":readx.db/ref").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    // `:_/x` escapes the prefix and an explicitly qualified key keeps its own.
+    assert_eq!(
+        occurrences_of(&occs, ":other.ns/kept").len(),
+        1,
+        "occs: {:?}",
+        occs
+    );
+    assert!(
+        occs.iter()
+            .all(|o| o.fqn != ":readx.db/bare" && o.fqn != ":readx.db"),
+        "escaped key or map prefix recorded: {:?}",
+        occs
+    );
+
+    // The range is the key token, which the rename rewrites the suffix of.
+    let key = occurrences_of(&occs, ":readx.db/db")[0];
+    assert_eq!(key.name_range.start.line, 0);
+    assert_eq!(key.name_range.start.character, "#:readx.db{".len() as u32);
+}
+
+#[test]
 fn test_extract_edn_records_qualified_keywords_including_ig_ref() {
     let src = "{:readx.db/db {:url \"x\"}\n \
                :readx.server/server {:db #ig/ref :readx.db/db}}";

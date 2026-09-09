@@ -165,7 +165,8 @@ fn has_namespaced_top_level_key(source: &str) -> bool {
 /// system configs). EDN has no `ns` form or `::` auto-resolution, so only
 /// literal `:ns/name` keywords qualify — an empty `NsMeta` makes `keyword_fqn`
 /// drop `::`/unqualified keywords. Keywords nested in tagged literals
-/// (`#ig/ref :ns/x`), maps, and vectors are all reached by the generic descent.
+/// (`#ig/ref :ns/x`), maps, and vectors are all reached by the generic descent;
+/// a namespaced map (`#:my.app{:db …}`) qualifies its keys with its prefix.
 pub fn extract_edn(source: &str) -> Vec<Occurrence> {
     match parse_tree(source) {
         Some(tree) => extract_edn_tree(&tree, source),
@@ -201,8 +202,53 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
         }
         return;
     }
+    // `#:my.app{:db {…}}` is an ordinary Integrant config written short: the
+    // reader qualifies each unqualified key with the map's prefix, so walking
+    // the keys blindly would miss `:my.app/db` entirely — and a keyword rename
+    // that cannot see a site silently leaves it reading the old key.
+    if node.kind() == "ns_map_lit" {
+        collect_edn_ns_map(node, source, ns_meta, out);
+        return;
+    }
     for child in named_children(node) {
         collect_edn_keywords(child, source, ns_meta, out);
+    }
+}
+
+/// The keys of a namespaced map in an EDN config, under the fqns the reader
+/// gives them. Mirrors [`walk_ns_map`] with no scope to track: an EDN file has
+/// no `ns` form, so `#::{…}` and `#::alias{…}` resolve to nothing and their keys
+/// stay unqualified (recorded under no fqn), while `#:my.app{…}` qualifies its
+/// own. A splicing reader conditional makes keys and values indistinguishable,
+/// so such a map falls back to the ordinary walk.
+fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<Occurrence>) {
+    static NO_LINT_AS: OnceLock<HashMap<String, DefKind>> = OnceLock::new();
+    let ctx = OccurrenceCtx {
+        source,
+        ns_meta,
+        def_names: HashSet::new(),
+        lint_as: NO_LINT_AS.get_or_init(HashMap::new),
+    };
+    let map_ns = ns_map_prefix(node, &ctx);
+    let mut cursor = node.walk();
+    let entries: Vec<Node> = node.children_by_field_name("value", &mut cursor).collect();
+    if entries.iter().any(|n| n.kind() == "splicing_read_cond_lit") {
+        for entry in entries {
+            collect_edn_keywords(entry, source, ns_meta, out);
+        }
+        return;
+    }
+    for pair in entries.chunks(2) {
+        match pair.first() {
+            Some(key) if key.kind() == "kwd_lit" => {
+                record_ns_map_key(*key, map_ns.as_deref(), &ctx, out)
+            }
+            Some(key) => collect_edn_keywords(*key, source, ns_meta, out),
+            None => {}
+        }
+        if let Some(value) = pair.get(1) {
+            collect_edn_keywords(*value, source, ns_meta, out);
+        }
     }
 }
 
