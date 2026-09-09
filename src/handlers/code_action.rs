@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 use crate::document::DocumentStore;
 use crate::index::{extractor, Index, NsMeta};
@@ -271,9 +271,11 @@ impl RequireAnchor {
 /// last element (name / docstring / attr-map). `None` when there is no `ns`
 /// form to edit.
 pub fn require_anchor(source: &str) -> Option<RequireAnchor> {
-    let mut parser = Parser::new();
-    parser.set_language(extractor::language()).ok()?;
-    let tree = parser.parse(source, None)?;
+    require_anchor_tree(&extractor::parse_tree(source)?, source)
+}
+
+/// [`require_anchor`] over an already-parsed `tree` of `source`.
+pub fn require_anchor_tree(tree: &tree_sitter::Tree, source: &str) -> Option<RequireAnchor> {
     let root = tree.root_node();
 
     let ns_form = ns_form(root, source)?;
@@ -314,6 +316,11 @@ pub fn require_edit(source: &str, spec: &str) -> Option<TextEdit> {
     Some(require_anchor(source)?.edit(spec))
 }
 
+/// [`require_edit`] over an already-parsed `tree` of `source`.
+pub fn require_edit_tree(tree: &tree_sitter::Tree, source: &str, spec: &str) -> Option<TextEdit> {
+    Some(require_anchor_tree(tree, source)?.edit(spec))
+}
+
 /// What to do with one `:require` spec when cleaning the namespace.
 enum Plan {
     /// Drop the whole spec (unused, or an exact duplicate of an earlier one).
@@ -330,9 +337,11 @@ enum Plan {
 /// and reader-conditional specs are left untouched, and surviving specs keep
 /// their original order and formatting. Returns `None` when nothing changes.
 pub fn clean_ns_edits(source: &str) -> Option<Vec<TextEdit>> {
-    let mut parser = Parser::new();
-    parser.set_language(extractor::language()).ok()?;
-    let tree = parser.parse(source, None)?;
+    clean_ns_edits_tree(&extractor::parse_tree(source)?, source)
+}
+
+/// [`clean_ns_edits`] over an already-parsed `tree` of `source`.
+pub fn clean_ns_edits_tree(tree: &tree_sitter::Tree, source: &str) -> Option<Vec<TextEdit>> {
     let root = tree.root_node();
 
     let ns_form = ns_form(root, source)?;
@@ -347,7 +356,7 @@ pub fn clean_ns_edits(source: &str) -> Option<Vec<TextEdit>> {
         return None;
     }
 
-    let mut used_prefixes = used_prefixes(source);
+    let mut used_prefixes = used_prefixes(tree, source);
     collect_keyword_prefixes(root, source, &mut used_prefixes);
     let used_bare = used_bare_symbols(root, ns_form, source);
     let self_ns = ns_name_of(ns_form, source).unwrap_or_default();
@@ -392,13 +401,14 @@ pub struct UnusedRequire {
 /// reader-conditional specs, and libspecs with options we don't model are never
 /// reported.
 pub fn unused_requires(source: &str) -> Vec<UnusedRequire> {
-    let mut parser = Parser::new();
-    if parser.set_language(extractor::language()).is_err() {
-        return vec![];
+    match extractor::parse_tree(source) {
+        Some(tree) => unused_requires_tree(&tree, source),
+        None => vec![],
     }
-    let Some(tree) = parser.parse(source, None) else {
-        return vec![];
-    };
+}
+
+/// [`unused_requires`] over an already-parsed `tree` of `source`.
+pub fn unused_requires_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<UnusedRequire> {
     let root = tree.root_node();
     let Some(ns_form) = ns_form(root, source) else {
         return vec![];
@@ -411,7 +421,7 @@ pub fn unused_requires(source: &str) -> Vec<UnusedRequire> {
         return vec![];
     }
 
-    let mut used_prefixes = used_prefixes(source);
+    let mut used_prefixes = used_prefixes(tree, source);
     collect_keyword_prefixes(root, source, &mut used_prefixes);
     let used_bare = used_bare_symbols(root, ns_form, source);
     let self_ns = ns_name_of(ns_form, source).unwrap_or_default();
@@ -459,13 +469,14 @@ pub struct DuplicateRequire {
 /// `some.ns` requires are considered too; reader-conditional specs are ignored,
 /// since their branches are mutually exclusive.
 pub fn duplicate_requires(source: &str) -> Vec<DuplicateRequire> {
-    let mut parser = Parser::new();
-    if parser.set_language(extractor::language()).is_err() {
-        return vec![];
+    match extractor::parse_tree(source) {
+        Some(tree) => duplicate_requires_tree(&tree, source),
+        None => vec![],
     }
-    let Some(tree) = parser.parse(source, None) else {
-        return vec![];
-    };
+}
+
+/// [`duplicate_requires`] over an already-parsed `tree` of `source`.
+pub fn duplicate_requires_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<DuplicateRequire> {
     let root = tree.root_node();
     let Some(ns_form) = ns_form(root, source) else {
         return vec![];
@@ -580,8 +591,8 @@ fn clean_one_clause(
 
 /// Namespace prefixes used in qualified symbols (`str/join` → `str`), covering
 /// both `:as` aliases and fully-qualified `some.ns/foo` uses.
-fn used_prefixes(source: &str) -> HashSet<String> {
-    extractor::qualified_usages(source)
+fn used_prefixes(tree: &tree_sitter::Tree, source: &str) -> HashSet<String> {
+    extractor::qualified_usages_tree(tree, source)
         .into_iter()
         .map(|u| u.prefix)
         .collect()
@@ -1148,6 +1159,30 @@ mod tests {
             }
         }
         source.len()
+    }
+
+    /// Every `_tree` variant must agree with its string version: the handlers
+    /// run on the cached tree, the diagnostics tests on strings.
+    #[test]
+    fn tree_variants_match_string_versions() {
+        let sources = [
+            "(ns my.app\n  (:require [clojure.string :as str]\n            [clojure.set :as set]\n            [clojure.set :as cset]\n            [clojure.walk :refer [postwalk prewalk]]))\n(defn f [x] (postwalk identity (str/trim x)))\n",
+            "(ns my.app)\n(defn f [x] x)\n",
+            "(defn f [x] x)\n",
+        ];
+        for source in sources {
+            let tree = extractor::parse_tree(source).unwrap();
+            assert_eq!(unused_requires(source), unused_requires_tree(&tree, source));
+            assert_eq!(
+                duplicate_requires(source),
+                duplicate_requires_tree(&tree, source)
+            );
+            assert_eq!(clean_ns_edits(source), clean_ns_edits_tree(&tree, source));
+            assert_eq!(
+                require_edit(source, "[clojure.edn :as edn]"),
+                require_edit_tree(&tree, source, "[clojure.edn :as edn]")
+            );
+        }
     }
 
     #[test]
