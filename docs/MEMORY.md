@@ -97,12 +97,14 @@ The EDN scan used to be limited to `:paths`, so a config the classpath does not
 name — `resources/config.edn` with `:paths ["src"]`, a Leiningen
 `:resource-paths`, a `system.edn` at the project root — was never indexed, and
 references and keyword rename silently skipped it. It now walks each project dir
-instead. Unbounded, that walk costs ~700 ms on metabase (27 556 files in 5 111
-dirs) for the 73 `.edn` files it finds: the traversal, not the reads. Bounded at
-`EDN_SCAN_MAX_DEPTH = 5` it costs nothing measurable (project index 2.85 s,
-median of two runs, against 3.2-3.4 s in the table above), and still reaches
-every layout in the wild. Deeper or gitignored configs fall back to `didOpen`
-indexing.
+as well. Unbounded, that extra walk costs ~700 ms on metabase (27 556 files in
+5 111 dirs) for the 73 `.edn` files it finds: the traversal, not the reads.
+Bounded at `EDN_SCAN_MAX_DEPTH = 5` it costs nothing measurable — project index
+3.6 s, against 3.2-3.4 s in the table above and 3.7-4.0 s measured on this box
+the same afternoon — and still reaches every layout in the wild. The declared
+source roots are still walked in full alongside it, since one can sit outside
+the project dir (`:paths ["../shared/resources"]`) or below the bound. Deeper or
+gitignored configs fall back to `didOpen` indexing.
 
 ### On the maintainer's machine (macOS)
 

@@ -104,26 +104,37 @@ pub fn build_index_scoped(roots: &[ScanRoot], cfg: &ExtractConfig) -> Result<Ind
 /// file and nothing in the index. Gitignore still applies, as it does to
 /// sources; an ignored config is indexed when the user opens it.
 fn collect_edn_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
+    // The declared source roots, walked in full as they always were: one may
+    // sit outside the project dir (`:paths ["../shared/resources"]`) or deeper
+    // than the bound below, and dropping either would lose a config that used
+    // to be indexed.
+    let mut walks: Vec<(ScanRoot, usize)> = roots
+        .iter()
+        .filter(|root| root.path.exists())
+        .map(|root| (root.clone(), usize::MAX))
+        .collect();
+
+    // Plus each project dir, bounded — this is the widening.
     let mut project_dirs: Vec<PathBuf> = Vec::new();
     for root in roots {
         let dir = normalize_lexically(&root.project_dir);
-        if !project_dirs.contains(&dir) {
+        if dir.exists() && !project_dirs.contains(&dir) {
             project_dirs.push(dir);
         }
     }
-
-    let mut files = Vec::new();
-    for dir in project_dirs {
-        if !dir.exists() {
-            continue;
-        }
-        // A whole-project walk: same gitignore scoping as a source root whose
-        // path *is* the project dir.
+    walks.extend(project_dirs.into_iter().map(|dir| {
+        // Same gitignore scoping as a source root whose path *is* the project
+        // dir, so `filter_entry` never engages.
         let root = ScanRoot {
             project_dir: dir.clone(),
             path: dir,
         };
-        for entry in scoped_walker_max_depth(&root, EDN_SCAN_MAX_DEPTH) {
+        (root, EDN_SCAN_MAX_DEPTH)
+    }));
+
+    let mut files = Vec::new();
+    for (root, max_depth) in walks {
+        for entry in scoped_walker_max_depth(&root, max_depth) {
             let Ok(entry) = entry else {
                 continue;
             };
@@ -133,6 +144,9 @@ fn collect_edn_files(roots: &[ScanRoot]) -> Vec<PathBuf> {
             }
         }
     }
+    // The walks overlap: a source root inside its project dir is covered twice.
+    files.sort();
+    files.dedup();
     files
 }
 
@@ -443,6 +457,51 @@ mod tests {
         assert!(
             !index.occurrences.contains_key(&project.join("deps.edn")),
             "build manifests must never be indexed"
+        );
+    }
+
+    #[test]
+    fn declared_source_roots_still_contribute_edn_configs() {
+        // The project-dir walk is bounded and stops at the project dir, so the
+        // declared roots must still be walked in full: one can sit outside the
+        // project (`:paths ["../shared/resources"]`) or deeper than the bound.
+        // Both were indexed before the widening.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path();
+        let project = ws.join("app");
+        let shared = ws.join("shared/resources");
+        let deep = project.join("a/b/c/d/e/f/resources");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(project.join("src/db.clj"), "(ns app.db)\n").unwrap();
+        let config = "{:app.db/db {} :app/sys {:db #ig/ref :app.db/db}}";
+        fs::write(shared.join("config.edn"), config).unwrap();
+        fs::write(deep.join("config.edn"), config).unwrap();
+
+        let roots = [
+            ScanRoot {
+                project_dir: project.clone(),
+                path: project.join("src"),
+            },
+            ScanRoot {
+                project_dir: project.clone(),
+                path: project.join("../shared/resources"),
+            },
+            ScanRoot {
+                project_dir: project.clone(),
+                path: deep.clone(),
+            },
+        ];
+        let index = build_index_scoped(&roots, &ExtractConfig::default()).unwrap();
+
+        assert!(
+            index.occurrences.contains_key(&shared.join("config.edn")),
+            "a config under a source root outside the project dir"
+        );
+        assert!(
+            index.occurrences.contains_key(&deep.join("config.edn")),
+            "a config under a declared root deeper than EDN_SCAN_MAX_DEPTH"
         );
     }
 
