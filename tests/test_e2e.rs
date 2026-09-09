@@ -5958,18 +5958,18 @@ fn test_e2e_prepare_rename_rejects_what_rename_rejects() {
     .unwrap();
 
     let utils = root.join("src/utils.clj");
-    let file = root.join("src/ns_options.clj");
+    let file = root.join("src/keywords.clj");
     for path in [&utils, &file, &probe] {
         client.did_open(path);
     }
 
     let (str_line, str_ch) = position_of(&utils, "(str \"Hello");
-    let (kw_line, kw_ch) = start_of(&std::fs::read_to_string(&file).unwrap(), "::cfg/port");
+    let (kw_line, kw_ch) = start_of(&std::fs::read_to_string(&file).unwrap(), ":id 0");
     let (bind_line, bind_ch) = start_of(&std::fs::read_to_string(&probe).unwrap(), "amount]");
 
     let cases = [
         (&utils, str_line, str_ch + 1, "rename"),
-        (&file, kw_line, kw_ch + 3, "keyword"),
+        (&file, kw_line, kw_ch + 1, "unqualified keyword"),
         (&probe, bind_line, bind_ch + 2, ":keys"),
     ];
     for (path, line, ch, needle) in cases {
@@ -5998,6 +5998,144 @@ fn test_e2e_prepare_rename_rejects_what_rename_rejects() {
             ch
         );
     }
+}
+
+#[test]
+fn test_e2e_prepare_rename_keyword_returns_name_suffix() {
+    // A keyword rename rewrites only the name at the end of the token — the
+    // notation (`::db`, `::alias/db`, `:readx.db/db`) takes care of itself — so
+    // the range the editor pre-selects is `db`, not the whole `::db`.
+    let project = setup_named("integrant_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let db = root.join("src/readx/db.clj");
+    client.did_open(&db);
+
+    let text = std::fs::read_to_string(&db).unwrap();
+    let (line, col) = start_of(&text, "::db");
+    // Cursor on the second colon: still inside the token, outside the suffix.
+    let range = client.prepare_rename(&db, line, col + 1);
+    assert_eq!(
+        range["start"],
+        json!({ "line": line, "character": col + 2 }),
+        "{}",
+        range
+    );
+    assert_eq!(
+        range["end"],
+        json!({ "line": line, "character": col + 4 }),
+        "{}",
+        range
+    );
+}
+
+#[test]
+fn test_e2e_prepare_rename_refuses_keys_destructuring() {
+    // `{::kw/keys [local]}` reads `:simple.keywords/local` through a bare
+    // symbol, so no suffix edit can rewrite it. The rename is refused whole
+    // rather than rewriting every other site and leaving this one reading the
+    // old key — and prepareRename refuses it with the same message.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, "::local true");
+    let prepared = client.prepare_rename_error(&keywords, line, col + 3);
+    assert!(
+        prepared.contains("destructuring") && prepared.contains("kw_destructure.clj"),
+        "expected the destructuring refusal, got: {}",
+        prepared
+    );
+
+    let renamed = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", keywords.display()) },
+            "position": { "line": line, "character": col + 3 },
+            "newName": "scoped"
+        }),
+    );
+    assert_eq!(
+        renamed["message"].as_str().unwrap(),
+        prepared,
+        "prepareRename and rename must reject alike"
+    );
+}
+
+#[test]
+fn test_e2e_rename_refuses_unqualified_keyword() {
+    // `:id` in one map and `:id` in another are not one thing, so there is
+    // nothing project-wide to rename.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, ":id 0");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", keywords.display()) },
+            "position": { "line": line, "character": col + 1 },
+            "newName": "ident"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("unqualified keyword"),
+        "expected the unqualified refusal, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_e2e_rename_refuses_library_keyword() {
+    // `:clojure.string/x` is namespaced to a library: its sites are not ours
+    // to edit, the same rule library *symbols* already follow.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    write_clojure_string_jar(&root);
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.wait_for_log("library indexing complete");
+
+    let utils = root.join("src/utils.clj");
+    client.did_open(&utils);
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    client.did_change_insert(&utils, last_line, 0, "(def k :clojure.string/x)\n");
+
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", utils.display()) },
+            "position": { "line": last_line, "character": 10 },
+            "newName": "y"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("library namespace") && msg.contains("clojure.string"),
+        "expected the library-namespace refusal, got: {}",
+        msg
+    );
 }
 
 #[test]

@@ -103,22 +103,41 @@ Modify:
 - Modify: `src/handlers/references.rs`, `src/index/mod.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   e2e: `test_e2e_prepare_rename_keyword_returns_name_suffix` on `::db` in `integrant_project/src/readx/db.clj`; `test_e2e_rename_refuses_unqualified_keyword`; `test_e2e_rename_refuses_library_keyword` (`:clojure.string/x` typed into an open buffer of `simple_project`).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e rename_keyword`
   Expected: FAIL (keywords still refused with the old message).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `RenameTarget::Keyword { fqn, sites }`, the two scope rules, the project-path filter, and the site collection with token checks in `rename_target` (`fn name_suffix_range(range: Range, token: &str, name: &str) -> Option<Range>`, UTF-16 lengths), `is_library_namespace`, and `prepare_rename` answering with the site at the cursor. Add `test_e2e_prepare_rename_refuses_keys_destructuring` here as well.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS; existing `rename` tests for vars and locals unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Accept qualified project keywords as rename targets"`
+
+> Deviation: the `Keyword` branch of `rename` and the colon-in-new-name message
+> (Task 3, step 3) landed here — the `match` on `RenameTarget` does not compile
+> without the branch, and Task 2's own refusal tests go through `rename`. Task 3
+> keeps its tests, the fixture and the Pulse gate.
+>
+> Deviation: `tests/fixtures/simple_project/src/kw_destructure.clj` was added here
+> rather than in Task 3, since `test_e2e_prepare_rename_refuses_keys_destructuring`
+> needs it.
+>
+> Deviation: `RenameTarget::Keyword` carries `sites: Vec<KeywordSite>` — each site
+> holds the whole token range as well as the name sub-range — instead of
+> `{ fqn, sites: Vec<(Url, Range)> }`. `prepareRename` needs the token range: a
+> cursor on the `::` marker sits outside the suffix the edit replaces. `fqn` had no
+> reader left once the refusals moved into `rename_target`.
+>
+> Deviation: `test_e2e_prepare_rename_rejects_what_rename_rejects` used
+> `::cfg/port` as its keyword case, which is now renameable; it checks the
+> unqualified `:id` instead.
 
 ### Task 3: Keyword edits
 

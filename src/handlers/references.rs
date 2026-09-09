@@ -150,6 +150,18 @@ pub enum RenameTarget {
     },
     /// A project-wide var, record, keyword-free symbol — renamed by fqn.
     Global { fqn: String, sym: Symbol },
+    /// A qualified project keyword: every site that reads it, already checked
+    /// down to the range of the name its notation ends with.
+    Keyword { sites: Vec<KeywordSite> },
+}
+
+/// One site a keyword rename rewrites: the file, the whole token (which the
+/// cursor may sit anywhere in, `::` marker included) and the sub-range of it
+/// the edit replaces.
+pub struct KeywordSite {
+    pub uri: Url,
+    pub token: Range,
+    pub name: Range,
 }
 
 /// Everything [`rename`] checks before building edits, minus the checks that
@@ -188,11 +200,11 @@ pub fn rename_target(
 
     let fqn = resolve_fqn_at(index, documents, uri, pos)
         .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?;
-    // Keyword fqns are colon-prefixed. Keyword occurrences span the whole
-    // token, so renaming through this path would rewrite the entire keyword;
-    // keyword rename isn't supported yet, so reject it rather than corrupt.
+    // Keyword fqns are colon-prefixed. A keyword occurrence spans the whole
+    // token, so it takes its own path: the edit replaces the name the notation
+    // ends with, never the token.
     if fqn.starts_with(':') {
-        anyhow::bail!("renaming keywords is not yet supported");
+        return keyword_target(index, documents, fqn);
     }
     let sym = index
         .lookup(&fqn)
@@ -201,6 +213,156 @@ pub fn rename_target(
         anyhow::bail!("cannot rename library or built-in symbol {}", fqn);
     }
     Ok(RenameTarget::Global { fqn, sym })
+}
+
+/// Everything a keyword rename can be refused for before the new name is
+/// known, plus the sites it would rewrite. Kept in [`rename_target`] so
+/// `prepareRename` refuses exactly what `rename` would.
+fn keyword_target(index: &Index, documents: &DocumentStore, fqn: String) -> Result<RenameTarget> {
+    let Some((ns, name)) = fqn.trim_start_matches(':').split_once('/') else {
+        anyhow::bail!(
+            "cannot rename the unqualified keyword {}: the same name in unrelated maps is not one thing",
+            fqn
+        );
+    };
+    let (ns, name) = (ns.to_string(), name.to_string());
+    if index.is_library_namespace(&ns) {
+        anyhow::bail!("cannot rename a keyword of library namespace {}", ns);
+    }
+
+    // The definition site (an `ig/init-key` dispatch keyword, an `s/def` name)
+    // is a symbol rather than an occurrence, so it needs its own entry.
+    let mut candidates: Vec<(PathBuf, Range)> = Vec::new();
+    if let Some(sym) = index.lookup(&fqn) {
+        let range = live_definition_range(index, documents, &sym, &fqn);
+        candidates.push((sym.file, range));
+    }
+    for (file, occs) in occurrences_for(index, documents, &fqn) {
+        candidates.extend(occs.into_iter().map(|occ| (file.clone(), occ.name_range)));
+    }
+
+    let mut sites: Vec<KeywordSite> = Vec::new();
+    for (path, token) in candidates {
+        // Library files are read-only even when the user has one open, and an
+        // open `jar:` buffer contributes occurrences like any other file.
+        if !index.is_project_path(&path) {
+            continue;
+        }
+        let Ok(uri) = Url::from_file_path(&path) else {
+            continue;
+        };
+        // Unsaved edits move the ranges `occurrences_for` reports, so the token
+        // is read from the same text those ranges came from.
+        let text = documents
+            .text(&uri)
+            .or_else(|| std::fs::read_to_string(&path).ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("cannot rename {}: {} is unreadable", fqn, path.display())
+            })?;
+        let text = token_at(&text, token).unwrap_or_default();
+        let Some(name_range) = name_suffix_range(token, &text, &name) else {
+            // All-or-nothing: rewriting the sites that do conform would leave
+            // this one reading the old key, which is worse than refusing.
+            if text == name {
+                anyhow::bail!(
+                    "cannot rename {}: the {{:keys [{}]}} destructuring at {}:{} would keep \
+                     reading the old key; rewrite it as {{{} {}}} first",
+                    fqn,
+                    name,
+                    path.display(),
+                    token.start.line + 1,
+                    name,
+                    fqn
+                );
+            }
+            anyhow::bail!(
+                "cannot rename {}: '{}' at {}:{} is not a keyword ending in '{}'",
+                fqn,
+                text,
+                path.display(),
+                token.start.line + 1,
+                name
+            );
+        };
+        if sites
+            .iter()
+            .any(|site| site.uri == uri && site.name == name_range)
+        {
+            continue;
+        }
+        sites.push(KeywordSite {
+            uri,
+            token,
+            name: name_range,
+        });
+    }
+    if sites.is_empty() {
+        anyhow::bail!("cannot rename {}: no project occurrence to rewrite", fqn);
+    }
+    Ok(RenameTarget::Keyword { sites })
+}
+
+/// A definition's name range, taken from the live buffer when its file is open
+/// — the indexed range may be stale against unsaved edits.
+fn live_definition_range(
+    index: &Index,
+    documents: &DocumentStore,
+    sym: &Symbol,
+    fqn: &str,
+) -> Range {
+    let Ok(uri) = Url::from_file_path(&sym.file) else {
+        return sym.name_range;
+    };
+    documents
+        .snapshot(&uri)
+        .and_then(|snapshot| {
+            extractor::extract_full_tree(
+                &snapshot.tree,
+                &snapshot.text,
+                &sym.file,
+                &index.extract_config(),
+            )
+            .ok()
+        })
+        .and_then(|(_, syms, _)| syms.into_iter().find(|s| s.fqn == fqn))
+        .map(|s| s.name_range)
+        .unwrap_or(sym.name_range)
+}
+
+/// The text `range` covers. Keyword tokens never span lines, so a multi-line
+/// range is not one; columns are UTF-16 units, what LSP ranges count in.
+fn token_at(text: &str, range: Range) -> Option<String> {
+    if range.start.line != range.end.line {
+        return None;
+    }
+    let line = text.lines().nth(range.start.line as usize)?;
+    let units: Vec<u16> = line.encode_utf16().collect();
+    let (from, to) = (range.start.character as usize, range.end.character as usize);
+    if from > to || to > units.len() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&units[from..to]))
+}
+
+/// The sub-range of a keyword token covering just the trailing `name`. Every
+/// notation ends with the name — `::name`, `::alias/name`, `:ns/name` — so
+/// rewriting that suffix renames the keyword whatever notation the site uses.
+/// `None` when the token does not end with `name` behind its separator: a
+/// `{::keys [name]}` entry is a bare symbol, and any other shape this cannot
+/// rewrite is refused rather than corrupted.
+fn name_suffix_range(range: Range, token: &str, name: &str) -> Option<Range> {
+    let head = token.strip_suffix(name)?;
+    if !head.ends_with('/') && !head.ends_with(':') {
+        return None;
+    }
+    let len = name.encode_utf16().count() as u32;
+    Some(Range {
+        start: Position {
+            line: range.end.line,
+            character: range.end.character.checked_sub(len)?,
+        },
+        end: range.end,
+    })
 }
 
 /// The range of the token under the cursor, for `textDocument/prepareRename` —
@@ -221,6 +383,13 @@ pub fn prepare_rename(
             occurrence_range_at(index, documents, uri, pos, &fqn)
                 .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?
         }
+        // The cursor may sit anywhere in the token, `::` marker included, but
+        // the range the editor pre-selects is the name the edit replaces.
+        RenameTarget::Keyword { sites } => sites
+            .iter()
+            .find(|site| site.uri == *uri && range_contains(&site.token, pos))
+            .map(|site| site.name)
+            .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?,
     };
     Ok(PrepareRenameResponse::Range(range))
 }
@@ -284,11 +453,25 @@ pub fn rename(
     let pos = params.text_document_position.position;
     let new_name = params.new_name;
 
+    let target = rename_target(index, documents, &uri, pos)?;
+
+    // A keyword rename takes the bare name — the notation at each site supplies
+    // the colons — so say that rather than let the general rule below report
+    // `:store` as an invalid symbol name.
+    if matches!(target, RenameTarget::Keyword { .. }) {
+        if let Some(bare) = new_name.strip_prefix(':') {
+            anyhow::bail!(
+                "cannot rename to '{}': type the new name without the colon ('{}')",
+                new_name,
+                bare.trim_start_matches(':')
+            );
+        }
+    }
     if !is_valid_symbol_name(&new_name) {
         anyhow::bail!("cannot rename: '{}' is not a valid symbol name", new_name);
     }
 
-    let (fqn, sym) = match rename_target(index, documents, &uri, pos)? {
+    let (fqn, sym) = match target {
         RenameTarget::Local { word, refs } => {
             if let Some(snapshot) = documents.snapshot(&uri) {
                 reject_local_capture(&snapshot, &refs, &word, &new_name)?;
@@ -306,6 +489,22 @@ pub fn rename(
                 ..Default::default()
             }));
         }
+        // Every site was validated by `rename_target`; each edit replaces the
+        // name its notation ends with, so `::db`, `::alias/db` and
+        // `:readx.db/db` all keep the notation they were written in.
+        RenameTarget::Keyword { sites } => {
+            let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+            for site in sites {
+                changes.entry(site.uri).or_default().push(TextEdit {
+                    range: site.name,
+                    new_text: new_name.clone(),
+                });
+            }
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }));
+        }
         RenameTarget::Global { fqn, sym } => (fqn, sym),
     };
 
@@ -315,23 +514,7 @@ pub fn rename(
     // (its indexed range may be stale against unsaved edits).
     let decl_uri = Url::from_file_path(&sym.file)
         .map_err(|_| anyhow::anyhow!("invalid path: {:?}", sym.file))?;
-    let decl_range = documents
-        .snapshot(&decl_uri)
-        .and_then(|snapshot| {
-            extractor::extract_full_tree(
-                &snapshot.tree,
-                &snapshot.text,
-                &sym.file,
-                &index.extract_config(),
-            )
-            .ok()
-            .and_then(|(_, syms, _)| {
-                syms.into_iter()
-                    .find(|s| s.fqn == fqn)
-                    .map(|s| s.name_range)
-            })
-        })
-        .unwrap_or(sym.name_range);
+    let decl_range = live_definition_range(index, documents, &sym, &fqn);
     changes.entry(decl_uri).or_default().push(TextEdit {
         range: decl_range,
         new_text: new_name.clone(),
