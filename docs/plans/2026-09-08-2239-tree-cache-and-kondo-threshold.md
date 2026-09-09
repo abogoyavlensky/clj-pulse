@@ -1,5 +1,7 @@
 # Parse-Tree Cache and clj-kondo Size Threshold Implementation Plan
 
+> **Status: complete** (2026-09-09). See the completion summary at the end.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop re-parsing open buffers on every request and every lint pass by caching one incrementally-updated tree-sitter tree per document, and keep clj-kondo off the keystroke path for very large buffers, so a didChange pass on the bench's 452 KiB file drops from about 1.2 s to under 400 ms measured from the edit (the 300 ms debounce plus a native-only pass) (ROADMAP Milestone 1, the two bench-driven items). Runs before the Milestone 3 plans.
@@ -94,22 +96,26 @@ The Clojure Pulse extension setting `clojurePulse.kondo.liveMaxKb` is a one-line
 **Files:**
 - Modify: `src/document.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In `document.rs` `mod tests`, next to `test_apply_changes_utf16_after_emoji`: the six edit-conversion cases from the design, each asserting that the cached tree equals a fresh parse of `snapshot(uri).text`: same `root_node().to_sexp()` *and* the same start and end byte offsets and points for every named node in a pre-order walk. Structure alone would not prove the coordinates navigation and diagnostics consume.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --lib document::tests::snapshot`
   Expected: FAIL (no `snapshot`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Store `(Rope, Tree)` per document, the parser mutex, `InputEdit` conversion, eager reparse through `parse_with` over rope chunks, `Snapshot` and `snapshot()`. Keep `text()`, `word_at`, `keyword_at`, and the rest reading the rope as today.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Keep an incrementally updated parse tree per open document"`
+
+> Deviation: `Parser::parse_with` is deprecated in tree-sitter 0.25 and clippy runs with `-D warnings`, so the reparse calls `parse_with_options(…, None)`, the function it forwards to.
+> Deviation: one incremental reparse per `apply_changes` batch, after every change in the notification has edited the tree, instead of one per change; the invariant (tree matches rope when the call returns) is the same.
+> Review (codex, commit 3b69d06): "No actionable regressions were found." An interim P2 about pre-existing keyword code in `extractor.rs` (unqualified keys inside `#:ns{…}` maps) was dropped from its final report; out of scope here, noted for the Backlog in Task 5.
 
 ### Task 2: Tree-taking extractor and code-action entry points
 
@@ -117,22 +123,25 @@ The Clojure Pulse extension setting `clojurePulse.kondo.liveMaxKb` is a one-line
 - Modify: `src/index/extractor.rs`, `src/handlers/code_action.rs`, `src/handlers/ignored_forms.rs`, `src/diagnostics.rs`
 - Test: `tests/test_extractor.rs`, `src/handlers/code_action.rs` tests
 
-- [ ] **Step 1: Write the equivalence tests**
+- [x] **Step 1: Write the equivalence tests**
   For each pair, parse a fixture once and assert the `_tree` variant equals the string variant. Put extractor pairs in `tests/test_extractor.rs`, code-action pairs in `code_action.rs` tests, `compute_tree` in `diagnostics.rs` tests.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor tree_variant`
   Expected: FAIL (no such functions).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Add the variants; the string versions delegate. No behavior change.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Let extraction and lints run on an existing parse tree"`
+
+> Deviation: `Symbol` and `NsMeta` gained `PartialEq` so the equivalence tests can compare outputs directly. `require_anchor` (the parse behind `require_edit`, also used by completion) and `extract_edn` (behind the EDN branch of `file_occurrences`) got `_tree` variants too, and `used_prefixes` takes the tree, so `unused_requires_tree` and `clean_ns_edits_tree` no longer parse a second time through `qualified_usages`.
+> Review (codex, commit 304eada): "No actionable regressions were found."
 
 ### Task 3: Handlers and the lint pass use the snapshot
 
@@ -140,18 +149,21 @@ The Clojure Pulse extension setting `clojurePulse.kondo.liveMaxKb` is a one-line
 - Modify: `src/server.rs`, `src/handlers/{definition,hover,references,completion,symbols}.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e tests**
+- [x] **Step 1: Write the failing e2e tests**
   `test_e2e_diagnostics_stable_across_edits` and `test_e2e_definition_after_edits` from the design. They pass today by construction; they are regression guards for the switch. Add a debug log line in `lint_and_publish_doc` reporting whether the pass parsed (`parsed=0`) so the test can assert the cache was used via `wait_for_log`.
 
-- [ ] **Step 2: Switch the callers**
+- [x] **Step 2: Switch the callers**
   Every open-buffer handler and `lint_and_publish_doc` take `documents.snapshot(&uri)` and call the `_tree` variants. `occurrences_for` uses snapshots for open documents. Search for remaining `documents.text(` callers that then parse and convert them; `word_at`, `keyword_at`, indent, and text-only uses stay.
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
   Run: `bb check && bb e2e && bb e2e-pulse && bb e2e-calva`
   Expected: PASS; the lint log shows `parsed=0`. Calva is required here: the definition handler changed how it reads the buffer, and the Calva gate is the one that proves `jar:` locations still come out right.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "Serve requests and lints from the cached parse tree"`
+
+> Deviation: `parsed=0` is a `tracing::debug!` line, since only explicit `window/logMessage` calls reach the client and a per-keystroke client log would be noise. The harness gained `LspClient::start_verbose` (spawns with `--verbose`) and `wait_for_server_log`, which read `.clj-pulse/server.log`; the e2e test asserts the line there. `did_open` now opens the document first and indexes the file from the snapshot's tree, so opening a file parses once instead of twice. `Snapshot::parse` exists for tests that need a snapshot without a store. `complete_symbols` takes `Option<&Snapshot>` instead of `Option<&str>`.
+> Review (codex, commit 0123188): "No actionable regressions found." `bb e2e-pulse` and `bb e2e-calva` both passed.
 
 ### Task 4: clj-kondo size threshold
 
@@ -159,39 +171,68 @@ The Clojure Pulse extension setting `clojurePulse.kondo.liveMaxKb` is a one-line
 - Modify: `src/kondo.rs`, `src/server.rs`
 - Test: `tests/test_e2e.rs`, `src/kondo.rs` tests
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   `kondo.rs`: `parse_config_edn` and `parse_config_json` read `live-max-kb` / `liveMaxKb`; merge keeps the lower layer when absent. e2e: the two threshold tests from the design (`start_with_kondo_env` with a config file setting `:live-max-kb 1`, then `0`).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_e2e kondo_threshold`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `live_max_kb` through both config layers, `LintTrigger`, the gate in `lint_and_publish_doc`, and each caller passing its trigger (`did_open`, `did_save`, the debounced `did_change`, the engine-reload re-lint).
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e && bb e2e-pulse`
   Expected: PASS. The Pulse run proves the extension's lint-status display still reports the engine as active while a large buffer sits out keystrokes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Skip clj-kondo on keystrokes for buffers above a size threshold"`
+
+> Deviation: the byte check lives on `KondoConfig::exceeds_live_max`, so the gate in `lint_and_publish_doc` is one line and the unit tests pin the `0` rule; `DEFAULT_LIVE_MAX_KB` is a named constant. Negative or non-integer EDN values and non-integer JSON values are "no override", like the other keys.
+> Review (codex, commit 793ce12): one P2, confirmed real. An edit followed by a save inside the 300 ms debounce let the pending native-only change pass publish after the save's full pass, erasing clj-kondo's findings (same version, so the version guard passed both). Fixed in a follow-up commit: `DocumentStore` keeps a per-document lint epoch that `didChange` and `didSave` bump; the debounced pass and the post-join guard both compare it. `test_e2e_kondo_threshold_save_right_after_change_keeps_kondo_findings` reproduces the race (fails on the unfixed server).
+> Review round 2 (codex, commit 6d08edb): P2, the pass re-read the epoch at its start, leaving a window between the debounce check and the read where a save's bump would be adopted rather than retire the pass. Fixed by capturing version, epoch and trigger at the trigger into a `LintPass` value the pass never re-reads (also what keeps `lint_and_publish_doc` under clippy's argument cap).
+> Review round 3 (codex, commit 6b9f713): "No introduced defects were found."
 
 ### Task 5: Bench and docs
 
 **Files:**
 - Modify: `docs/MEMORY.md`, `README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Run the bench**
+- [x] **Step 1: Run the bench**
   Run: `bb bench`
   Expected: didChange to diagnostics median under 400 ms on the Linux box, definition under 20 ms. If not, profile before touching docs: add `tracing` timings around the native pass, the snapshot call (text materialization of a 452 KiB rope), the occurrence walk, and the publish, and read the bench's own breakdown. A leftover parse in Task 3 is one candidate, not the only one; tree traversal, text materialization, and tokio scheduling can each account for tens of milliseconds on that file.
 
-- [ ] **Step 2: Record and document**
+- [x] **Step 2: Record and document**
   MEMORY.md: an "After the tree cache" table with the commit. README: the `:kondo {:live-max-kb}` setting with one sentence on what large files lose until save; name the extension setting `clojurePulse.kondo.liveMaxKb` as *pending* until the extension change ships, so the README never claims a setting the Marketplace build lacks. AGENTS.md invariants: the tree in the store always matches the rope (eager reparse), handlers must take a `Snapshot` never text plus a separate parse, and the threshold applies to `Change` only. ARCHITECTURE "Data Flow": the snapshot. ROADMAP: tick both Milestone 1 items, `Plan:` to `done`. Use /writing-clearly.
 
-- [ ] **Step 3: Extension follow-up**
+- [x] **Step 3: Extension follow-up**
   Note in the commit message and in the roadmap Backlog: `clojurePulse.kondo.liveMaxKb` to be added to `../clojure-pulse-vscode` (package.json setting plus the settings push), a separate change.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
   Run: `bb check && bb e2e`
   Expected: PASS.
   `git commit -m "Record the post-cache bench and document the kondo threshold"`
+
+> Deviation: definition measures 22 ms on the Linux box against the plan's 20 ms. Profiled as the plan asks: no parse is left anywhere; the 21 ms is the definitions-and-occurrences walk itself (`extract_full_tree`). Going lower means caching the `Analysis` per document version, a design step outside this plan, recorded in the ROADMAP Backlog. didChange → diagnostics is 369 ms cold / 372 ms warm, inside the 400 ms target.
+
+---
+
+## Completion summary (2026-09-09)
+
+**Status: complete.** Branch `tree-cache-and-kondo-threshold`, commits 3b69d06, 304eada, 0123188, 793ce12, 6d08edb, 6b9f713, plus the docs commit.
+
+**Implemented.** `DocumentStore` holds one tree-sitter tree per open document, edited with `Tree::edit` and reparsed incrementally on every `didChange`, and hands out `Snapshot { text, tree }` from one lock. The extractor, code actions, ignored forms and `diagnostics::compute` gained `_tree` entry points; the string versions delegate. Every open-buffer handler and the lint pass read the snapshot, so no request or lint pass parses an open buffer (`parsed=0` in the server log, asserted end to end). `:kondo {:live-max-kb 256}` (`liveMaxKb` in editor settings) keeps clj-kondo off the didChange pass for buffers above the threshold; open, save and engine change still run it, and one publish per pass stands. Bench on the 452 KiB metabase file: didChange → diagnostics 1202 ms → 372 ms, definition 71 ms → 22 ms, index time and RSS unchanged.
+
+**Issues met.** Codex found a real race in the threshold (edit then save inside the debounce let the native-only change pass erase the save's clj-kondo findings), then a narrower window in the first fix. Both fixed: a per-document lint epoch that `didChange` and `didSave` bump, captured at the trigger into a `LintPass` and never re-read by the pass. The reproduction test fails on the unfixed server.
+
+**Deviations, gathered.**
+- `parse_with` is deprecated in tree-sitter 0.25; the store calls `parse_with_options(…, None)`.
+- One incremental reparse per `apply_changes` batch rather than per change; same invariant.
+- `Symbol` and `NsMeta` derive `PartialEq` for the equivalence tests; `require_anchor` and `extract_edn` also got `_tree` variants; `used_prefixes` takes the tree, so the ns lints no longer parse twice.
+- `parsed=0` is a `tracing::debug!` line; the harness gained `start_verbose`, `server_log` and `wait_for_server_log` to read `.clj-pulse/server.log`. `did_open` opens the document first and indexes from its tree. `Snapshot::parse` exists for tests. `complete_symbols` takes `Option<&Snapshot>`.
+- `KondoConfig::exceeds_live_max` and `DEFAULT_LIVE_MAX_KB` hold the threshold rule; the lint epoch and `LintPass` were not in the plan.
+- Definition is 22 ms, not under 20 ms; see the Task 5 note. Analysis caching is a Backlog item.
+- The session had no TaskCreate/TaskUpdate tools, so this document was the only tracking surface.
+
+**What the plan could have specified better.** The `parsed=0` assertion assumed `wait_for_log` could see tracing output; only explicit `window/logMessage` calls reach the client, so the plan needed to say where the line goes and how a test reads it. It also missed that the threshold introduces a second trigger for the same document version, so the staleness guard needed a key beyond the version; a plan that names every guard the lint pass relies on would have caught the save-during-debounce race before review did.
+

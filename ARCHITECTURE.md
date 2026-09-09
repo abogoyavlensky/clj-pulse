@@ -5,6 +5,10 @@
 editor keystroke
   → tower-lsp (server.rs) receives LSP request
   → delegates to handlers/ function with (&Index, &DocumentStore, params)
+  → handler takes documents.snapshot(uri): the buffer text plus its cached
+    tree-sitter tree. didChange keeps the tree current (Tree::edit plus an
+    incremental reparse inside DocumentStore::apply_changes), so no request
+    and no lint pass parses an open buffer
   → handler queries Index via public API only
   → returns LSP response type
 

@@ -152,18 +152,27 @@ still works; only the cross-file linters stay quiet.
 ```clojure
 ;; .clj-pulse/config.edn - defaults made explicit
 {:kondo {:enabled true
-         :path "clj-kondo"}}
+         :path "clj-kondo"
+         :live-max-kb 256}}
 ```
 
 `:enabled` means "use clj-kondo when it is found", not "require it". Set it to
 `false` to stay on native lints only; clj-pulse then never probes for the
 binary or spawns it. `:path` is passed to the OS as-is, so a bare name is
-resolved through `PATH` and an absolute path is used verbatim. Both keys apply
-live, with no restart.
+resolved through `PATH` and an absolute path is used verbatim. All three keys
+apply live, with no restart.
 
-The VS Code extension exposes the same two settings as
-`clojurePulse.kondo.enabled` and `clojurePulse.kondo.path`, and shows which
-tier is active in its status-bar tooltip.
+`:live-max-kb` keeps clj-kondo off the keystroke path for very large files.
+While you type in a buffer larger than this many KiB, each pass publishes the
+native tier alone; opening and saving the file still run clj-kondo, so its full
+findings are never more than a save away. `0` removes the limit. clj-kondo
+takes close to a second on a 450 KiB file, and that time is its own, so this
+is the one lever over when it runs.
+
+The VS Code extension exposes `clojurePulse.kondo.enabled` and
+`clojurePulse.kondo.path`, and shows which tier is active in its status-bar
+tooltip. `clojurePulse.kondo.liveMaxKb` is pending in the extension; until it
+ships, set `:live-max-kb` in `.clj-pulse/config.edn`.
 
 ## Installation
 
