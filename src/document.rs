@@ -62,6 +62,11 @@ pub struct DocumentStore {
     /// Latest LSP version per open document, used to discard superseded
     /// debounced diagnostic passes.
     versions: DashMap<Url, i32>,
+    /// Per-document count of lint triggers that supersede a pending pass. The
+    /// version alone cannot tell a save from the edit just before it — both
+    /// carry the same version — so a save bumps this, and the debounced change
+    /// pass still waiting on that edit sees the mismatch and stands down.
+    lint_epochs: DashMap<Url, u64>,
     /// One parser for every document. `Parser` is not `Sync`, and parsing an
     /// edit is milliseconds even on a very large buffer, so one shared parser
     /// behind a mutex costs nothing measurable.
@@ -77,6 +82,7 @@ impl Default for DocumentStore {
         Self {
             docs: DashMap::new(),
             versions: DashMap::new(),
+            lint_epochs: DashMap::new(),
             parser: Mutex::new(parser),
         }
     }
@@ -96,6 +102,7 @@ impl DocumentStore {
     pub fn close(&self, uri: &Url) {
         self.docs.remove(uri);
         self.versions.remove(uri);
+        self.lint_epochs.remove(uri);
     }
 
     pub fn set_version(&self, uri: &Url, version: i32) {
@@ -105,6 +112,21 @@ impl DocumentStore {
     /// The latest recorded version for `uri`, if open.
     pub fn current_version(&self, uri: &Url) -> Option<i32> {
         self.versions.get(uri).map(|r| *r)
+    }
+
+    /// Retires every lint pass still pending for `uri` and returns the epoch
+    /// the next pass should carry. Called for each trigger that starts a pass
+    /// of its own (an edit, a save).
+    pub fn bump_lint_epoch(&self, uri: &Url) -> u64 {
+        let mut epoch = self.lint_epochs.entry(uri.clone()).or_insert(0);
+        *epoch += 1;
+        *epoch
+    }
+
+    /// The current lint epoch for `uri`: a pass whose captured epoch differs
+    /// has been superseded and must not publish.
+    pub fn lint_epoch(&self, uri: &Url) -> u64 {
+        self.lint_epochs.get(uri).map(|e| *e).unwrap_or(0)
     }
 
     /// Applies the editor's changes in order. Each incremental change is turned

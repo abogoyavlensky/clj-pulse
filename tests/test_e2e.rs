@@ -4980,6 +4980,62 @@ fn test_e2e_kondo_threshold_skips_keystrokes_on_large_buffers() {
 }
 
 #[test]
+fn test_e2e_kondo_threshold_save_right_after_change_keeps_kondo_findings() {
+    // Edit, then save inside the debounce window. The save runs clj-kondo and
+    // publishes; the change pass still waiting on the edit must then stand
+    // down, or its native-only set would erase the findings the save produced
+    // — same version, no further edit, nothing to bring them back until the
+    // next save.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:live-max-kb 1}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let big = write_large_kondo_file(&root);
+    client.did_open(&big);
+    client.wait_for_diagnostics("/src/big.clj");
+
+    client.clear_notifications();
+    client.did_change_insert(&big, 1, 0, ";; typing\n");
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": format!("file://{}", big.display()) } }),
+    );
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "the save's full pass publishes first"
+    );
+
+    // Outlast the debounce, then make sure nothing native-only followed.
+    std::thread::sleep(Duration::from_millis(3 * 300));
+    while let Ok(msg) = client.incoming.try_recv() {
+        if msg["method"] == "textDocument/publishDiagnostics"
+            && msg["params"]["uri"]
+                .as_str()
+                .is_some_and(|u| u.ends_with("/src/big.clj"))
+        {
+            assert_eq!(
+                diagnostic_codes(&msg["params"]),
+                vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+                "a pending change pass overwrote the save's findings: {}",
+                msg["params"]
+            );
+        }
+        client.stash(msg);
+    }
+}
+
+#[test]
 fn test_e2e_kondo_threshold_zero_means_no_limit() {
     let project = setup_kondo_project();
     let root = project.path().canonicalize().unwrap();

@@ -1196,6 +1196,7 @@ async fn lint_and_publish_doc(
     let Ok(path) = uri.to_file_path() else {
         return;
     };
+    let epoch = documents.lint_epoch(&uri);
     // The tree comes from the document store, already updated for every edit
     // so far: a pass never parses. `parsed=0` is what the e2e suite looks for.
     tracing::debug!(
@@ -1262,10 +1263,16 @@ async fn lint_and_publish_doc(
     // outlast the settings change that retired this engine. Either way the
     // result is stale, and the re-lint that follows an engine change will
     // publish the current one; the document version alone would not catch
-    // that, since a settings-triggered re-lint reuses the same version. The
-    // check belongs *after* the join: whichever tier finishes last is what
-    // decides how old this pass is.
-    if documents.current_version(&uri) != Some(version) || *kondo_state.lock().unwrap() != engine {
+    // that, since a settings-triggered re-lint reuses the same version. Nor
+    // would it catch a save that landed while a change pass was pending: same
+    // version, but the save ran the full engine and a native-only change pass
+    // publishing after it would erase clj-kondo's findings — that is what the
+    // lint epoch is for. The check belongs *after* the join: whichever tier
+    // finishes last is what decides how old this pass is.
+    if documents.current_version(&uri) != Some(version)
+        || documents.lint_epoch(&uri) != epoch
+        || *kondo_state.lock().unwrap() != engine
+    {
         return;
     }
 
@@ -2312,6 +2319,9 @@ impl LanguageServer for Backend {
             }
         }
 
+        // A save runs the full engine whatever the buffer size, so a change
+        // pass still waiting out its debounce must not publish after it.
+        self.documents.bump_lint_epoch(&uri);
         let version = self.documents.current_version(&uri).unwrap_or(0);
         self.lint_and_publish(uri, version, LintTrigger::Save).await;
     }
@@ -2602,16 +2612,20 @@ impl LanguageServer for Backend {
             return;
         }
         self.documents.set_version(&uri, version);
+        let epoch = self.documents.bump_lint_epoch(&uri);
 
-        // Debounced re-lint: only the latest edit (matching version) survives
-        // the sleep, so bursts of keystrokes collapse to one diagnostic pass.
+        // Debounced re-lint: only the latest edit (matching version and epoch)
+        // survives the sleep, so bursts of keystrokes collapse to one
+        // diagnostic pass, and a save in the meantime retires it outright.
         let documents = self.documents.clone();
         let client = self.client.clone();
         let index = self.index.clone();
         let kondo_state = self.kondo.state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS)).await;
-            if documents.current_version(&uri) != Some(version) {
+            if documents.current_version(&uri) != Some(version)
+                || documents.lint_epoch(&uri) != epoch
+            {
                 return;
             }
             lint_and_publish_doc(
