@@ -1249,7 +1249,8 @@ fn test_namespaced_keys_entries_are_keyword_occurrences() {
     // qualified entry of `{:keys [other.lib/c]}` all read a namespaced key, so
     // the entry symbol is a usage of that keyword as well as a binding site —
     // otherwise a keyword rename would rewrite every other site and leave these
-    // reading the old key. `:strs` reads string keys and contributes nothing.
+    // reading the old key. `:syms` reads quoted symbols and `:strs` strings, so
+    // neither contributes a keyword occurrence.
     let src = "(ns my.ns\n  (:require [other.lib :as o]))\n\
                (defn f [{::keys [a]}] a)\n\
                (defn g [{:my.ns/keys [b]}] b)\n\
@@ -1257,24 +1258,31 @@ fn test_namespaced_keys_entries_are_keyword_occurrences() {
                (defn i [{::syms [d]}] d)\n\
                (defn j [{::o/keys [e]}] e)\n\
                (defn k [{:strs [s]}] s)\n\
-               (defn l [{:keys [plain]}] plain)";
+               (defn l [{:keys [plain]}] plain)\n\
+               (defn m [{:my.ns/keys [ignored.ns/n]}] n)";
     let (_, _, occs) = extract_full(src, Path::new("keys.clj")).unwrap();
 
-    for fqn in [
-        ":my.ns/a",
-        ":my.ns/b",
-        ":other.lib/c",
-        ":my.ns/d",
-        ":other.lib/e",
-    ] {
+    for fqn in [":my.ns/a", ":my.ns/b", ":other.lib/c", ":other.lib/e"] {
         assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
     }
-    // A string key is a different thing, and a plain `{:keys [plain]}` entry
-    // reads the unqualified `:plain`, which no rename can target.
+    // `clojure.core/destructure` reads the key as
+    // `(keyword (or directive-ns (namespace entry)) (name entry))`, so a
+    // qualified directive wins over a qualified entry.
+    assert_eq!(
+        occurrences_of(&occs, ":my.ns/n").len(),
+        1,
+        "directive namespace must win: {:?}",
+        occs
+    );
+    // A symbol key, a string key and a plain `{:keys [plain]}` entry (which
+    // reads the unqualified `:plain`) are not keyword occurrences.
     assert!(
-        occs.iter()
-            .all(|o| o.fqn != ":my.ns/s" && o.fqn != ":s" && !o.fqn.ends_with("/plain")),
-        "string or unqualified destructuring key recorded: {:?}",
+        occs.iter().all(|o| !o.fqn.ends_with("/d")
+            && !o.fqn.ends_with("/s")
+            && o.fqn != ":s"
+            && !o.fqn.ends_with("/plain")
+            && !o.fqn.starts_with(":ignored.ns/")),
+        "symbol, string or unqualified destructuring key recorded: {:?}",
         occs
     );
 

@@ -87,6 +87,16 @@ Modify:
 - [x] **Step 5: Commit**
   `git commit -m "Record namespaced destructuring entries as keyword occurrences"`
 
+> Deviation: `:syms` vectors are excluded alongside `:strs`. `clojure.core/destructure`
+> reads a `:syms` entry as a quoted *symbol* key, so `{::syms [a]}` never reads the
+> keyword `::a` — recording it would put unrelated sites in find-references and make
+> keyword rename refuse for a site it does not touch. Only `:keys` is recorded.
+>
+> Deviation: when both the directive and the entry are qualified, the directive's
+> namespace wins — `destructure` builds the key as
+> `(keyword (or directive-ns (namespace entry)) (name entry))`, so `{:foo/keys [bar/a]}`
+> reads `:foo/a`. Both found by the codex review of the task commit.
+
 ### Task 2: Keyword target, sites, and prepareRename
 
 **Files:**
