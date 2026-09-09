@@ -3,11 +3,11 @@
 //! included) so a client can lay a decoration over them — a job semantic tokens
 //! can't do, since they never override bracket-pair colorization. Plain `;` line
 //! comments are excluded (the grammar already handles those). Purely syntactic —
-//! no name resolution. Reuses the extractor's tree-sitter parser (`language()`)
+//! no name resolution. Reuses the extractor's tree-sitter parser (`parse_tree`)
 //! and UTF-16 position conversion (`point_to_position`).
 
 use tower_lsp::lsp_types::Range;
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 use crate::index::extractor;
 
@@ -17,13 +17,14 @@ use crate::index::extractor;
 /// comments are excluded (the grammar handles those), and a `(comment …)` inside
 /// quoted data is inert and excluded.
 pub fn ignored_form_ranges(source: &str) -> Vec<Range> {
-    let mut parser = Parser::new();
-    if parser.set_language(extractor::language()).is_err() {
-        return Vec::new();
+    match extractor::parse_tree(source) {
+        Some(tree) => ignored_form_ranges_tree(&tree, source),
+        None => Vec::new(),
     }
-    let Some(tree) = parser.parse(source, None) else {
-        return Vec::new();
-    };
+}
+
+/// [`ignored_form_ranges`] over an already-parsed `tree` of `source`.
+pub fn ignored_form_ranges_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<Range> {
     let mut out = Vec::new();
     walk(tree.root_node(), source, false, &mut out);
     out
@@ -126,6 +127,17 @@ mod tests {
             .into_iter()
             .map(|r| (r.start.line, r.start.character, r.end.line, r.end.character))
             .collect()
+    }
+
+    #[test]
+    fn tree_variant_matches() {
+        let src = "#_ x\n(comment (+ 1 2))\n'(comment a)\n(defn f [] #_(g) 1)\n";
+        let tree = extractor::parse_tree(src).unwrap();
+        assert_eq!(
+            ignored_form_ranges(src),
+            ignored_form_ranges_tree(&tree, src)
+        );
+        assert_eq!(ignored_form_ranges_tree(&tree, src).len(), 3);
     }
 
     #[test]

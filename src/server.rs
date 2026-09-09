@@ -847,6 +847,10 @@ pub(crate) struct LintStatusParams {
     version: Option<String>,
     /// Whether a dependency-cache warm is running right now.
     warming: bool,
+    /// Why clj-kondo is not in use when it was wanted: the same line the log
+    /// carries, for an editor to show beside "native lints only".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 /// The editor layer's `:kondo` overrides (`initializationOptions` /
@@ -875,13 +879,18 @@ type SharedClojureDocs = Arc<std::sync::Mutex<ClojureDocsState>>;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct KondoState {
     config: kondo::KondoConfig,
-    found: Option<String>,
+    found: Option<kondo::Probe>,
+    /// Why the probe failed, when it did: the `detail` the lint status
+    /// carries so an editor can show it next to "native lints only".
+    detail: Option<String>,
 }
 
 impl KondoState {
     /// The binary to spawn, or `None` when clj-kondo is disabled or absent.
+    /// The probe resolved a bare name to a full path, so a later PATH change
+    /// cannot swap the binary under a running session.
     fn bin(&self) -> Option<&str> {
-        self.found.is_some().then_some(self.config.path.as_str())
+        self.found.as_ref().map(|p| p.bin.as_str())
     }
 }
 
@@ -916,16 +925,32 @@ async fn probe_and_announce(
     let config = kondo::resolve_config(&file, &editor);
 
     // A disabled kondo is never probed — no spawn, no PATH lookup, nothing.
-    let found = match config.enabled {
-        true => kondo::probe_version(&config.path).await,
-        false => None,
+    // The probe runs from the workspace root so a mise shim resolves the
+    // version the project pins.
+    let probed = match config.enabled {
+        true => kondo::probe_version(&config.path, root).await,
+        false => Err("clj-kondo disabled".to_string()),
+    };
+    let msg = match (&probed, config.enabled) {
+        (Ok(probe), _) => format!(
+            "clj-kondo {} found ({}) — linting: clj-kondo + native",
+            probe.version, probe.bin
+        ),
+        (Err(reason), true) => kondo::not_found_message(&config.path, reason),
+        (Err(_), false) => "clj-kondo disabled — linting: native lints only".to_string(),
+    };
+    let (found, detail) = match probed {
+        Ok(probe) => (Some(probe), None),
+        Err(_) if !config.enabled => (None, None),
+        Err(_) => (None, Some(msg.clone())),
     };
 
     let engine_changed = {
         let mut state = kondo_state.lock().unwrap();
         let next = KondoState {
             config: config.clone(),
-            found: found.clone(),
+            found,
+            detail,
         };
         // Compare the whole resolved state, not just "is clj-kondo active":
         // switching `:path` from one working binary to another, or picking up
@@ -935,14 +960,6 @@ async fn probe_and_announce(
         changed
     };
 
-    let msg = match (&found, config.enabled) {
-        (Some(version), _) => format!(
-            "clj-kondo {version} found ({}) — linting: clj-kondo + native",
-            config.path
-        ),
-        (None, true) => "clj-kondo not found — linting: native lints only".to_string(),
-        (None, false) => "clj-kondo disabled — linting: native lints only".to_string(),
-    };
     tracing::info!("{}", msg);
     client.log_message(MessageType::INFO, msg).await;
     send_lint_status(client, kondo_state, false).await;
@@ -953,7 +970,13 @@ async fn probe_and_announce(
 /// Pushes the current lint engine to the client. `warming` is passed in rather
 /// than stored: it is a property of the moment, not of the probe.
 async fn send_lint_status(client: &Client, kondo_state: &SharedKondoState, warming: bool) {
-    let version = kondo_state.lock().unwrap().found.clone();
+    let (version, detail) = {
+        let state = kondo_state.lock().unwrap();
+        (
+            state.found.as_ref().map(|p| p.version.clone()),
+            state.detail.clone(),
+        )
+    };
     client
         .send_notification::<LintStatus>(LintStatusParams {
             engine: match version {
@@ -962,6 +985,7 @@ async fn send_lint_status(client: &Client, kondo_state: &SharedKondoState, warmi
             },
             version,
             warming,
+            detail,
         })
         .await;
 }
@@ -1143,9 +1167,37 @@ async fn relint_open_documents(
     kondo_state: &SharedKondoState,
 ) {
     for uri in documents.open_uris() {
-        let version = documents.current_version(&uri).unwrap_or(0);
-        lint_and_publish_doc(client, documents, index, kondo_state, uri, version).await;
+        let pass = LintPass {
+            version: documents.current_version(&uri).unwrap_or(0),
+            epoch: documents.lint_epoch(&uri),
+            trigger: LintTrigger::EngineChange,
+        };
+        lint_and_publish_doc(client, documents, index, kondo_state, uri, pass).await;
     }
+}
+
+/// What started a lint pass. Only `Change` is subject to the clj-kondo size
+/// threshold: a keystroke on a very large buffer gets the native set alone,
+/// while open, save, and an engine change always run clj-kondo, so the buffer
+/// is never more than a save away from its full findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LintTrigger {
+    Open,
+    Save,
+    Change,
+    EngineChange,
+}
+
+/// One lint pass as its trigger captured it: the document version and lint
+/// epoch the result is valid for, and what started it. Captured at the
+/// trigger, never re-read inside the pass — a save that lands between a change
+/// pass's debounce check and its start must retire that pass, not be adopted
+/// by it.
+#[derive(Debug, Clone, Copy)]
+struct LintPass {
+    version: i32,
+    epoch: u64,
+    trigger: LintTrigger,
 }
 
 /// Caps concurrent clj-kondo processes. Each spawn costs ~54 MB RSS, so
@@ -1166,24 +1218,41 @@ async fn lint_and_publish_doc(
     index: &Index,
     kondo_state: &SharedKondoState,
     uri: Url,
-    version: i32,
+    pass: LintPass,
 ) {
-    let Some(text) = documents.text(&uri) else {
+    let LintPass {
+        version,
+        epoch,
+        trigger,
+    } = pass;
+    let Some(snapshot) = documents.snapshot(&uri) else {
         return;
     };
     let Ok(path) = uri.to_file_path() else {
         return;
     };
+    // The tree comes from the document store, already updated for every edit
+    // so far: a pass never parses. `parsed=0` is what the e2e suite looks for.
+    tracing::debug!(
+        "lint pass {} v{} parsed=0 ({} bytes, cached tree)",
+        path.display(),
+        version,
+        snapshot.text.len()
+    );
+    let text = Arc::new(snapshot.text);
     // The two tiers are independent, so they run at the same time rather than
     // one after the other — on a large buffer each costs hundreds of
     // milliseconds, and this is the path every keystroke takes. The native pass
     // is CPU-bound, so it goes to a blocking thread instead of holding a tokio
-    // worker for the whole parse.
+    // worker for the whole walk.
     let native_pass = {
         let text = text.clone();
+        let tree = snapshot.tree;
         let path = path.clone();
         let cfg = index.extract_config();
-        tokio::task::spawn_blocking(move || crate::diagnostics::compute(&text, &path, &cfg))
+        tokio::task::spawn_blocking(move || {
+            crate::diagnostics::compute_tree(&tree, &text, &path, &cfg)
+        })
     };
 
     let engine = kondo_state.lock().unwrap().clone();
@@ -1191,12 +1260,26 @@ async fn lint_and_publish_doc(
         .bin()
         .filter(|_| kondo::lints_file(&path))
         .map(str::to_string);
+    // The size threshold applies to keystrokes only. It is the same "no say in
+    // this pass" outcome as a missing binary, so one publish still goes out,
+    // carrying the native set — never a native publish and then a kondo one.
+    let over_live_max =
+        trigger == LintTrigger::Change && engine.config.exceeds_live_max(text.len());
     let kondo_pass = async {
         let Some(bin) = bin else {
             // Not an error the user should see — just "clj-kondo has no say in
             // this pass", which `merge` reads as "keep the native set".
             return Err("clj-kondo not in use".to_string());
         };
+        if over_live_max {
+            tracing::debug!(
+                "clj-kondo skipped on change: {} is {} bytes, over live-max-kb {}",
+                path.display(),
+                text.len(),
+                engine.config.live_max_kb
+            );
+            return Err("clj-kondo skipped: buffer over live-max-kb".to_string());
+        }
         let _permit = KONDO_LIMIT.acquire().await;
         let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
         if let Err(e) = &result {
@@ -1214,10 +1297,16 @@ async fn lint_and_publish_doc(
     // outlast the settings change that retired this engine. Either way the
     // result is stale, and the re-lint that follows an engine change will
     // publish the current one; the document version alone would not catch
-    // that, since a settings-triggered re-lint reuses the same version. The
-    // check belongs *after* the join: whichever tier finishes last is what
-    // decides how old this pass is.
-    if documents.current_version(&uri) != Some(version) || *kondo_state.lock().unwrap() != engine {
+    // that, since a settings-triggered re-lint reuses the same version. Nor
+    // would it catch a save that landed while a change pass was pending: same
+    // version, but the save ran the full engine and a native-only change pass
+    // publishing after it would erase clj-kondo's findings — that is what the
+    // lint epoch is for. The check belongs *after* the join: whichever tier
+    // finishes last is what decides how old this pass is.
+    if documents.current_version(&uri) != Some(version)
+        || documents.lint_epoch(&uri) != epoch
+        || *kondo_state.lock().unwrap() != engine
+    {
         return;
     }
 
@@ -1385,10 +1474,13 @@ impl Backend {
         let Ok(uri) = Url::parse(&params.uri) else {
             return Ok(Vec::new());
         };
-        let Some(text) = self.documents.text(&uri) else {
+        let Some(snapshot) = self.documents.snapshot(&uri) else {
             return Ok(Vec::new());
         };
-        Ok(handlers::ignored_forms::ignored_form_ranges(&text))
+        Ok(handlers::ignored_forms::ignored_form_ranges_tree(
+            &snapshot.tree,
+            &snapshot.text,
+        ))
     }
 
     /// clj-pulse custom `clojurePulse/clojureDocs`: the ClojureDocs entry for
@@ -1745,14 +1837,14 @@ impl Backend {
     }
 
     /// Computes diagnostics from the live buffer and publishes them for `uri`.
-    async fn lint_and_publish(&self, uri: Url, version: i32) {
+    async fn lint_and_publish(&self, uri: Url, pass: LintPass) {
         lint_and_publish_doc(
             &self.client,
             &self.documents,
             &self.index,
             &self.kondo.state,
             uri,
-            version,
+            pass,
         )
         .await;
     }
@@ -2054,6 +2146,13 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         tracing::info!("clj-pulse initialized");
 
+        // tower-lsp suppresses custom notifications until this point, and the
+        // clj-kondo probe spawned from `initialize` can finish before it — a
+        // missing binary fails in microseconds. Its lint status would then be
+        // lost, so send the current one now; if the probe is still running,
+        // its own send follows and supersedes this one.
+        send_lint_status(&self.client, &self.kondo.state, false).await;
+
         // Watch source files so git pulls / branch switches keep the index
         // fresh without editor saves. Clients without dynamic registration
         // simply reject this; everything else still works.
@@ -2173,12 +2272,23 @@ impl LanguageServer for Backend {
         let text = params.text_document.text;
         let version = params.text_document.version;
 
+        // The store parses the buffer once on open; the on-open indexing below
+        // and the first lint pass both run on that tree.
+        self.documents.open(uri.clone(), text);
+        self.documents.set_version(&uri, version);
+
         // Files outside deps.edn :paths (dev/, scratch files, test dirs that
         // only appear in alias :extra-paths) are not indexed at startup;
         // index them on open so navigation from them works.
-        if let Ok(path) = uri.to_file_path() {
+        if let (Ok(path), Some(snapshot)) = (uri.to_file_path(), self.documents.snapshot(&uri)) {
+            let text = &snapshot.text;
             if config::is_clojure_source(&path) && self.index.file_ns(&path).is_none() {
-                match extractor::extract_full_with(&text, &path, &self.index.extract_config()) {
+                match extractor::extract_full_tree(
+                    &snapshot.tree,
+                    text,
+                    &path,
+                    &self.index.extract_config(),
+                ) {
                     Ok((meta, symbols, occurrences)) => {
                         tracing::info!("indexed opened file {}", path.display());
                         self.index.insert_file(meta, symbols, occurrences);
@@ -2187,19 +2297,24 @@ impl LanguageServer for Backend {
                         tracing::debug!("failed to index opened {}: {}", path.display(), e)
                     }
                 }
-            } else if extractor::is_integrant_edn(&path, &text)
+            } else if extractor::is_integrant_edn(&path, text)
                 && self.index.file_ns(&path).is_none()
             {
                 // Integrant config opened from outside the scanned paths.
                 tracing::info!("indexed opened EDN config {}", path.display());
-                self.index
-                    .insert_edn_file(path.clone(), extractor::extract_edn(&text));
+                self.index.insert_edn_file(
+                    path.clone(),
+                    extractor::extract_edn_tree(&snapshot.tree, text),
+                );
             }
         }
 
-        self.documents.open(uri.clone(), text);
-        self.documents.set_version(&uri, version);
-        self.lint_and_publish(uri, version).await;
+        let pass = LintPass {
+            version,
+            epoch: self.documents.lint_epoch(&uri),
+            trigger: LintTrigger::Open,
+        };
+        self.lint_and_publish(uri, pass).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -2249,8 +2364,14 @@ impl LanguageServer for Backend {
             }
         }
 
-        let version = self.documents.current_version(&uri).unwrap_or(0);
-        self.lint_and_publish(uri, version).await;
+        // A save runs the full engine whatever the buffer size, so a change
+        // pass still waiting out its debounce must not publish after it.
+        let pass = LintPass {
+            epoch: self.documents.bump_lint_epoch(&uri),
+            version: self.documents.current_version(&uri).unwrap_or(0),
+            trigger: LintTrigger::Save,
+        };
+        self.lint_and_publish(uri, pass).await;
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -2422,10 +2543,13 @@ impl LanguageServer for Backend {
                             if !config::is_clojure_source(&path) || !index.is_project_path(&path) {
                                 continue;
                             }
-                            if let Some(text) = documents.text(&uri) {
-                                if let Ok((meta, symbols, occ)) =
-                                    extractor::extract_full_with(&text, &path, &cfg)
-                                {
+                            if let Some(snapshot) = documents.snapshot(&uri) {
+                                if let Ok((meta, symbols, occ)) = extractor::extract_full_tree(
+                                    &snapshot.tree,
+                                    &snapshot.text,
+                                    &path,
+                                    &cfg,
+                                ) {
                                     index.remove_file(&path);
                                     index.insert_file(meta, symbols, occ);
                                 }
@@ -2536,19 +2660,28 @@ impl LanguageServer for Backend {
             return;
         }
         self.documents.set_version(&uri, version);
+        let epoch = self.documents.bump_lint_epoch(&uri);
 
-        // Debounced re-lint: only the latest edit (matching version) survives
-        // the sleep, so bursts of keystrokes collapse to one diagnostic pass.
+        // Debounced re-lint: only the latest edit (matching version and epoch)
+        // survives the sleep, so bursts of keystrokes collapse to one
+        // diagnostic pass, and a save in the meantime retires it outright.
         let documents = self.documents.clone();
         let client = self.client.clone();
         let index = self.index.clone();
         let kondo_state = self.kondo.state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS)).await;
-            if documents.current_version(&uri) != Some(version) {
+            if documents.current_version(&uri) != Some(version)
+                || documents.lint_epoch(&uri) != epoch
+            {
                 return;
             }
-            lint_and_publish_doc(&client, &documents, &index, &kondo_state, uri, version).await;
+            let pass = LintPass {
+                version,
+                epoch,
+                trigger: LintTrigger::Change,
+            };
+            lint_and_publish_doc(&client, &documents, &index, &kondo_state, uri, pass).await;
         });
     }
 

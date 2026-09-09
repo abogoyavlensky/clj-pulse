@@ -15,15 +15,33 @@ pub fn compute(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Diagnostic
     if !crate::config::is_clojure_source(path) {
         return vec![];
     }
+    match extractor::parse_tree(source) {
+        Some(tree) => compute_tree(&tree, source, path, cfg),
+        None => vec![],
+    }
+}
 
-    let Ok(analysis) = extractor::extract_analysis_with(source, path, cfg) else {
+/// [`compute`] over an already-parsed `tree` of `source`. This is what the
+/// lint pass runs on an open buffer's cached tree: it parses zero times, where
+/// the string version used to parse three times per pass.
+pub fn compute_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    path: &Path,
+    cfg: &ExtractConfig,
+) -> Vec<Diagnostic> {
+    if !crate::config::is_clojure_source(path) {
+        return vec![];
+    }
+
+    let Ok(analysis) = extractor::extract_analysis_tree(tree, source, path, cfg) else {
         return vec![];
     };
     let ns_meta = &analysis.ns_meta;
 
     // A warning for each qualified usage (`prefix/name`) whose prefix isn't
     // resolvable from this file and isn't Java/JS interop.
-    let mut diags: Vec<Diagnostic> = extractor::qualified_usages(source)
+    let mut diags: Vec<Diagnostic> = extractor::qualified_usages_tree(tree, source)
         .into_iter()
         .filter(|u| {
             !ns_meta.resolves_prefix(&u.prefix)
@@ -45,7 +63,7 @@ pub fn compute(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Diagnostic
     // (clojure-lsp's treatment), and built from the same usage analysis that
     // action uses, so the squiggle and the fix never disagree.
     diags.extend(
-        crate::handlers::code_action::unused_requires(source)
+        crate::handlers::code_action::unused_requires_tree(tree, source)
             .into_iter()
             .map(|u| Diagnostic {
                 range: u.range,
@@ -64,7 +82,7 @@ pub fn compute(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Diagnostic
     // require provides a distinct, used alias/refer the later one is redundant
     // but not dead, and fading it would wrongly imply it is safe to delete.
     diags.extend(
-        crate::handlers::code_action::duplicate_requires(source)
+        crate::handlers::code_action::duplicate_requires_tree(tree, source)
             .into_iter()
             .map(|d| Diagnostic {
                 range: d.range,
@@ -221,6 +239,22 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn compute_tree_matches_compute() {
+        let src = "(ns my.app\n  (:require [clojure.string :as str]\n            [clojure.set :as set]\n            [clojure.set :as cset]))\n(defn- unused-fn [] 1)\n(defn f [x]\n  (let [y 1]\n    (missing/call x)))\n";
+        let tree = extractor::parse_tree(src).unwrap();
+        let by_str = compute(src, Path::new("test.clj"), &ExtractConfig::default());
+        let by_tree = compute_tree(&tree, src, Path::new("test.clj"), &ExtractConfig::default());
+        assert_eq!(by_str, by_tree);
+        assert_eq!(by_str.len(), 7, "{:?}", by_str);
+        // The EDN gate applies to both.
+        let edn = "{:deps {org.clojure/clojure {:mvn/version \"1.11.1\"}}}\n";
+        let tree = extractor::parse_tree(edn).unwrap();
+        assert!(
+            compute_tree(&tree, edn, Path::new("deps.edn"), &ExtractConfig::default()).is_empty()
+        );
     }
 
     #[test]

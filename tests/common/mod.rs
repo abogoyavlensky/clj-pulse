@@ -100,13 +100,52 @@ impl LspClient {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-clj-kondo")
     }
 
+    /// Like [`start`] but with `--verbose`, so the server's `tracing::debug!`
+    /// lines land in `.clj-pulse/server.log` under the project root — the only
+    /// way a test can observe what a request did internally (see
+    /// [`wait_for_server_log`]).
+    pub fn start_verbose(project_root: &Path) -> Self {
+        Self::spawn_with_args(project_root, &[], true, Kondo::Off, &["--verbose"])
+    }
+
+    /// The server's own log file for a project started with [`start_verbose`].
+    pub fn server_log(project_root: &Path) -> String {
+        std::fs::read_to_string(project_root.join(".clj-pulse/server.log")).unwrap_or_default()
+    }
+
+    /// Waits until the server log contains `needle`. The log is written by a
+    /// non-blocking appender, so a line can trail the response it describes by
+    /// a few milliseconds.
+    pub fn wait_for_server_log(project_root: &Path, needle: &str) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !Self::server_log(project_root).contains(needle) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for server log line: {needle}\n{}",
+                Self::server_log(project_root)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     pub fn spawn(
         project_root: &Path,
         envs: &[(&str, &Path)],
         disable_classpath_cli: bool,
         kondo: Kondo,
     ) -> Self {
+        Self::spawn_with_args(project_root, envs, disable_classpath_cli, kondo, &[])
+    }
+
+    fn spawn_with_args(
+        project_root: &Path,
+        envs: &[(&str, &Path)],
+        disable_classpath_cli: bool,
+        kondo: Kondo,
+        args: &[&str],
+    ) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
+        cmd.args(args);
         cmd.current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -267,6 +306,36 @@ impl LspClient {
             self.send(json!({ "jsonrpc": "2.0", "id": id, "result": null }));
         }
         self.notifications.push(msg);
+    }
+
+    /// Waits for the first notification with `method` whose `params` satisfy
+    /// `accept`, and returns those params (checks already-stashed
+    /// notifications first).
+    pub fn wait_for_notification_where(
+        &mut self,
+        method: &str,
+        accept: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let matches = |m: &Value| m["method"] == method && accept(&m["params"]);
+        if let Some(m) = self.notifications.iter().find(|m| matches(m)) {
+            return m["params"].clone();
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for notification: {method}"));
+            let msg = self
+                .incoming
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("timed out waiting for notification: {method}"));
+            let found = matches(&msg);
+            let params = msg["params"].clone();
+            self.stash(msg);
+            if found {
+                return params;
+            }
+        }
     }
 
     /// Waits until a `window/logMessage` whose text contains `needle` has

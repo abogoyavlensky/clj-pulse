@@ -52,12 +52,13 @@ multi-project workspaces with graduated classpath resolution, let-go/lgx
 support. The full ns form is understood (`:as-alias`, `:rename`,
 `:refer-clojure :exclude`/`:rename`, prefix lists, `declare`). A panicking
 request fails alone instead of taking the server down, and `bb e2e-pulse` plus
-`bb bench` guard the first-priority editor and the performance baseline.
+`bb bench` guard the first-priority editor and the performance baseline. Open
+buffers keep one incrementally updated parse tree, so no request or lint pass
+parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 
 Not shipped: keyword rename, `documentHighlight`, `selectionRange`,
 `foldingRange`, formatting, semantic tokens, code lens, implementation
-provider, `executeCommand` refactors, `willRenameFiles`. The parse tree is not
-yet cached per document, so large buffers re-parse on every lint pass.
+provider, `executeCommand` refactors, `willRenameFiles`.
 
 ## Milestone 0 — release gates
 
@@ -108,7 +109,7 @@ Small fixes that remove wrong answers. Each extractor change bumps
   - [x] Malformed-input pass: unbalanced buffers, huge single lines, non-UTF-8
         files, empty `deps.edn`. Every handler returns, none panics.
   Plan: [2026-09-05-1537-reliability-floor.md](plans/2026-09-05-1537-reliability-floor.md) — done
-- [ ] **Cache the parse tree per document.** The bench
+- [x] **Cache the parse tree per document.** The bench
       ([MEMORY.md](MEMORY.md)) shows every diagnostics pass parsing the buffer
       three times and every position request parsing it once: on a 452 KiB file
       that is ~285 ms of the ~360 ms native lint pass. The lint pass is the
@@ -116,14 +117,16 @@ Small fixes that remove wrong answers. Each extractor change bumps
       machine, under the bar, however bad it looks on the Linux box. Cache a
       tree per document version, updated incrementally from the `didChange`
       ranges tree-sitter already accepts.
-  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — in progress
-- [ ] **Keep clj-kondo off the keystroke path for large buffers.** It costs
+  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — done
+- [x] **Keep clj-kondo off the keystroke path for large buffers.** It costs
       ~840 ms on the same file, which is its own runtime, not ours. Options: a
       size-scaled debounce, a size threshold above which the kondo tier is
       skipped, or publishing the native tier immediately and the kondo tier
       when it lands — the last one changes the "one publish per pass"
-      invariant, so decide that first.
-  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — in progress
+      invariant, so decide that first. Decided: a size threshold
+      (`:kondo {:live-max-kb 256}`) on the didChange pass only; one publish
+      per pass stays.
+  Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — done
 
 ## Milestone 2 — completion quality
 
@@ -212,6 +215,17 @@ One line each, newest last. Promote or reject; never let this grow silently.
   fixed the auto-require pool only. One filter on `fqn.starts_with(':')` in the
   var pools, plus a decision on whether `::database` should complete as a
   keyword instead.
+- 2026-09-09 **`clojurePulse.kondo.liveMaxKb` in the Clojure Pulse extension.**
+  The server reads `"kondo": {"liveMaxKb": …}` from editor settings already;
+  the extension needs the `package.json` setting and its settings push
+  (`../clojure-pulse-vscode`). Until then the README points at
+  `:live-max-kb` in `.clj-pulse/config.edn`.
+- 2026-09-09 **Cache the extraction per document version, not just the
+  tree.** With the tree cached, a definition request on the 452 KiB bench file
+  is the 21 ms definitions-and-occurrences walk, and `unused_requires` is
+  28 ms of the 65 ms native pass ([MEMORY.md](MEMORY.md)). Caching the
+  `Analysis` per version would make position requests walk nothing. Only worth
+  it if a real project's largest files make the 22 ms show.
 
 ## Best effort — do when cheap or asked
 

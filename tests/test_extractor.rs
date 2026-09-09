@@ -1257,3 +1257,123 @@ fn test_namespaced_map_with_splicing_conditional_invents_no_namespace() {
         occs
     );
 }
+
+/// The `_tree` variants exist so handlers can run on the document store's
+/// cached tree instead of parsing again. Each must give exactly what the
+/// string version gives on the same source.
+mod tree_variant {
+    use clj_pulse::index::extractor::{
+        extract_analysis_tree, extract_analysis_with, extract_full_tree, extract_full_with,
+        file_occurrences_tree, file_occurrences_with, local_references_at,
+        local_references_at_tree, locals_in_scope_at, locals_in_scope_at_tree, parse_tree,
+        qualified_usages, qualified_usages_tree,
+    };
+    use clj_pulse::index::ExtractConfig;
+    use std::path::Path;
+    use tower_lsp::lsp_types::Position;
+
+    const FIXTURES: [(&str, &str); 5] = [
+        (
+            "basic_defn.clj",
+            include_str!("fixtures/snippets/basic_defn.clj"),
+        ),
+        (
+            "ns_with_requires.clj",
+            include_str!("fixtures/snippets/ns_with_requires.clj"),
+        ),
+        (
+            "multi_arity.clj",
+            include_str!("fixtures/snippets/multi_arity.clj"),
+        ),
+        (
+            "reader_conditional.cljc",
+            include_str!("fixtures/snippets/reader_conditional.cljc"),
+        ),
+        (
+            "private_vars.clj",
+            include_str!("fixtures/snippets/private_vars.clj"),
+        ),
+    ];
+
+    #[test]
+    fn tree_variant_extract_full_matches() {
+        let cfg = ExtractConfig::default();
+        for (name, src) in FIXTURES {
+            let tree = parse_tree(src).unwrap();
+            let by_str = extract_full_with(src, Path::new(name), &cfg).unwrap();
+            let by_tree = extract_full_tree(&tree, src, Path::new(name), &cfg).unwrap();
+            assert_eq!(by_str, by_tree, "{name}");
+        }
+    }
+
+    #[test]
+    fn tree_variant_extract_analysis_matches() {
+        let cfg = ExtractConfig::default();
+        for (name, src) in FIXTURES {
+            let tree = parse_tree(src).unwrap();
+            let by_str = extract_analysis_with(src, Path::new(name), &cfg).unwrap();
+            let by_tree = extract_analysis_tree(&tree, src, Path::new(name), &cfg).unwrap();
+            assert_eq!(by_str.ns_meta, by_tree.ns_meta, "{name}");
+            assert_eq!(by_str.symbols, by_tree.symbols, "{name}");
+            assert_eq!(by_str.occurrences, by_tree.occurrences, "{name}");
+            assert_eq!(by_str.unused_bindings, by_tree.unused_bindings, "{name}");
+        }
+    }
+
+    #[test]
+    fn tree_variant_file_occurrences_matches() {
+        let cfg = ExtractConfig::default();
+        for (name, src) in FIXTURES {
+            let tree = parse_tree(src).unwrap();
+            assert_eq!(
+                file_occurrences_with(src, Path::new(name), &cfg),
+                file_occurrences_tree(&tree, src, Path::new(name), &cfg),
+                "{name}"
+            );
+        }
+        // The EDN branch: an Integrant config and a plain manifest.
+        let cfg_edn = "{:app/db {:port 5432}\n :app/server {:db #ig/ref :app/db}}\n";
+        let deps = "{:deps {org.clojure/clojure {:mvn/version \"1.11.1\"}}}\n";
+        for (name, src) in [("config.edn", cfg_edn), ("deps.edn", deps)] {
+            let tree = parse_tree(src).unwrap();
+            assert_eq!(
+                file_occurrences_with(src, Path::new(name), &cfg),
+                file_occurrences_tree(&tree, src, Path::new(name), &cfg),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_variant_qualified_usages_matches() {
+        for (name, src) in FIXTURES {
+            let tree = parse_tree(src).unwrap();
+            assert_eq!(
+                qualified_usages(src),
+                qualified_usages_tree(&tree, src),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_variant_locals_match() {
+        let src = "(ns a)\n(defn f [x {:keys [y]}]\n  (let [z (+ x y)]\n    (map (fn [w] (* w z)) [x])))\n";
+        let tree = parse_tree(src).unwrap();
+        let pos = Position::new(3, 20);
+        assert_eq!(
+            locals_in_scope_at(src, pos),
+            locals_in_scope_at_tree(&tree, src, pos)
+        );
+        let in_body = Position::new(3, 22);
+        assert_eq!(
+            local_references_at(src, in_body, "z"),
+            local_references_at_tree(&tree, src, in_body, "z")
+        );
+        assert!(local_references_at_tree(&tree, src, in_body, "z").is_some());
+        assert_eq!(
+            local_references_at(src, Position::new(0, 2), "z"),
+            local_references_at_tree(&tree, src, Position::new(0, 2), "z")
+        );
+    }
+}

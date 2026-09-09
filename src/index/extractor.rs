@@ -36,13 +36,14 @@ pub struct QualifiedUsage {
 /// `'`-quoted data and `(quote …)` forms (which are data, not var usages);
 /// syntax-quote is kept, since macro bodies reference real vars.
 pub fn qualified_usages(source: &str) -> Vec<QualifiedUsage> {
-    let mut parser = Parser::new();
-    if parser.set_language(language()).is_err() {
-        return vec![];
+    match parse_tree(source) {
+        Some(tree) => qualified_usages_tree(&tree, source),
+        None => vec![],
     }
-    let Some(tree) = parser.parse(source, None) else {
-        return vec![];
-    };
+}
+
+/// [`qualified_usages`] over an already-parsed `tree` of `source`.
+pub fn qualified_usages_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<QualifiedUsage> {
     let mut out = Vec::new();
     collect_qualified(tree.root_node(), source, &mut out);
     out
@@ -166,13 +167,14 @@ fn has_namespaced_top_level_key(source: &str) -> bool {
 /// drop `::`/unqualified keywords. Keywords nested in tagged literals
 /// (`#ig/ref :ns/x`), maps, and vectors are all reached by the generic descent.
 pub fn extract_edn(source: &str) -> Vec<Occurrence> {
-    let mut parser = Parser::new();
-    if parser.set_language(language()).is_err() {
-        return vec![];
+    match parse_tree(source) {
+        Some(tree) => extract_edn_tree(&tree, source),
+        None => vec![],
     }
-    let Some(tree) = parser.parse(source, None) else {
-        return vec![];
-    };
+}
+
+/// [`extract_edn`] over an already-parsed `tree` of `source`.
+pub fn extract_edn_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<Occurrence> {
     let empty = NsMeta {
         name: String::new(),
         file: std::path::PathBuf::new(),
@@ -217,14 +219,27 @@ pub fn file_occurrences(source: &str, path: &Path) -> Vec<Occurrence> {
 
 /// Like [`file_occurrences`] but honors `cfg` (`:lint-as`) for Clojure sources.
 pub fn file_occurrences_with(source: &str, path: &Path, cfg: &ExtractConfig) -> Vec<Occurrence> {
+    match parse_tree(source) {
+        Some(tree) => file_occurrences_tree(&tree, source, path, cfg),
+        None => Vec::new(),
+    }
+}
+
+/// [`file_occurrences_with`] over an already-parsed `tree` of `source`.
+pub fn file_occurrences_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    path: &Path,
+    cfg: &ExtractConfig,
+) -> Vec<Occurrence> {
     if crate::config::is_edn(path) {
         if is_integrant_edn(path, source) {
-            extract_edn(source)
+            extract_edn_tree(tree, source)
         } else {
             Vec::new()
         }
     } else {
-        extract_full_with(source, path, cfg)
+        extract_full_tree(tree, source, path, cfg)
             .map(|(_, _, occs)| occs)
             .unwrap_or_default()
     }
@@ -250,6 +265,17 @@ pub fn extract_full_with(
     Ok((analysis.ns_meta, analysis.symbols, analysis.occurrences))
 }
 
+/// [`extract_full_with`] over an already-parsed `tree` of `source`.
+pub fn extract_full_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    file: &Path,
+    cfg: &ExtractConfig,
+) -> Result<(NsMeta, Vec<Symbol>, Vec<Occurrence>)> {
+    let analysis = extract_analysis_tree(tree, source, file, cfg)?;
+    Ok((analysis.ns_meta, analysis.symbols, analysis.occurrences))
+}
+
 /// Everything one parse of a Clojure file yields: its namespace metadata, the
 /// definitions it introduces, every resolved usage, and the local bindings that
 /// were never used (the `unused-binding` lint's input). [`extract_full_with`]
@@ -265,15 +291,19 @@ pub struct Analysis {
 /// `:lint-as` macros) and, over the same tree, occurrences plus unused-binding
 /// analysis.
 pub fn extract_analysis_with(source: &str, file: &Path, cfg: &ExtractConfig) -> Result<Analysis> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(language())
-        .map_err(|e| anyhow!("failed to set language: {}", e))?;
+    let tree = parse_tree(source).ok_or_else(|| anyhow!("failed to parse"))?;
+    extract_analysis_tree(&tree, source, file, cfg)
+}
 
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| anyhow!("failed to parse"))?;
-
+/// [`extract_analysis_with`] over an already-parsed `tree` of `source`: the
+/// entry point for everything that holds the document store's cached tree.
+/// Parses nothing.
+pub fn extract_analysis_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    file: &Path,
+    cfg: &ExtractConfig,
+) -> Result<Analysis> {
     let root = tree.root_node();
     let mut ns_meta = NsMeta {
         name: String::new(),
@@ -2268,11 +2298,22 @@ pub fn locals_in_scope_at(source: &str, pos: Position) -> Vec<LocalBinding> {
     let Some(tree) = parse_tree(source) else {
         return vec![];
     };
+    locals_in_scope_at_tree(&tree, source, pos)
+}
+
+/// [`locals_in_scope_at`] over an already-parsed `tree` of `source`.
+pub fn locals_in_scope_at_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    pos: Position,
+) -> Vec<LocalBinding> {
     locals_at_node(tree.root_node(), source, pos)
 }
 
 /// Parses `source` with the Clojure grammar, or `None` on setup/parse failure.
-fn parse_tree(source: &str) -> Option<tree_sitter::Tree> {
+/// The one-off parse for callers without a cached tree; open documents carry
+/// theirs in the document store.
+pub fn parse_tree(source: &str) -> Option<tree_sitter::Tree> {
     let mut parser = Parser::new();
     parser.set_language(language()).ok()?;
     parser.parse(source, None)
@@ -2707,6 +2748,16 @@ pub struct LocalRefs {
 /// and a same-named global outside the local's scope is not matched.
 pub fn local_references_at(source: &str, pos: Position, name: &str) -> Option<LocalRefs> {
     let tree = parse_tree(source)?;
+    local_references_at_tree(&tree, source, pos, name)
+}
+
+/// [`local_references_at`] over an already-parsed `tree` of `source`.
+pub fn local_references_at_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    pos: Position,
+    name: &str,
+) -> Option<LocalRefs> {
     let root = tree.root_node();
 
     let mut occurrences = Vec::new();

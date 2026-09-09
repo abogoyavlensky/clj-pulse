@@ -3009,6 +3009,216 @@ fn test_e2e_definition_after_in_memory_edit() {
     assert_eq!(result["range"]["start"]["line"], json!(def_line));
 }
 
+/// A `(line, character)` pair in LSP coordinates.
+type Pos = (u32, u32);
+/// One incremental change: `(start, end, text)`.
+type Edit = (Pos, Pos, String);
+
+/// Applies one LSP range edit to `text`: ASCII-only, so UTF-16 columns are
+/// byte columns. The tests' own model of what the server's buffer holds.
+fn apply_range_edit(text: &str, start: (u32, u32), end: (u32, u32), insert: &str) -> String {
+    let offset = |(line, ch): (u32, u32)| {
+        let mut off = 0;
+        for (i, l) in text.split_inclusive('\n').enumerate() {
+            if i == line as usize {
+                return off + ch as usize;
+            }
+            off += l.len();
+        }
+        off + ch as usize
+    };
+    let (from, to) = (offset(start), offset(end));
+    format!("{}{}{}", &text[..from], insert, &text[to..])
+}
+
+/// Diagnostics as `(code, message, range)` triples, so two publishes for
+/// different files can be compared.
+fn diagnostic_shapes(params: &Value) -> Vec<(String, String, Value)> {
+    params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|d| {
+            (
+                d["code"].as_str().unwrap_or_default().to_string(),
+                d["message"].as_str().unwrap_or_default().to_string(),
+                d["range"].clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn test_e2e_diagnostics_stable_across_edits() {
+    // Every lint pass after the first runs on the incrementally updated tree,
+    // never on a fresh parse. So after each of these edits the diagnostics must
+    // be exactly what a server that opens the same text cold publishes —
+    // through unbalanced intermediate states, an added-then-removed unused
+    // require, and lines shifting under the ns form.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let reference = setup_project();
+    let reference_root = reference.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start_verbose(&root);
+    client.initialize(&root);
+    let mut fresh = LspClient::start(&reference_root);
+    fresh.initialize(&reference_root);
+
+    let scratch = root.join("src/scratch.clj");
+    let mut text = "(ns simple.scratch\n  (:require [simple.helpers :as helpers]))\n\n\
+                    (defn run []\n  (helpers/greet \"hi\"))\n"
+        .to_string();
+    std::fs::write(&scratch, &text).unwrap();
+    client.did_open(&scratch);
+    client.wait_for_diagnostics("/src/scratch.clj");
+
+    // Twenty edits the way an editor sends them: a second require (unused for
+    // now), a fn typed in chunks that uses it, then everything unwound with a
+    // line deleted above it all so every following line shifts.
+    let append = |text: &str, chunk: &str| -> Edit {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let last = (lines.len() - 1) as u32;
+        let at = (last, lines[last as usize].len() as u32);
+        (at, at, chunk.to_string())
+    };
+    let mut edits: Vec<Edit> = Vec::new();
+    let mut model = text.clone();
+    let mut plan = |edit: Edit, model: &mut String| {
+        *model = apply_range_edit(model, edit.0, edit.1, &edit.2);
+        edits.push(edit);
+    };
+    plan(
+        (
+            (1, 40),
+            (1, 40),
+            "\n            [clojure.string :as str]".to_string(),
+        ),
+        &mut model,
+    );
+    for chunk in [
+        "(defn ",
+        "shout ",
+        "[s]",
+        "\n  (str/",
+        "upper-case",
+        " s",
+        ")",
+        ")\n",
+    ] {
+        let edit = append(&model, chunk);
+        plan(edit, &mut model);
+    }
+    assert!(
+        model.ends_with("(defn shout [s]\n  (str/upper-case s))\n"),
+        "{model}"
+    );
+    let unwind: [(&str, Pos, Pos); 11] = [
+        ("nil", (7, 2), (7, 20)),                // drop the usage: `s` is unused
+        ("", (6, 13), (6, 14)),                  // `[s]` -> `[]`
+        ("(defn shout [] nil)", (6, 0), (7, 6)), // one-line fn
+        ("", (3, 0), (4, 0)),                    // delete the blank line under the ns
+        ("", (1, 40), (2, 36)),                  // remove `[clojure.string :as str]`
+        ("", (4, 0), (5, 0)),                    // delete the `shout` line
+        (" ", (3, 2), (3, 2)),                   // a whitespace-only change
+        ("", (3, 2), (3, 3)),                    // and back
+        ("simple.scratch2", (0, 4), (0, 18)),    // rename the ns
+        ("simple.scratch", (0, 4), (0, 19)),     // and back
+        ("(def leftover 1)\n", (4, 0), (4, 0)),  // and one more form
+    ];
+    for (insert, start, end) in unwind {
+        plan((start, end, insert.to_string()), &mut model);
+    }
+    assert_eq!(edits.len(), 20);
+
+    for (i, (start, end, insert)) in edits.iter().enumerate() {
+        let version = (i + 2) as i64;
+        text = apply_range_edit(&text, *start, *end, insert);
+        client.clear_notifications();
+        client.did_change_range(&scratch, version, *start, *end, insert);
+        let live = client.wait_for_diagnostics("/src/scratch.clj");
+        assert_eq!(
+            live["version"],
+            json!(version),
+            "publish carries the edit's version"
+        );
+
+        // A cold open of the same text, on a server that never saw the edits.
+        let path = reference_root.join(format!("src/step_{i}.clj"));
+        std::fs::write(&path, &text).unwrap();
+        fresh.did_open(&path);
+        let expected = fresh.wait_for_diagnostics(&format!("/src/step_{i}.clj"));
+        assert_eq!(
+            diagnostic_shapes(&live),
+            diagnostic_shapes(&expected),
+            "edit {i} ({start:?}..{end:?} {insert:?}) on:\n{text}"
+        );
+    }
+    assert_eq!(text, model);
+
+    // And the passes really came from the cache: none of them parsed.
+    LspClient::wait_for_server_log(&root, "parsed=0");
+    assert!(
+        !LspClient::server_log(&root).contains("parsed=1"),
+        "a lint pass parsed the buffer instead of using the cached tree"
+    );
+}
+
+#[test]
+fn test_e2e_definition_after_edits() {
+    // Position requests read the cached tree too. After edits that shift lines
+    // and change the form under the cursor, definition must land on the right
+    // symbol — cross-file through the index and a local through the tree.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let utils = root.join("src/utils.clj");
+    let core = root.join("src/core.clj");
+    client.did_open(&utils);
+
+    let last_line = std::fs::read_to_string(&utils).unwrap().lines().count() as u32;
+    let mut version = 2;
+    let mut edit = |client: &mut LspClient, start, end, text: &str| {
+        client.did_change_range(&utils, version, start, end, text);
+        version += 1;
+    };
+    // Type a new fn in pieces...
+    edit(
+        &mut client,
+        (last_line, 0),
+        (last_line, 0),
+        "(defn scale [factor xs]\n",
+    );
+    edit(
+        &mut client,
+        (last_line + 1, 0),
+        (last_line + 1, 0),
+        "  (map #(core/multiply factor %) xs))\n",
+    );
+    // ...then insert two lines above it, so its lines move.
+    edit(&mut client, (0, 0), (0, 0), ";; header\n;; more\n");
+    // ...and change the form itself: `multiply` -> `add`, then back.
+    let fn_line = last_line + 3;
+    edit(&mut client, (fn_line, 14), (fn_line, 22), "add");
+    edit(&mut client, (fn_line, 14), (fn_line, 17), "multiply");
+
+    let result = client.goto_definition(&utils, fn_line, 16);
+    let uri = result["uri"].as_str().expect("expected a Location");
+    assert!(uri.ends_with("/src/core.clj"), "got {uri}");
+    let (def_line, _) = position_of(&core, "defn multiply");
+    assert_eq!(result["range"]["start"]["line"], json!(def_line));
+
+    // The local `factor` resolves to its param binding, two lines up.
+    let result = client.goto_definition(&utils, fn_line, 25);
+    let uri = result["uri"].as_str().expect("expected a Location");
+    assert!(uri.ends_with("/src/utils.clj"), "got {uri}");
+    assert_eq!(result["range"]["start"]["line"], json!(fn_line - 1));
+    assert_eq!(result["range"]["start"]["character"], json!(13));
+}
+
 #[test]
 fn test_e2e_jar_definition_and_content() {
     // Library symbol: definition must return a jar: URI, and
@@ -4704,6 +4914,309 @@ fn test_e2e_unused_private_var_diagnostic() {
         "{}",
         found[0]
     );
+}
+
+/// A buffer over 1 KiB carrying the fake kondo's error marker, so both tiers
+/// have something to say and the `:live-max-kb 1` threshold applies.
+fn write_large_kondo_file(root: &Path) -> std::path::PathBuf {
+    let big = root.join("src/big.clj");
+    let mut source = String::from(
+        "(ns kondo.big)\n;; kondo-finding-here\n(defn run []\n  (helpers/greet \"world\"))\n",
+    );
+    while source.len() <= 1024 {
+        source.push_str(";; padding so the buffer is larger than one kibibyte\n");
+    }
+    std::fs::write(&big, source).unwrap();
+    big
+}
+
+#[test]
+fn test_e2e_kondo_threshold_skips_keystrokes_on_large_buffers() {
+    // Above `:live-max-kb`, clj-kondo sits out the didChange pass — the native
+    // set publishes alone — but still runs on open and on save. The engine
+    // itself stays active: no lint-status change, no re-probe.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:live-max-kb 1}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let big = write_large_kondo_file(&root);
+    client.did_open(&big);
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "didOpen always runs clj-kondo"
+    );
+
+    client.clear_notifications();
+    client.did_change_insert(&big, 1, 0, ";; typing\n");
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())],
+        "a keystroke on a buffer above the threshold publishes native lints only"
+    );
+
+    client.clear_notifications();
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": format!("file://{}", big.display()) } }),
+    );
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "didSave always runs clj-kondo"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_threshold_save_right_after_change_keeps_kondo_findings() {
+    // Edit, then save inside the debounce window. The save runs clj-kondo and
+    // publishes; the change pass still waiting on the edit must then stand
+    // down, or its native-only set would erase the findings the save produced
+    // — same version, no further edit, nothing to bring them back until the
+    // next save.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:live-max-kb 1}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let big = write_large_kondo_file(&root);
+    client.did_open(&big);
+    client.wait_for_diagnostics("/src/big.clj");
+
+    client.clear_notifications();
+    client.did_change_insert(&big, 1, 0, ";; typing\n");
+    client.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": format!("file://{}", big.display()) } }),
+    );
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "the save's full pass publishes first"
+    );
+
+    // Outlast the debounce, then make sure nothing native-only followed.
+    std::thread::sleep(Duration::from_millis(3 * 300));
+    while let Ok(msg) = client.incoming.try_recv() {
+        if msg["method"] == "textDocument/publishDiagnostics"
+            && msg["params"]["uri"]
+                .as_str()
+                .is_some_and(|u| u.ends_with("/src/big.clj"))
+        {
+            assert_eq!(
+                diagnostic_codes(&msg["params"]),
+                vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+                "a pending change pass overwrote the save's findings: {}",
+                msg["params"]
+            );
+        }
+        client.stash(msg);
+    }
+}
+
+#[test]
+fn test_e2e_kondo_threshold_zero_means_no_limit() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:live-max-kb 0}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let big = write_large_kondo_file(&root);
+    client.did_open(&big);
+    client.wait_for_diagnostics("/src/big.clj");
+
+    client.clear_notifications();
+    client.did_change_insert(&big, 1, 0, ";; typing\n");
+    let params = client.wait_for_diagnostics("/src/big.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "with no limit, a keystroke runs clj-kondo too"
+    );
+}
+
+/// A directory holding a copy of the fake clj-kondo, standing in for a mise
+/// shims or Homebrew bin directory the editor's PATH does not list.
+fn well_known_dir_with_fake_kondo() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join("clj-kondo");
+    std::fs::copy(LspClient::fake_kondo_dir().join("clj-kondo"), &target).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+/// A PATH holding only the system directories the fake needs (`sh`, `cat`),
+/// and no clj-kondo — what a Dock-launched editor hands the server.
+const BARE_PATH: &str = "/usr/bin:/bin";
+
+#[test]
+fn test_e2e_kondo_found_in_a_well_known_dir_off_path() {
+    // Homebrew and mise install directories are searched after PATH, so a
+    // clj-kondo the editor's PATH does not list is still found — and the
+    // announcement names the file that ran.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let shims = well_known_dir_with_fake_kondo();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", shims.path()),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log(&format!(
+        "clj-kondo v0.0.0-fake found ({})",
+        shims.path().join("clj-kondo").display()
+    ));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+}
+
+#[test]
+fn test_e2e_kondo_not_found_says_where_it_looked() {
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let empty = tempfile::TempDir::new().unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", empty.path()),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo not found — linting: native lints only");
+    let line = client
+        .notifications
+        .iter()
+        .filter(|m| m["method"] == "window/logMessage")
+        .map(|m| {
+            m["params"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .find(|m| m.contains("clj-kondo not found"))
+        .unwrap();
+    assert!(line.contains("PATH (2 entries)"), "{line}");
+    assert!(
+        line.contains(&empty.path().display().to_string()),
+        "names the well-known dirs it tried: {line}"
+    );
+    assert!(line.contains("clojurePulse.kondo.path"), "{line}");
+
+    // The same reason rides the lint status, for the editor to show. An
+    // earlier status without it is legitimate: `initialized` sends the
+    // current state, which may predate the probe.
+    let status = client.wait_for_notification_where("clojurePulse/lintStatus", |p| {
+        p["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("clj-kondo not found"))
+    });
+    assert_eq!(status["engine"], json!("native"));
+}
+
+#[test]
+fn test_e2e_kondo_workspace_relative_path_lints_files_in_subdirectories() {
+    // `:path "./bin/clj-kondo"` is anchored to the workspace. A lint runs from
+    // the file's own directory (so mise shims see the project's pin), which
+    // must not turn that path into `src/bin/clj-kondo`.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let target = root.join("bin/clj-kondo");
+    std::fs::copy(LspClient::fake_kondo_dir().join("clj-kondo"), &target).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:path \"./bin/clj-kondo\"}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::spawn(&root, &[("PATH", Path::new(BARE_PATH))], true, Kondo::Real);
+    client.initialize(&root);
+    client.wait_for_log(&format!(
+        "clj-kondo v0.0.0-fake found ({})",
+        root.join("./bin/clj-kondo").display()
+    ));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())],
+        "the lint from src/ must still run the workspace's bin/clj-kondo"
+    );
+}
+
+#[test]
+fn test_e2e_kondo_path_that_is_a_command_line_is_explained() {
+    // `mise exec -- clj-kondo` is a natural thing to type into a "path"
+    // setting; it is spawned as one program name and cannot work. Say so.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".clj-pulse")).unwrap();
+    std::fs::write(
+        root.join(".clj-pulse/config.edn"),
+        "{:kondo {:path \"mise exec -- clj-kondo\"}}\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("names a program, not a command line");
 }
 
 #[test]

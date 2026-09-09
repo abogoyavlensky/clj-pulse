@@ -158,6 +158,7 @@ pub const DEFAULT_BIN: &str = "clj-kondo";
 pub struct KondoOverride {
     pub enabled: Option<bool>,
     pub path: Option<String>,
+    pub live_max_kb: Option<u32>,
 }
 
 /// The resolved clj-kondo settings: both layers merged over the defaults.
@@ -169,14 +170,33 @@ pub struct KondoOverride {
 pub struct KondoConfig {
     pub enabled: bool,
     pub path: String,
+    /// Buffers larger than this many KiB skip clj-kondo on keystrokes (the
+    /// debounced didChange pass) and get it back on open and save. `0` means
+    /// no limit. clj-kondo costs close to a second on a 450 KiB file, which
+    /// is its own runtime; this is the one lever we have over when it runs.
+    pub live_max_kb: u32,
 }
+
+/// The default [`KondoConfig::live_max_kb`]: a quarter megabyte, well above
+/// any ordinary namespace and below the test files that take clj-kondo the
+/// better part of a second.
+pub const DEFAULT_LIVE_MAX_KB: u32 = 256;
 
 impl Default for KondoConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             path: DEFAULT_BIN.to_string(),
+            live_max_kb: DEFAULT_LIVE_MAX_KB,
         }
+    }
+}
+
+impl KondoConfig {
+    /// Whether a buffer of `bytes` is too large for clj-kondo to run on a
+    /// keystroke under this config.
+    pub fn exceeds_live_max(&self, bytes: usize) -> bool {
+        self.live_max_kb != 0 && bytes > self.live_max_kb as usize * 1024
     }
 }
 
@@ -199,6 +219,10 @@ pub fn parse_config_edn(contents: &str) -> KondoOverride {
             Some(Value::String(s)) => Some(s.clone()),
             _ => None,
         },
+        live_max_kb: match get(spec, kw("live-max-kb")) {
+            Some(Value::Integer(n)) => u32::try_from(*n).ok(),
+            _ => None,
+        },
     }
 }
 
@@ -219,6 +243,10 @@ pub fn parse_config_json(v: &serde_json::Value) -> KondoOverride {
             .get("path")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        live_max_kb: spec
+            .get("liveMaxKb")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok()),
     }
 }
 
@@ -245,11 +273,36 @@ fn resolve_config_with_disable(
         if let Some(path) = &layer.path {
             cfg.path = path.clone();
         }
+        if let Some(kb) = layer.live_max_kb {
+            cfg.live_max_kb = kb;
+        }
     }
     if disable {
         cfg.enabled = false;
     }
     cfg
+}
+
+/// The line announcing a failed probe: what went wrong, then the one hint that
+/// fits the shape of the setting. A value with whitespace was meant as a
+/// command line (`mise exec -- clj-kondo`), which no setting here runs; a bare
+/// name that is not on PATH is almost always an editor started from a desktop
+/// launcher without the shell's PATH.
+pub fn not_found_message(path: &str, reason: &str) -> String {
+    let mut msg = format!("clj-kondo not found — linting: native lints only ({reason}).");
+    if path.split_whitespace().count() > 1 {
+        msg.push_str(
+            " The path setting names a program, not a command line: set it to the binary's \
+             full path (the output of `mise which clj-kondo` or `which clj-kondo` in a terminal).",
+        );
+    } else if !path.contains('/') && !path.contains(std::path::MAIN_SEPARATOR) {
+        msg.push_str(
+            " If clj-kondo works in a terminal, the editor was started without your shell's \
+             PATH: set clojurePulse.kondo.path (or :kondo {:path} in .clj-pulse/config.edn) \
+             to the binary's full path.",
+        );
+    }
+    msg
 }
 
 /// How long one buffer lint may take before it is abandoned. Normal files
@@ -308,6 +361,13 @@ pub async fn lint(
     if abs_path.extension().is_some_and(|e| e == "bb") {
         cmd.arg("--lang").arg("clj");
     }
+    // Run from the file's own directory. clj-kondo does not care (it resolves
+    // its config from `--filename`), but a mise shim does: it picks the
+    // version the nearest mise config pins, and the server's own cwd is
+    // wherever the editor happened to start it.
+    if let Some(dir) = abs_path.parent().filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
 
     let output = run(&mut cmd, bin, Some(source), timeout).await?;
 
@@ -365,28 +425,62 @@ pub async fn warm(
     Ok(())
 }
 
+/// A clj-kondo the probe could run: the version it reported and the binary it
+/// was run as, resolved to a full path when the setting was a bare name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    pub version: String,
+    pub bin: String,
+}
+
 /// Runs `<bin> --version` and returns the version it reports.
 ///
 /// `None` covers every "no usable clj-kondo here" case: the binary is absent
 /// (bare names are resolved through PATH by `Command`, so this doubles as
 /// discovery), it fails, it times out, or it is some *other* tool whose
 /// `--version` we would otherwise happily accept.
-pub async fn probe_version(bin: &str) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(bin);
+pub async fn probe_version(bin: &str, cwd: Option<&Path>) -> Result<Probe, String> {
+    // Resolve the name ourselves, to an absolute path, so the answer names the
+    // file that ran — the one thing a user with two installs needs to know —
+    // so "not found" can say where it looked, and so a workspace-relative
+    // `:path` still works when a lint runs from the file's own directory.
+    let base = cwd
+        .filter(|d| d.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let Some(resolved) = crate::tools::resolve(bin, &base) else {
+        return Err(format!(
+            "`{bin}` not found on {}",
+            crate::tools::describe_search()
+        ));
+    };
+    let resolved = resolved.display().to_string();
+    let mut cmd = tokio::process::Command::new(&resolved);
     cmd.arg("--version");
-    let output = run(&mut cmd, bin, None, PROBE_TIMEOUT).await.ok()?;
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    let output = run(&mut cmd, &resolved, None, PROBE_TIMEOUT).await?;
     // A wrapper script that prints a version banner and then fails is not a
     // clj-kondo we can lint with; treat it as absent rather than spawn it once
     // per keystroke.
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "`{resolved} --version` failed ({}): {}",
+            output.status,
+            stderr_snippet(&output)
+        ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
         .find_map(|line| line.trim().strip_prefix("clj-kondo "))
-        .map(|version| version.trim().to_string())
-        .filter(|version| !version.is_empty())
+        .map(|version| Probe {
+            version: version.trim().to_string(),
+            bin: resolved.clone(),
+        })
+        .ok_or_else(|| format!("`{resolved} --version` did not print a clj-kondo version line"))
 }
 
 /// Spawns `cmd`, optionally feeding `stdin_data` to it, and collects its
@@ -406,6 +500,7 @@ async fn run(
 ) -> Result<std::process::Output, String> {
     #[cfg(unix)]
     cmd.process_group(0);
+    crate::tools::apply_env(cmd);
     cmd.stdin(match stdin_data {
         Some(_) => std::process::Stdio::piped(),
         None => std::process::Stdio::null(),
@@ -871,7 +966,9 @@ exit 3
     async fn probe_version_reads_the_version_line() {
         let dir = tempfile::TempDir::new().unwrap();
         let bin = fake_bin(dir.path(), "echo 'clj-kondo v2026.08.04'\n");
-        assert_eq!(probe_version(&bin).await, Some("v2026.08.04".to_string()));
+        let probe = probe_version(&bin, None).await.unwrap();
+        assert_eq!(probe.version, "v2026.08.04");
+        assert_eq!(probe.bin, bin);
     }
 
     #[cfg(unix)]
@@ -881,14 +978,36 @@ exit 3
         // "not found", not as a working clj-kondo.
         let dir = tempfile::TempDir::new().unwrap();
         let bin = fake_bin(dir.path(), "echo 'GNU bash, version 5.2'\n");
-        assert_eq!(probe_version(&bin).await, None);
+        let err = probe_version(&bin, None).await.unwrap_err();
+        assert!(
+            err.contains("did not print a clj-kondo version line"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
-    async fn probe_version_of_a_missing_binary_is_none() {
-        assert_eq!(
-            probe_version("clj-kondo-definitely-not-installed").await,
-            None
+    async fn probe_version_of_a_missing_binary_says_where_it_looked() {
+        let err = probe_version("clj-kondo-definitely-not-installed", None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not found on PATH ("), "{err}");
+    }
+
+    #[test]
+    fn not_found_message_fits_the_setting_shape() {
+        let bare = not_found_message("clj-kondo", "`clj-kondo` not found on PATH (3 entries)");
+        assert!(bare.contains("linting: native lints only"), "{bare}");
+        assert!(bare.contains("started without your shell's PATH"), "{bare}");
+        let cmdline = not_found_message(
+            "mise exec -- clj-kondo",
+            "`mise exec -- clj-kondo` not found",
+        );
+        assert!(cmdline.contains("not a command line"), "{cmdline}");
+        assert!(cmdline.contains("mise which clj-kondo"), "{cmdline}");
+        let explicit = not_found_message("/opt/x/clj-kondo", "`/opt/x/clj-kondo --version` failed");
+        assert!(
+            explicit.ends_with("failed)."),
+            "no hint for an explicit path: {explicit}"
         );
     }
 
@@ -898,11 +1017,67 @@ exit 3
         KondoOverride {
             enabled,
             path: path.map(str::to_string),
+            live_max_kb: None,
         }
     }
 
     fn resolved(file: KondoOverride, editor: KondoOverride) -> KondoConfig {
         resolve_config_with_disable(&file, &editor, false)
+    }
+
+    #[test]
+    fn live_max_kb_defaults_to_256_and_merges_per_key() {
+        let cfg = resolved(KondoOverride::default(), KondoOverride::default());
+        assert_eq!(cfg.live_max_kb, 256);
+        // The file sets it; an editor layer that says nothing keeps it.
+        let file = KondoOverride {
+            live_max_kb: Some(64),
+            ..KondoOverride::default()
+        };
+        assert_eq!(
+            resolved(file.clone(), KondoOverride::default()).live_max_kb,
+            64
+        );
+        // The editor overrides it — `0` (no limit) included.
+        let editor = KondoOverride {
+            live_max_kb: Some(0),
+            ..KondoOverride::default()
+        };
+        assert_eq!(resolved(file, editor).live_max_kb, 0);
+    }
+
+    #[test]
+    fn parses_live_max_kb_from_edn_and_json() {
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb 128}}"#).live_max_kb,
+            Some(128)
+        );
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb 0}}"#).live_max_kb,
+            Some(0)
+        );
+        // Wrong type or negative: no override.
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb "big"}}"#).live_max_kb,
+            None
+        );
+        assert_eq!(
+            parse_config_edn(r#"{:kondo {:live-max-kb -1}}"#).live_max_kb,
+            None
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"kondo": {"liveMaxKb": 512}})).live_max_kb,
+            Some(512)
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"clojurePulse": {"kondo": {"liveMaxKb": 0}}}))
+                .live_max_kb,
+            Some(0)
+        );
+        assert_eq!(
+            parse_config_json(&serde_json::json!({"kondo": {"liveMaxKb": "big"}})).live_max_kb,
+            None
+        );
     }
 
     #[test]
@@ -1052,7 +1227,8 @@ exit 3
         // A broken wrapper must read as "not found", not as a usable install.
         let dir = tempfile::TempDir::new().unwrap();
         let bin = fake_bin(dir.path(), "echo 'clj-kondo v2026.08.04'\nexit 1\n");
-        assert_eq!(probe_version(&bin).await, None);
+        let err = probe_version(&bin, None).await.unwrap_err();
+        assert!(err.contains("--version` failed"), "{err}");
     }
 
     #[test]

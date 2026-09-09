@@ -129,8 +129,8 @@ fn local_definition(documents: &DocumentStore, uri: &Url, pos: Position) -> Opti
     if word.contains('/') {
         return None;
     }
-    let text = documents.text(uri)?;
-    let binding = extractor::locals_in_scope_at(&text, pos)
+    let snapshot = documents.snapshot(uri)?;
+    let binding = extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, pos)
         .into_iter()
         .rev()
         .find(|b| b.name == word)?;

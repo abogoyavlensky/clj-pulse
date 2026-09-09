@@ -52,6 +52,36 @@ they buy find-references and completion on unqualified keywords. If it ever
 needs winning back, interning occurrence fqns is the lever — most of them
 repeat.
 
+### After the tree cache (2026-09-09)
+
+Same box, same corpus and edit target, the release binary at commit 6b9f713
+(one incrementally updated tree per open document, and clj-kondo skipped on
+keystrokes above `:live-max-kb 256`; the 452 KiB target is above it).
+
+| Metric | Cold caches | Warm `.cpcache` + kondo cache |
+|---|---|---|
+| Time to project index | 3.2 s | 3.4 s |
+| Time to library index (through stage 3, 491 classpath entries) | 7.8 s | 3.7 s |
+| RSS after project index | 354 MiB | 346 MiB |
+| RSS after library index | 398 MiB | 352 MiB |
+| didOpen → first diagnostics | 1010 ms | 1076 ms |
+| didChange → diagnostics (median of 20) | 369 ms | 372 ms |
+| Definition (median of 20) | 22 ms | 22 ms |
+
+Per edit that is the 300 ms debounce plus a native pass of about 65 ms, down
+from about 1200 ms; definition fell from about 75 ms to 22 ms. Index times and
+RSS are unchanged (the RSS step from the baseline table is the keyword
+occurrences recorded on 2026-09-08, below, not the tree: one cached tree is a
+few MiB). didOpen still runs clj-kondo, so it did not move.
+
+What a request costs now, measured step by step on the same file in release
+mode: the definitions-and-occurrences walk (`extract_full_tree`) is 21 ms and
+is all of a definition request; the native pass is that walk plus
+`qualified_usages` (9 ms) and `unused_requires` (28 ms, mostly the bare-symbol
+collection). Nothing parses. The next lever, if a large file ever needs it, is
+caching the `Analysis` per document version so a request walks nothing; it is
+in the ROADMAP Backlog, not scheduled.
+
 ### On the maintainer's machine (macOS)
 
 The table above is a Linux CI-shaped box. The numbers users actually see are
@@ -70,9 +100,9 @@ against a metabase checkout that is *not* the same commit — 35 003 symbols in
 | Definition (median of 20) | 33 ms | 30 ms |
 
 Two things this changes. **Definition is ~30 ms on real hardware**, under the
-50 ms bar, not the ~75 ms the Linux box reports — the parse-cache item below is
-still worth doing for the lint pass, but definition latency is not the argument
-for it. And **~400 ms separates the wall clock from the elapsed time the server
+50 ms bar, not the ~75 ms the Linux box reported before the tree cache — the
+cache was worth doing for the lint pass, and definition latency was not the
+argument for it. And **~400 ms separates the wall clock from the elapsed time the server
 logs for itself** (1.6 s vs 1.18 s, consistent across runs), where on Linux the
 gap is ~10 ms. That gap is process spawn plus the `initialize` handshake plus
 project detection, before indexing starts — worth a look given that instant
@@ -92,27 +122,26 @@ independent, so they now run concurrently, with the CPU-bound native pass on a
 blocking thread: didChange → diagnostics fell from ~1570 ms to ~1200 ms and
 didOpen → first diagnostics from ~1330 ms to ~950 ms.
 
-Two costs remain, both above what a user would call comfortable, and both
-larger than a single fix:
+Two costs remained at that point, both above what a user would call
+comfortable; both are resolved as of 2026-09-09 (table above):
 
-- **No cached parse tree.** Every diagnostics pass parses the buffer three
+- **No cached parse tree.** Every diagnostics pass parsed the buffer three
   times (`extract_analysis_with` ~80 ms, `qualified_usages` ~65 ms,
   `unused_requires` ~140 ms on the 452 KiB file), and every position request
-  parses it once — which is most of the ~75 ms definition latency. A parse
-  cached per document version, ideally updated incrementally from the
-  `didChange` ranges tree-sitter already accepts, would cut the native pass to
-  roughly one parse and take position requests to single-digit milliseconds.
-- **clj-kondo dominates the remaining per-edit time**, and that is its own cost,
-  not ours. Measured directly by taking it off `PATH`: the median per edit falls
-  from ~1230 ms to **633 ms** — i.e. 300 ms debounce plus a 333 ms native pass,
-  with clj-kondo adding ~595 ms on top. (Its standalone run on this file is
-  ~1.0 s; the difference is what the concurrent native pass already hides.)
-  Options are all design changes: a longer debounce for large buffers, skipping
-  the kondo tier above a size threshold, or publishing the native tier first and
-  the kondo tier when it lands — which the "one publish per pass" invariant
-  currently forbids.
-
-Both are tracked as Milestone 1 items in [ROADMAP.md](ROADMAP.md).
+  parsed it once — most of the ~75 ms definition latency. Now the document
+  store keeps one tree per open buffer, edited and reparsed incrementally on
+  every `didChange`, and every handler and the lint pass read it.
+- **clj-kondo dominated the remaining per-edit time**, and that is its own
+  cost, not ours. Measured directly by taking it off `PATH`: the median per
+  edit fell from ~1230 ms to **633 ms** — i.e. 300 ms debounce plus a 333 ms
+  native pass, with clj-kondo adding ~595 ms on top. (Its standalone run on
+  this file is ~1.0 s; the difference is what the concurrent native pass
+  already hides.) Of the design options — a longer debounce for large buffers,
+  a size threshold above which the kondo tier is skipped, or publishing the
+  native tier first and the kondo tier when it lands — the threshold won: the
+  third would have broken the "one publish per pass" invariant, and the first
+  only moves the wait. `:kondo {:live-max-kb 256}` skips clj-kondo on the
+  didChange pass alone; open and save still run it.
 
 ## Leiningen indexes only direct dependencies
 

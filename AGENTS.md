@@ -110,10 +110,30 @@ and update README and this file in the same change.
   successful kondo run owns all five codes and the native copies are dropped
   for that pass; any failure publishes the native set unchanged. One publish
   per pass, never two.
+- The document store keeps one tree-sitter tree per open document. `open`
+  parses once; `apply_changes` turns every incremental change into a
+  `Tree::edit` and reparses incrementally before it returns, so the tree in
+  the store always matches the rope (eager, never lazy). Handlers and the lint
+  pass read `DocumentStore::snapshot` (text and tree from one lock) and call
+  the extractor's `_tree` variants; never `text()` plus a fresh parse. `text()`
+  is for text-only work such as `word_at` and indent-on-Enter.
+- `:kondo {:live-max-kb}` applies to `LintTrigger::Change` alone: a keystroke
+  on a larger buffer publishes the native set, while open, save, and an engine
+  change always run clj-kondo. A save bumps the document's lint epoch so a
+  change pass still waiting out its debounce stands down; the version alone
+  cannot tell a save from the edit just before it.
 - Rename resolves locals structurally (`extractor::local_references_at`)
   *before* the fqn path, so a param shadowing a global only ever edits itself;
   a `:keys`/`:strs`/`:syms`-destructured binding is rejected, since its name is
   also the key being read.
+- Child processes (`clj-kondo`, the classpath shell) get PATH plus the
+  well-known install directories in `tools::well_known_dirs` (mise shims,
+  Homebrew, `~/.cargo/bin`, …), appended after the user's entries, so a
+  Dock-launched editor's bare PATH still finds them. `CLJ_PULSE_TOOL_DIRS`
+  (PATH-style) replaces that list; the discovery e2e tests set it, so they
+  never depend on what the host has installed. A bare `:kondo {:path}` is
+  resolved to a full path at probe time and that file is what lints; the
+  probe's failure reason travels as `detail` on `clojurePulse/lintStatus`.
 - `CLJ_PULSE_DISABLE_KONDO` (non-empty) forces `:kondo {:enabled false}`, the
   twin of `CLJ_PULSE_DISABLE_CLASSPATH_CLI`. `LspClient::start` sets it, so no
   test depends on a host clj-kondo; kondo tests opt in with

@@ -101,7 +101,7 @@ pub struct ExtractConfig {
     pub lint_as: HashMap<String, DefKind>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub fqn: String,
@@ -133,7 +133,7 @@ pub struct Occurrence {
     pub name_range: Range,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NsMeta {
     pub name: String,
     pub file: PathBuf,
