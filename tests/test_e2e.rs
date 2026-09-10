@@ -7279,3 +7279,140 @@ fn test_e2e_selection_range_blank_line() {
         result
     );
 }
+
+/// The (line, character) of `needle` on the first line containing `anchor` —
+/// for a name that appears several times in a file, addressed by the form it
+/// belongs to.
+fn position_of_in_line(path: &Path, anchor: &str, needle: &str) -> (u32, u32) {
+    let text = std::fs::read_to_string(path).unwrap();
+    for (i, line) in text.lines().enumerate() {
+        if line.contains(anchor) {
+            let col = line
+                .find(needle)
+                .unwrap_or_else(|| panic!("{:?} not on the {:?} line", needle, anchor));
+            return (i as u32, (col + needle.len() / 2) as u32);
+        }
+    }
+    panic!("{:?} not found in {}", anchor, path.display());
+}
+
+#[test]
+fn test_e2e_qualified_defn_is_navigable() {
+    // `(mu/defn scale …)` defines a function like `defn` does: definition,
+    // hover and references all reach it.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/schema_defs.clj");
+    client.did_open(&file);
+
+    let (def_line, _) = position_of_in_line(&file, "(mu/defn scale", "scale");
+    let (use_line, use_ch) = position_of_in_line(&file, "(map #(scale", "scale");
+
+    let result = client.goto_definition(&file, use_line, use_ch);
+    let loc = if result.is_array() {
+        result[0].clone()
+    } else {
+        result.clone()
+    };
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/src/schema_defs.clj"),
+        "definition of a mu/defn: {}",
+        result
+    );
+    assert_eq!(loc["range"]["start"]["line"], json!(def_line));
+
+    let hover = client.hover(&file, use_line, use_ch);
+    let text = hover["contents"]["value"].as_str().unwrap_or("");
+    assert!(
+        text.contains("scale [factor x]") && text.contains("simple.schema-defs"),
+        "hover on a mu/defn: {}",
+        hover
+    );
+
+    let (name_line, name_ch) = position_of_in_line(&file, "(mu/defn scale", "scale");
+    let refs = client.references(&file, name_line, name_ch, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", refs));
+    assert_eq!(locs.len(), 2, "definition + one usage: {:?}", locs);
+}
+
+#[test]
+fn test_e2e_qualified_defn_param_shadows_global() {
+    // `factor` is both a var of this namespace and a parameter of `scale`.
+    // The parameter's params bind as locals, so references and rename inside
+    // `scale` see the local alone.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/schema_defs.clj");
+    client.did_open(&file);
+
+    let (global_line, _) = position_of_in_line(&file, "(def factor", "factor");
+    let (param_line, param_ch) = position_of_in_line(&file, "(mu/defn scale", "factor");
+    let (body_line, _) = position_of_in_line(&file, "(* factor x)", "factor");
+
+    let refs = client.references(&file, param_line, param_ch, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", refs));
+    let lines: Vec<u64> = locs
+        .iter()
+        .map(|l| l["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        vec![param_line as u64, body_line as u64],
+        "the parameter's own sites only: {:?}",
+        locs
+    );
+    assert!(
+        !lines.contains(&(global_line as u64)),
+        "the global `factor` is a different name: {:?}",
+        locs
+    );
+
+    let result = client.rename(&file, param_line, param_ch, "k");
+    let changes = &result["changes"];
+    let edits = changes
+        .as_object()
+        .unwrap_or_else(|| panic!("rename returned no changes: {}", result))
+        .values()
+        .next()
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let edit_lines: Vec<u64> = edits
+        .iter()
+        .map(|e| e["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        edit_lines,
+        vec![param_line as u64, body_line as u64],
+        "rename edits the local alone: {}",
+        result
+    );
+
+    let source = std::fs::read_to_string(&file).unwrap();
+    let renamed = apply_edits(&source, edits);
+    assert!(
+        renamed.contains("(mu/defn scale [k x]") && renamed.contains("(* k x)"),
+        "renamed source: {}",
+        renamed
+    );
+    assert!(
+        renamed.contains("(def factor 10)") && renamed.contains("#(scale factor %)"),
+        "the global keeps its name: {}",
+        renamed
+    );
+}

@@ -83,21 +83,21 @@ Modify:
 - Modify: `src/handlers/completion.rs`
 - Test: `tests/test_completion.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Using `tests/fixtures/integrant_project`: `test_integrant_key_not_offered_as_var` (prefix `d` in `readx.db` has no item labeled `db`), `test_integrant_key_not_offered_through_alias` (a namespace aliasing `readx.db` as `db` gets no `db/db`), `test_integrant_key_not_offered_through_refer_all` (a namespace with `[readx.db :refer :all]` gets no bare `db`), and `test_integrant_key_completes_as_keyword` (`::d` yields `::db`).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_completion integrant_key`
   Expected: FAIL on the first two.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `is_var_symbol` and its four call sites.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Keep Integrant keys out of the var completion pools"`
 
 ### Task 2: Qualified def-family heads

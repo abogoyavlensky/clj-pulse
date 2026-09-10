@@ -510,6 +510,47 @@ fn macro_def_kind(
     })
 }
 
+/// The def-family kind a *qualified* head names through its name part alone:
+/// `mu/defn`, `s/defn`, `p/defn-`, `mu/defmethod` all define what `defn`,
+/// `defn-` and `defmethod` define, whatever library the qualifier names. Only
+/// when the form's second child is a symbol: `(s/def ::user (s/keys …))` names
+/// a keyword, and reading it as a `def` would invent a var called `::user`.
+fn qualified_head_def_kind(children: &[Node], source: &str) -> Option<DefKind> {
+    let head = *children.first()?;
+    if head.kind() != "sym_lit" || head.child_by_field_name("namespace").is_none() {
+        return None;
+    }
+    if children.get(1).map(|n| n.kind()) != Some("sym_lit") {
+        return None;
+    }
+    DefKind::from_def_symbol(node_text(sym_name_node(head), source))
+}
+
+/// The `DefKind` a list head introduces, with the fqn that matched, for every
+/// path that classifies a defining form (definition extraction, the occurrence
+/// walker, the scope walker). `:lint-as` and the built-in macro table are
+/// consulted first ([`macro_def_kind`]), so a config entry always wins; a
+/// qualified head that matches neither falls back to its name part
+/// ([`qualified_head_def_kind`]). `None` for core def forms — those are
+/// [`str_to_defkind`]'s — and for ordinary calls.
+fn head_def_kind(
+    children: &[Node],
+    ns_meta: &NsMeta,
+    source: &str,
+    lint_as: &HashMap<String, DefKind>,
+) -> Option<(String, DefKind)> {
+    let head = *children.first()?;
+    if head.kind() != "sym_lit" {
+        return None;
+    }
+    if let Some(hit) = macro_def_kind(head, ns_meta, source, lint_as) {
+        return Some(hit);
+    }
+    let kind = qualified_head_def_kind(children, source)?;
+    let fqn = resolve_head_fqn(head, ns_meta, source)?;
+    Some((fqn, kind))
+}
+
 fn process_top_level_list(
     node: Node,
     source: &str,
@@ -546,7 +587,7 @@ fn process_top_level_list(
     // `deftest`). The mapped kind reuses the normal def extraction, so the
     // macro's defined name becomes a real symbol.
     let kind = str_to_defkind(first_text)
-        .or_else(|| macro_def_kind(first, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind));
+        .or_else(|| head_def_kind(&children, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind));
     if let Some(kind) = kind {
         let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
@@ -1597,7 +1638,7 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     // form as the def-family kind it maps to: its name binds as a def, its body
     // args are usages.
     if head.kind() == "sym_lit" {
-        if let Some((fqn, kind)) = macro_def_kind(*head, ctx.ns_meta, ctx.source, ctx.lint_as) {
+        if let Some((fqn, kind)) = head_def_kind(&children, ctx.ns_meta, ctx.source, ctx.lint_as) {
             out.push(Occurrence {
                 fqn,
                 name_range: node_to_lsp_range(sym_name_node(*head), ctx.source),
@@ -2551,6 +2592,16 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                     None => true,
                     Some(ns) => node_text(ns, source) == "clojure.core",
                 };
+            if !core_form {
+                // A qualified defining head (`mu/defn`) binds like the form its
+                // name part names, matching `head_def_kind` in the occurrence
+                // walker. `:lint-as` is not visible here (no ns metadata), so
+                // only the name-part rule applies.
+                if let Some(kind) = qualified_head_def_kind(&children, source) {
+                    walk_scope_def(kind, &children, source, pos, out);
+                    return;
+                }
+            }
             if core_form {
                 let head_text = sym_text(*head, source);
                 if let Some(kind) = str_to_defkind(head_text) {

@@ -1505,3 +1505,98 @@ mod tree_variant {
         );
     }
 }
+
+// --- qualified def-family heads ---------------------------------------------
+
+/// `mu/defn`, `s/defn` and friends: the qualifier says which library's macro
+/// this is, the name part says what it defines.
+fn qualified_defs() -> (
+    Vec<clj_pulse::index::Symbol>,
+    Vec<clj_pulse::index::Occurrence>,
+) {
+    let (_, syms, occs) = extract_full(
+        include_str!("fixtures/snippets/qualified_defs.clj"),
+        Path::new("qualified_defs.clj"),
+    )
+    .unwrap();
+    (syms, occs)
+}
+
+#[test]
+fn test_qualified_defs_are_indexed_by_name_part() {
+    let (syms, _) = qualified_defs();
+    let sym = |name: &str| {
+        syms.iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{} not indexed: {:?}", name, syms))
+    };
+
+    let f = sym("f");
+    assert_eq!(f.kind, DefKind::Defn);
+    assert_eq!(f.fqn, "my.app/f");
+    assert_eq!(f.name_range.start.line, 5);
+    assert_eq!(f.name_range.start.character, 9);
+    // The return schema (`:- :int`) is not a parameter vector.
+    assert_eq!(f.params, vec!["[x :- :int]"]);
+
+    assert_eq!(sym("g").kind, DefKind::Defn);
+    assert_eq!(sym("g").fqn, "my.app/g");
+    assert_eq!(sym("h").kind, DefKind::DefnPrivate);
+    assert!(sym("h").private);
+    assert!(syms
+        .iter()
+        .any(|s| s.name == "m" && s.kind == DefKind::Defmethod));
+}
+
+#[test]
+fn test_qualified_defs_spec_def_still_names_a_keyword() {
+    // `(spec/def ::user string?)` names a keyword, not a var: no symbol, but
+    // the keyword occurrence stays.
+    let (syms, occs) = qualified_defs();
+    assert!(
+        !syms.iter().any(|s| s.name == "user"),
+        "spec/def must not define a var: {:?}",
+        syms
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":my.app/user").len(),
+        1,
+        "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_qualified_defn_params_bind_as_locals() {
+    // `x` is a parameter of `mu/defn f`, so it is a local, not a var usage of
+    // the current namespace; the body's `str` is a real usage.
+    let (_, occs) = qualified_defs();
+    assert!(
+        occurrences_of(&occs, "my.app/x").is_empty(),
+        "a mu/defn parameter must bind as a local: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, "clojure.core/str").len(),
+        1,
+        "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_lint_as_outranks_the_name_part_fallback() {
+    // The user's `:lint-as` is consulted first, so mapping `malli.util/defn`
+    // to `clojure.core/def` makes `f` a plain `def`.
+    let mut lint_as = std::collections::HashMap::new();
+    lint_as.insert("malli.util/defn".to_string(), DefKind::Def);
+    let cfg = clj_pulse::index::ExtractConfig { lint_as };
+    let (_, syms, _) = clj_pulse::index::extractor::extract_full_with(
+        include_str!("fixtures/snippets/qualified_defs.clj"),
+        Path::new("qualified_defs.clj"),
+        &cfg,
+    )
+    .unwrap();
+    let f = syms.iter().find(|s| s.name == "f").expect("f not indexed");
+    assert_eq!(f.kind, DefKind::Def);
+}
