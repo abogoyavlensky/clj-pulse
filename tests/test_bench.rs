@@ -40,6 +40,12 @@ const QUIET: Duration = Duration::from_secs(2);
 /// the keystroke path, so a file on each side of the line is measured.
 const LIVE_MAX_BYTES: u64 = 256 * 1024;
 
+/// How long to wait for stage 3 to announce itself before concluding it is not
+/// going to run for this workspace (disabled in config, no CLI, an lgx
+/// project). It logs that line before it does any work, so this only ever
+/// absorbs the gap between the two background tasks.
+const STAGE3_ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
+
 /// The lines that mean stage 2 has finished with the libraries it could find.
 const STAGE2_LINES: [&str; 3] = [
     "library indexing complete",
@@ -93,13 +99,16 @@ fn run_clj_pulse(root: &Path, corpus: &str, probes: &Probes) -> Row {
         client.did_open(&site.file);
     }
 
-    let deadline = t0 + CEILING;
-    if let Some(site) = &probes.startup_project {
-        row.first_definition = poll_definition(&mut client, site, t0, deadline, &mut watch);
-    }
-    if let Some(site) = &probes.startup_library {
-        row.first_library_definition = poll_definition(&mut client, site, t0, deadline, &mut watch);
-    }
+    let (first, library) = poll_definitions(
+        &mut client,
+        probes.startup_project.as_ref(),
+        probes.startup_library.as_ref(),
+        t0,
+        t0 + CEILING,
+        &mut watch,
+    );
+    row.first_definition = first;
+    row.first_library_definition = library;
 
     // Settled, not merely answering: stage 3 re-resolves and re-indexes long
     // after stage 2 has answered a definition, and sampling latency or RSS
@@ -168,24 +177,39 @@ fn run_clj_pulse(root: &Path, corpus: &str, probes: &Probes) -> Row {
     row
 }
 
-/// Asks for `site`'s definition until the answer is the right one, and returns
-/// how long that took from `t0`. `None` when the ceiling passed first.
-fn poll_definition(
+/// Asks both startup probes for their definition until each answers correctly,
+/// and returns how long each took from `t0`. Interleaved, never in sequence:
+/// the library index finishes after the project one, but a probe that never
+/// resolves must not lend its whole wait to the other's number. `None` for a
+/// probe the ceiling passed first, or one this corpus has no site for.
+fn poll_definitions(
     client: &mut LspClient,
-    site: &Site,
+    project: Option<&Site>,
+    library: Option<&Site>,
     t0: Instant,
     deadline: Instant,
     watch: &mut StageWatch,
-) -> Option<Duration> {
+) -> (Option<Duration>, Option<Duration>) {
+    let mut answered: [Option<Duration>; 2] = [None, None];
+    let sites = [project, library];
     loop {
-        let answer = definition(client, site);
-        if answers(&answer, &site.expect) {
-            return Some(t0.elapsed());
+        for (i, site) in sites.iter().enumerate() {
+            let Some(site) = site else { continue };
+            if answered[i].is_some() {
+                continue;
+            }
+            if answers(&definition(client, site), &site.expect) {
+                answered[i] = Some(t0.elapsed());
+            }
+        }
+        let pending = sites
+            .iter()
+            .enumerate()
+            .any(|(i, site)| site.is_some() && answered[i].is_none());
+        if !pending || Instant::now() >= deadline {
+            return (answered[0], answered[1]);
         }
         watch.observe(client, t0);
-        if Instant::now() >= deadline {
-            return None;
-        }
         std::thread::sleep(POLL);
     }
 }
@@ -214,13 +238,22 @@ fn settle_clj_pulse(
         Some(line) => line.trim_start_matches("clj-pulse: ").to_string(),
         None => "no library stage reported".to_string(),
     };
-    // Stage 2 came first; stage 3 is still to come, and it re-indexes.
-    if stage.as_deref().is_some_and(|l| !is_stage3(l)) {
-        if let Some(line) = client.log_line_within(
+    // Stage 2 came first; stage 3 may still be to come, and it re-indexes. It
+    // announces itself before doing any work, so a short look for that line
+    // decides whether waiting for its result is worth anything at all — a
+    // workspace with stage 3 disabled, or without a classpath command, must
+    // not pay the whole ceiling for a line that is never coming.
+    if stage.as_deref().is_some_and(|l| !is_stage3(l))
+        && client
+            .log_line_within(&["resolving classpath via"], STAGE3_ANNOUNCE_GRACE)
+            .is_some()
+    {
+        match client.log_line_within(
             &STAGE3_LINES,
             deadline.saturating_duration_since(Instant::now()),
         ) {
-            note = line.trim_start_matches("clj-pulse: ").to_string();
+            Some(line) => note = line.trim_start_matches("clj-pulse: ").to_string(),
+            None => note.push_str("; stage 3 announced but never reported"),
         }
     }
 

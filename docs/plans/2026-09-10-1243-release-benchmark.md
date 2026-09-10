@@ -87,30 +87,62 @@ Modify:
 **Files:**
 - Modify: `bb.edn`, `tests/test_bench.rs`
 
-- [ ] **Step 1: Parametrize**
+- [x] **Step 1: Parametrize**
   `bb bench` accepts `metabase`, `clj-kondo`, or nothing for both; clones shallowly and checks out the pinned commit; exports the two variables. The test reads `CLJ_PULSE_BENCH_CORPUS` for the report header.
 
-- [ ] **Step 2: Run**
+- [x] **Step 2: Run**
   Run: `bb bench clj-kondo`
   Expected: the existing table prints for the new corpus within the ceiling.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Bench two pinned corpora"`
+
+> Deviation: metabase is pinned at `42a8e9f7` (the commit already checked out
+> under `.tmp/bench/`, the one the MEMORY baseline was measured on) and
+> clj-kondo at `13a32d1c`. The corpus is fetched by commit into a shallow
+> `git init` + `git fetch --depth 1` checkout rather than `git clone --depth 1`,
+> which cannot pin.
 
 ### Task 2: Behavior-based metrics
 
 **Files:**
 - Modify: `tests/test_bench.rs`, `tests/common/mod.rs`
 
-- [ ] **Step 1: Replace log-line waits**
+- [x] **Step 1: Replace log-line waits**
   Implement the five metrics, the settled-state check, the version-matched diagnostics sampling with missing-sample reporting, the below-threshold clj-kondo row with its label rule, definition validation, and the configurable request timeout, for clj-pulse only. Keep the old log-based rows for one run to check the new "first definition" numbers agree with "Indexed" plus a few hundred milliseconds.
 
-- [ ] **Step 2: Run both corpora**
+- [x] **Step 2: Run both corpora**
   Run: `bb bench`
   Expected: two tables; each JSON row parses.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Measure the bench by observable behavior, not log lines"`
+
+> Deviation: the startup probes are chosen from the corpus's *top-level*
+> `src`/`test` only, the namespace-to-file match is anchored at that source root,
+> and the target file must contain a `(def… name)` for that name. Without all
+> three the probe picks something no server can resolve — clj-kondo's `corpus/`
+> holds deliberately broken sample projects (with their own `src/` dirs),
+> clj-kondo has a `src/clj_kondo/impl/types/clojure/string.clj` that a suffix
+> match reads as `clojure.string`, and metabase's `metabase.events.core`
+> re-exports its vars through `potemkin/import-vars`, so a definition on one
+> lands anywhere but the file the require names.
+> Deviation: the library expectation is `clojure/string.clj`, `.cljc` *or*
+> `.cljs`. clj-pulse answers `clojure/string.cljs` out of the ClojureScript jar
+> for a `.clj` file when the classpath carries both (a real finding, filed in
+> the ROADMAP backlog); either is a definition inside a dependency, which is
+> what the metric times.
+> Deviation: `clojurePulse/lintStatus` qualifies a "native only" label but never
+> produces a "with clj-kondo" one. The plan allowed it as positive evidence, but
+> it reports whether the *engine* is live, not whether it ran for this pass — on
+> the 452 KiB file, which is above `:live-max-kb`, it says `kondo+native` while
+> clj-kondo sits out every keystroke, so trusting it mislabels exactly the row
+> the plan wants footnoted.
+> Deviation: the settle check gets its own ceiling rather than what is left of
+> the startup one, so a probe that never resolves cannot also make the settle
+> check report a failure. It also waits on "no child process of the server",
+> which on metabase means the ~45 s clj-kondo dependency-cache warm — work the
+> server is doing, however quiet its log has gone.
 
 ### Task 3: clojure-lsp in the harness
 
