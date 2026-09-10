@@ -804,3 +804,75 @@ fn test_no_auto_require_for_integrant_keys() {
         labels(&items)
     );
 }
+
+// --- Integrant keys are not vars --------------------------------------------
+
+/// The Integrant fixture: `readx.db` defines `::db` through
+/// `(defmethod ig/init-key ::db …)` — a keyword definition whose fqn is
+/// `:readx.db/db`, not a var anything can call.
+fn integrant_index() -> Index {
+    let root = Path::new("tests/fixtures/integrant_project");
+    let paths = vec![root.join("src")];
+    let mut index =
+        scanner::build_index(root, &paths, &clj_pulse::index::ExtractConfig::default()).unwrap();
+    index.core_symbols = clj_pulse::index::core::core_symbols();
+    index
+}
+
+#[test]
+fn test_integrant_key_not_offered_as_var() {
+    // The defining namespace's own pool: `db` is a key, so typing `d` here
+    // must not propose it as a name to call.
+    let index = integrant_index();
+    let items = complete_symbols(&index, "d", "readx.db", None);
+    assert!(
+        !labels(&items).contains(&"db".to_string()),
+        "an Integrant key is not a var: {:?}",
+        labels(&items)
+    );
+}
+
+#[test]
+fn test_integrant_key_not_offered_through_alias() {
+    // `db/d` where `db` aliases the defining namespace: `db/db` names nothing.
+    let index = integrant_index();
+    let mut meta = ns_meta("readx.app");
+    meta.aliases
+        .insert("db".to_string(), "readx.db".to_string());
+    index.insert_file(meta, vec![], vec![]);
+
+    let items = complete_symbols(&index, "db/d", "readx.app", None);
+    assert!(
+        !labels(&items).contains(&"db/db".to_string()),
+        "an Integrant key is not a var through an alias: {:?}",
+        labels(&items)
+    );
+}
+
+#[test]
+fn test_integrant_key_not_offered_through_refer_all() {
+    // `:refer :all` brings in public vars; a keyword definition is not one.
+    let index = integrant_index();
+    let mut meta = ns_meta("readx.all");
+    meta.refer_all = vec!["readx.db".to_string()];
+    index.insert_file(meta, vec![], vec![]);
+
+    let items = complete_symbols(&index, "d", "readx.all", None);
+    assert!(
+        !labels(&items).contains(&"db".to_string()),
+        "an Integrant key is not a var through `:refer :all`: {:?}",
+        labels(&items)
+    );
+}
+
+#[test]
+fn test_integrant_key_completes_as_keyword() {
+    // The key is still reachable where it belongs: the keyword notation.
+    let index = integrant_index();
+    let labels = kw_labels(&index, &kw_ctx(true, "d"), "readx.db");
+    assert!(
+        labels.contains(&"::db".to_string()),
+        "the key must still complete as a keyword: {:?}",
+        labels
+    );
+}
