@@ -273,8 +273,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   "edit a form, preserve formatting" helper first.
 - **Library-wide occurrence index**. Truthful references from inside deps;
   gate behind a setting, lazy per JAR.
-- **Leiningen transitive deps** — see [MEMORY.md](MEMORY.md); opt-in
-  `lein classpath` at most.
+- **Leiningen's direct-dependency fallback** — stage 3 already runs
+  `lein classpath` for a root Leiningen project, so transitive deps are
+  indexed; what stays thin is the fallback when that command is off or fails
+  (version-less direct deps are skipped). See [MEMORY.md](MEMORY.md).
 - **re-frame keyword registrations** (`reg-sub`/`reg-event-*` as definitions);
   the Integrant machinery is the template.
 - **CLI mode** (`clj-pulse clean-ns|lint`) for CI, once the features exist.

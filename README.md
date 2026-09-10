@@ -110,11 +110,13 @@ Clojure & project support:
   `:paths` are indexed when opened.
 
 > [!NOTE]
-> **Dependency depth:** `deps.edn` and let-go projects index the full transitive
-> dependency tree (from `.cpcache` and `lgx.edn`). Leiningen `project.clj`
-> projects index only direct dependencies that declare an explicit version and
-> already live in `~/.m2`; transitive deps and parent-inherited versions are not
-> indexed yet. See [docs/MEMORY.md](docs/MEMORY.md).
+> **Dependency depth:** every project type indexes the full transitive
+> dependency tree — deps.edn from the resolved classpath, let-go from
+> `lgx.edn`, and Leiningen from `lein classpath`, run in the background and
+> enabled by default for the workspace root. Where that command is turned off
+> or fails, a Leiningen project falls back to the direct dependencies that name
+> an explicit version and already live in `~/.m2`. See
+> [docs/MEMORY.md](docs/MEMORY.md).
 
 ## Linting
 
@@ -186,6 +188,9 @@ is resolved through `PATH` and the install directories above, and an absolute
 path is used verbatim. `mise exec -- clj-kondo` cannot work there; use the
 path `mise which clj-kondo` prints, or the shim. All three keys apply live,
 with no restart.
+
+See [docs/SETTINGS.md](docs/SETTINGS.md) for these three keys beside every
+other setting, with the initialization options and environment variables.
 
 `:live-max-kb` keeps clj-kondo off the keystroke path for very large files.
 While you type in a buffer larger than this many KiB, each pass publishes the
@@ -369,7 +374,8 @@ a license for examples (CC0) but none for notes.
 clj-pulse reads an optional `.clj-pulse/config.edn` at the workspace root and
 falls back to `.clj-kondo/config.edn` where the keys overlap. It understands
 three keys: `:projects` and `:lint-as`, below, and `:kondo`, documented under
-[Linting](#settings).
+[Linting](#settings). Every key, its default, and the Clojure Pulse setting
+that matches it are listed in [docs/SETTINGS.md](docs/SETTINGS.md).
 
 `:projects` controls per-project classpath resolution. clj-pulse detects every
 directory holding a `deps.edn`, `project.clj`, or `lgx.edn` (up to four levels

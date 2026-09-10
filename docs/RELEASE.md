@@ -18,6 +18,9 @@ truth**. The release CI refuses to publish if the tag and `Cargo.toml` disagree.
    - the README feature list and Linting section match `ServerCapabilities` in
      `src/server.rs` and the native lint codes in `src/diagnostics.rs`;
    - the AGENTS.md invariants still describe what the code does;
+   - [SETTINGS.md](SETTINGS.md) matches the parsers — every key, default, and
+     environment variable it lists is the one `src/projects.rs`, `src/kondo.rs`,
+     `src/settings.rs` and `src/clojuredocs.rs` actually read;
    - ROADMAP "Where we stand" and its ticked items match what ships;
    - the editor setup snippets still work.
 
