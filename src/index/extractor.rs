@@ -2131,6 +2131,15 @@ fn walk_letfn_form(
     scope.pop();
 }
 
+/// Whether `node` is the `:-` marker of a schema annotation. The schema-style
+/// def macros (`schema.core/defn`, `malli.util/defn`) annotate a parameter as
+/// `[x :- s/Int]`: the element after the marker is a *type expression*
+/// evaluated in the enclosing scope, not a binding target. Binding it would
+/// invent a local called `Int` and lose the reference to the schema var.
+fn is_schema_annotation_marker(node: Node, source: &str) -> bool {
+    node.kind() == "kwd_lit" && node_text(node, source) == ":-"
+}
+
 /// Collects every symbol inside a binding pattern (plain names, vector and
 /// map destructuring) except `&` and `_`, each with its name range. Map
 /// destructuring `:or` defaults are *expressions*, recorded as occurrences
@@ -2183,6 +2192,22 @@ fn collect_binding_names(
                         record_keyword_occurrence(*v, ctx, out);
                     }
                 }
+            }
+        }
+        "vec_lit" => {
+            // A schema annotation's type expression is a usage, not a binding.
+            let items = named_children(pattern);
+            let mut i = 0;
+            while i < items.len() {
+                if is_schema_annotation_marker(items[i], ctx.source) {
+                    if let Some(annotation) = items.get(i + 1) {
+                        walk_occurrences(*annotation, ctx, scope, out);
+                    }
+                    i += 2;
+                    continue;
+                }
+                collect_binding_names(items[i], ctx, scope, out, names);
+                i += 1;
             }
         }
         _ => {
@@ -2929,6 +2954,20 @@ fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBindi
                     // {pattern :key} — the pattern binds; the key does not.
                     collect_binding_targets(*k, source, out);
                 }
+            }
+        }
+        "vec_lit" => {
+            // Same rule as `collect_binding_names`: `[x :- s/Int]` binds `x`
+            // alone, so a cursor on `Int` resolves to the schema var.
+            let items = named_children(pattern);
+            let mut i = 0;
+            while i < items.len() {
+                if is_schema_annotation_marker(items[i], source) {
+                    i += 2;
+                    continue;
+                }
+                collect_binding_targets(items[i], source, out);
+                i += 1;
             }
         }
         _ => {

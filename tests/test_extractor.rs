@@ -1600,3 +1600,52 @@ fn test_lint_as_outranks_the_name_part_fallback() {
     let f = syms.iter().find(|s| s.name == "f").expect("f not indexed");
     assert_eq!(f.kind, DefKind::Def);
 }
+
+#[test]
+fn test_schema_annotations_are_usages_not_bindings() {
+    // `[y :- s/Int]` binds `y`; `s/Int` is a reference to the schema var,
+    // evaluated in the enclosing scope. Binding it would invent a local
+    // called `Int` and lose the reference.
+    let (_, occs) = qualified_defs();
+    assert_eq!(
+        occurrences_of(&occs, "schema.core/Int").len(),
+        1,
+        "the parameter's schema is a usage: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, "schema.core/Str").len(),
+        1,
+        "the return schema is a usage: {:?}",
+        occs
+    );
+    assert!(
+        occurrences_of(&occs, "my.app/y").is_empty(),
+        "the annotated parameter binds as a local: {:?}",
+        occs
+    );
+
+    let src = include_str!("fixtures/snippets/qualified_defs.clj");
+    let (line, _) = line_of(src, "  y)");
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(line, 2),
+    );
+    let names: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["y"],
+        "only the parameter is a local: {:?}",
+        locals
+    );
+}
+
+/// The 0-based line of the first line equal to `needle`.
+fn line_of(text: &str, needle: &str) -> (u32, u32) {
+    for (i, line) in text.lines().enumerate() {
+        if line == needle {
+            return (i as u32, 0);
+        }
+    }
+    panic!("{:?} not found", needle);
+}

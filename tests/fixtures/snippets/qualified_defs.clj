@@ -9,6 +9,10 @@
 
 (s/defn g [y] y)
 
+(s/defn annotated :- s/Str
+  [y :- s/Int]
+  y)
+
 (mu/defn- h [] 1)
 
 (defmulti m :kind)
