@@ -174,6 +174,8 @@ fn bench_large_project() {
 
 struct Report {
     root: PathBuf,
+    /// The corpus name `bb bench` passed, for the report header.
+    corpus: Option<String>,
     project_index_wall: Option<Duration>,
     project_index_reported: Option<String>,
     library_index_wall: Option<Duration>,
@@ -195,6 +197,7 @@ impl Report {
     fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            corpus: std::env::var("CLJ_PULSE_BENCH_CORPUS").ok(),
             project_index_wall: None,
             project_index_reported: None,
             library_index_wall: None,
@@ -229,6 +232,10 @@ impl Report {
 
         println!();
         println!("clj-pulse bench");
+        println!(
+            "  corpus          {}",
+            self.corpus.as_deref().unwrap_or("(unnamed)")
+        );
         println!("  root            {}", self.root.display());
         println!("  binary          {}", env!("CARGO_BIN_EXE_clj-pulse"));
         println!("  kondo           {}", kondo);

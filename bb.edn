@@ -1,7 +1,53 @@
 {:tasks
- {:requires ([babashka.fs :as fs])
+ {:requires ([babashka.fs :as fs]
+             [clojure.string :as str])
 
   :enter (println "Running task:" (:name (current-task)))
+
+  ;; --- bench corpora -------------------------------------------------------
+  ;; Pinned by commit, not by branch: a re-run months from now has to measure
+  ;; the same code, or the numbers in docs/MEMORY.md compare nothing.
+  :init (do
+          (def bench-order ["metabase" "clj-kondo"])
+
+          (def bench-corpora
+            {"metabase" {:url "https://github.com/metabase/metabase"
+                         :sha "42a8e9f77d330c90c5a4d71927fed2823897f949"}
+             "clj-kondo" {:url "https://github.com/clj-kondo/clj-kondo"
+                          :sha "13a32d1caf6278b7e4a8c4ad4936d4fc33db6cf2"}})
+
+          (defn bench-git
+            "Runs git in `dir`, returning trimmed stdout, or nil when it fails."
+            [dir & args]
+            (let [{:keys [exit out]} (apply shell {:dir (str dir)
+                                                   :out :string
+                                                   :err :string
+                                                   :continue true}
+                                            "git" args)]
+              (when (zero? exit) (str/trim out))))
+
+          (defn bench-corpus!
+            "The corpus checkout for `name`, at its pinned commit. Fetches only
+             that commit (`--depth 1`), so the clone stays shallow and a re-pin
+             costs one fetch rather than a re-clone."
+            [name]
+            (let [{:keys [url sha]} (or (get bench-corpora name)
+                                        (do (binding [*out* *err*]
+                                              (println "Unknown bench corpus:" name
+                                                       "- known:" (str/join ", " bench-order)))
+                                            (System/exit 1)))
+                  dir (fs/absolutize (fs/path ".tmp/bench" name))]
+              (when-not (fs/exists? (fs/path dir ".git"))
+                (println "Creating the bench corpus at" (str dir) "...")
+                (fs/create-dirs dir)
+                (shell {:dir (str dir)} "git init -q")
+                (shell {:dir (str dir)} "git remote add origin" url))
+              (when-not (= sha (bench-git dir "rev-parse" "HEAD"))
+                (println "Fetching" name "at" sha "...")
+                (shell {:dir (str dir)} "git fetch --depth 1 -q origin" sha)
+                (shell {:dir (str dir)} "git checkout -q --detach FETCH_HEAD"))
+              dir))
+          nil)
 
   fmt-check {:doc "Check code formatting"
              :task (shell "cargo fmt --all -- --check")}
@@ -18,14 +64,13 @@
   e2e {:doc "End-to-end tests (spawns real binary, speaks LSP over stdio)"
        :task (shell "cargo test --test test_e2e")}
 
-  bench {:doc "Bench against a large real Clojure repo (clones metabase into .tmp/bench on first run)"
-         :task (let [corpus ".tmp/bench/metabase"]
-                 (when-not (fs/exists? corpus)
-                   (println "Cloning the bench corpus into" corpus "...")
-                   (shell "git clone --depth 1 https://github.com/metabase/metabase" corpus))
-                 ;; --release: the debug build's numbers are not what users see.
-                 (shell {:extra-env {"CLJ_PULSE_BENCH_ROOT" (str (fs/absolutize corpus))}}
-                        "cargo test --release --test test_bench -- --ignored --nocapture"))}
+  bench {:doc "Bench against pinned real Clojure repos: `bb bench metabase`, `bb bench clj-kondo`, or no argument for both (checked out under .tmp/bench on first run)"
+         :task (doseq [name (or (seq *command-line-args*) bench-order)]
+                 (let [dir (bench-corpus! name)]
+                   ;; --release: the debug build's numbers are not what users see.
+                   (shell {:extra-env {"CLJ_PULSE_BENCH_ROOT" (str dir)
+                                       "CLJ_PULSE_BENCH_CORPUS" name}}
+                          "cargo test --release --test test_bench -- --ignored --nocapture")))}
 
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}
