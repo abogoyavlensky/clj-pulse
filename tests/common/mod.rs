@@ -14,7 +14,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+pub mod sampling;
+
 pub const TIMEOUT: Duration = Duration::from_secs(20);
+
+/// `FileChangeType`, spelled as the protocol's own numbers: the client speaks
+/// JSON, so pulling in `lsp_types` for three constants would be the only
+/// typed thing in it.
+pub const FILE_CREATED: u8 = 1;
+pub const FILE_CHANGED: u8 = 2;
+pub const FILE_DELETED: u8 = 3;
 
 /// Which `clj-kondo`, if any, the server under test may find.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -580,6 +589,41 @@ impl LspClient {
                     "text": text
                 }
             }),
+        );
+    }
+
+    /// `didSave` without text: the server re-reads the file from disk, the way
+    /// an editor's save notification leaves it.
+    pub fn did_save(&mut self, path: &Path) {
+        self.notify(
+            "textDocument/didSave",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) }
+            }),
+        );
+    }
+
+    pub fn did_close(&mut self, path: &Path) {
+        self.notify(
+            "textDocument/didClose",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) }
+            }),
+        );
+    }
+
+    /// `workspace/didChangeWatchedFiles` for a whole batch of changes in one
+    /// notification — a branch switch arrives as one, and delivering it file by
+    /// file would measure a shape no editor produces. Each change pairs a path
+    /// with a [`FILE_CREATED`] / [`FILE_CHANGED`] / [`FILE_DELETED`] type.
+    pub fn did_change_watched_files(&mut self, changes: &[(&Path, u8)]) {
+        let changes: Vec<Value> = changes
+            .iter()
+            .map(|(path, typ)| json!({ "uri": format!("file://{}", path.display()), "type": typ }))
+            .collect();
+        self.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": changes }),
         );
     }
 
