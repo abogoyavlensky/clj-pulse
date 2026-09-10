@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 pub mod sampling;
+pub mod sites;
 
 pub const TIMEOUT: Duration = Duration::from_secs(20);
 

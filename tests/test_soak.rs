@@ -13,11 +13,23 @@
 //! without `CLJ_PULSE_SOAK_ROOT`. The corpus is churned in place, so
 //! [`CorpusGuard`] restores it on the way out, panic or not.
 
+// The oracle lands one commit before the driver that runs it, so everything
+// below is dead until `bb soak` exists. Removed with that commit.
+#![allow(dead_code)]
+
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use serde_json::{json, Value};
+
+use common::sampling::{
+    has_children, median, quiet_for, rss_kib, QUIET, STAGE2_LINES, STAGE3_ANNOUNCE_GRACE,
+    STAGE3_LINES,
+};
+use common::sites::{answers, definition, is_source_ish, project_sites, source_files, Site};
 use common::{LspClient, FILE_CHANGED, FILE_CREATED, FILE_DELETED};
 
 // ---------------------------------------------------------------------------
@@ -55,6 +67,21 @@ impl Lcg {
             (self.next() % n as u64) as usize
         }
     }
+}
+
+/// A random `u64` for the default seed. `SystemTime` alone repeats on a fast
+/// machine; the address of a heap allocation is what ASLR makes different per
+/// process.
+fn random_seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let boxed = Box::new(0u8);
+    let address = Box::into_raw(boxed) as u64;
+    // SAFETY: the pointer came from `Box::into_raw` one line above.
+    unsafe { drop(Box::from_raw(address as *mut u8)) };
+    nanos ^ address.rotate_left(17)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,12 +155,12 @@ impl Witness {
     /// `Ok(())` when the index agrees, `Err(why)` when it does not — a plain
     /// description, because a witness that has not landed yet and one that
     /// landed wrong read the same until the deadline passes.
-    fn check(&self, client: &mut LspClient) -> Result<(), String> {
+    fn check(&self, session: &mut Session) -> Result<(), String> {
         // The query is fuzzy (`workspace/symbol` matches by subsequence too),
         // so `soak-witness-…-7` also matches `soak-witness-…-17`. Only an
         // exact name counts, and the exact tier sorts first, so the 128-result
         // cap can never drop it.
-        let answer = client.workspace_symbols(&self.name);
+        let answer = session.request("workspace/symbol", json!({ "query": self.name }));
         let hits: Vec<String> = answer
             .as_array()
             .map(|items| {
@@ -498,6 +525,53 @@ impl Churn {
         });
         true
     }
+
+    fn open_files(&self) -> Vec<PathBuf> {
+        self.open.keys().cloned().collect()
+    }
+
+    /// The watched-file changes that describe a restore to baseline: every
+    /// tracked file written back, every file the soak created gone.
+    fn restore_changes(&self) -> Vec<(PathBuf, u8)> {
+        let mut changes: Vec<(PathBuf, u8)> = self
+            .dirtied
+            .iter()
+            .map(|p| (p.clone(), FILE_CHANGED))
+            .collect();
+        changes.extend(self.created.iter().map(|c| (c.path.clone(), FILE_DELETED)));
+        changes
+    }
+
+    /// What the index must say once the restore has landed: every var the run
+    /// appended is gone again. The baseline is the state the reference server
+    /// will be started on, so this is the check that makes the comparison fair.
+    fn restore_witnesses(&self) -> Vec<Witness> {
+        let mut witnesses: Vec<Witness> = self
+            .created
+            .iter()
+            .map(|c| Witness {
+                name: c.var.clone(),
+                expect: Expect::Gone,
+                action: format!("restore removes {}", c.path.display()),
+            })
+            .collect();
+        witnesses.extend(self.saved_vars.iter().map(|(var, path)| Witness {
+            name: var.clone(),
+            expect: Expect::Gone,
+            action: format!("restore reverts {}", path.display()),
+        }));
+        witnesses
+    }
+
+    /// Forgets everything the restore undid: buffers are closed, created files
+    /// are gone, tracked files are back at their pinned contents.
+    fn reset_to_baseline(&mut self) {
+        self.open.clear();
+        self.created.clear();
+        self.dirtied.clear();
+        self.disk_owned.clear();
+        self.saved_vars.clear();
+    }
 }
 
 /// The end of a buffer, in the units the protocol counts: a line index and a
@@ -639,6 +713,690 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// How the run is configured
+// ---------------------------------------------------------------------------
+
+/// Everything the run reads from the environment, read once and echoed in the
+/// report header so a run is reproducible from its own output.
+struct Settings {
+    root: PathBuf,
+    corpus: String,
+    seed: u64,
+    rounds: usize,
+    files: usize,
+    bulk_every: usize,
+    bulk_files: usize,
+    checkpoint_every: usize,
+    converge_timeout: Duration,
+    rss_growth: f64,
+    probes: usize,
+}
+
+impl Settings {
+    fn from_env(root: PathBuf, corpus: String) -> Self {
+        Self {
+            seed: env_parse("CLJ_PULSE_SOAK_SEED").unwrap_or_else(random_seed),
+            rounds: env_parse("CLJ_PULSE_SOAK_ROUNDS").unwrap_or(20),
+            files: env_parse("CLJ_PULSE_SOAK_FILES").unwrap_or(10),
+            bulk_every: env_parse("CLJ_PULSE_SOAK_BULK_EVERY").unwrap_or(5),
+            bulk_files: env_parse("CLJ_PULSE_SOAK_BULK_FILES").unwrap_or(100),
+            // A metabase checkpoint costs about a minute, nearly all of it the
+            // reference server settling, so it is taken half as often there.
+            checkpoint_every: env_parse("CLJ_PULSE_SOAK_CHECKPOINT_EVERY")
+                .unwrap_or(if corpus == "metabase" { 10 } else { 5 }),
+            converge_timeout: Duration::from_secs(
+                env_parse("CLJ_PULSE_SOAK_CONVERGE_TIMEOUT").unwrap_or(30),
+            ),
+            rss_growth: env_parse("CLJ_PULSE_SOAK_RSS_GROWTH").unwrap_or(1.5),
+            probes: env_parse("CLJ_PULSE_SOAK_PROBES").unwrap_or(12),
+            root,
+            corpus,
+        }
+    }
+
+    fn is_checkpoint(&self, round: usize) -> bool {
+        round == self.rounds || round.is_multiple_of(self.checkpoint_every.max(1))
+    }
+
+    fn is_bulk(&self, round: usize) -> bool {
+        self.bulk_every > 0 && round.is_multiple_of(self.bulk_every)
+    }
+}
+
+fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// One server, and everything that has gone wrong with it
+// ---------------------------------------------------------------------------
+
+/// A client plus the liveness record for the server behind it. Every request
+/// goes through here: a JSON-RPC error answer is a liveness failure — the panic
+/// guard answers a panicked handler with exactly one — so it is recorded rather
+/// than merely returned. A request that never answers panics inside the client
+/// and takes the run down with it, which is the same verdict by a louder route.
+struct Session {
+    client: LspClient,
+    errors: Vec<String>,
+}
+
+impl Session {
+    fn new(client: LspClient) -> Self {
+        Self {
+            client,
+            errors: Vec::new(),
+        }
+    }
+
+    /// A server on `root` under production settings — stage 3 runs and
+    /// clj-kondo is spawned when installed, because that is what the machine
+    /// under a real editor does.
+    fn production(root: &Path) -> Self {
+        Self::new(LspClient::start_production(root).with_request_timeout(REQUEST_TIMEOUT))
+    }
+
+    fn client(&mut self) -> &mut LspClient {
+        &mut self.client
+    }
+
+    fn pid(&self) -> u32 {
+        self.client.child.id()
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let msg = self.client.request_full(method, params.clone());
+        if let Some(error) = msg.get("error") {
+            self.errors
+                .push(format!("{method} answered {error}: {params}"));
+        }
+        msg["result"].clone()
+    }
+
+    /// Whether the server process is still running. A handler that panics is
+    /// answered by the guard, so a dead process here means something worse.
+    fn alive(&mut self) -> bool {
+        matches!(self.client.child.try_wait(), Ok(None))
+    }
+}
+
+/// Generous, like the bench's: the point is to find divergence, not to fail on
+/// a slow machine.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Definitions timed per checkpoint.
+const SAMPLES: usize = 20;
+/// How often a convergence poll re-asks.
+const POLL: Duration = Duration::from_millis(100);
+
+/// Settles a server the way the bench does: stage 2 (or stage 3, when it is
+/// coming) has reported, no child process is still working, and nothing has
+/// been logged for [`QUIET`]. Waiting for `Indexed` alone would compare a
+/// settled server against one still indexing its libraries, and invent
+/// divergences that are nothing but a race.
+fn settle(session: &mut Session, deadline: Instant) -> String {
+    let terminal: Vec<&str> = STAGE2_LINES
+        .iter()
+        .chain(STAGE3_LINES.iter())
+        .copied()
+        .collect();
+    let remaining = |deadline: Instant| deadline.saturating_duration_since(Instant::now());
+    let stage = session
+        .client
+        .log_line_within(&terminal, remaining(deadline));
+    let mut note = match &stage {
+        Some(line) => line.trim_start_matches("clj-pulse: ").to_string(),
+        None => "no library stage reported".to_string(),
+    };
+    let stage3 = stage
+        .as_deref()
+        .is_some_and(|l| STAGE3_LINES.iter().any(|s| l.contains(s)));
+    if !stage3
+        && session
+            .client
+            .log_line_within(&["resolving classpath via"], STAGE3_ANNOUNCE_GRACE)
+            .is_some()
+    {
+        match session
+            .client
+            .log_line_within(&STAGE3_LINES, remaining(deadline))
+        {
+            Some(line) => note = line.trim_start_matches("clj-pulse: ").to_string(),
+            None => note.push_str("; stage 3 announced but never reported"),
+        }
+    }
+    let pid = session.pid();
+    loop {
+        session.client.clear_notifications();
+        let quiet = quiet_for(&mut session.client, &["window/logMessage"], QUIET);
+        if quiet && !has_children(pid) {
+            return note;
+        }
+        if Instant::now() >= deadline {
+            return format!("{note}; never settled");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The probe set
+// ---------------------------------------------------------------------------
+
+/// A `workspace/symbol` answer this close to the server's 128-result cap is a
+/// truncated list, and two servers are not obliged to truncate the same one.
+const QUERY_CAP: usize = 100;
+
+/// The fixed set of questions both servers are asked at every checkpoint. The
+/// same sites carry definition, references, completion and hover: a site the
+/// rules picked is one a server can answer, and re-using it keeps the number of
+/// files the comparison has to open down to what a checkpoint can afford.
+struct Probes {
+    sites: Vec<Site>,
+    files: Vec<PathBuf>,
+    queries: Vec<String>,
+    /// Set once the reference server has been asked how big each query's answer
+    /// is; queries near the cap are dropped, not compared.
+    trimmed: bool,
+}
+
+impl Probes {
+    fn discover(root: &Path, want: usize) -> Self {
+        let mut files = source_files(root);
+        // Deterministic: size descending, path ascending, the bench's order.
+        files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|(_, p)| p.clone())
+            .filter(|p| is_source_ish(p, root))
+            .collect();
+
+        // From the smallest qualifying files up: a checkpoint opens every probe
+        // file on both servers, and the corpus's 450 KiB outlier would cost
+        // more than it tells us. Three sites per file, so one file with an
+        // unusual shape cannot dominate the set.
+        let mut sites: Vec<Site> = Vec::new();
+        for (_, path) in files.iter().rev() {
+            if sites.len() >= want {
+                break;
+            }
+            if !is_source_ish(path, root) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            sites.extend(project_sites(&text, path, root, &paths, 3));
+        }
+        sites.truncate(want);
+
+        let mut files: Vec<PathBuf> = Vec::new();
+        for site in &sites {
+            if !files.contains(&site.file) {
+                files.push(site.file.clone());
+            }
+        }
+        // The name half of each probed token: a real project name, so the query
+        // exercises the index the way Cmd+T does, and short enough that the
+        // fuzzy tiers below exact are part of what is compared.
+        let mut queries: Vec<String> = sites
+            .iter()
+            .filter_map(|s| s.token.split_once('/').map(|(_, name)| name.to_string()))
+            .collect();
+        queries.sort();
+        queries.dedup();
+
+        Self {
+            sites,
+            files,
+            queries,
+            trimmed: false,
+        }
+    }
+
+    /// Drops the queries whose answers sit near the result cap, asking the
+    /// reference server — the one server in the run that is by definition
+    /// right. Done once: the corpus is back at its baseline at every
+    /// checkpoint, so the counts do not move.
+    fn trim_queries(&mut self, reference: &mut Session) {
+        if self.trimmed {
+            return;
+        }
+        self.trimmed = true;
+        let mut kept = Vec::new();
+        for query in std::mem::take(&mut self.queries) {
+            let answer = reference.request("workspace/symbol", json!({ "query": query }));
+            let count = answer.as_array().map(|a| a.len()).unwrap_or(0);
+            if count < QUERY_CAP {
+                kept.push(query);
+            } else {
+                println!("  probe query {query:?} dropped: {count} results, too near the cap");
+            }
+        }
+        self.queries = kept;
+    }
+
+    fn print(&self, root: &Path) {
+        let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+        println!();
+        println!("soak probes");
+        println!("  {:<22} {}", "definition sites", self.sites.len());
+        for site in &self.sites {
+            println!(
+                "    {}:{} `{}` -> {}",
+                rel(&site.file),
+                site.line + 1,
+                site.token,
+                site.expect.describe()
+            );
+        }
+        println!("  {:<22} {}", "files opened", self.files.len());
+        println!("  {:<22} {}", "symbol queries", self.queries.join(", "));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Asking, and comparing
+// ---------------------------------------------------------------------------
+
+/// Everything one server answered at one checkpoint.
+struct Answers {
+    definition: Vec<Value>,
+    references: Vec<Value>,
+    document_symbol: Vec<Value>,
+    workspace_symbol: Vec<Value>,
+    /// Definition probes that landed where the site says they should. A probe
+    /// set that resolves nothing compares two `null`s and passes while testing
+    /// nothing, so this is reported and checked, not merely collected.
+    resolved: usize,
+}
+
+fn ask_all(session: &mut Session, probes: &Probes) -> Answers {
+    let mut out = Answers {
+        definition: Vec::new(),
+        references: Vec::new(),
+        document_symbol: Vec::new(),
+        workspace_symbol: Vec::new(),
+        resolved: 0,
+    };
+    for site in &probes.sites {
+        let at = json!({
+            "textDocument": { "uri": format!("file://{}", site.file.display()) },
+            "position": { "line": site.line, "character": site.character }
+        });
+        let definition = session.request("textDocument/definition", at.clone());
+        if answers(&definition, &site.expect) {
+            out.resolved += 1;
+        }
+        out.definition.push(definition);
+        let mut references = at.clone();
+        references["context"] = json!({ "includeDeclaration": true });
+        out.references
+            .push(session.request("textDocument/references", references));
+        // Completion and hover are liveness only: completion's ranking reads
+        // occurrence counts and the response is explicitly `isIncomplete`, so
+        // equality on it would flake for reasons that are not bugs.
+        session.request("textDocument/completion", at.clone());
+        session.request("textDocument/hover", at);
+    }
+    for file in &probes.files {
+        out.document_symbol.push(session.request(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": format!("file://{}", file.display()) } }),
+        ));
+    }
+    for query in &probes.queries {
+        out.workspace_symbol
+            .push(session.request("workspace/symbol", json!({ "query": query })));
+    }
+    out
+}
+
+/// One place the churned server and a fresh one disagree.
+struct Divergence {
+    request: String,
+    site: String,
+    churned: String,
+    reference: String,
+}
+
+impl Divergence {
+    fn print(&self) {
+        println!("  {} at {}", self.request, self.site);
+        println!("    churned:   {}", self.churned);
+        println!("    reference: {}", self.reference);
+    }
+}
+
+fn compare(
+    churned: &Answers,
+    reference: &Answers,
+    probes: &Probes,
+    root: &Path,
+) -> Vec<Divergence> {
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+    let mut out = Vec::new();
+    for (i, site) in probes.sites.iter().enumerate() {
+        let where_ = format!("{}:{} `{}`", rel(&site.file), site.line + 1, site.token);
+        // Definition is compared exactly: one answer, one place, and the two
+        // servers are the same build reading the same files.
+        if let (Some(a), Some(b)) = (churned.definition.get(i), reference.definition.get(i)) {
+            if a != b {
+                out.push(Divergence {
+                    request: "definition".into(),
+                    site: where_.clone(),
+                    churned: brief(a),
+                    reference: brief(b),
+                });
+            }
+        }
+        // References is compared as a set: the order is whatever the index
+        // iterated in, which is not something two servers owe each other.
+        if let (Some(a), Some(b)) = (churned.references.get(i), reference.references.get(i)) {
+            let (a, b) = (locations(a), locations(b));
+            if a != b {
+                out.push(Divergence {
+                    request: "references".into(),
+                    site: where_,
+                    churned: brief_set(&a, &b),
+                    reference: brief_set(&b, &a),
+                });
+            }
+        }
+    }
+    for (i, file) in probes.files.iter().enumerate() {
+        if let (Some(a), Some(b)) = (
+            churned.document_symbol.get(i),
+            reference.document_symbol.get(i),
+        ) {
+            if a != b {
+                out.push(Divergence {
+                    request: "documentSymbol".into(),
+                    site: rel(file),
+                    churned: brief(a),
+                    reference: brief(b),
+                });
+            }
+        }
+    }
+    for (i, query) in probes.queries.iter().enumerate() {
+        if let (Some(a), Some(b)) = (
+            churned.workspace_symbol.get(i),
+            reference.workspace_symbol.get(i),
+        ) {
+            let (a, b) = (symbol_set(a), symbol_set(b));
+            if a != b {
+                out.push(Divergence {
+                    request: "workspace/symbol".into(),
+                    site: format!("query {query:?}"),
+                    churned: brief_set(&a, &b),
+                    reference: brief_set(&b, &a),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A `Location[]` answer as a set of `uri@line:col-line:col`.
+fn locations(result: &Value) -> BTreeSet<String> {
+    result
+        .as_array()
+        .map(|items| items.iter().map(location_key).collect())
+        .unwrap_or_default()
+}
+
+/// A `SymbolInformation[]` answer as a set: name plus where it is. Ranking
+/// depends on occurrence counts, which a churned index counts in its own order,
+/// so only the set is something two servers owe each other.
+fn symbol_set(result: &Value) -> BTreeSet<String> {
+    result
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} {}",
+                        item["name"].as_str().unwrap_or_default(),
+                        location_key(&item["location"])
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn location_key(location: &Value) -> String {
+    let range = &location["range"];
+    format!(
+        "{}@{}:{}-{}:{}",
+        location["uri"].as_str().unwrap_or_default(),
+        range["start"]["line"],
+        range["start"]["character"],
+        range["end"]["line"],
+        range["end"]["character"]
+    )
+}
+
+/// A JSON answer, short enough to read in a failure report.
+fn brief(value: &Value) -> String {
+    let text = value.to_string();
+    if text.len() <= 300 {
+        text
+    } else {
+        format!("{}… ({} bytes)", &text[..300], text.len())
+    }
+}
+
+/// What one side has that the other does not — the whole set is unreadable and
+/// the difference is the finding.
+fn brief_set(mine: &BTreeSet<String>, theirs: &BTreeSet<String>) -> String {
+    let extra: Vec<&String> = mine.difference(theirs).take(5).collect();
+    format!(
+        "{} entries, {} not in the other: {:?}",
+        mine.len(),
+        mine.difference(theirs).count(),
+        extra
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Convergence
+// ---------------------------------------------------------------------------
+
+/// Polls until every witness in the batch holds, or the deadline passes. The
+/// error names the actions that never landed: a bulk round that converges for
+/// its first file and drops its ninetieth is exactly the bug worth catching, so
+/// every action is checked, not one per batch.
+fn converge(
+    session: &mut Session,
+    witnesses: &[Witness],
+    timeout: Duration,
+) -> Result<Duration, Vec<String>> {
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut pending: Vec<&Witness> = witnesses.iter().collect();
+    loop {
+        let mut failures = Vec::new();
+        pending.retain(|witness| match witness.check(session) {
+            Ok(()) => false,
+            Err(why) => {
+                failures.push(format!("{} ({why})", witness.action));
+                true
+            }
+        });
+        if pending.is_empty() {
+            return Ok(started.elapsed());
+        }
+        if Instant::now() >= deadline {
+            failures.truncate(10);
+            return Err(failures);
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panic evidence
+// ---------------------------------------------------------------------------
+
+/// The churned server's `.clj-pulse/server.log`, accumulated. `main.rs` opens
+/// it with `File::create`, which truncates, and both servers derive the path
+/// from the same working directory — so every reference-server start wipes what
+/// the churned server has written. The record is taken before each start and
+/// again after, and the panic check runs against the record rather than
+/// whatever the file happens to hold at the end.
+#[derive(Default)]
+struct LogRecord {
+    text: String,
+    seen: usize,
+}
+
+impl LogRecord {
+    fn absorb(&mut self, root: &Path) {
+        let text = LspClient::server_log(root);
+        if text.len() >= self.seen {
+            self.text.push_str(&text[self.seen..]);
+        } else {
+            // Truncated since the last read: what is there now is all new.
+            self.text.push_str(&text);
+        }
+        self.seen = text.len();
+    }
+
+    /// Every panic the run logged. `install_panic_hook` records payload and
+    /// location through `tracing::error!`, and the default level is `WARN`, so
+    /// the line is there without `--verbose`.
+    fn panics(&self) -> Vec<String> {
+        self.text
+            .lines()
+            .filter(|line| line.contains("panicked at"))
+            .map(|line| line.trim().to_string())
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The checkpoint
+// ---------------------------------------------------------------------------
+
+/// What one checkpoint measured.
+struct Checkpoint {
+    round: usize,
+    rss_kib: Option<u64>,
+    definition: Option<Duration>,
+    definition_samples: usize,
+    divergences: Vec<Divergence>,
+    /// Baseline witnesses that never came back after the restore.
+    stragglers: Vec<String>,
+    resolved: usize,
+    reference_resolved: usize,
+    reference_note: String,
+}
+
+/// Brings the churned server to the same footing a freshly started one has —
+/// nothing open, disk back at its pinned contents — and holds the two to the
+/// same answers.
+fn checkpoint(
+    churned: &mut Session,
+    churn: &mut Churn,
+    guard: &CorpusGuard,
+    probes: &mut Probes,
+    settings: &Settings,
+    log: &mut LogRecord,
+    round: usize,
+) -> Checkpoint {
+    let root = settings.root.as_path();
+
+    // 1. Every buffer closed, so no unsaved edit is part of what is compared.
+    for file in churn.open_files() {
+        churned.client().did_close(&file);
+    }
+    // 2-3. Disk back to baseline, and one notification covering all of it.
+    let restored = churn.restore_changes();
+    let witnesses = churn.restore_witnesses();
+    guard.restore();
+    notify_watched(churned.client(), &restored);
+
+    // 4. The restore has to land like any other batch: the reference server is
+    // started on the baseline, so an index still holding a churned var would
+    // diverge for a reason that is not the bug being hunted.
+    let stragglers = converge(churned, &witnesses, settings.converge_timeout)
+        .err()
+        .unwrap_or_default();
+    churn.reset_to_baseline();
+
+    // 5-6. Settled and quiet, with nothing open: the only state in which two
+    // checkpoints' memory samples mean the same thing.
+    let quiesce_deadline = Instant::now() + REQUEST_TIMEOUT;
+    let pid = churned.pid();
+    loop {
+        churned.client().clear_notifications();
+        let quiet = quiet_for(churned.client(), &["window/logMessage"], QUIET);
+        if (quiet && !has_children(pid)) || Instant::now() >= quiesce_deadline {
+            break;
+        }
+    }
+    let rss = rss_kib(pid);
+
+    // 7. The reference server. Its start truncates the shared log, so the
+    // record is taken first.
+    log.absorb(root);
+    let mut reference = Session::production(root);
+    reference.client().initialize_no_wait(root);
+    let reference_note = settle(&mut reference, Instant::now() + REQUEST_TIMEOUT);
+    probes.trim_queries(&mut reference);
+
+    // 8. The probe files open on both, from the text on disk. Definition
+    // resolves through the document store at every branch, so with nothing open
+    // both servers answer `null` and the comparison would pass while testing
+    // nothing.
+    for file in &probes.files {
+        churned.client().did_open(file);
+        reference.client().did_open(file);
+    }
+
+    // 9. The comparison, then the latency sample, then the reference is gone.
+    let churned_answers = ask_all(churned, probes);
+    let reference_answers = ask_all(&mut reference, probes);
+    let divergences = compare(&churned_answers, &reference_answers, probes, root);
+
+    let mut latencies = Vec::new();
+    if !probes.sites.is_empty() {
+        for i in 0..SAMPLES {
+            let site = &probes.sites[i % probes.sites.len()];
+            let sent = Instant::now();
+            let answer = definition(churned.client(), site);
+            let took = sent.elapsed();
+            // A wrong answer is a divergence, not a sample: timing an index
+            // lookup that found nothing measures nothing.
+            if answers(&answer, &site.expect) {
+                latencies.push(took);
+            }
+        }
+    }
+
+    // The probe files are closed again, so the next checkpoint's memory sample
+    // is taken in the same state as this one.
+    for file in &probes.files {
+        churned.client().did_close(file);
+    }
+    drop(reference);
+    log.absorb(root);
+
+    Checkpoint {
+        round,
+        rss_kib: rss,
+        definition_samples: latencies.len(),
+        definition: median(&mut latencies),
+        divergences,
+        stragglers,
+        resolved: churned_answers.resolved,
+        reference_resolved: reference_answers.resolved,
+        reference_note,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The one part of the soak that cannot wait for a manual run
 // ---------------------------------------------------------------------------
 
@@ -653,14 +1411,14 @@ fn churn_is_restored_by_the_guard() {
 
     let seed = 20260910;
     let soak_dir = root.join("src").join(format!("soak_{seed:x}"));
-    let mut client = LspClient::start(&root);
-    client.initialize(&root);
+    let mut session = Session::new(LspClient::start(&root));
+    session.client().initialize(&root);
 
     {
         let _guard = CorpusGuard::new(&root, &soak_dir);
         let mut churn = Churn::new(&root, seed);
         let edits = churn.draw(1, 12, false);
-        let witnesses = churn.apply(&mut client, &edits);
+        let witnesses = churn.apply(session.client(), &edits);
         assert!(
             !witnesses.is_empty(),
             "a round of churn produced no witness: {edits:?}"
@@ -670,7 +1428,7 @@ fn churn_is_restored_by_the_guard() {
         for witness in &witnesses {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
-                match witness.check(&mut client) {
+                match witness.check(&mut session) {
                     Ok(()) => break,
                     Err(why) => {
                         assert!(
@@ -692,6 +1450,11 @@ fn churn_is_restored_by_the_guard() {
         );
     }
 
+    assert!(
+        session.errors.is_empty(),
+        "the server answered with an error: {:?}",
+        session.errors
+    );
     assert_eq!(
         git(&root, &["status", "--porcelain", "-uno"]).unwrap(),
         "",

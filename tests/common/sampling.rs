@@ -8,6 +8,26 @@ use std::time::{Duration, Instant};
 
 use super::LspClient;
 
+/// How long a server has to stay silent before it counts as settled.
+pub const QUIET: Duration = Duration::from_secs(2);
+
+/// How long to wait for stage 3 to announce itself before concluding it is not
+/// going to run for this workspace (disabled in config, no CLI, an lgx
+/// project). It logs that line before it does any work, so this only ever
+/// absorbs the gap between the two background tasks.
+pub const STAGE3_ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
+
+/// The lines that mean stage 2 has finished with the libraries it could find.
+pub const STAGE2_LINES: [&str; 3] = [
+    "library indexing complete",
+    "no classpath found",
+    "no lgx deps resolved",
+];
+
+/// The lines that mean stage 3 has settled, resolved or failed. A stage-3
+/// failure degrades to the stage-2 result, which is still a settled state.
+pub const STAGE3_LINES: [&str; 2] = ["full classpath indexed", "classpath resolution failed"];
+
 /// Resident set size in KiB, or `None` on a platform with neither reader.
 pub fn rss_kib(pid: u32) -> Option<u64> {
     if cfg!(target_os = "linux") {
