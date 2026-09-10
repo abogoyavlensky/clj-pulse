@@ -20,7 +20,10 @@ and update README and this file in the same change.
   `.cpcache` via `clojure -Spath` and navigates into a downloaded JAR.
   Needs the clojure CLI; ignored in plain `cargo test`.
 - `bb e2e-nvim` — drives the server through a real editor client
-  (headless Neovim's built-in LSP client, `scripts/e2e_nvim.lua`).
+  (headless Neovim's built-in LSP client, `scripts/e2e_nvim.lua`). It resolves
+  the fixture's classpath first and drives `editors/nvim/jar.lua` — the `jar:`
+  handler the README tells Neovim users to install — so a definition into the
+  clojure JAR opens with its source.
 - `bb e2e-calva` — the user's exact setup, headless: real VS Code + real Calva
   (`calva.clojureLspPath` → our binary) under Xvfb (`scripts/calva-e2e/`).
   Covers project + jar: navigation through Calva's own definition pipeline and
@@ -155,7 +158,17 @@ and update README and this file in the same change.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
 - Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
   first, then the built-in table `DefKind::from_macro_fqn`
-  (`clojure.test/deftest` and friends). `NsMeta.refer_all` records
+  (`clojure.test/deftest` and friends), then — for a *qualified* head alone —
+  the def form its name part names (`extractor::head_def_kind`): `mu/defn`,
+  `s/defn`, `p/defn-` and `mu/defmethod` define what `defn`, `defn-` and
+  `defmethod` define, whatever library the qualifier points at. `:lint-as` is
+  consulted first, so it always outranks the fallback, and the fallback applies
+  only when the form's second child is a symbol, which leaves `(s/def ::user …)`
+  naming a keyword. All three paths that classify a defining form use the same
+  resolver — `process_top_level_list`, `walk_list`, `walk_scope` — or the index
+  and the scope walkers disagree about what binds. Inside a parameter vector a
+  `:-` marker annotates: `[x :- s/Int]` binds `x` and reads `s/Int`, never the
+  other way round. `NsMeta.refer_all` records
   `:refer :all` / `(:use ns)` namespaces; head resolution, completion and
   `resolve_symbol` all consult it, so `deftest` works however `clojure.test`
   was required.
@@ -196,6 +209,12 @@ and update README and this file in the same change.
   inserting a require is a bigger action than picking a name already in scope.
   They come from project namespaces and `code_action::CURATED_ALIASES` only,
   and never propose an alias the file has bound to another namespace.
+- Only vars reach the symbol completion pools (`completion::is_var_symbol`): an
+  Integrant key is indexed as a symbol whose fqn is the keyword it defines
+  (`:app.system/database`), so the current-namespace, alias-qualified,
+  `:refer :all` and auto-require pools all skip it — offering `database` or
+  `sys/database` would name nothing. Keys reach the user through
+  `complete_keywords`.
 - Every completion pool filters through `handlers::matching::match_score`, the
   same matcher `workspace/symbol` uses, and each item carries a `sort_text` of
   `tier-pool-name`: tier is the match (exact 0 to subsequence 3), pool is how
@@ -253,6 +272,11 @@ priority: Clojure Pulse, Calva, Neovim; Zed and ClojureScript are best effort.
 Clojure Pulse registers its own `jar:` `TextDocumentContentProvider` that calls
 the server's `clojure/dependencyContents`; Calva reads JARs itself and never
 calls it, so both paths must keep working.
+
+Every user-facing setting — `.clj-pulse/config.edn`, `initializationOptions`,
+environment variables — is tabulated with its default in
+[docs/SETTINGS.md](docs/SETTINGS.md), which is read from the parsers and has to
+change with them.
 
 See [docs/DEV_SETUP.md](docs/DEV_SETUP.md) for the full development &
 verification environment: the two environments (maintainer's Calva/macOS vs the

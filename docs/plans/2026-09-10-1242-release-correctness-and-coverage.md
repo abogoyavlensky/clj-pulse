@@ -202,14 +202,19 @@ Modify:
 - Create: `docs/SETTINGS.md`
 - Modify: `README.md`, `docs/MEMORY.md`, `docs/RELEASE.md`
 
-- [ ] **Step 1: Write SETTINGS.md**
+- [x] **Step 1: Write SETTINGS.md**
   The three tables, defaults read from the parsers. Use /writing-clearly.
 
-- [ ] **Step 2: Link and correct**
+- [x] **Step 2: Link and correct**
   README: Configuration and Linting link to the page; the Dependency depth note describes stage 3 for Leiningen. MEMORY.md: retitle and rewrite the Leiningen section. RELEASE.md: the sweep checks SETTINGS.md.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Document every setting in one place and correct the Leiningen docs"`
+
+> Deviation: the ROADMAP's best-effort item "Leiningen transitive deps — opt-in
+> `lein classpath` at most" was stale in the same way MEMORY.md was, so it is
+> rewritten here (what remains is the direct-dependency fallback) rather than
+> left for a later reader to trip over.
 
 ### Task 6: Roadmap and invariants
 

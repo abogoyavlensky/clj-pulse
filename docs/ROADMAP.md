@@ -178,23 +178,23 @@ Each is small because the index already holds the data.
 
 Three plans, in order: correctness and coverage, the benchmark, the release.
 
-- [ ] **Correctness and coverage before 1.0**
-  - [ ] Integrant keys are no longer offered as vars by the completion pools
+- [x] **Correctness and coverage before 1.0**
+  - [x] Integrant keys are no longer offered as vars by the completion pools
         (promoted from the Backlog).
-  - [ ] Qualified def-family heads (`mu/defn`, `s/defn`) define navigable
+  - [x] Qualified def-family heads (`mu/defn`, `s/defn`) define navigable
         functions; on metabase one function in eight is invisible today.
-  - [ ] Neovim opens `jar:` locations through a documented snippet
+  - [x] Neovim opens `jar:` locations through a documented snippet
         (`editors/nvim/jar.lua`) that reads `clojure/dependencyContents`
         (promoted from the Backlog; server-side materialization stays there).
-  - [ ] let-go verified end to end: references, rename, and diagnostics on
+  - [x] let-go verified end to end: references, rename, and diagnostics on
         `.lg` files in the server suite, and a let-go project in the Clojure
         Pulse e2e fixture.
-  - [ ] Settings documented in one place (`docs/SETTINGS.md`): every
+  - [x] Settings documented in one place (`docs/SETTINGS.md`): every
         `.clj-pulse/config.edn` key with its default and the matching Clojure
         Pulse setting, initialization options, environment variables.
-  - [ ] Leiningen docs corrected: stage 3 runs `lein classpath`, direct deps
+  - [x] Leiningen docs corrected: stage 3 runs `lein classpath`, direct deps
         only is the fallback.
-  Plan: [2026-09-10-1242-release-correctness-and-coverage.md](plans/2026-09-10-1242-release-correctness-and-coverage.md) — in progress
+  Plan: [2026-09-10-1242-release-correctness-and-coverage.md](plans/2026-09-10-1242-release-correctness-and-coverage.md) — done
 - [ ] **Benchmark against clojure-lsp**: two pinned corpora (metabase,
       clj-kondo), both servers through the same harness, behavior-based
       metrics, cold and warm, a README "Performance" section with the caveats

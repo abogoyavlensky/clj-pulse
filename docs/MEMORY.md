@@ -91,6 +91,21 @@ so the bench was re-run to price it: 3.7-4.0 s to project index, 365 MiB RSS,
 cache table within run-to-run noise — the new work is proportional to
 destructuring forms, not to file size, and does not show up.
 
+### After qualified def heads (2026-09-10)
+
+Same box and corpus, the release binary at commit 204525d. `mu/defn` and its
+relatives are now indexed (`extractor::head_def_kind`), which is 2 694 more
+symbols on metabase — 37 675 → 40 369 over `src` + `test`, a 7% gain, and it
+matches the corpus: 1 547 `(mu/defn`, 1 102 `(mu/defn-`, 243 `(mu/defmethod`.
+Roughly one function in fourteen was invisible to navigation before.
+
+The extra symbols cost nothing measurable: 3.5 s to project index, 5.0 s to
+library index (491 entries, through stage 3), 363 MiB RSS after the project
+index and 372 MiB after libraries, 1 141 ms didOpen → first diagnostics,
+380 ms per edit, 24 ms per definition. That is the keyword-rename table within
+run-to-run noise. Indexing more names is proportional to the definitions a file
+holds, and definition latency is a hash lookup either way.
+
 ### Integrant configs are searched project-wide (2026-09-09)
 
 The EDN scan used to be limited to `:paths`, so a config the classpath does not
