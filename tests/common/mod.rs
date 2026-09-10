@@ -33,6 +33,10 @@ pub struct LspClient {
     pub incoming: Receiver<Value>,
     pub notifications: Vec<Value>,
     pub next_id: i64,
+    /// How long a request may take before the harness gives up on it. The
+    /// default suits the e2e fixtures; the bench raises it to its indexing
+    /// ceiling, where a first request legitimately waits out a whole index.
+    pub request_timeout: Duration,
 }
 
 impl LspClient {
@@ -225,7 +229,15 @@ impl LspClient {
             incoming: rx,
             notifications: Vec::new(),
             next_id: 0,
+            request_timeout: TIMEOUT,
         }
+    }
+
+    /// Raises (or lowers) the per-request deadline. Builder-style, so the
+    /// bench can write `LspClient::start_production(root).with_request_timeout(…)`.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     pub fn send(&mut self, msg: Value) {
@@ -261,7 +273,7 @@ impl LspClient {
     pub fn request_with_id(&mut self, id: i64, method: &str, params: Value) -> Value {
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
 
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + self.request_timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -282,7 +294,7 @@ impl LspClient {
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
 
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + self.request_timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -375,7 +387,9 @@ impl LspClient {
     }
 
     /// [`initialize`] without the trailing wait, so a caller can time the
-    /// indexing stages itself (the bench).
+    /// indexing stages itself (the bench). Advertises `window.workDoneProgress`
+    /// and `publishDiagnostics.versionSupport` because a real editor does: the
+    /// bench compares two servers, and both have to be asked the same thing.
     pub fn initialize_no_wait(&mut self, root: &Path) -> Value {
         let root_uri = format!("file://{}", root.display());
         let result = self.request(
@@ -385,7 +399,11 @@ impl LspClient {
                 "rootUri": root_uri,
                 "workspaceFolders": [{ "uri": root_uri, "name": "bench" }],
                 "capabilities": {
-                    "textDocument": { "definition": { "linkSupport": true } },
+                    "textDocument": {
+                        "definition": { "linkSupport": true },
+                        "publishDiagnostics": { "versionSupport": true }
+                    },
+                    "window": { "workDoneProgress": true },
                     "general": { "positionEncodings": ["utf-16"] }
                 }
             }),

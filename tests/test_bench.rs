@@ -1,23 +1,45 @@
-//! A bench against a large real Clojure project, so index time, memory, and
+//! A bench against pinned real Clojure projects, so index time, memory, and
 //! per-edit latency are measured rather than guessed.
 //!
 //! Ignored by default and skipped when `CLJ_PULSE_BENCH_ROOT` is unset. Drive
-//! it with `bb bench`, which clones the corpus and passes `--nocapture`.
+//! it with `bb bench`, which checks the corpus out at its pinned commit and
+//! passes `--nocapture`.
+//!
+//! Every metric is defined by *observable behavior* — a definition request
+//! that lands where it should, a `publishDiagnostics` carrying the version of
+//! the edit that caused it — and not by a log line, so the same code can
+//! measure a second server that logs nothing we recognize. clj-pulse's own log
+//! lines are still reported, as a cross-check on the behavioral numbers, but
+//! no metric depends on one.
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde_json::{json, Value};
+
 use common::LspClient;
 
-/// The hang ceiling: indexing that takes longer than this is a bug, not a slow
-/// machine. It is deliberately far above any number worth reporting.
-const INDEX_CEILING: Duration = Duration::from_secs(120);
+/// The hang ceiling: a server that cannot answer a definition within this is
+/// broken, not slow. Deliberately far above any number worth reporting.
+const CEILING: Duration = Duration::from_secs(120);
 /// Per-request waits. Generous: the point is to measure, not to fail.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Samples per latency metric.
 const SAMPLES: usize = 20;
+/// Below this many samples a median is printed with a warning rather than as a
+/// clean number.
+const MIN_SAMPLES: usize = 15;
+/// How often a startup probe re-asks for a definition it did not get.
+const POLL: Duration = Duration::from_millis(100);
+/// How long a server has to stay silent before it counts as settled.
+const QUIET: Duration = Duration::from_secs(2);
+/// `:kondo {:live-max-kb}`'s default, in bytes: above it clj-kondo sits out
+/// the keystroke path, so a file on each side of the line is measured.
+const LIVE_MAX_BYTES: u64 = 256 * 1024;
+
 /// The lines that mean stage 2 has finished with the libraries it could find.
 const STAGE2_LINES: [&str; 3] = [
     "library indexing complete",
@@ -27,12 +49,6 @@ const STAGE2_LINES: [&str; 3] = [
 /// The lines that mean stage 3 has settled, resolved or failed. A stage-3
 /// failure degrades to the stage-2 result, which is still a settled state.
 const STAGE3_LINES: [&str; 2] = ["full classpath indexed", "classpath resolution failed"];
-
-/// How long to wait for stage 3 to announce itself before concluding it is not
-/// going to run for this workspace (disabled in config, no CLI, an lgx project).
-/// It logs that line before it does any work, so this only ever absorbs the gap
-/// between the two background tasks.
-const STAGE3_ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
 
 #[test]
 #[ignore = "needs CLJ_PULSE_BENCH_ROOT pointing at a large Clojure checkout; run with `bb bench`"]
@@ -44,266 +60,437 @@ fn bench_large_project() {
     let root = PathBuf::from(root)
         .canonicalize()
         .expect("CLJ_PULSE_BENCH_ROOT does not exist");
+    let corpus = std::env::var("CLJ_PULSE_BENCH_CORPUS").unwrap_or_else(|_| "(unnamed)".into());
 
-    let mut report = Report::new(&root);
+    let probes = Probes::discover(&root);
+    probes.print(&root);
+
+    let row = run_clj_pulse(&root, &corpus, &probes);
+    row.print(&probes, &root);
+    row.print_json();
+}
+
+// ---------------------------------------------------------------------------
+// One run of one server
+// ---------------------------------------------------------------------------
+
+fn run_clj_pulse(root: &Path, corpus: &str, probes: &Probes) -> Row {
+    let mut row = Row::new("clj-pulse", corpus);
 
     // Production settings, unlike every other test in the suite: stage-3
     // classpath resolution runs and clj-kondo is used when installed, because
     // that is what a user's machine does.
-    let mut client = LspClient::start_production(&root);
+    let mut client = LspClient::start_production(root).with_request_timeout(CEILING);
     let pid = client.child.id();
-    let started = Instant::now();
-    client.initialize_no_wait(&root);
+    let t0 = Instant::now();
+    let mut watch = StageWatch::default();
+    client.initialize_no_wait(root);
 
-    // Stage 1: the project's own sources.
-    match client.log_line_within(&["Indexed"], INDEX_CEILING) {
-        Some(line) => {
-            report.project_index_wall = Some(started.elapsed());
-            report.project_index_reported = reported_elapsed(&line);
-            let (symbols, namespaces) = indexed_counts(&line);
-            report.symbols = symbols;
-            report.namespaces = namespaces;
-            report.rss_after_project = rss_kib(pid);
-        }
-        None => panic!(
-            "project indexing did not finish within {:?} — the hang ceiling",
-            INDEX_CEILING
-        ),
+    // The startup probes are open from the moment the server is, the way an
+    // editor restores a session: "time to first definition" is the wait a user
+    // sitting in front of that buffer actually has.
+    for site in probes.startup_sites() {
+        client.did_open(&site.file);
     }
 
-    // Stage 2/3: libraries. The two tiers must be waited on *together*, not in
-    // sequence: on a warm checkout stage 2 reports first and stage 3 re-resolves
-    // seconds later, but on a cold one stage 2 finds nothing and stays silent
-    // entirely — stage 3 wins the race, so the "nothing found" warning never
-    // fires either. Waiting for stage 2 first would then burn the whole ceiling
-    // and report it as the library index time.
+    let deadline = t0 + CEILING;
+    if let Some(site) = &probes.startup_project {
+        row.first_definition = poll_definition(&mut client, site, t0, deadline, &mut watch);
+    }
+    if let Some(site) = &probes.startup_library {
+        row.first_library_definition = poll_definition(&mut client, site, t0, deadline, &mut watch);
+    }
+
+    // Settled, not merely answering: stage 3 re-resolves and re-indexes long
+    // after stage 2 has answered a definition, and sampling latency or RSS
+    // through that folds a background reindex into every number below.
+    // Its own deadline, not what is left of the startup one: a probe that
+    // never resolved must not also make the settle check report a failure.
+    let (settled, note) =
+        settle_clj_pulse(&mut client, pid, t0, Instant::now() + CEILING, &mut watch);
+    row.settled = settled;
+    row.settle_note = note;
+    row.rss_settled = rss_kib(pid);
+
+    // clj-pulse's own account of the same startup. Observed at poll
+    // granularity (100 ms), so it is a cross-check on the numbers above, not a
+    // number to quote on its own.
+    watch.observe(&client, t0);
+    row.take_stages(&watch);
+
+    // didOpen on the largest file in the corpus, the worst realistic case for
+    // per-edit work, once the server is settled.
+    reset(&mut client, &mut watch, t0);
+    let opened = Instant::now();
+    client.did_open(&probes.edit_target);
+    if let Some(params) = wait_for_diagnostics(
+        &mut client,
+        &probes.edit_target,
+        Version::Any,
+        REQUEST_TIMEOUT,
+    ) {
+        row.first_diagnostics = Some(opened.elapsed());
+        row.open_tier = tier_of(&params);
+    }
+
+    // Definition latency on that file's first alias-qualified project symbol —
+    // the common navigation, and the one that touches the index.
+    if let Some(site) = &probes.edit_site {
+        let mut latencies = Vec::new();
+        for _ in 0..SAMPLES {
+            let sent = Instant::now();
+            let answer = definition(&mut client, site);
+            let took = sent.elapsed();
+            // A wrong or empty answer is not a sample: it would time an index
+            // lookup that found nothing.
+            if answers(&answer, &site.expect) {
+                latencies.push(took);
+            }
+        }
+        row.definition_samples = latencies.len();
+        row.definition = median(&mut latencies);
+    }
+
+    let large = edit_to_diagnostics(&mut client, &probes.edit_target, &mut watch, t0);
+    row.take_edits(large, false);
+
+    // The same on a file *under* `:live-max-kb`, where clj-kondo does run on a
+    // keystroke — otherwise the bench only ever prices the native tier.
+    if let Some(small) = &probes.small_target {
+        reset(&mut client, &mut watch, t0);
+        client.did_open(small);
+        wait_for_diagnostics(&mut client, small, Version::Any, REQUEST_TIMEOUT);
+        let small_edits = edit_to_diagnostics(&mut client, small, &mut watch, t0);
+        row.take_edits(small_edits, true);
+    }
+
+    row.lint_engine = watch.lint_engine.clone();
+    row
+}
+
+/// Asks for `site`'s definition until the answer is the right one, and returns
+/// how long that took from `t0`. `None` when the ceiling passed first.
+fn poll_definition(
+    client: &mut LspClient,
+    site: &Site,
+    t0: Instant,
+    deadline: Instant,
+    watch: &mut StageWatch,
+) -> Option<Duration> {
+    loop {
+        let answer = definition(client, site);
+        if answers(&answer, &site.expect) {
+            return Some(t0.elapsed());
+        }
+        watch.observe(client, t0);
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// clj-pulse is settled when stage 3 has reported (or degraded to stage 2), no
+/// child process of the server is still running, and nothing has been logged
+/// for [`QUIET`]. The child check is what keeps a `clojure -Spath` that is
+/// still writing `.cpcache` from being sampled as idle.
+fn settle_clj_pulse(
+    client: &mut LspClient,
+    pid: u32,
+    t0: Instant,
+    deadline: Instant,
+    watch: &mut StageWatch,
+) -> (Option<Duration>, String) {
     let terminal: Vec<&str> = STAGE2_LINES
         .iter()
         .chain(STAGE3_LINES.iter())
         .copied()
         .collect();
-    let first = client.log_line_within(&terminal, INDEX_CEILING.saturating_sub(started.elapsed()));
-    let first_sample = (started.elapsed(), rss_kib(pid));
-
-    let settled = match first {
-        // Stage 3 has already settled; there is nothing further to wait for.
-        Some(line) if is_stage3(&line) => Some((line, first_sample)),
-        // Stage 2 reported. Stage 3 logs a line before it does any work, so a
-        // short look for that decides whether waiting for it is worth anything
-        // — a workspace with stage 3 disabled must not pay the ceiling.
-        Some(line) => {
-            let announced = client
-                .log_line_within(&["resolving classpath via"], STAGE3_ANNOUNCE_GRACE)
-                .is_some();
-            let later = announced
-                .then(|| {
-                    client.log_line_within(
-                        &STAGE3_LINES,
-                        INDEX_CEILING.saturating_sub(started.elapsed()),
-                    )
-                })
-                .flatten();
-            match later {
-                Some(stage3) => Some((stage3, (started.elapsed(), rss_kib(pid)))),
-                None if announced => {
-                    Some((format!("{line} (stage 3 never reported)"), first_sample))
-                }
-                None => Some((line, first_sample)),
-            }
+    let stage = client.log_line_within(
+        &terminal,
+        deadline.saturating_duration_since(Instant::now()),
+    );
+    let mut note = match &stage {
+        Some(line) => line.trim_start_matches("clj-pulse: ").to_string(),
+        None => "no library stage reported".to_string(),
+    };
+    // Stage 2 came first; stage 3 is still to come, and it re-indexes.
+    if stage.as_deref().is_some_and(|l| !is_stage3(l)) {
+        if let Some(line) = client.log_line_within(
+            &STAGE3_LINES,
+            deadline.saturating_duration_since(Instant::now()),
+        ) {
+            note = line.trim_start_matches("clj-pulse: ").to_string();
         }
-        None => None,
-    };
-
-    if let Some((line, (wall, rss))) = settled {
-        report.library_index_wall = Some(wall);
-        report.rss_after_libraries = rss;
-        report.library_stage = Some(line);
     }
 
-    // The remaining metrics all run against the largest source file, the worst
-    // realistic case for per-edit work.
-    let Some(target) = largest_clj_file(&root) else {
-        report.print();
-        panic!("no .clj file under {}", root.display());
-    };
-    report.target = Some(target.clone());
-    report.target_bytes = std::fs::metadata(&target).map(|m| m.len()).ok();
-
-    let text = std::fs::read_to_string(&target).expect("bench target is not UTF-8");
-    let suffix = file_name(&target);
-
-    client.clear_notifications();
-    let opened = Instant::now();
-    client.did_open(&target);
-    if wait_for_diagnostics(&mut client, &suffix, REQUEST_TIMEOUT) {
-        report.first_diagnostics = Some(opened.elapsed());
+    loop {
+        reset(client, watch, t0);
+        let quiet = quiet_for(client, &["window/logMessage"], QUIET);
+        if quiet && !has_children(pid) {
+            return (Some(t0.elapsed()), note);
+        }
+        if Instant::now() >= deadline {
+            return (None, format!("{note}; never settled within {CEILING:?}"));
+        }
     }
+}
 
+/// One edit-to-diagnostics measurement: [`SAMPLES`] single-character inserts at
+/// the end of the buffer, each timed to the publication carrying its version.
+fn edit_to_diagnostics(
+    client: &mut LspClient,
+    path: &Path,
+    watch: &mut StageWatch,
+    t0: Instant,
+) -> Edits {
+    let mut edits = Edits::new(path);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return edits;
+    };
     // Edits land at the very end of the buffer, where they cannot corrupt a
     // form the parser is mid-way through.
     let end_line = text.lines().count() as u32;
-    let mut edit_latencies = Vec::new();
     for i in 0..SAMPLES {
-        client.clear_notifications();
+        reset(client, watch, t0);
+        // Versions continue past the didOpen's 1 and never repeat, so a
+        // publication can always be matched to the edit that caused it.
+        let version = (i + 2) as i64;
         let sent = Instant::now();
-        client.did_change_range(&target, (i + 2) as i64, (end_line, 0), (end_line, 0), "\n");
-        if wait_for_diagnostics(&mut client, &suffix, REQUEST_TIMEOUT) {
-            edit_latencies.push(sent.elapsed());
+        client.did_change_range(path, version, (end_line, 0), (end_line, 0), "\n");
+        match wait_for_diagnostics(client, path, Version::Exactly(version), REQUEST_TIMEOUT) {
+            Some(params) => {
+                edits.latencies.push(sent.elapsed());
+                edits.versioned &= params.get("version").is_some();
+                if tier_of(&params) == Tier::Kondo {
+                    edits.kondo = true;
+                }
+            }
+            None => edits.missing += 1,
         }
     }
-    report.edit_to_diagnostics = median(&mut edit_latencies);
-
-    // Definition on a qualified name whose alias the file's own ns form
-    // declares — the common navigation, and the one that touches the index.
-    if let Some((line, character)) = first_aliased_usage(&text) {
-        let mut latencies = Vec::new();
-        for _ in 0..SAMPLES {
-            let sent = Instant::now();
-            let _ = client.goto_definition(&target, line, character);
-            latencies.push(sent.elapsed());
-        }
-        report.definition = median(&mut latencies);
-    }
-
-    report.print();
+    edits
 }
 
 // ---------------------------------------------------------------------------
-// Report
+// Reading what a server answered
 // ---------------------------------------------------------------------------
 
-struct Report {
-    root: PathBuf,
-    /// The corpus name `bb bench` passed, for the report header.
-    corpus: Option<String>,
-    project_index_wall: Option<Duration>,
-    project_index_reported: Option<String>,
-    library_index_wall: Option<Duration>,
-    /// The log line that ended the library wait, so a warm run (stage 3
-    /// re-resolved) and a degraded one (stage 3 failed) are told apart.
-    library_stage: Option<String>,
-    symbols: Option<u64>,
-    namespaces: Option<u64>,
-    rss_after_project: Option<u64>,
-    rss_after_libraries: Option<u64>,
-    target: Option<PathBuf>,
-    target_bytes: Option<u64>,
-    first_diagnostics: Option<Duration>,
-    edit_to_diagnostics: Option<Duration>,
-    definition: Option<Duration>,
+fn definition(client: &mut LspClient, site: &Site) -> Value {
+    client.request_full(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": format!("file://{}", site.file.display()) },
+            "position": { "line": site.line, "character": site.character }
+        }),
+    )["result"]
+        .clone()
 }
 
-impl Report {
-    fn new(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            corpus: std::env::var("CLJ_PULSE_BENCH_CORPUS").ok(),
-            project_index_wall: None,
-            project_index_reported: None,
-            library_index_wall: None,
-            library_stage: None,
-            symbols: None,
-            namespaces: None,
-            rss_after_project: None,
-            rss_after_libraries: None,
-            target: None,
-            target_bytes: None,
-            first_diagnostics: None,
-            edit_to_diagnostics: None,
-            definition: None,
-        }
+/// Every URI in a definition answer, whichever of the three shapes the server
+/// chose (`Location`, `Location[]`, `LocationLink[]`).
+fn definition_uris(result: &Value) -> Vec<String> {
+    let one = |v: &Value| {
+        v["uri"]
+            .as_str()
+            .or_else(|| v["targetUri"].as_str())
+            .map(str::to_string)
+    };
+    match result {
+        Value::Array(items) => items.iter().filter_map(one).collect(),
+        other => one(other).into_iter().collect(),
     }
+}
 
-    fn print(&self) {
-        let kondo = if std::env::var_os("CLJ_PULSE_DISABLE_KONDO").is_some() {
-            "disabled by environment"
-        } else if which("clj-kondo") {
-            "on (clj-kondo found on PATH)"
-        } else {
-            "off (no clj-kondo on PATH)"
+/// Whether the answer landed where it should. A wrong or empty answer is a
+/// retry, never a sample: a server that answers `null` in 2 ms is not fast.
+fn answers(result: &Value, expect: &Expect) -> bool {
+    let uris = definition_uris(result);
+    match expect {
+        Expect::File(path) => {
+            let tail = path.to_string_lossy().to_string();
+            uris.iter().any(|u| u.ends_with(&tail))
+        }
+        // clj-pulse navigates a JAR entry as `jar:`, clojure-lsp as `zipfile:`
+        // (its `:dependency-scheme` default). Both are "inside a dependency".
+        Expect::Archive(entry) => uris.iter().any(|u| {
+            (u.starts_with("jar:") || u.starts_with("zipfile:"))
+                && ["clj", "cljc", "cljs"]
+                    .iter()
+                    .any(|ext| u.ends_with(&format!("{entry}.{ext}")))
+        }),
+    }
+}
+
+/// Which version of a document a publication has to carry to count.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Version {
+    /// Any publication for the document (the didOpen case).
+    Any,
+    /// Only the publication caused by this edit. Older ones are skipped; a
+    /// server that reports no version at all is taken at its word, and the row
+    /// is marked as unversioned.
+    Exactly(i64),
+}
+
+/// The `publishDiagnostics` params for `path`, or `None` on timeout.
+fn wait_for_diagnostics(
+    client: &mut LspClient,
+    path: &Path,
+    want: Version,
+    timeout: Duration,
+) -> Option<Value> {
+    let tail = path.to_string_lossy().to_string();
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let Ok(msg) = client.incoming.recv_timeout(remaining) else {
+            return None;
         };
-        let classpath = if std::env::var_os("CLJ_PULSE_DISABLE_CLASSPATH_CLI").is_some() {
-            "disabled by environment"
-        } else if which("clojure") {
-            "on (clojure CLI found on PATH)"
-        } else {
-            "off (no clojure CLI on PATH)"
-        };
-
-        println!();
-        println!("clj-pulse bench");
-        println!(
-            "  corpus          {}",
-            self.corpus.as_deref().unwrap_or("(unnamed)")
-        );
-        println!("  root            {}", self.root.display());
-        println!("  binary          {}", env!("CARGO_BIN_EXE_clj-pulse"));
-        println!("  kondo           {}", kondo);
-        println!("  classpath CLI   {}", classpath);
-        if let Some(target) = &self.target {
-            let size = self
-                .target_bytes
-                .map(|b| format!("{} KiB", b / 1024))
-                .unwrap_or_else(|| "?".into());
-            println!(
-                "  edit target     {} ({})",
-                target.strip_prefix(&self.root).unwrap_or(target).display(),
-                size
-            );
+        let mut hit = None;
+        if msg["method"] == "textDocument/publishDiagnostics"
+            && msg["params"]["uri"]
+                .as_str()
+                .is_some_and(|u| u.ends_with(&tail))
+        {
+            let matches = match (want, msg["params"]["version"].as_i64()) {
+                (Version::Any, _) => true,
+                (Version::Exactly(want), Some(got)) => want == got,
+                // No version reported: the server does not echo one, so this
+                // is the best evidence available that the edit was linted.
+                (Version::Exactly(_), None) => true,
+            };
+            if matches {
+                hit = Some(msg["params"].clone());
+            }
         }
-        println!();
-        row("metric", "value");
-        println!("  {:-<34} {:-<24}", "", "");
-        row("time to project index", &ms(self.project_index_wall));
-        row(
-            "  as the server reported it",
-            self.project_index_reported.as_deref().unwrap_or("n/a"),
-        );
-        row("time to library index", &ms(self.library_index_wall));
-        row(
-            "  ended by",
-            self.library_stage
-                .as_deref()
-                .map(|l| l.trim_start_matches("clj-pulse: "))
-                .unwrap_or("n/a"),
-        );
-        row("symbols indexed", &count(self.symbols));
-        row("namespaces indexed", &count(self.namespaces));
-        row("RSS after project index", &mib(self.rss_after_project));
-        row("RSS after library index", &mib(self.rss_after_libraries));
-        row("didOpen -> first diagnostics", &ms(self.first_diagnostics));
-        row(
-            &format!("didChange -> diagnostics (median of {})", SAMPLES),
-            &ms(self.edit_to_diagnostics),
-        );
-        row(
-            &format!("definition (median of {})", SAMPLES),
-            &ms(self.definition),
-        );
-        println!();
+        client.stash(msg);
+        if hit.is_some() {
+            return hit;
+        }
     }
 }
 
-fn row(label: &str, value: &str) {
-    println!("  {:<34} {}", label, value);
+/// Which lint tier a publication came from, by the only evidence a client has:
+/// whether clj-kondo owns any of the diagnostics in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    Kondo,
+    Unknown,
 }
 
-fn ms(d: Option<Duration>) -> String {
-    d.map(|d| format!("{} ms", d.as_millis()))
-        .unwrap_or_else(|| "n/a".into())
+fn tier_of(params: &Value) -> Tier {
+    let kondo = params["diagnostics"]
+        .as_array()
+        .is_some_and(|ds| ds.iter().any(|d| d["source"] == "clj-kondo"));
+    if kondo {
+        Tier::Kondo
+    } else {
+        Tier::Unknown
+    }
 }
 
-fn count(n: Option<u64>) -> String {
-    n.map(|n| n.to_string()).unwrap_or_else(|| "n/a".into())
+/// Drops the stash, after letting the watch read what is in it: the sampling
+/// loops clear before every sample, and the server's lint status and stage
+/// lines would otherwise be thrown away with it.
+fn reset(client: &mut LspClient, watch: &mut StageWatch, t0: Instant) {
+    watch.observe(client, t0);
+    client.clear_notifications();
 }
 
-fn mib(kib: Option<u64>) -> String {
-    kib.map(|k| format!("{} MiB", k / 1024))
-        .unwrap_or_else(|| "n/a".into())
+/// Whether nothing matching `methods` arrived for `window`.
+fn quiet_for(client: &mut LspClient, methods: &[&str], window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return true;
+        };
+        let Ok(msg) = client.incoming.recv_timeout(remaining) else {
+            return true;
+        };
+        let hit = methods.iter().any(|m| msg["method"] == *m);
+        client.stash(msg);
+        if hit {
+            return false;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Sampling
+// The server's own log lines: a cross-check, never a metric
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct StageWatch {
+    /// Needle -> (the line, when it was first seen).
+    seen: BTreeMap<&'static str, (String, Duration)>,
+    /// The engine of the last `clojurePulse/lintStatus` seen. Kept here rather
+    /// than read off the stash at the end, which the sampling loops clear.
+    lint_engine: Option<String>,
+}
+
+impl StageWatch {
+    /// Records the stage lines among the messages stashed so far. Called
+    /// between polls, so a time here is accurate to [`POLL`], not better.
+    fn observe(&mut self, client: &LspClient, t0: Instant) {
+        let elapsed = t0.elapsed();
+        for msg in &client.notifications {
+            if msg["method"] == "clojurePulse/lintStatus" {
+                if let Some(engine) = msg["params"]["engine"].as_str() {
+                    self.lint_engine = Some(engine.to_string());
+                }
+                continue;
+            }
+            if msg["method"] != "window/logMessage" {
+                continue;
+            }
+            let Some(text) = msg["params"]["message"].as_str() else {
+                continue;
+            };
+            for needle in ["Indexed"].iter().chain(&STAGE2_LINES).chain(&STAGE3_LINES) {
+                if text.contains(needle) && !self.seen.contains_key(needle) {
+                    self.seen.insert(needle, (text.to_string(), elapsed));
+                }
+            }
+        }
+    }
+
+    fn line(&self, needle: &str) -> Option<&(String, Duration)> {
+        self.seen.get(needle)
+    }
+
+    /// The first library-stage line seen, stage 3 preferred over stage 2.
+    fn library_stage(&self) -> Option<&(String, Duration)> {
+        STAGE3_LINES
+            .iter()
+            .chain(&STAGE2_LINES)
+            .find_map(|n| self.seen.get(n))
+    }
+}
+
+fn is_stage3(line: &str) -> bool {
+    STAGE3_LINES.iter().any(|n| line.contains(n))
+}
+
+/// `Indexed 1234 symbols in 56 namespaces in 1.2s` -> `(1234, 56)`.
+fn indexed_counts(line: &str) -> (Option<u64>, Option<u64>) {
+    let after = |keyword: &str| -> Option<u64> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let at = words.iter().position(|w| *w == keyword)?;
+        words.get(at.wrapping_sub(1))?.parse().ok()
+    };
+    (after("symbols"), after("namespaces"))
+}
+
+/// The `{:?}` duration the server itself logged, i.e. everything after the
+/// final ` in `.
+fn reported_elapsed(line: &str) -> Option<String> {
+    line.rsplit_once(" in ")
+        .map(|(_, tail)| tail.trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Sampling the process
 // ---------------------------------------------------------------------------
 
 /// Resident set size in KiB, or `None` on a platform with neither reader.
@@ -326,8 +513,26 @@ fn rss_kib(pid: u32) -> Option<u64> {
     None
 }
 
-fn is_stage3(line: &str) -> bool {
-    STAGE3_LINES.iter().any(|n| line.contains(n))
+/// Whether the server still has a child process — a `clojure -Spath`, a
+/// `clj-kondo`, the shell wrapping either. Work in a child is work the server
+/// is doing, however quiet its own log has gone.
+fn has_children(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{}/task", pid)) else {
+            return false;
+        };
+        return tasks.flatten().any(|task| {
+            std::fs::read_to_string(task.path().join("children"))
+                .is_ok_and(|c| !c.trim().is_empty())
+        });
+    }
+    if cfg!(target_os = "macos") {
+        return std::process::Command::new("pgrep")
+            .args(["-P", &pid.to_string()])
+            .output()
+            .is_ok_and(|out| !out.stdout.is_empty());
+    }
+    false
 }
 
 fn median(samples: &mut [Duration]) -> Option<Duration> {
@@ -343,57 +548,180 @@ fn which(binary: &str) -> bool {
         .any(|dir| dir.join(binary).is_file())
 }
 
-/// A `publishDiagnostics` for `suffix`, or `false` on timeout. Unlike the e2e
-/// harness's waiter this never panics: a missing metric prints as `n/a`.
-fn wait_for_diagnostics(client: &mut LspClient, suffix: &str, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return false;
-        };
-        let Ok(msg) = client.incoming.recv_timeout(remaining) else {
-            return false;
-        };
-        let hit = msg["method"] == "textDocument/publishDiagnostics"
-            && msg["params"]["uri"]
-                .as_str()
-                .is_some_and(|u| u.ends_with(suffix));
-        client.stash(msg);
-        if hit {
-            return true;
+// ---------------------------------------------------------------------------
+// What the run measures against
+// ---------------------------------------------------------------------------
+
+/// A cursor position whose definition answer is checked, not just timed.
+struct Site {
+    file: PathBuf,
+    line: u32,
+    character: u32,
+    expect: Expect,
+    /// The `alias/name` under the cursor, for the report.
+    token: String,
+}
+
+/// Where a right answer has to land.
+enum Expect {
+    /// A file in the project, by path suffix.
+    File(PathBuf),
+    /// An entry inside a dependency archive, by entry path without its
+    /// extension: a classpath can hold `clojure/string.clj` and
+    /// `clojure/string.cljs` at once, and either is a library definition.
+    Archive(String),
+}
+
+impl Expect {
+    fn describe(&self) -> String {
+        match self {
+            Expect::File(p) => p.display().to_string(),
+            Expect::Archive(entry) => format!("<dependency>/{entry}.clj[cs]"),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parsing the server's own log lines
-// ---------------------------------------------------------------------------
-
-/// `Indexed 1234 symbols in 56 namespaces in 1.2s` -> `(1234, 56)`.
-fn indexed_counts(line: &str) -> (Option<u64>, Option<u64>) {
-    let after = |keyword: &str| -> Option<u64> {
-        let words: Vec<&str> = line.split_whitespace().collect();
-        let at = words.iter().position(|w| *w == keyword)?;
-        words.get(at.wrapping_sub(1))?.parse().ok()
-    };
-    (after("symbols"), after("namespaces"))
+struct Probes {
+    /// The largest `.clj` in the corpus: the worst realistic case per edit.
+    edit_target: PathBuf,
+    edit_bytes: u64,
+    /// The largest `.clj` *under* `:live-max-kb`, where clj-kondo still runs on
+    /// a keystroke. `None` when the largest file is already under it — then the
+    /// row above already measures the kondo tier.
+    small_target: Option<PathBuf>,
+    small_bytes: Option<u64>,
+    /// Definition into the project, from a small file open at startup.
+    startup_project: Option<Site>,
+    /// Definition into a JAR (`clojure.string`), the same way.
+    startup_library: Option<Site>,
+    /// Definition into the project from the largest file, for the latency
+    /// median.
+    edit_site: Option<Site>,
 }
 
-/// The `{:?}` duration the server itself logged, i.e. everything after the
-/// final ` in `.
-fn reported_elapsed(line: &str) -> Option<String> {
-    line.rsplit_once(" in ")
-        .map(|(_, tail)| tail.trim().to_string())
+impl Probes {
+    fn discover(root: &Path) -> Self {
+        let mut files = source_files(root);
+        // Deterministic: size descending, path ascending.
+        files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+        // Only files under a `src` or `test` directory are candidates for a
+        // definition probe, at either end of it: a corpus of deliberately
+        // broken sample files (clj-kondo's `corpus/`, metabase's fixtures) is
+        // on no server's source path, so a definition into one would never
+        // resolve and the probe would burn the whole ceiling.
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|(_, p)| p.clone())
+            .filter(|p| is_source_ish(p, root))
+            .collect();
+        let (edit_bytes, edit_target) = files
+            .iter()
+            .find(|(_, p)| p.extension().is_some_and(|e| e == "clj"))
+            .cloned()
+            .unwrap_or_else(|| panic!("no .clj file under {}", root.display()));
+        let small = files
+            .iter()
+            .find(|(size, p)| *size < LIVE_MAX_BYTES && p.extension().is_some_and(|e| e == "clj"))
+            .cloned()
+            .filter(|(_, p)| *p != edit_target);
+
+        let edit_text = std::fs::read_to_string(&edit_target).unwrap_or_default();
+        let edit_site = project_site(&edit_text, &edit_target, root, &paths);
+
+        // The startup probes are opened before anything is indexed, so they are
+        // taken from the *smallest* files that qualify: a didOpen of the 450 KiB
+        // file at that moment would measure the harness's own choice, not the
+        // server.
+        let mut startup_project = None;
+        let mut startup_library = None;
+        for (_, path) in files.iter().rev() {
+            if startup_project.is_some() && startup_library.is_some() {
+                break;
+            }
+            if !is_source_ish(path, root) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if startup_project.is_none() {
+                startup_project = project_site(&text, path, root, &paths);
+            }
+            if startup_library.is_none() {
+                startup_library = library_site(&text, path);
+            }
+        }
+
+        Self {
+            edit_target,
+            edit_bytes,
+            small_target: small.as_ref().map(|(_, p)| p.clone()),
+            small_bytes: small.as_ref().map(|(size, _)| *size),
+            startup_project,
+            startup_library,
+            edit_site,
+        }
+    }
+
+    /// The files the startup probes need open, each once.
+    fn startup_sites(&self) -> Vec<&Site> {
+        let mut sites: Vec<&Site> = Vec::new();
+        for site in [&self.startup_project, &self.startup_library]
+            .into_iter()
+            .flatten()
+        {
+            if !sites.iter().any(|s| s.file == site.file) {
+                sites.push(site);
+            }
+        }
+        sites
+    }
+
+    fn print(&self, root: &Path) {
+        let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+        let site = |label: &str, site: &Option<Site>| match site {
+            Some(s) => println!(
+                "  {:<22} {}:{} `{}` -> {}",
+                label,
+                rel(&s.file),
+                s.line + 1,
+                s.token,
+                s.expect.describe()
+            ),
+            None => println!("  {:<22} n/a", label),
+        };
+        println!();
+        println!("bench probes");
+        println!(
+            "  {:<22} {} ({} KiB)",
+            "edit target",
+            rel(&self.edit_target),
+            self.edit_bytes / 1024
+        );
+        match (&self.small_target, self.small_bytes) {
+            (Some(p), Some(bytes)) => println!(
+                "  {:<22} {} ({} KiB)",
+                "under live-max-kb",
+                rel(p),
+                bytes / 1024
+            ),
+            _ => println!(
+                "  {:<22} n/a (the edit target is already under {} KiB)",
+                "under live-max-kb",
+                LIVE_MAX_BYTES / 1024
+            ),
+        }
+        site("first definition", &self.startup_project);
+        site("first library def", &self.startup_library);
+        site("definition latency", &self.edit_site);
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Choosing what to measure against
-// ---------------------------------------------------------------------------
-
-/// The largest `.clj` file under `root`, ties broken by path so repeat runs
-/// measure the same file. Skips dot-directories (`.git`, `.cpcache`).
-fn largest_clj_file(root: &Path) -> Option<PathBuf> {
-    let mut best: Option<(u64, PathBuf)> = None;
+/// Every `.clj`/`.cljc` under `root` with its size, skipping dot-directories
+/// (`.git`, `.cpcache`, `.clj-pulse`).
+fn source_files(root: &Path) -> Vec<(u64, PathBuf)> {
+    let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -401,74 +729,164 @@ fn largest_clj_file(root: &Path) -> Option<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') {
+            if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "clj") {
-                let Ok(size) = entry.metadata().map(|m| m.len()) else {
-                    continue;
-                };
-                let better = match &best {
-                    None => true,
-                    Some((best_size, best_path)) => {
-                        size > *best_size || (size == *best_size && path < *best_path)
-                    }
-                };
-                if better {
-                    best = Some((size, path));
+            } else if path.extension().is_some_and(|e| e == "clj" || e == "cljc") {
+                if let Ok(size) = entry.metadata().map(|m| m.len()) {
+                    out.push((size, path));
                 }
             }
         }
     }
-    best.map(|(_, path)| path)
+    out
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into()
+/// Whether a path sits under the corpus's own top-level `src` or `test` — the
+/// only files a definition probe is taken from or points at. It has to be the
+/// *first* component: clj-kondo's `corpus/` holds deliberately broken sample
+/// projects, `src` directories and all, which are on no server's source path,
+/// so a definition into one would never resolve and the probe would burn the
+/// whole ceiling waiting for it.
+fn is_source_ish(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .next()
+        .is_some_and(|c| matches!(c.as_os_str().to_str(), Some("src") | Some("test")))
 }
 
-/// The (line, character) of the first `alias/name` usage whose `alias` the
-/// file's own ns form declares with `:as`. `None` when the file has none, so
-/// the metric prints `n/a` instead of failing the run.
-fn first_aliased_usage(text: &str) -> Option<(u32, u32)> {
+/// The first `alias/name` usage in `text` whose alias names a namespace that
+/// has a file in this corpus — so the right answer is a known path, and a
+/// server that answers something else is not credited with a sample.
+fn project_site(text: &str, file: &Path, root: &Path, paths: &[PathBuf]) -> Option<Site> {
+    usage_site(text, file, |ns, name| {
+        namespace_file(ns, name, root, paths).map(Expect::File)
+    })
+}
+
+/// The first `alias/name` usage of `clojure.string` — a var from a JAR on the
+/// classpath, so the answer has to come out of a dependency archive.
+fn library_site(text: &str, file: &Path) -> Option<Site> {
+    usage_site(text, file, |ns, _| {
+        (ns == "clojure.string").then(|| Expect::Archive("clojure/string".to_string()))
+    })
+}
+
+fn usage_site(
+    text: &str,
+    file: &Path,
+    expect: impl Fn(&str, &str) -> Option<Expect>,
+) -> Option<Site> {
     let aliases = as_aliases(text);
     if aliases.is_empty() {
         return None;
     }
     for (line_no, line) in text.lines().enumerate() {
-        // The ns form itself is full of `:as` pairs that are not usages.
-        if line.contains(":require") || line.contains(":as ") {
+        // The ns form itself is full of `:as` pairs that are not usages, and a
+        // non-ASCII line would make byte columns disagree with the UTF-16 ones
+        // the protocol counts.
+        if line.contains(":require") || line.contains(":as ") || !line.is_ascii() {
             continue;
         }
         for (col, token) in tokens(line) {
             let Some((alias, name)) = token.split_once('/') else {
                 continue;
             };
-            if !name.is_empty() && aliases.iter().any(|a| a == alias) {
-                return Some((line_no as u32, (col + alias.len() / 2) as u32));
+            if name.is_empty() || !is_symbol_start(alias) {
+                continue;
             }
+            let Some(ns) = aliases.get(alias) else {
+                continue;
+            };
+            let Some(expect) = expect(ns, name) else {
+                continue;
+            };
+            return Some(Site {
+                file: file.to_path_buf(),
+                line: line_no as u32,
+                // The middle of the *name* part: unambiguous for any server,
+                // whatever it does with the namespace half of the token.
+                character: (col + alias.len() + 1 + name.len() / 2) as u32,
+                expect,
+                token: token.to_string(),
+            });
         }
     }
     None
 }
 
-/// Every `:as <alias>` name in the file's ns form.
-fn as_aliases(text: &str) -> Vec<String> {
-    let mut aliases = Vec::new();
-    let words: Vec<&str> = text.split_whitespace().collect();
-    for pair in words.windows(2) {
-        if pair[0] == ":as" {
-            let alias = pair[1].trim_matches(|c: char| c == ']' || c == ')' || c == '[');
-            if !alias.is_empty() && !alias.starts_with(':') {
-                aliases.push(alias.to_string());
+fn is_symbol_start(alias: &str) -> bool {
+    alias
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+/// The file a namespace name would live in, when this corpus holds one *and*
+/// that file defines `name` itself. The match is anchored at the source root,
+/// not merely a path suffix: clj-kondo has a
+/// `src/clj_kondo/impl/types/clojure/string.clj`, which a suffix match would
+/// happily offer as the definition of `clojure.string`. The `name` check rules
+/// out a facade namespace — metabase's `metabase.events.core` re-exports
+/// `derive!` through `potemkin/import-vars`, so a definition on it lands
+/// wherever the original is, or nowhere, and either way not in the file the
+/// require names.
+fn namespace_file(ns: &str, name: &str, root: &Path, paths: &[PathBuf]) -> Option<PathBuf> {
+    let rel = ns.replace('-', "_").replace('.', "/");
+    paths
+        .iter()
+        .find(|p| {
+            let Ok(from_root) = p.strip_prefix(root) else {
+                return false;
+            };
+            let mut components = from_root.components();
+            // The source root itself (`src`, `test`); `is_source_ish` has
+            // already established that it is one.
+            components.next();
+            let under_root = components.as_path().to_string_lossy().to_string();
+            if under_root != format!("{rel}.clj") && under_root != format!("{rel}.cljc") {
+                return false;
             }
+            std::fs::read_to_string(p).is_ok_and(|text| defines(&text, name))
+        })
+        .cloned()
+}
+
+/// Whether `text` holds a top-level `(def… name …)` form — the cheap test for
+/// "this file really is where that var is written".
+fn defines(text: &str, name: &str) -> bool {
+    text.lines().any(|line| {
+        let tokens = tokens(line);
+        let Some((_, head)) = tokens.first() else {
+            return false;
+        };
+        let bare = head.rsplit('/').next().unwrap_or(head);
+        bare.starts_with("def") && tokens.get(1).is_some_and(|(_, t)| *t == name)
+    })
+}
+
+/// Every `:as <alias>` pair in the file's ns form, alias -> namespace.
+fn as_aliases(text: &str) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let trim = |w: &str| w.trim_matches(|c: char| "[]()".contains(c)).to_string();
+    for (i, window) in words.windows(2).enumerate() {
+        if window[0] != ":as" {
+            continue;
         }
+        let alias = trim(window[1]);
+        // The namespace is the last symbol before the `:as`, which is where a
+        // require vector puts it: `[clojure.string :as str]`.
+        let Some(ns) = words.get(i.wrapping_sub(1)).map(|w| trim(w)) else {
+            continue;
+        };
+        if alias.is_empty() || alias.starts_with(':') || ns.is_empty() || ns.starts_with(':') {
+            continue;
+        }
+        aliases.entry(alias).or_insert(ns);
     }
     aliases
 }
@@ -494,4 +912,298 @@ fn tokens(line: &str) -> Vec<(usize, &str)> {
         out.push((s, &code[s..]));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// The report
+// ---------------------------------------------------------------------------
+
+/// One edit-to-diagnostics measurement.
+struct Edits {
+    latencies: Vec<Duration>,
+    /// Samples whose publication never arrived within the request timeout.
+    missing: usize,
+    /// Whether every publication carried the version of its edit. A server that
+    /// echoes no version is measured on the next publication instead, and the
+    /// row says so.
+    versioned: bool,
+    /// Whether clj-kondo owned a diagnostic in any of them.
+    kondo: bool,
+    file: PathBuf,
+}
+
+impl Edits {
+    fn new(file: &Path) -> Self {
+        Self {
+            latencies: Vec::new(),
+            missing: 0,
+            versioned: true,
+            kondo: false,
+            file: file.to_path_buf(),
+        }
+    }
+}
+
+struct Row {
+    server: String,
+    corpus: String,
+    first_definition: Option<Duration>,
+    first_library_definition: Option<Duration>,
+    settled: Option<Duration>,
+    settle_note: String,
+    rss_settled: Option<u64>,
+    project_index_observed: Option<Duration>,
+    project_index_reported: Option<String>,
+    symbols: Option<u64>,
+    namespaces: Option<u64>,
+    library_stage_observed: Option<Duration>,
+    library_stage: Option<String>,
+    first_diagnostics: Option<Duration>,
+    open_tier: Tier,
+    definition: Option<Duration>,
+    definition_samples: usize,
+    edit: Option<Duration>,
+    edit_samples: usize,
+    edit_kondo: bool,
+    edit_versioned: bool,
+    edit_file: Option<PathBuf>,
+    small_edit: Option<Duration>,
+    small_edit_samples: usize,
+    small_edit_kondo: bool,
+    small_edit_file: Option<PathBuf>,
+    lint_engine: Option<String>,
+}
+
+impl Row {
+    fn new(server: &str, corpus: &str) -> Self {
+        Self {
+            server: server.to_string(),
+            corpus: corpus.to_string(),
+            first_definition: None,
+            first_library_definition: None,
+            settled: None,
+            settle_note: String::new(),
+            rss_settled: None,
+            project_index_observed: None,
+            project_index_reported: None,
+            symbols: None,
+            namespaces: None,
+            library_stage_observed: None,
+            library_stage: None,
+            first_diagnostics: None,
+            open_tier: Tier::Unknown,
+            definition: None,
+            definition_samples: 0,
+            edit: None,
+            edit_samples: 0,
+            edit_kondo: false,
+            edit_versioned: true,
+            edit_file: None,
+            small_edit: None,
+            small_edit_samples: 0,
+            small_edit_kondo: false,
+            small_edit_file: None,
+            lint_engine: None,
+        }
+    }
+
+    fn take_stages(&mut self, watch: &StageWatch) {
+        if let Some((line, at)) = watch.line("Indexed") {
+            self.project_index_observed = Some(*at);
+            self.project_index_reported = reported_elapsed(line);
+            let (symbols, namespaces) = indexed_counts(line);
+            self.symbols = symbols;
+            self.namespaces = namespaces;
+        }
+        if let Some((line, at)) = watch.library_stage() {
+            self.library_stage_observed = Some(*at);
+            self.library_stage = Some(line.trim_start_matches("clj-pulse: ").to_string());
+        }
+    }
+
+    fn take_edits(&mut self, mut edits: Edits, small: bool) {
+        let samples = edits.latencies.len();
+        let median = median(&mut edits.latencies);
+        if small {
+            self.small_edit = median;
+            self.small_edit_samples = samples;
+            self.small_edit_kondo = edits.kondo;
+            self.small_edit_file = Some(edits.file);
+        } else {
+            self.edit = median;
+            self.edit_samples = samples;
+            self.edit_kondo = edits.kondo;
+            self.edit_versioned = edits.versioned;
+            self.edit_file = Some(edits.file);
+        }
+    }
+
+    fn print(&self, probes: &Probes, root: &Path) {
+        let kondo = if std::env::var_os("CLJ_PULSE_DISABLE_KONDO").is_some() {
+            "disabled by environment"
+        } else if which("clj-kondo") {
+            "on (clj-kondo found on PATH)"
+        } else {
+            "off (no clj-kondo on PATH)"
+        };
+        let classpath = if std::env::var_os("CLJ_PULSE_DISABLE_CLASSPATH_CLI").is_some() {
+            "disabled by environment"
+        } else if which("clojure") {
+            "on (clojure CLI found on PATH)"
+        } else {
+            "off (no clojure CLI on PATH)"
+        };
+
+        println!();
+        println!("{} on {}", self.server, self.corpus);
+        println!("  root            {}", root.display());
+        println!("  binary          {}", env!("CARGO_BIN_EXE_clj-pulse"));
+        println!("  kondo           {}", kondo);
+        println!("  classpath CLI   {}", classpath);
+        println!(
+            "  lint engine     {}",
+            self.lint_engine.as_deref().unwrap_or("not reported")
+        );
+        println!();
+        row("metric", "value");
+        println!("  {:-<34} {:-<34}", "", "");
+        row("time to first definition", &ms(self.first_definition));
+        row(
+            "time to first library definition",
+            &ms(self.first_library_definition),
+        );
+        row("time to settled", &ms(self.settled));
+        row("  settled by", &self.settle_note);
+        row("RSS settled", &mib(self.rss_settled));
+        row(
+            &format!("definition (median of {})", SAMPLES),
+            &sampled(self.definition, self.definition_samples),
+        );
+        row("didOpen -> first diagnostics", &ms(self.first_diagnostics));
+        row("  tier", self.tier_label(self.open_tier == Tier::Kondo));
+        row(
+            &format!(
+                "didChange -> diagnostics ({} KiB)",
+                probes.edit_bytes / 1024
+            ),
+            &sampled(self.edit, self.edit_samples),
+        );
+        row("  tier", self.tier_label(self.edit_kondo));
+        if let Some(bytes) = probes.small_bytes {
+            row(
+                &format!("didChange -> diagnostics ({} KiB)", bytes / 1024),
+                &sampled(self.small_edit, self.small_edit_samples),
+            );
+            row("  tier", self.tier_label(self.small_edit_kondo));
+        }
+        if !self.edit_versioned {
+            row(
+                "  note",
+                "the server echoes no document version; the next publication was timed",
+            );
+        }
+        println!();
+        println!("  as the server logged it");
+        row("  project index", &ms(self.project_index_observed));
+        row(
+            "    as it reported",
+            self.project_index_reported.as_deref().unwrap_or("n/a"),
+        );
+        row("  symbols indexed", &count(self.symbols));
+        row("  namespaces indexed", &count(self.namespaces));
+        row("  library stage", &ms(self.library_stage_observed));
+        row(
+            "    ended by",
+            self.library_stage.as_deref().unwrap_or("n/a"),
+        );
+        println!();
+    }
+
+    /// "with clj-kondo" only on evidence, and the only evidence a client has
+    /// per pass is a diagnostic clj-kondo owns. `clojurePulse/lintStatus` says
+    /// whether the engine is live at all, which is a different question: on a
+    /// buffer above `:live-max-kb` it reports `kondo+native` while clj-kondo
+    /// sits out every keystroke, so it can qualify a negative but never turn
+    /// one into a positive.
+    fn tier_label(&self, kondo_diagnostic: bool) -> &'static str {
+        match (kondo_diagnostic, self.lint_engine.as_deref()) {
+            (true, _) => "with clj-kondo (a diagnostic carried its source)",
+            (false, Some("kondo+native")) => {
+                "native only in these publications (the engine is kondo+native, so the file is \
+                 above :live-max-kb or has no clj-kondo findings)"
+            }
+            (false, _) => "native only (clj-kondo not in use)",
+        }
+    }
+
+    /// One line a later run can be diffed against.
+    fn print_json(&self) {
+        let ms = |d: Option<Duration>| match d {
+            Some(d) => json!(d.as_millis() as u64),
+            None => Value::Null,
+        };
+        println!(
+            "BENCH_JSON {}",
+            json!({
+                "server": self.server,
+                "corpus": self.corpus,
+                "first_definition_ms": ms(self.first_definition),
+                "first_library_definition_ms": ms(self.first_library_definition),
+                "settled_ms": ms(self.settled),
+                "settled_by": self.settle_note,
+                "rss_settled_kib": self.rss_settled,
+                "definition_ms": ms(self.definition),
+                "definition_samples": self.definition_samples,
+                "first_diagnostics_ms": ms(self.first_diagnostics),
+                "edit_ms": ms(self.edit),
+                "edit_samples": self.edit_samples,
+                "edit_kondo": self.edit_kondo,
+                "edit_versioned": self.edit_versioned,
+                "edit_file": self.edit_file.as_ref().map(|p| p.display().to_string()),
+                "small_edit_ms": ms(self.small_edit),
+                "small_edit_samples": self.small_edit_samples,
+                "small_edit_kondo": self.small_edit_kondo,
+                "small_edit_file": self.small_edit_file.as_ref().map(|p| p.display().to_string()),
+                "symbols": self.symbols,
+                "namespaces": self.namespaces,
+                "lint_engine": self.lint_engine,
+            })
+        );
+    }
+}
+
+fn row(label: &str, value: &str) {
+    println!("  {:<34} {}", label, value);
+}
+
+fn ms(d: Option<Duration>) -> String {
+    d.map(|d| format!("{} ms", d.as_millis()))
+        .unwrap_or_else(|| "n/a".into())
+}
+
+/// A median with its sample count, warned about when too few landed for the
+/// number to stand on its own.
+fn sampled(d: Option<Duration>, samples: usize) -> String {
+    match d {
+        None => format!("n/a (0/{} samples)", SAMPLES),
+        Some(d) if samples < MIN_SAMPLES => format!(
+            "{} ms (only {}/{} samples — treat as indicative)",
+            d.as_millis(),
+            samples,
+            SAMPLES
+        ),
+        Some(d) if samples < SAMPLES => {
+            format!("{} ms ({}/{} samples)", d.as_millis(), samples, SAMPLES)
+        }
+        Some(d) => format!("{} ms", d.as_millis()),
+    }
+}
+
+fn count(n: Option<u64>) -> String {
+    n.map(|n| n.to_string()).unwrap_or_else(|| "n/a".into())
+}
+
+fn mib(kib: Option<u64>) -> String {
+    kib.map(|k| format!("{} MiB", k / 1024))
+        .unwrap_or_else(|| "n/a".into())
 }
