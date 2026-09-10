@@ -195,11 +195,13 @@ Three plans, in order: correctness and coverage, the benchmark, the release.
   - [x] Leiningen docs corrected: stage 3 runs `lein classpath`, direct deps
         only is the fallback.
   Plan: [2026-09-10-1242-release-correctness-and-coverage.md](plans/2026-09-10-1242-release-correctness-and-coverage.md) — done
-- [ ] **Benchmark against clojure-lsp**: two pinned corpora (metabase,
+- [x] **Benchmark against clojure-lsp**: two pinned corpora (metabase,
       clj-kondo), both servers through the same harness, behavior-based
       metrics, cold and warm, a README "Performance" section with the caveats
-      next to the numbers and a one-line reproduce command.
-  Plan: [2026-09-10-1243-release-benchmark.md](plans/2026-09-10-1243-release-benchmark.md) — in progress
+      next to the numbers and a one-line reproduce command. The macOS column is
+      still open: the README table carries the Linux box alone until the
+      maintainer runs `bb bench` on the Mac and adds its row.
+  Plan: [2026-09-10-1243-release-benchmark.md](plans/2026-09-10-1243-release-benchmark.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
@@ -246,6 +248,14 @@ One line each, newest last. Promote or reject; never let this grow silently.
   still binds its vector as parameters there while the occurrence walker does
   not. Narrow, but it makes local resolution and references disagree; the fix
   is threading `ExtractConfig` through `locals_in_scope_at`.
+- 2026-09-10 **A `.clj` file navigates into the ClojureScript copy of a core
+  namespace.** With both `org.clojure/clojure` and `org.clojure/clojurescript`
+  on the classpath (clj-kondo's `:test` alias, and common in full-stack
+  projects), definition on `str/trim` in a `.clj` file answers
+  `clojure/string.cljs` out of the ClojureScript jar. The library index keys by
+  fqn and the last dialect indexed wins; it should prefer the dialect of the
+  file that is asking. Found by the clojure-lsp benchmark, which has to accept
+  either file to time the metric at all.
 - 2026-09-09 **Cache the extraction per document version, not just the
   tree.** With the tree cached, a definition request on the 452 KiB bench file
   is the 21 ms definitions-and-occurrences walk, and `unused_requires` is

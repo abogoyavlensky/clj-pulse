@@ -149,37 +149,111 @@ Modify:
 **Files:**
 - Modify: `bb.edn`, `tests/common/mod.rs`, `tests/test_bench.rs`
 
-- [ ] **Step 1: Download and pin**
+- [x] **Step 1: Download and pin**
   `bb bench` fetches the pinned clojure-lsp native release for the platform, verifies the checksum, and exports `CLJ_PULSE_BENCH_CLOJURE_LSP`.
 
-- [ ] **Step 2: Drive it**
+- [x] **Step 2: Drive it**
   `start_binary`; the bench runs the same metric set against clojure-lsp when the variable is set. Read clojure-lsp's `initialize` needs (it wants `rootUri` and may need `initializationOptions` for `:dependency-scheme`, check its docs) and match them; do not tune either server beyond defaults.
 
-- [ ] **Step 3: Preparation, cold and warm**
+- [x] **Step 3: Preparation, cold and warm**
   The untimed preparation step in `bb bench`, the per-server cache clearing, the fixed run order, and the clojure-lsp settled-state check; run each configuration and print all.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
   Run: `bb bench`
   Expected: four tables (two corpora, cold and warm), both servers in each. If clojure-lsp's cold run exceeds the 120 s ceiling on metabase, raise the ceiling for that server rather than dropping the row; the number is the point.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Compare against clojure-lsp in the bench"`
+
+> Deviation: cold also clears clojure-lsp's *global* cache. It keeps ~150 MiB
+> of JDK-source analysis under `$XDG_CACHE_HOME/clojure-lsp`, outside the
+> project, so the plan's two project directories were not enough: a "cold" row
+> was reusing an earlier run's analysis, and metabase's clojure-lsp startup
+> swung between 293 s and 700 s. The bench now points `XDG_CACHE_HOME` inside
+> the corpus and clears it with the rest; the two runs after that agree within
+> a few percent. Found by the codex review.
+> Deviation: clojure-lsp declares `TextDocumentSyncKind.Full`, so the bench
+> sends it the whole buffer per keystroke and clj-pulse an incremental range —
+> each what it asked for. Sending a range to a full-sync server would have made
+> it lint a one-character document and report a meaningless number.
+> Deviation: clojure-lsp emits no `$/progress` for its analysis even with
+> `window.workDoneProgress` advertised (checked against the binary), and it
+> echoes no document version in `publishDiagnostics`. So its settle check rests
+> on the 2 s quiet window plus the no-child-process rule, and its edit rows time
+> the next publication for the file rather than a version-matched one. Both are
+> stated in the row and in MEMORY.md.
+> Deviation: clojure-lsp gets a 900 s ceiling, clj-pulse keeps 120 s. A cold
+> clojure-lsp run on metabase needs ~5 minutes before it answers anything, and
+> the plan says the number is the point.
 
 ### Task 4: Publish
 
 **Files:**
 - Modify: `README.md`, `docs/MEMORY.md`, `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Record**
+- [x] **Step 1: Record**
   MEMORY.md: the full tables with versions, commits, machine, date, and the honesty rules. The README section is not published until the maintainer has run `bb bench` on the macOS machine and that table is in MEMORY.md too; the plan stays open at this step until then.
 
-- [ ] **Step 2: README**
+- [x] **Step 2: README**
   The Performance section as designed. Use /writing-clearly; no superlatives.
 
-- [ ] **Step 3: Roadmap and invariants**
+- [x] **Step 3: Roadmap and invariants**
   AGENTS.md: `bb bench` now compares two servers and takes a corpus. ROADMAP Milestone 5: tick the benchmark item, status `done`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
   Run: `bb check`
   Expected: PASS.
   `git commit -m "Publish the benchmark against clojure-lsp"`
+
+> Deviation: the README section is published with the Linux table alone rather
+> than held until the macOS run, at the maintainer's direction. It says so in
+> the section ("One Linux container, one run each. macOS numbers are not in
+> yet") and in the ROADMAP item, and the macOS column is an added row, not a
+> rewrite.
+
+---
+
+## Completion summary
+
+**Status: complete** (2026-09-10), except the macOS table the maintainer adds
+after running `bb bench` on the Mac.
+
+`bb bench` now compares clj-pulse with clojure-lsp on two corpora pinned by
+commit, four configurations each (both servers, cold and warm), with every
+metric defined by what a client can observe rather than by a log line. The
+harness fetches the pinned clojure-lsp release and checks its sha256, prepares
+the corpus classpath untimed, clears each server's caches before its cold run,
+and prints a table plus a `BENCH_JSON` line per row. `docs/MEMORY.md` holds the
+full tables and the method; `README.md` gained a "Performance" section with the
+warm numbers and the caveats beside them.
+
+What the numbers say on this box: clj-pulse answers its first definition on
+metabase in 3.1 s warm against clojure-lsp's 60 s (3.4 s against 293 s cold),
+in 353 MiB against 1 798 MiB; clojure-lsp answers a definition faster once it
+is up (7 ms against 34 ms) from a fuller analysis, and lints a 452 KiB buffer
+per keystroke in 1 371 ms against our 381 ms native-tier pass.
+
+Two things the bench found rather than measured, both filed: a `.clj` file
+navigates into the ClojureScript copy of `clojure.string` when both jars are on
+the classpath (ROADMAP backlog), and clj-pulse spends ~50 s after startup on
+metabase warming the clj-kondo dependency cache in a child process - background
+work that does not block an answer, but it is what "settled" waits for.
+
+**Deviations** are noted inline under each task above: probe selection needed
+three extra rules to pick a symbol either server can resolve; `lintStatus` was
+demoted from positive to negative evidence for the kondo tier label;
+clojure-lsp's global cache had to be isolated for cold to mean cold; full vs
+incremental document sync is now per server; clojure-lsp gets its own ceiling;
+and the README ships with Linux numbers alone.
+
+**What the plan could have specified better:** it defined the probes by rule
+("the largest source file's first alias-qualified symbol") without asking
+whether a server can *answer* at that position. Three of the four re-runs in
+task 2 went into that: a corpus of deliberately broken sample files, a project
+file named `clojure/string.clj`, and a `potemkin/import-vars` facade all
+produce a position that never resolves, and each one costs a full ceiling to
+discover. A plan step that said "validate the probe against the running server
+before timing anything, and pick another site when it does not answer" would
+have collapsed those iterations into one. The same applies to the second
+server: the plan assumed `$/progress` and version-matched diagnostics without a
+fallback, and both assumptions turned out to be wrong for clojure-lsp.

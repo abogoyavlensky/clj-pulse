@@ -35,11 +35,18 @@ and update README and this file in the same change.
   `jar:` content through the extension's own `clojure/dependencyContents`
   provider, hover, completion, and diagnostics.
 
-- `bb bench` — a large real project (metabase, shallow-cloned into
-  `.tmp/bench/` on first run) indexed by the release binary under production
-  settings, reporting index time, symbol counts, RSS, and per-edit and
-  definition latency (`tests/test_bench.rs`). Not a pass/fail gate beyond a
-  120 s hang ceiling; compare its table against the baseline in
+- `bb bench [metabase|clj-kondo]` — the release binary and clojure-lsp, each
+  driven by the same client through the same requests, on two corpora pinned by
+  commit (`bb bench` runs both; they are checked out under `.tmp/bench/` on
+  first use, and the pinned clojure-lsp release is downloaded and checksum-
+  verified beside them). Four configurations per corpus, in a fixed order:
+  clj-pulse cold, clj-pulse warm, clojure-lsp cold, clojure-lsp warm. Every
+  metric is behavioral, so it means the same thing for both servers — time
+  until a `textDocument/definition` on a project symbol *lands where it should*,
+  the same into a JAR, RSS once the server is settled (no traffic for 2 s and no
+  child process still working), and medians of 20 definitions and 20 keystrokes
+  to `publishDiagnostics`. Each row also prints as one `BENCH_JSON` line, so a
+  later run can be diffed. Not a pass/fail gate; compare against the tables in
   [docs/MEMORY.md](docs/MEMORY.md).
 
 | Gate | Run when |
