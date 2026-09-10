@@ -368,12 +368,12 @@ impl Churn {
                     }
                     let form = witness_form(var);
                     let buffer = self.open.get_mut(file).expect("just opened");
-                    let end_line = buffer.text.lines().count() as u32;
+                    let end = end_position(&buffer.text);
                     buffer.version += 1;
                     let version = buffer.version;
                     buffer.text.push_str(&form);
                     buffer.pending.push(var.clone());
-                    client.did_change_range(file, version, (end_line, 0), (end_line, 0), &form);
+                    client.did_change_range(file, version, end, end, &form);
                 }
                 Edit::Save { file } => {
                     let Some(buffer) = self.open.get_mut(file) else {
@@ -498,6 +498,19 @@ impl Churn {
         });
         true
     }
+}
+
+/// The end of a buffer, in the units the protocol counts: a line index and a
+/// UTF-16 column. `lines().count()` is the end only when the text finishes with
+/// a newline — the pinned clj-kondo corpus has files that do not, and a change
+/// starting past the end is rejected outright, leaving the server's copy of the
+/// buffer behind the client's for the rest of the run.
+fn end_position(text: &str) -> (u32, u32) {
+    // `split` rather than `lines`: it keeps the empty final line a trailing
+    // newline leaves behind, which is exactly the position wanted there.
+    let last = text.split('\n').next_back().unwrap_or_default();
+    let line = text.split('\n').count().saturating_sub(1) as u32;
+    (line, last.encode_utf16().count() as u32)
 }
 
 /// One witness per var, the last action's. A round can create a file and then
@@ -691,15 +704,63 @@ fn churn_is_restored_by_the_guard() {
     );
 }
 
+/// A buffer edit at the end of a file that does *not* end in a newline. Get the
+/// end position wrong and the server rejects the change while the client's copy
+/// of the buffer grows anyway, so every later edit in that file is applied at
+/// the wrong place and the round measures nothing.
+#[test]
+fn a_buffer_edit_lands_on_a_file_without_a_trailing_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    write_temp_corpus(&root);
+    let file = root.join("src/app/mod2.clj");
+    assert!(!std::fs::read_to_string(&file).unwrap().ends_with('\n'));
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    let mut churn = Churn::new(&root, 1);
+    let var = "soak-witness-no-trailing-newline".to_string();
+    churn.apply(
+        &mut client,
+        &[
+            Edit::Buffer {
+                file: file.clone(),
+                var: var.clone(),
+            },
+            // A second edit lands past the first: the position for it is only
+            // right if the first one was applied where the client thinks.
+            Edit::Buffer {
+                file: file.clone(),
+                var: format!("{var}-2"),
+            },
+        ],
+    );
+
+    // `documentSymbol` reads the open buffer, so it is the client's view of
+    // what the server's copy of the document now holds.
+    let symbols = client.document_symbols(&file);
+    let names: Vec<&str> = symbols
+        .as_array()
+        .map(|items| items.iter().filter_map(|i| i["name"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        names.contains(&var.as_str()) && names.contains(&format!("{var}-2").as_str()),
+        "the buffer edits did not reach the server: {names:?}"
+    );
+}
+
 /// A minimal git-tracked project: a deps.edn with `src` on `:paths` and a
 /// handful of namespaces for the churn to draw from.
 fn write_temp_corpus(root: &Path) {
     std::fs::create_dir_all(root.join("src/app")).unwrap();
     std::fs::write(root.join("deps.edn"), "{:paths [\"src\"]}\n").unwrap();
     for i in 0..5 {
+        // `mod2` deliberately ends without a newline: a real corpus has such
+        // files, and an edit at the wrong end position is rejected there.
+        let tail = if i == 2 { "" } else { "\n" };
         std::fs::write(
             root.join(format!("src/app/mod{i}.clj")),
-            format!("(ns app.mod{i})\n\n(defn f{i} [x] (inc x))\n"),
+            format!("(ns app.mod{i})\n\n(defn f{i} [x] (inc x)){tail}"),
         )
         .unwrap();
     }
