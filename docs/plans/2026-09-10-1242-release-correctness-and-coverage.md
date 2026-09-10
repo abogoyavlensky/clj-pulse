@@ -260,10 +260,22 @@ All six tasks are implemented, verified and committed on
    MEMORY.md and the ROADMAP backlog.
 6. **AGENTS.md and ROADMAP** updated; Milestone 5's first item is ticked.
 
+### Post-review fix
+
+A branch-wide codex review found the fallback reading a *vector* return schema
+as the parameter vector — `(mu/defn f :- [:vector :int] [xs] …)`, which is
+malli's ordinary spelling. `skip_return_schema` now steps over the `:-` pair in
+all three paths (`extract_def`, `walk_def_form`, `walk_scope_def`), the schema
+is walked for occurrences instead, and the AGENTS.md invariant states the
+`walk_scope` limitation rather than claiming all three paths share the
+resolver. Symbol count on metabase is unchanged (40 369), so the fix costs no
+definitions.
+
 ### Verification
 
-`bb check` (451 unit + 168 e2e), `bb e2e`, `bb e2e-nvim`, `bb e2e-calva`,
-`bb e2e-pulse` (21 checks) and `bb bench` all pass. Every task ended with a
+`bb check` (451 unit + 79 extractor + 168 e2e), `bb e2e`, `bb e2e-nvim`,
+`bb e2e-calva`, `bb e2e-pulse` (21 checks) and `bb bench` all pass, and every
+gate was re-run after the post-review fix. Every task ended with a
 codex review; the two P2 findings it raised (schema annotations bound as
 locals, the Neovim gate depending on an uncommitted `.cpcache`) were fixed and
 re-verified, and one advisory was filed in the ROADMAP backlog.
