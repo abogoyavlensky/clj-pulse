@@ -7279,3 +7279,260 @@ fn test_e2e_selection_range_blank_line() {
         result
     );
 }
+
+/// The (line, character) of `needle` on the first line containing `anchor` —
+/// for a name that appears several times in a file, addressed by the form it
+/// belongs to.
+fn position_of_in_line(path: &Path, anchor: &str, needle: &str) -> (u32, u32) {
+    let text = std::fs::read_to_string(path).unwrap();
+    for (i, line) in text.lines().enumerate() {
+        if line.contains(anchor) {
+            let col = line
+                .find(needle)
+                .unwrap_or_else(|| panic!("{:?} not on the {:?} line", needle, anchor));
+            return (i as u32, (col + needle.len() / 2) as u32);
+        }
+    }
+    panic!("{:?} not found in {}", anchor, path.display());
+}
+
+#[test]
+fn test_e2e_qualified_defn_is_navigable() {
+    // `(mu/defn scale …)` defines a function like `defn` does: definition,
+    // hover and references all reach it.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/schema_defs.clj");
+    client.did_open(&file);
+
+    let (def_line, _) = position_of_in_line(&file, "(mu/defn scale", "scale");
+    let (use_line, use_ch) = position_of_in_line(&file, "(map #(scale", "scale");
+
+    let result = client.goto_definition(&file, use_line, use_ch);
+    let loc = if result.is_array() {
+        result[0].clone()
+    } else {
+        result.clone()
+    };
+    assert!(
+        loc["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/src/schema_defs.clj"),
+        "definition of a mu/defn: {}",
+        result
+    );
+    assert_eq!(loc["range"]["start"]["line"], json!(def_line));
+
+    let hover = client.hover(&file, use_line, use_ch);
+    let text = hover["contents"]["value"].as_str().unwrap_or("");
+    assert!(
+        text.contains("scale [factor x]") && text.contains("simple.schema-defs"),
+        "hover on a mu/defn: {}",
+        hover
+    );
+
+    let (name_line, name_ch) = position_of_in_line(&file, "(mu/defn scale", "scale");
+    let refs = client.references(&file, name_line, name_ch, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", refs));
+    assert_eq!(locs.len(), 2, "definition + one usage: {:?}", locs);
+}
+
+#[test]
+fn test_e2e_qualified_defn_param_shadows_global() {
+    // `factor` is both a var of this namespace and a parameter of `scale`.
+    // The parameter's params bind as locals, so references and rename inside
+    // `scale` see the local alone.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/schema_defs.clj");
+    client.did_open(&file);
+
+    let (global_line, _) = position_of_in_line(&file, "(def factor", "factor");
+    let (param_line, param_ch) = position_of_in_line(&file, "(mu/defn scale", "factor");
+    let (body_line, _) = position_of_in_line(&file, "(* factor x)", "factor");
+
+    let refs = client.references(&file, param_line, param_ch, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", refs));
+    let lines: Vec<u64> = locs
+        .iter()
+        .map(|l| l["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        vec![param_line as u64, body_line as u64],
+        "the parameter's own sites only: {:?}",
+        locs
+    );
+    assert!(
+        !lines.contains(&(global_line as u64)),
+        "the global `factor` is a different name: {:?}",
+        locs
+    );
+
+    let result = client.rename(&file, param_line, param_ch, "k");
+    let changes = &result["changes"];
+    let edits = changes
+        .as_object()
+        .unwrap_or_else(|| panic!("rename returned no changes: {}", result))
+        .values()
+        .next()
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let edit_lines: Vec<u64> = edits
+        .iter()
+        .map(|e| e["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        edit_lines,
+        vec![param_line as u64, body_line as u64],
+        "rename edits the local alone: {}",
+        result
+    );
+
+    let source = std::fs::read_to_string(&file).unwrap();
+    let renamed = apply_edits(&source, edits);
+    assert!(
+        renamed.contains("(mu/defn scale [k x]") && renamed.contains("(* k x)"),
+        "renamed source: {}",
+        renamed
+    );
+    assert!(
+        renamed.contains("(def factor 10)") && renamed.contains("#(scale factor %)"),
+        "the global keeps its name: {}",
+        renamed
+    );
+}
+
+#[test]
+fn test_e2e_letgo_references_across_files() {
+    // References on a `:local/root` dep's var from the `.lg` file that calls
+    // it: the definition in vendor/loc plus the call site.
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let app = root.join("src/app.lg");
+    client.did_open(&app);
+
+    let (line, ch) = position_of(&app, "loc/hello");
+    let result = client.references(&app, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null for loc/hello: {}", result));
+    let uris: Vec<&str> = locs.iter().map(|l| l["uri"].as_str().unwrap()).collect();
+    assert!(
+        uris.iter()
+            .any(|u| u.ends_with("/vendor/loc/src/loc/core.lg")),
+        "the definition is a reference: {:?}",
+        uris
+    );
+    assert!(
+        uris.iter().any(|u| u.ends_with("/src/app.lg")),
+        "the call site is a reference: {:?}",
+        uris
+    );
+}
+
+#[test]
+fn test_e2e_letgo_rename_across_files() {
+    // Renaming a var of a project-local `.lg` namespace edits its definition
+    // and every call site, across files.
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let util = root.join("src/util.lg");
+    client.did_open(&util);
+
+    let (line, ch) = position_of(&util, "defn shout");
+    let result = client.rename(&util, line, ch, "yell");
+    let changes = result["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("rename returned no changes: {}", result));
+
+    let file_of = |suffix: &str| {
+        changes
+            .iter()
+            .find(|(uri, _)| uri.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no edits for {}: {}", suffix, result))
+            .1
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+
+    let util_edits = file_of("/src/util.lg");
+    let app_edits = file_of("/src/app.lg");
+    assert_eq!(util_edits.len(), 1, "the definition: {:?}", util_edits);
+    assert_eq!(app_edits.len(), 1, "the call site: {:?}", app_edits);
+
+    let renamed = apply_edits(&std::fs::read_to_string(&util).unwrap(), &util_edits);
+    assert!(
+        renamed.contains("(defn yell"),
+        "renamed util.lg: {}",
+        renamed
+    );
+    let app = root.join("src/app.lg");
+    let renamed = apply_edits(&std::fs::read_to_string(&app).unwrap(), &app_edits);
+    assert!(
+        renamed.contains("(util/yell "),
+        "renamed app.lg: {}",
+        renamed
+    );
+}
+
+#[test]
+fn test_e2e_letgo_unused_require_diagnostic() {
+    // clj-kondo does not read `.lg`, so the native lints are what a let-go
+    // project gets: an unused `:require` is reported by clj-pulse itself.
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    let stale = root.join("src/stale.lg");
+    std::fs::write(
+        &stale,
+        "(ns stale\n  (:require [util :as util]))\n\n(defn go [] 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    client.did_open(&stale);
+    let diags = client.wait_for_diagnostics("/src/stale.lg");
+    let list = diags["diagnostics"].as_array().expect("diagnostics array");
+    let unused = list
+        .iter()
+        .find(|d| d["code"] == json!("unused-namespace"))
+        .unwrap_or_else(|| panic!("no unused-namespace diagnostic: {}", diags["diagnostics"]));
+    assert_eq!(unused["source"], json!("clj-pulse"));
+    assert!(
+        unused["message"].as_str().unwrap().contains("util"),
+        "message names the namespace: {}",
+        unused
+    );
+}

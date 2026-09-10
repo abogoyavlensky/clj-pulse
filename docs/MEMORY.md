@@ -91,6 +91,21 @@ so the bench was re-run to price it: 3.7-4.0 s to project index, 365 MiB RSS,
 cache table within run-to-run noise — the new work is proportional to
 destructuring forms, not to file size, and does not show up.
 
+### After qualified def heads (2026-09-10)
+
+Same box and corpus, the release binary at commit 35f1c39. `mu/defn` and its
+relatives are now indexed (`extractor::head_def_kind`), which is 2 694 more
+symbols on metabase — 37 675 → 40 369 over `src` + `test`, a 7% gain, and it
+matches the corpus: 1 547 `(mu/defn`, 1 102 `(mu/defn-`, 243 `(mu/defmethod`.
+Roughly one function in fourteen was invisible to navigation before.
+
+The extra symbols cost nothing measurable: 3.5-3.6 s to project index, 3.7-5.3 s
+to library index (491 entries, through stage 3), 365 MiB RSS after the project
+index and 374 MiB after libraries, ~1 s didOpen → first diagnostics, 380 ms per
+edit, 25-27 ms per definition (three runs). That is the keyword-rename table within
+run-to-run noise. Indexing more names is proportional to the definitions a file
+holds, and definition latency is a hash lookup either way.
+
 ### Integrant configs are searched project-wide (2026-09-09)
 
 The EDN scan used to be limited to `:paths`, so a config the classpath does not
@@ -167,7 +182,7 @@ comfortable; both are resolved as of 2026-09-09 (table above):
   only moves the wait. `:kondo {:live-max-kb 256}` skips clj-kondo on the
   didChange pass alone; open and save still run it.
 
-## Leiningen indexes only direct dependencies
+## Leiningen: transitive deps come from `lein classpath`
 
 ### How deep each project type goes
 
@@ -178,7 +193,7 @@ depth it indexes varies:
 |---|---|---|
 | `deps.edn` | reads `.cpcache/*.cp`, then background `clojure -A:dev:test -Spath` (`src/classpath.rs`) | Full closure, including alias deps |
 | let-go `lgx.edn` | `lgx::resolve` (`src/lgx.rs`) | Full transitive - breadth-first walk of each dep's own `:deps` |
-| Leiningen `project.clj` | `leiningen::resolve` (`src/leiningen.rs`) | Direct deps only |
+| Leiningen `project.clj` | background `lein classpath` (`src/classpath.rs`), else `leiningen::resolve` (`src/leiningen.rs`) | Full closure from the command; direct deps only when it is off or fails |
 
 For `deps.edn`, indexing is graduated. Stage 2 reads whatever classpath a prior
 `clojure` invocation left in `.cpcache` — instant, no subprocess. Stage 3 then
@@ -194,11 +209,16 @@ failure (CLI missing, offline, bad alias) degrades to the stage-2 result. For
 let-go, `lgx::resolve` walks each dependency's own `:deps` until the queue
 drains, so depth is unbounded.
 
-### The gap
+### The fallback, and its gap
 
-Leiningen is the exception. `leiningen::resolve` reads `project.clj` as text and
-maps only the direct `:dependencies` to JARs under `~/.m2`. Within that, it
-skips any dependency that:
+Leiningen resolves the same way deps.edn does: stage 3 runs the project's
+`:cmd` — `lein classpath` by default, enabled by default for the workspace root
+— in the background, and the full closure is indexed from its output. What
+differs is the *fallback*. A deps.edn project that never reaches stage 3 still
+has `.cpcache` to read; a Leiningen project has nothing equivalent, so it falls
+back to `leiningen::resolve`, which reads `project.clj` as text and maps only
+the direct `:dependencies` to JARs under `~/.m2`. Within that, it skips any
+dependency that:
 
 - declares no inline string version - `coord_from` in `src/leiningen.rs`
   requires the `[group/artifact "version"]` shape, or
@@ -210,11 +230,11 @@ dependencies. It never reads `:managed-dependencies` or a `lein-parent`
 deliberate: the module inspects `project.clj` only and never shells out to
 `lein classpath`, which avoids JVM startup at the cost of completeness.
 
-### Symptom
+### Symptom, when the command does not run
 
-In a Leiningen project, go-to-definition fails for any symbol whose namespace
-lives in a transitive or version-less dependency, because that JAR is never
-indexed.
+With `lein classpath` disabled (`:classpath {:enabled false}`), unavailable, or
+failing, go-to-definition fails for any symbol whose namespace lives in a
+transitive or version-less dependency, because that JAR is never indexed.
 
 Example, from the `flockman` project: `(defcomponent ...)` uses the
 `defcomponent` macro from `defcomponent-0.2.2.jar`. That JAR is a transitive
@@ -228,21 +248,22 @@ This is not specific to macros. A macro is indexed like any other var
 exactly like a function call. The symbol is missing only because its JAR sits
 off the resolved classpath.
 
-### Stance: best effort, and never a JVM on the hot path
+### Stance: never a JVM on the hot path
 
-Leiningen is not a primary target for clj-pulse - `deps.edn` and let-go come
-first - so its dependency support stays best effort. The original fixed
-principle here was "clj-pulse will not start a JVM"; it has since been
-narrowed to: **never a JVM on the hot path.** deps.edn projects now run
-`clojure -Spath` in a background task (see the resolver table above) because
-the clojure CLI itself skips the JVM when its cache is warm and accurate alias
-navigation outranks JVM purity. The narrowed principle still rules out shelling
-out to `lein classpath` — `lein` boots a JVM *every* run, warm or not — which
-is the only fully accurate way to get Leiningen's transitive and
-parent-inherited deps. Startup stays fast and self-contained, so we accept the
-Leiningen gap rather than pay unconditional JVM cost.
+The original fixed principle here was "clj-pulse will not start a JVM"; it has
+since been narrowed to: **never a JVM on the hot path.** Under the narrowed
+principle `lein classpath` is fine, and it is what stage 3 runs for a Leiningen
+project. `lein` does boot a JVM every run, warm or not, unlike the clojure CLI
+with a warm cache — but that cost is paid once per resolution, in a background
+task, while the index already serves the project's own sources. Nothing waits
+on it: startup, keystrokes and requests never touch a JVM, and a failed or
+disabled run degrades to the direct-dependency fallback above.
 
-Best-effort directions that respect the no-JVM rule, none urgent:
+The two directions below remain worth having, because they improve the
+fallback — the path a project takes when the command is off, `lein` is missing,
+or the resolve fails.
+
+Neither is urgent:
 
 1. **Resolve version-less direct deps from `~/.m2`.** When a direct dep declares
    no version (the version comes from the parent project), look under
@@ -254,6 +275,5 @@ Best-effort directions that respect the no-JVM rule, none urgent:
    but a large and fragile effort: version ranges, exclusions, and profiles all
    apply.
 
-For complete, accurate Leiningen support, clojure-lsp (which embeds clj-kondo
-and resolves the real classpath) remains the better tool. See also the
-"Leiningen transitive deps" item under best effort in [ROADMAP.md](ROADMAP.md).
+See also the "Leiningen transitive deps" item under best effort in
+[ROADMAP.md](ROADMAP.md).

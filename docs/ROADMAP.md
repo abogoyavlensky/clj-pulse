@@ -178,23 +178,23 @@ Each is small because the index already holds the data.
 
 Three plans, in order: correctness and coverage, the benchmark, the release.
 
-- [ ] **Correctness and coverage before 1.0**
-  - [ ] Integrant keys are no longer offered as vars by the completion pools
+- [x] **Correctness and coverage before 1.0**
+  - [x] Integrant keys are no longer offered as vars by the completion pools
         (promoted from the Backlog).
-  - [ ] Qualified def-family heads (`mu/defn`, `s/defn`) define navigable
+  - [x] Qualified def-family heads (`mu/defn`, `s/defn`) define navigable
         functions; on metabase one function in eight is invisible today.
-  - [ ] Neovim opens `jar:` locations through a documented snippet
+  - [x] Neovim opens `jar:` locations through a documented snippet
         (`editors/nvim/jar.lua`) that reads `clojure/dependencyContents`
         (promoted from the Backlog; server-side materialization stays there).
-  - [ ] let-go verified end to end: references, rename, and diagnostics on
+  - [x] let-go verified end to end: references, rename, and diagnostics on
         `.lg` files in the server suite, and a let-go project in the Clojure
         Pulse e2e fixture.
-  - [ ] Settings documented in one place (`docs/SETTINGS.md`): every
+  - [x] Settings documented in one place (`docs/SETTINGS.md`): every
         `.clj-pulse/config.edn` key with its default and the matching Clojure
         Pulse setting, initialization options, environment variables.
-  - [ ] Leiningen docs corrected: stage 3 runs `lein classpath`, direct deps
+  - [x] Leiningen docs corrected: stage 3 runs `lein classpath`, direct deps
         only is the fallback.
-  Plan: [2026-09-10-1242-release-correctness-and-coverage.md](plans/2026-09-10-1242-release-correctness-and-coverage.md) — in progress
+  Plan: [2026-09-10-1242-release-correctness-and-coverage.md](plans/2026-09-10-1242-release-correctness-and-coverage.md) — done
 - [ ] **Benchmark against clojure-lsp**: two pinned corpora (metabase,
       clj-kondo), both servers through the same harness, behavior-based
       metrics, cold and warm, a README "Performance" section with the caveats
@@ -234,6 +234,18 @@ One line each, newest last. Promote or reject; never let this grow silently.
   Neovim and Zed fold from tree-sitter. A server would only add semantic kinds
   (`Comment`, `Imports`) for "fold all comments" style commands. Revisit if an
   editor in the priority list turns out to need it.
+- 2026-09-10 **Two files, one namespace.** `Index::namespaces` is keyed by
+  namespace name, so when a monorepo holds two files declaring the same `ns`
+  (easy to hit: a `.clj` and a `.lg` project each with `(ns app)`), the last
+  one indexed owns the aliases. Hover and completion in the other file then
+  silently answer as if it required nothing, while definition — occurrence
+  based — still works. Found writing the let-go Clojure Pulse fixture; keying
+  namespace metadata by file would fix it.
+- 2026-09-10 **`:lint-as` in the locals walker.** `extractor::walk_scope` has no
+  ns metadata or `ExtractConfig`, so a head the config maps to a non-fn kind
+  still binds its vector as parameters there while the occurrence walker does
+  not. Narrow, but it makes local resolution and references disagree; the fix
+  is threading `ExtractConfig` through `locals_in_scope_at`.
 - 2026-09-09 **Cache the extraction per document version, not just the
   tree.** With the tree cached, a definition request on the 452 KiB bench file
   is the 21 ms definitions-and-occurrences walk, and `unused_requires` is
@@ -261,8 +273,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   "edit a form, preserve formatting" helper first.
 - **Library-wide occurrence index**. Truthful references from inside deps;
   gate behind a setting, lazy per JAR.
-- **Leiningen transitive deps** — see [MEMORY.md](MEMORY.md); opt-in
-  `lein classpath` at most.
+- **Leiningen's direct-dependency fallback** — stage 3 already runs
+  `lein classpath` for a root Leiningen project, so transitive deps are
+  indexed; what stays thin is the fallback when that command is off or fails
+  (version-less direct deps are skipped). See [MEMORY.md](MEMORY.md).
 - **re-frame keyword registrations** (`reg-sub`/`reg-event-*` as definitions);
   the Integrant machinery is the template.
 - **CLI mode** (`clj-pulse clean-ns|lint`) for CI, once the features exist.

@@ -510,6 +510,62 @@ fn macro_def_kind(
     })
 }
 
+/// The def-family kind a *qualified* head names through its name part alone:
+/// `mu/defn`, `s/defn`, `p/defn-`, `mu/defmethod` all define what `defn`,
+/// `defn-` and `defmethod` define, whatever library the qualifier names. Only
+/// when the form's second child is a symbol: `(s/def ::user (s/keys …))` names
+/// a keyword, and reading it as a `def` would invent a var called `::user`.
+fn qualified_head_def_kind(children: &[Node], source: &str) -> Option<DefKind> {
+    let head = *children.first()?;
+    if head.kind() != "sym_lit" || head.child_by_field_name("namespace").is_none() {
+        return None;
+    }
+    if children.get(1).map(|n| n.kind()) != Some("sym_lit") {
+        return None;
+    }
+    DefKind::from_def_symbol(node_text(sym_name_node(head), source))
+}
+
+/// Where a def form's parameter vector can start: past an optional docstring,
+/// an optional attribute map, and a `:-` return schema on either side of them
+/// (`(s/defn f :- Int "doc" [x])` and `(s/defn f "doc" :- Int [x])` both
+/// parse). Everything skipped is an expression or metadata; none of it binds.
+fn skip_def_preamble(children: &[Node], start: usize, source: &str) -> usize {
+    let mut i = skip_return_schema(children, start, source);
+    if children.get(i).map(|n| n.kind()) == Some("str_lit") {
+        i += 1;
+    }
+    if children.get(i).map(|n| n.kind()) == Some("map_lit") {
+        i += 1;
+    }
+    skip_return_schema(children, i, source)
+}
+
+/// The `DefKind` a list head introduces, with the fqn that matched, for every
+/// path that classifies a defining form (definition extraction, the occurrence
+/// walker, the scope walker). `:lint-as` and the built-in macro table are
+/// consulted first ([`macro_def_kind`]), so a config entry always wins; a
+/// qualified head that matches neither falls back to its name part
+/// ([`qualified_head_def_kind`]). `None` for core def forms — those are
+/// [`str_to_defkind`]'s — and for ordinary calls.
+fn head_def_kind(
+    children: &[Node],
+    ns_meta: &NsMeta,
+    source: &str,
+    lint_as: &HashMap<String, DefKind>,
+) -> Option<(String, DefKind)> {
+    let head = *children.first()?;
+    if head.kind() != "sym_lit" {
+        return None;
+    }
+    if let Some(hit) = macro_def_kind(head, ns_meta, source, lint_as) {
+        return Some(hit);
+    }
+    let kind = qualified_head_def_kind(children, source)?;
+    let fqn = resolve_head_fqn(head, ns_meta, source)?;
+    Some((fqn, kind))
+}
+
 fn process_top_level_list(
     node: Node,
     source: &str,
@@ -546,7 +602,7 @@ fn process_top_level_list(
     // `deftest`). The mapped kind reuses the normal def extraction, so the
     // macro's defined name becomes a real symbol.
     let kind = str_to_defkind(first_text)
-        .or_else(|| macro_def_kind(first, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind));
+        .or_else(|| head_def_kind(&children, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind));
     if let Some(kind) = kind {
         let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
@@ -960,7 +1016,10 @@ fn extract_def(
     let mut params: Vec<String> = Vec::new();
 
     // Walk remaining children to find docstring, params, and multi-arity bodies
-    let mut rest_start = 2;
+    // A `:-` return schema may sit on either side of the docstring
+    // (`(s/defn f :- Int "doc" [x])` and `(s/defn f "doc" :- Int [x])` both
+    // parse), so it is skipped on both.
+    let mut rest_start = skip_return_schema(children, 2, source);
 
     // Check for docstring (str_lit right after name)
     if rest_start < children.len() && children[rest_start].kind() == "str_lit" {
@@ -968,6 +1027,7 @@ fn extract_def(
         doc = Some(strip_string_quotes(raw));
         rest_start += 1;
     }
+    rest_start = skip_return_schema(children, rest_start, source);
 
     // Check for params: either a direct vec_lit (single arity) or list_lit children (multi-arity)
     let mut found_params = false;
@@ -1597,7 +1657,7 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     // form as the def-family kind it maps to: its name binds as a def, its body
     // args are usages.
     if head.kind() == "sym_lit" {
-        if let Some((fqn, kind)) = macro_def_kind(*head, ctx.ns_meta, ctx.source, ctx.lint_as) {
+        if let Some((fqn, kind)) = head_def_kind(&children, ctx.ns_meta, ctx.source, ctx.lint_as) {
             out.push(Occurrence {
                 fqn,
                 name_range: node_to_lsp_range(sym_name_node(*head), ctx.source),
@@ -1755,6 +1815,17 @@ fn walk_def_form(
         }
         rest_start = 3;
     }
+
+    // The docstring, attribute map and return schema are all expressions or
+    // metadata: record their occurrences here so the loop below never mistakes
+    // a vector schema for the parameter vector. `rest_start` can sit past the
+    // end while a form is half-typed (`(defmethod foo)`), so clamp first.
+    let rest_start = rest_start.min(children.len());
+    let params_start = skip_def_preamble(children, rest_start, ctx.source);
+    for child in &children[rest_start..params_start] {
+        walk_occurrences(*child, ctx, scope, out);
+    }
+    let rest_start = params_start;
 
     let mut frame_pushed = false;
     for child in children.iter().skip(rest_start) {
@@ -2090,6 +2161,27 @@ fn walk_letfn_form(
     scope.pop();
 }
 
+/// The index of the first child past an optional `:-` return schema at `idx`.
+/// `(mu/defn f :- [:vector :int] [x] …)` and `(s/defn f :- [s/Int] [x] …)`
+/// annotate what the function *returns*, and that schema is very often a
+/// vector — reading it as the parameter vector would bind its contents as
+/// parameters and leave the real ones unbound.
+fn skip_return_schema(children: &[Node], idx: usize, source: &str) -> usize {
+    match children.get(idx) {
+        Some(n) if is_schema_annotation_marker(*n, source) => (idx + 2).min(children.len()),
+        _ => idx,
+    }
+}
+
+/// Whether `node` is the `:-` marker of a schema annotation. The schema-style
+/// def macros (`schema.core/defn`, `malli.util/defn`) annotate a parameter as
+/// `[x :- s/Int]`: the element after the marker is a *type expression*
+/// evaluated in the enclosing scope, not a binding target. Binding it would
+/// invent a local called `Int` and lose the reference to the schema var.
+fn is_schema_annotation_marker(node: Node, source: &str) -> bool {
+    node.kind() == "kwd_lit" && node_text(node, source) == ":-"
+}
+
 /// Collects every symbol inside a binding pattern (plain names, vector and
 /// map destructuring) except `&` and `_`, each with its name range. Map
 /// destructuring `:or` defaults are *expressions*, recorded as occurrences
@@ -2142,6 +2234,22 @@ fn collect_binding_names(
                         record_keyword_occurrence(*v, ctx, out);
                     }
                 }
+            }
+        }
+        "vec_lit" => {
+            // A schema annotation's type expression is a usage, not a binding.
+            let items = named_children(pattern);
+            let mut i = 0;
+            while i < items.len() {
+                if is_schema_annotation_marker(items[i], ctx.source) {
+                    if let Some(annotation) = items.get(i + 1) {
+                        walk_occurrences(*annotation, ctx, scope, out);
+                    }
+                    i += 2;
+                    continue;
+                }
+                collect_binding_names(items[i], ctx, scope, out, names);
+                i += 1;
             }
         }
         _ => {
@@ -2551,6 +2659,16 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                     None => true,
                     Some(ns) => node_text(ns, source) == "clojure.core",
                 };
+            if !core_form {
+                // A qualified defining head (`mu/defn`) binds like the form its
+                // name part names, matching `head_def_kind` in the occurrence
+                // walker. `:lint-as` is not visible here (no ns metadata), so
+                // only the name-part rule applies.
+                if let Some(kind) = qualified_head_def_kind(&children, source) {
+                    walk_scope_def(kind, &children, source, pos, out);
+                    return;
+                }
+            }
             if core_form {
                 let head_text = sym_text(*head, source);
                 if let Some(kind) = str_to_defkind(head_text) {
@@ -2701,7 +2819,10 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
                 // scope, so this vector's params are not in scope inside it —
                 // bind nothing and stop. Anywhere else (a body, or a param
                 // binding site) the params do bind.
-                if in_vec && pos_in_or_default(*child, source, pos) {
+                if in_vec
+                    && (pos_in_or_default(*child, source, pos)
+                        || pos_in_schema_annotation(*child, source, pos))
+                {
                     return;
                 }
                 collect_binding_targets(*child, source, out);
@@ -2719,7 +2840,8 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
                     let in_or_default = params
                         .map(|p| {
                             lsp_range_contains(node_to_lsp_range(*p, source), pos)
-                                && pos_in_or_default(*p, source, pos)
+                                && (pos_in_or_default(*p, source, pos)
+                                    || pos_in_schema_annotation(*p, source, pos))
                         })
                         .unwrap_or(false);
                     if !in_or_default {
@@ -2758,14 +2880,8 @@ fn walk_scope_def(
 ) {
     match kind {
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro => {
-            // Skip the name and an optional docstring / attr-map before params.
-            let mut rest = 2;
-            if children.get(rest).map(|n| n.kind()) == Some("str_lit") {
-                rest += 1;
-            }
-            if children.get(rest).map(|n| n.kind()) == Some("map_lit") {
-                rest += 1;
-            }
+            // Skip the name and everything between it and the parameters.
+            let rest = skip_def_preamble(children, 2, source);
             if rest <= children.len() {
                 walk_scope_fn_tail(&children[rest.min(children.len())..], source, pos, out);
             }
@@ -2779,8 +2895,9 @@ fn walk_scope_def(
                     return;
                 }
             }
-            if children.len() > 3 {
-                walk_scope_fn_tail(&children[3..], source, pos, out);
+            let rest = skip_def_preamble(children, 3, source);
+            if children.len() > rest {
+                walk_scope_fn_tail(&children[rest..], source, pos, out);
             }
         }
         DefKind::Defrecord | DefKind::Deftype => {
@@ -2880,12 +2997,49 @@ fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBindi
                 }
             }
         }
+        "vec_lit" => {
+            // Same rule as `collect_binding_names`: `[x :- s/Int]` binds `x`
+            // alone, so a cursor on `Int` resolves to the schema var.
+            let items = named_children(pattern);
+            let mut i = 0;
+            while i < items.len() {
+                if is_schema_annotation_marker(items[i], source) {
+                    i += 2;
+                    continue;
+                }
+                collect_binding_targets(items[i], source, out);
+                i += 1;
+            }
+        }
         _ => {
             for child in named_children(pattern) {
                 collect_binding_targets(child, source, out);
             }
         }
     }
+}
+
+/// Whether `pos` sits inside a `:-` annotation expression of a parameter
+/// vector. Like an `:or` default, the annotation is evaluated where the vector
+/// is written, not inside it, so the vector's own parameters are not in scope
+/// there: in `(s/defn f [T :- T] …)` the annotation reads the namespace-level
+/// `T`, and renaming the parameter must leave it alone.
+fn pos_in_schema_annotation(node: Node, source: &str, pos: Position) -> bool {
+    let items = named_children(node);
+    let mut i = 0;
+    while i < items.len() {
+        if is_schema_annotation_marker(items[i], source) {
+            if let Some(annotation) = items.get(i + 1) {
+                if lsp_range_contains(node_to_lsp_range(*annotation, source), pos) {
+                    return true;
+                }
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Whether `pos` sits inside an `:or {name default}` *default expression* within

@@ -1505,3 +1505,251 @@ mod tree_variant {
         );
     }
 }
+
+// --- qualified def-family heads ---------------------------------------------
+
+/// `mu/defn`, `s/defn` and friends: the qualifier says which library's macro
+/// this is, the name part says what it defines.
+fn qualified_defs() -> (
+    Vec<clj_pulse::index::Symbol>,
+    Vec<clj_pulse::index::Occurrence>,
+) {
+    let (_, syms, occs) = extract_full(
+        include_str!("fixtures/snippets/qualified_defs.clj"),
+        Path::new("qualified_defs.clj"),
+    )
+    .unwrap();
+    (syms, occs)
+}
+
+#[test]
+fn test_qualified_defs_are_indexed_by_name_part() {
+    let (syms, _) = qualified_defs();
+    let sym = |name: &str| {
+        syms.iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{} not indexed: {:?}", name, syms))
+    };
+
+    let f = sym("f");
+    assert_eq!(f.kind, DefKind::Defn);
+    assert_eq!(f.fqn, "my.app/f");
+    assert_eq!(f.name_range.start.line, 5);
+    assert_eq!(f.name_range.start.character, 9);
+    // The return schema (`:- :int`) is not a parameter vector.
+    assert_eq!(f.params, vec!["[x :- :int]"]);
+
+    assert_eq!(sym("g").kind, DefKind::Defn);
+    assert_eq!(sym("g").fqn, "my.app/g");
+    assert_eq!(sym("h").kind, DefKind::DefnPrivate);
+    assert!(sym("h").private);
+    assert!(syms
+        .iter()
+        .any(|s| s.name == "m" && s.kind == DefKind::Defmethod));
+}
+
+#[test]
+fn test_qualified_defs_spec_def_still_names_a_keyword() {
+    // `(spec/def ::user string?)` names a keyword, not a var: no symbol, but
+    // the keyword occurrence stays.
+    let (syms, occs) = qualified_defs();
+    assert!(
+        !syms.iter().any(|s| s.name == "user"),
+        "spec/def must not define a var: {:?}",
+        syms
+    );
+    assert_eq!(
+        occurrences_of(&occs, ":my.app/user").len(),
+        1,
+        "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_qualified_defn_params_bind_as_locals() {
+    // `x` is a parameter of `mu/defn f`, so it is a local, not a var usage of
+    // the current namespace; the body's `str` is a real usage.
+    let (_, occs) = qualified_defs();
+    assert!(
+        occurrences_of(&occs, "my.app/x").is_empty(),
+        "a mu/defn parameter must bind as a local: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, "clojure.core/str").len(),
+        1,
+        "occurrences: {:?}",
+        occs
+    );
+}
+
+#[test]
+fn test_lint_as_outranks_the_name_part_fallback() {
+    // The user's `:lint-as` is consulted first, so mapping `malli.util/defn`
+    // to `clojure.core/def` makes `f` a plain `def`.
+    let mut lint_as = std::collections::HashMap::new();
+    lint_as.insert("malli.util/defn".to_string(), DefKind::Def);
+    let cfg = clj_pulse::index::ExtractConfig { lint_as };
+    let (_, syms, _) = clj_pulse::index::extractor::extract_full_with(
+        include_str!("fixtures/snippets/qualified_defs.clj"),
+        Path::new("qualified_defs.clj"),
+        &cfg,
+    )
+    .unwrap();
+    let f = syms.iter().find(|s| s.name == "f").expect("f not indexed");
+    assert_eq!(f.kind, DefKind::Def);
+}
+
+#[test]
+fn test_schema_annotations_are_usages_not_bindings() {
+    // `[y :- s/Int]` binds `y`; `s/Int` is a reference to the schema var,
+    // evaluated in the enclosing scope. Binding it would invent a local
+    // called `Int` and lose the reference.
+    let (_, occs) = qualified_defs();
+    assert!(
+        !occurrences_of(&occs, "schema.core/Int").is_empty(),
+        "the parameter's schema is a usage: {:?}",
+        occs
+    );
+    assert_eq!(
+        occurrences_of(&occs, "schema.core/Str").len(),
+        1,
+        "the return schema is a usage: {:?}",
+        occs
+    );
+    assert!(
+        occurrences_of(&occs, "my.app/y").is_empty(),
+        "the annotated parameter binds as a local: {:?}",
+        occs
+    );
+
+    let src = include_str!("fixtures/snippets/qualified_defs.clj");
+    let (line, _) = line_of(src, "  y)");
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(line, 2),
+    );
+    let names: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["y"],
+        "only the parameter is a local: {:?}",
+        locals
+    );
+}
+
+/// The 0-based line of the first line equal to `needle`.
+fn line_of(text: &str, needle: &str) -> (u32, u32) {
+    for (i, line) in text.lines().enumerate() {
+        if line == needle {
+            return (i as u32, 0);
+        }
+    }
+    panic!("{:?} not found", needle);
+}
+
+#[test]
+fn test_vector_return_schema_is_not_the_parameter_vector() {
+    // malli schemas are vectors (`:- [:vector :int]`), and Schema's sequence
+    // types are too (`:- [s/Int]`): the *next* vector is the parameters.
+    let (syms, occs) = qualified_defs();
+    let sym = |name: &str| {
+        syms.iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{} not indexed: {:?}", name, syms))
+    };
+    assert_eq!(sym("vector-schema").params, vec!["[xs]"]);
+    assert_eq!(sym("seq-schema").params, vec!["[zs]"]);
+    // Schema parses the docstring on either side of the annotation.
+    assert_eq!(sym("doc-first").params, vec!["[ws]"]);
+    assert_eq!(
+        sym("doc-first").doc.as_deref(),
+        Some("Doc before the schema.")
+    );
+    assert_eq!(
+        sym("seq-schema").doc.as_deref(),
+        Some("Doc after the schema."),
+        "a docstring after the return schema is still a docstring"
+    );
+
+    // The schema's own names are usages, and the parameters are locals.
+    assert_eq!(
+        occurrences_of(&occs, "schema.core/Int").len(),
+        3,
+        "`s/Int` in the parameter and in both return schemas: {:?}",
+        occs
+    );
+    for phantom in ["my.app/xs", "my.app/zs", "my.app/ws"] {
+        assert!(
+            occurrences_of(&occs, phantom).is_empty(),
+            "{} must bind as a local: {:?}",
+            phantom,
+            occs
+        );
+    }
+
+    let src = include_str!("fixtures/snippets/qualified_defs.clj");
+    let (line, _) = line_of(src, "  xs)");
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(line, 3),
+    );
+    let names: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["xs"],
+        "the parameter binds, not the schema: {:?}",
+        locals
+    );
+}
+
+#[test]
+fn test_half_typed_def_forms_extract_without_panicking() {
+    // Every intermediate state of a form the user is typing goes through the
+    // extractor on the keystroke path: a def form with no name, no params and
+    // no body must extract cleanly, not abort the pass.
+    for src in [
+        "(ns a)\n(defn)\n",
+        "(ns a)\n(defn f)\n",
+        "(ns a)\n(defmethod foo)\n",
+        "(ns a)\n(mu/defmethod x)\n",
+        "(ns a)\n(mu/defn f :-)\n",
+        "(ns a)\n(s/defn f :- s/Int)\n",
+    ] {
+        let extracted = extract_full(src, Path::new("a.clj"));
+        assert!(extracted.is_ok(), "extraction failed for {:?}", src);
+    }
+}
+
+#[test]
+fn test_cursor_in_a_schema_annotation_sees_no_parameters() {
+    // `(s/defn f [T :- T] T)` with a namespace-level schema `T`: the annotation
+    // reads the global, so the parameter must not be in scope there — renaming
+    // the parameter would otherwise rewrite the schema too.
+    let src =
+        "(ns app\n  (:require [schema.core :as s]))\n\n(def T s/Int)\n\n(s/defn f [T :- T] T)\n";
+    let annotation_col = src.lines().nth(5).unwrap().rfind(":- T").unwrap() as u32 + 3;
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(5, annotation_col),
+    );
+    assert!(
+        locals.is_empty(),
+        "the annotation is evaluated outside the vector: {:?}",
+        locals
+    );
+
+    // The body's `T` is the parameter, and it alone.
+    let body_col = src.lines().nth(5).unwrap().rfind('T').unwrap() as u32;
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(5, body_col),
+    );
+    assert_eq!(
+        locals.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+        vec!["T"],
+        "the parameter binds in the body: {:?}",
+        locals
+    );
+}

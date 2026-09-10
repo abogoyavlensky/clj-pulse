@@ -83,21 +83,21 @@ Modify:
 - Modify: `src/handlers/completion.rs`
 - Test: `tests/test_completion.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Using `tests/fixtures/integrant_project`: `test_integrant_key_not_offered_as_var` (prefix `d` in `readx.db` has no item labeled `db`), `test_integrant_key_not_offered_through_alias` (a namespace aliasing `readx.db` as `db` gets no `db/db`), `test_integrant_key_not_offered_through_refer_all` (a namespace with `[readx.db :refer :all]` gets no bare `db`), and `test_integrant_key_completes_as_keyword` (`::d` yields `::db`).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_completion integrant_key`
   Expected: FAIL on the first two.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `is_var_symbol` and its four call sites.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "Keep Integrant keys out of the var completion pools"`
 
 ### Task 2: Qualified def-family heads
@@ -106,25 +106,40 @@ Modify:
 - Modify: `src/index/extractor.rs`, `src/index/jar_cache.rs`
 - Test: `tests/test_extractor.rs`, `tests/fixtures/snippets/qualified_defs.clj`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Snippet with `[malli.util :as mu]`, `[schema.core :as s]`, and `[clojure.spec.alpha :as spec]` requires, `(mu/defn f :- :int [x :- :int] (str x))`, `(s/defn g [y] y)`, `(mu/defn- h [] 1)`, `(mu/defmethod m :k [_] 1)`, and `(spec/def ::user string?)`. Assert symbols `f` (Defn), `g` (Defn), `h` (DefnPrivate), `m` (Defmethod) with the right names and ranges, and *no* symbol for `::user` while its keyword occurrence is still recorded. Assert the occurrences: `x` inside `f` is not a var occurrence (it is a bound local), and `str` is. Add a `:lint-as` override test: with `malli.util/defn` mapped to `clojure.core/def`, `f` is indexed as `Def`, proving the fallback never outranks the config. Check the existing `mu/defn` param-vector handling: `f`'s params must not include the `:-` return schema; if `extract_def` picks up `:-` and `:int` as params, add the fix here and a test for the signature.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor qualified_defs`
   Expected: FAIL (no symbols).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `head_def_kind` in the extractor, used by `process_top_level_list`, `walk_list`, and `walk_scope` as designed. Bump `CACHE_FORMAT_VERSION` to 15.
 
-- [ ] **Step 4: e2e**
+- [x] **Step 4: e2e**
   Add `(mu/defn scale [factor x] (* factor x))` to a `simple_project` file, with a top-level `(def factor 10)` elsewhere in the project. Assert definition, hover, and references reach `scale`; references on the parameter `factor` inside `scale` list only the local's sites, never the global `factor`; and rename of that parameter edits only the local (the parameter-shadowing regression the review asked for).
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Resolve qualified def-family heads like mu/defn by name"`
+
+> Deviation: the e2e fixture keeps `(def factor 10)` in the same new file as
+> `(mu/defn scale …)` rather than elsewhere in the project — `core.clj`'s
+> outline is pinned by `test_e2e_document_symbols_outline`, and a global in the
+> same namespace is the sharper shadowing test (the name really does resolve
+> there).
+> Deviation: codex found that the new fallback sent `[x :- s/Int]` whole to the
+> binding collectors, inventing a local `Int` and losing the reference to the
+> schema var. Fixed in a follow-up commit (`is_schema_annotation_marker`): the
+> element after a `:-` marker is walked as a usage in both the occurrence and
+> the scope collector.
+> Advisory (not fixed, filed in the ROADMAP backlog): `walk_scope` cannot see
+> `:lint-as`, so a qualified head the config maps to a *non*-fn kind still binds
+> its vector as parameters there. Pre-existing for bare heads; fixing it means
+> threading `ExtractConfig` through `locals_in_scope_at`.
 
 ### Task 3: Neovim `jar:` snippet
 
@@ -132,17 +147,27 @@ Modify:
 - Create: `editors/nvim/jar.lua`
 - Modify: `scripts/e2e_nvim.lua`, `README.md`
 
-- [ ] **Step 1: Write the snippet**
+- [x] **Step 1: Write the snippet**
   As designed: `setup({ client_name = ... })` registers the `BufReadCmd` autocommand. Keep it under 40 lines with no dependencies beyond `vim.lsp`.
 
-- [ ] **Step 2: Extend the Neovim gate**
+- [x] **Step 2: Extend the Neovim gate**
   Load the file, wait for `library indexing complete`, jump to `str`, show the document, assert `(defn str` in the buffer. Run: `bb e2e-nvim`. Expected: the new check passes.
 
-- [ ] **Step 3: README**
+- [x] **Step 3: README**
   Replace the caveat paragraph with a "Library navigation" sub-section embedding the snippet and stating the client name must match.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "Open jar: locations in Neovim through clojure/dependencyContents"`
+
+> Deviation: the plan assumed the fixture's `.cpcache` and jar cache are
+> committed; both are gitignored local artifacts, so the gate needs a resolved
+> classpath on the box (it has one). No change to the checks.
+> Deviation: Neovim does not recognize `jar:file://…` as a URL, so it names the
+> buffer relative to the working directory. The autocommand matches `*/jar:*`
+> as well as `jar:*` and reads the URI back out of the buffer name.
+> Deviation: the README frames the snippet as a file to save (or vendor and
+> `dofile`) rather than paste into `init.lua` — it is a module ending in
+> `return M`, which is a syntax error mid-`init.lua`.
 
 ### Task 4: let-go verification
 
@@ -150,14 +175,26 @@ Modify:
 - Create: `tests/fixtures/letgo_project/src/util.lg`, `scripts/pulse-e2e/fixture/letgo/…`
 - Modify: `tests/test_e2e.rs`, `scripts/pulse-e2e/tests.js`
 
-- [ ] **Step 1: Server e2e**
+- [x] **Step 1: Server e2e**
   `test_e2e_letgo_references_across_files`, `test_e2e_letgo_rename_across_files`, `test_e2e_letgo_unused_require_diagnostic`. Run: `cargo test --test test_e2e letgo`. Expected: PASS, or a real finding to fix in the smallest way.
 
-- [ ] **Step 2: Pulse fixture and checks**
+- [x] **Step 2: Pulse fixture and checks**
   Add the `letgo/` sub-project and the four checks to `tests.js`. Run: `bb e2e-pulse`. Expected: PASS. If the sub-project is not detected, check `projects::detect` depth and the `.gitignore` in the fixture before touching the server.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Verify let-go support end to end, server and extension"`
+
+> Deviation: the plan's Pulse check hovers `when` for "the special-form
+> description"; `when` is a macro in both dialects, so the fixture and the check
+> use `if`, which `builtins::COMMON_SPECIAL_FORMS` actually holds.
+> Deviation: the let-go sub-project's namespaces are `lgapp`/`lgutil`, not
+> `app`/`util` — a second `(ns app)` in the same workspace made hover and
+> alias completion fail in the deps.edn project's `src/app.clj` (see the
+> ROADMAP backlog entry "Two files, one namespace"; the underlying server bug
+> is filed, not fixed here).
+> Deviation: the unused-require check writes `src/stale.lg` from the test
+> instead of leaving an unused require in the committed fixture, so the other
+> let-go tests keep a clean `app.lg`.
 
 ### Task 5: Settings page and Leiningen docs
 
@@ -165,24 +202,122 @@ Modify:
 - Create: `docs/SETTINGS.md`
 - Modify: `README.md`, `docs/MEMORY.md`, `docs/RELEASE.md`
 
-- [ ] **Step 1: Write SETTINGS.md**
+- [x] **Step 1: Write SETTINGS.md**
   The three tables, defaults read from the parsers. Use /writing-clearly.
 
-- [ ] **Step 2: Link and correct**
+- [x] **Step 2: Link and correct**
   README: Configuration and Linting link to the page; the Dependency depth note describes stage 3 for Leiningen. MEMORY.md: retitle and rewrite the Leiningen section. RELEASE.md: the sweep checks SETTINGS.md.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Document every setting in one place and correct the Leiningen docs"`
+
+> Deviation: the ROADMAP's best-effort item "Leiningen transitive deps — opt-in
+> `lein classpath` at most" was stale in the same way MEMORY.md was, so it is
+> rewritten here (what remains is the direct-dependency fallback) rather than
+> left for a later reader to trip over.
 
 ### Task 6: Roadmap and invariants
 
 **Files:**
 - Modify: `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update**
+- [x] **Step 1: Update**
   AGENTS.md invariants: var pools exclude keyword-fqn symbols; qualified def heads resolve by name after `:lint-as`. ROADMAP Milestone 5: tick the items this plan owns, set this plan's status to `done`.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
   Run: `bb check && bb e2e && bb e2e-nvim && bb e2e-pulse && bb e2e-calva && bb bench`
   Expected: all gates pass; the bench table is within noise of the MEMORY.md tables (the extractor changed, and AGENTS.md requires a bench run after extractor changes). Calva is required because definition results changed shape for `mu/defn` targets.
   `git commit -m "Record release plan 1 in the roadmap and invariants"`
+
+---
+
+## Status: complete (2026-09-10)
+
+All six tasks are implemented, verified and committed on
+`release-correctness-and-coverage`.
+
+### What shipped
+
+1. **Integrant keys out of the var pools.** One predicate,
+   `completion::is_var_symbol`, applied in the current-namespace,
+   alias-qualified, `:refer :all` and auto-require pools. Four tests; the
+   `:refer :all` pool turned out to be broken too, exactly as the design
+   predicted.
+2. **Qualified def-family heads.** `extractor::head_def_kind` resolves
+   `:lint-as`, then the built-in macro table, then a qualified head's name part,
+   and all three classifying paths (`process_top_level_list`, `walk_list`,
+   `walk_scope`) share it. Cache format version 15. On metabase this indexes
+   2 694 more symbols (37 675 → 40 369 over `src` + `test`), and the bench is
+   unchanged within noise.
+3. **Neovim `jar:` navigation.** `editors/nvim/jar.lua`, embedded in the README
+   and driven by `bb e2e-nvim`, which now opens clojure.core's source in a
+   real Neovim buffer.
+4. **let-go verified.** Three server e2e tests (references, cross-file rename,
+   `unused-namespace` on `.lg`) and a let-go sub-project in the Clojure Pulse
+   fixture with five checks, all green through the real extension.
+5. **`docs/SETTINGS.md`**, read from the parsers, linked from the README, and
+   checked by RELEASE.md's docs sweep. Leiningen docs corrected in README,
+   MEMORY.md and the ROADMAP backlog.
+6. **AGENTS.md and ROADMAP** updated; Milestone 5's first item is ticked.
+
+### Post-review fixes
+
+A branch-wide codex review found the fallback reading a *vector* return schema
+as the parameter vector — `(mu/defn f :- [:vector :int] [xs] …)`, which is
+malli's ordinary spelling. `skip_return_schema` now steps over the `:-` pair in
+all three paths (`extract_def`, `walk_def_form`, `walk_scope_def`), the schema
+is walked for occurrences instead, and the AGENTS.md invariant states the
+`walk_scope` limitation rather than claiming all three paths share the
+resolver. Symbol count on metabase is unchanged (40 369), so the fix costs no
+definitions.
+
+Reviewing that fix, codex found the new slice panicking on a half-typed form
+(`(defmethod foo)` — `rest_start` sits past the end), which the keystroke path
+hits constantly. Clamped, with a test over six half-typed forms, and the jar
+cache version went to 16 since extracted signatures changed again.
+
+Two further rounds tightened the same rule until it held everywhere: a
+docstring may sit *before* the schema (`(s/defn f "doc" :- [s/Int] [x] …)`), so
+one `skip_def_preamble` now steps over docstring, attribute map and schema in
+either order for both walkers; and a cursor inside an annotation must not see
+the vector's own parameters (`(s/defn f [T :- T] …)` reads the namespace-level
+`T`), which `pos_in_schema_annotation` now enforces the way `:or` defaults
+already did. Four review rounds in total on this task, each one finding a real
+case the previous fix had not covered — the annotation syntax has more shapes
+than it looks.
+
+### Verification
+
+`bb check` (451 unit + 81 extractor + 168 e2e), `bb e2e`, `bb e2e-nvim`,
+`bb e2e-calva`, `bb e2e-pulse` (21 checks) and `bb bench` all pass, and every
+gate was re-run after the post-review fix. Every task ended with a
+codex review; the two P2 findings it raised (schema annotations bound as
+locals, the Neovim gate depending on an uncommitted `.cpcache`) were fixed and
+re-verified, and one advisory was filed in the ROADMAP backlog.
+
+### Found on the way, filed not fixed
+
+- **Two files, one namespace.** `Index::namespaces` is keyed by namespace name,
+  so a second `(ns app)` anywhere in the workspace takes the first file's
+  aliases away and its hover and completion answer as if it required nothing.
+  Found because the new let-go fixture first used `(ns app)` beside the
+  deps.edn project's `app.clj`. In the ROADMAP backlog.
+- **`:lint-as` in the locals walker.** `walk_scope` has no config, so a head
+  `:lint-as` maps to a non-fn kind still binds its vector there. In the
+  ROADMAP backlog.
+
+### Deviations
+
+Recorded per task above.
+
+### What the plan could have specified better
+
+Three things it asserted turned out to be false, and each cost a detour:
+the fixture's `.cpcache` and jar cache are gitignored, not committed (the
+Neovim gate needed a resolution step); `when` is not a special form in either
+dialect (the Pulse hover check uses `if`); and the Clojure Pulse extension
+spells the project overrides `classpathEnabled`/`classpathCommand`, not
+nested. A plan that pins a claim about another repo's or a fixture's contents
+should name the file it read it from, the way it pinned the Rust line numbers —
+those were all still accurate.
+

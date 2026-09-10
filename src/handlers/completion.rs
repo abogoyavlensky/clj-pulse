@@ -8,7 +8,7 @@ use serde_json::json;
 use super::builtins;
 use super::matching::match_score;
 use crate::document::{DocumentStore, KeywordContext, Snapshot};
-use crate::index::{extractor, CoreSymbol, DefKind, Index, NsMeta};
+use crate::index::{extractor, CoreSymbol, DefKind, Index, NsMeta, Symbol};
 
 pub fn handle(
     index: &Index,
@@ -301,6 +301,15 @@ fn keyword_item(
     }
 }
 
+/// Whether `sym` names a var, the only thing a symbol pool may offer. An
+/// Integrant key — `(defmethod ig/init-key ::database …)` — is indexed as a
+/// symbol whose fqn is the keyword it defines (`:app.system/database`), and
+/// offering it as `database` or `sys/database` would name nothing. Keywords
+/// reach the user through `complete_keywords` instead.
+fn is_var_symbol(sym: &Symbol) -> bool {
+    !sym.fqn.starts_with(':')
+}
+
 /// Completion candidates for `prefix` in `current_ns`. `snapshot` is the live
 /// buffer, needed only to build the `:require` edit an auto-require item
 /// carries; without it those items are still offered, without their edit.
@@ -321,6 +330,9 @@ pub fn complete_symbols(
             if let Some(fqns) = index.ns_symbols.get(&full_ns) {
                 for fqn in fqns.iter() {
                     if let Some(sym) = index.symbols.get(fqn) {
+                        if !is_var_symbol(&sym) {
+                            continue;
+                        }
                         if let Some(tier) = matched(&sym.name, name_prefix, Pool::CurrentNs) {
                             push(
                                 &mut items,
@@ -379,6 +391,9 @@ pub fn complete_symbols(
         if let Some(fqns) = index.ns_symbols.get(current_ns) {
             for fqn in fqns.iter() {
                 if let Some(sym) = index.symbols.get(fqn) {
+                    if !is_var_symbol(&sym) {
+                        continue;
+                    }
                     if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {
                         push(
                             &mut items,
@@ -417,7 +432,10 @@ pub fn complete_symbols(
                 };
                 for fqn in fqns.iter() {
                     if let Some(sym) = index.symbols.get(fqn) {
-                        if sym.kind == DefKind::DefnPrivate || meta.refers.contains_key(&sym.name) {
+                        if sym.kind == DefKind::DefnPrivate
+                            || !is_var_symbol(&sym)
+                            || meta.refers.contains_key(&sym.name)
+                        {
                             continue;
                         }
                         if let Some(tier) = matched(&sym.name, prefix, Pool::Referred) {
@@ -660,10 +678,9 @@ fn auto_require_items(
             let Some(sym) = index.symbols.get(fqn) else {
                 continue;
             };
-            // Private vars are not referable, and an Integrant key is a
-            // keyword definition, not a var: `alias/database` would name
-            // nothing (see `DefKind::IntegrantKey`).
-            if sym.private || sym.kind == DefKind::DefnPrivate || sym.fqn.starts_with(':') {
+            // Private vars are not referable, and a keyword definition is not
+            // a var: `alias/database` would name nothing.
+            if sym.private || sym.kind == DefKind::DefnPrivate || !is_var_symbol(&sym) {
                 continue;
             }
             if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {

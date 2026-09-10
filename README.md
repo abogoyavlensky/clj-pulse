@@ -110,11 +110,13 @@ Clojure & project support:
   `:paths` are indexed when opened.
 
 > [!NOTE]
-> **Dependency depth:** `deps.edn` and let-go projects index the full transitive
-> dependency tree (from `.cpcache` and `lgx.edn`). Leiningen `project.clj`
-> projects index only direct dependencies that declare an explicit version and
-> already live in `~/.m2`; transitive deps and parent-inherited versions are not
-> indexed yet. See [docs/MEMORY.md](docs/MEMORY.md).
+> **Dependency depth:** every project type indexes the full transitive
+> dependency tree — deps.edn from the resolved classpath, let-go from
+> `lgx.edn`, and Leiningen from `lein classpath`, run in the background and
+> enabled by default for the workspace root. Where that command is turned off
+> or fails, a Leiningen project falls back to the direct dependencies that name
+> an explicit version and already live in `~/.m2`. See
+> [docs/MEMORY.md](docs/MEMORY.md).
 
 ## Linting
 
@@ -186,6 +188,9 @@ is resolved through `PATH` and the install directories above, and an absolute
 path is used verbatim. `mise exec -- clj-kondo` cannot work there; use the
 path `mise which clj-kondo` prints, or the shim. All three keys apply live,
 with no restart.
+
+See [docs/SETTINGS.md](docs/SETTINGS.md) for these three keys beside every
+other setting, with the initialization options and environment variables.
 
 `:live-max-kb` keeps clj-kondo off the keystroke path for very large files.
 While you type in a buffer larger than this many KiB, each pass publishes the
@@ -264,8 +269,68 @@ vim.lsp.enable("clj_pulse")
 vim.filetype.add({ extension = { lg = "clojure" } })
 ```
 
-`jar:` locations need a client that answers them; Neovim's built-in client
-does not, so definitions into library JARs are not opened yet.
+#### Library navigation
+
+Go-to-definition into a dependency answers with a `jar:` URI. Neovim's built-in
+client opens an empty buffer for it and fires `BufReadCmd`; the handler below
+fills that buffer from the server's `clojure/dependencyContents`. Save it as
+`~/.config/nvim/lua/clj_pulse_jar.lua`:
+
+```lua
+-- Opens `jar:` locations in Neovim.
+--
+-- Go-to-definition into a library lands on a `jar:file:///…!/clojure/core.clj`
+-- URI. Neovim's built-in LSP client creates an empty buffer for it and fires
+-- `BufReadCmd`; clj-pulse serves the entry's text through
+-- `clojure/dependencyContents`. Call `setup()` once, after `vim.lsp.enable`.
+local M = {}
+
+--- @param opts? { client_name?: string }  `client_name` must match the name
+--- the LSP client is registered under (default `"clj_pulse"`).
+function M.setup(opts)
+  local client_name = (opts or {}).client_name or "clj_pulse"
+  vim.api.nvim_create_autocmd("BufReadCmd", {
+    -- `jar:file://…` is not a URL Neovim recognizes (the scheme is not
+    -- followed by `://`), so it names the buffer relative to the working
+    -- directory: the pattern has to allow that prefix, and the URI is read
+    -- back out of the name.
+    pattern = { "jar:*", "*/jar:*" },
+    callback = function(args)
+      local uri = args.file:match("jar:.*")
+      local client = vim.lsp.get_clients({ name = client_name })[1]
+      if not uri or not client then
+        return
+      end
+      local res = client:request_sync("clojure/dependencyContents", { uri = uri }, 5000)
+      if not res or res.err or type(res.result) ~= "string" then
+        return
+      end
+      vim.bo[args.buf].modifiable = true
+      vim.api.nvim_buf_set_lines(args.buf, 0, -1, false, vim.split(res.result, "\n"))
+      vim.bo[args.buf].filetype = "clojure"
+      vim.bo[args.buf].buftype = "nofile"
+      vim.bo[args.buf].modifiable = false
+      vim.bo[args.buf].modified = false
+    end,
+  })
+end
+
+return M
+```
+
+and call it after `vim.lsp.enable`, with `client_name` matching the name the
+client is registered under (`clj_pulse` above, which is the default):
+
+```lua
+require("clj_pulse_jar").setup()
+```
+
+The same file ships as [`editors/nvim/jar.lua`](editors/nvim/jar.lua); vendor it
+and load it in one line instead:
+
+```lua
+dofile("/path/to/clj-pulse/editors/nvim/jar.lua").setup()
+```
 
 ### Zed
 
@@ -309,7 +374,8 @@ a license for examples (CC0) but none for notes.
 clj-pulse reads an optional `.clj-pulse/config.edn` at the workspace root and
 falls back to `.clj-kondo/config.edn` where the keys overlap. It understands
 three keys: `:projects` and `:lint-as`, below, and `:kondo`, documented under
-[Linting](#settings).
+[Linting](#settings). Every key, its default, and the Clojure Pulse setting
+that matches it are listed in [docs/SETTINGS.md](docs/SETTINGS.md).
 
 `:projects` controls per-project classpath resolution. clj-pulse detects every
 directory holding a `deps.edn`, `project.clj`, or `lgx.edn` (up to four levels

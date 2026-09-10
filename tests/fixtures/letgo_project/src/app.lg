@@ -1,7 +1,8 @@
 (ns app
   (:require [loc.core :as loc]
-            [ext.core :as ext]))
+            [ext.core :as ext]
+            [util :as util]))
 
 (defn run []
-  (println (loc/hello "world"))
+  (println (util/shout (loc/hello "world")))
   (println (ext/greet "world")))
