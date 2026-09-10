@@ -33,8 +33,13 @@
   e2e-real-kondo {:doc "E2E against a real clj-kondo binary (skips when not installed)"
                   :task (shell "cargo test --test test_e2e real_kondo -- --ignored")}
 
-  e2e-nvim {:doc "Real-editor-client e2e via headless Neovim"
+  e2e-nvim {:doc "Real-editor-client e2e via headless Neovim (needs the clojure CLI: the jar: check navigates into a real JAR)"
             :task (do (shell "cargo build")
+                      ;; Resolve the fixture's classpath first, the way the
+                      ;; Clojure Pulse runner does: without a `.cpcache` the
+                      ;; server reaches the clojure JAR through stage 3, which
+                      ;; announces itself with a different log line.
+                      (shell {:dir "tests/fixtures/simple_project" :out :string} "clojure -Spath")
                       (shell "nvim --headless -l scripts/e2e_nvim.lua tests/fixtures/simple_project target/debug/clj-pulse"))}
 
   e2e-calva {:doc "Full-stack e2e: real VS Code + Calva under Xvfb (needs npm install in scripts/calva-e2e)"

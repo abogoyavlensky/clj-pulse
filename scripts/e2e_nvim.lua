@@ -37,7 +37,16 @@ local client_id = vim.lsp.start({
       if params and params.message and params.message:find("Indexed") then
         indexed = true
       end
-      if params and params.message and params.message:find("library indexing complete") then
+      -- Stage 2 (a warm `.cpcache`) and stage 3 (the CLI) announce themselves
+      -- differently; either one means the libraries are in the index.
+      if
+        params
+        and params.message
+        and (
+          params.message:find("library indexing complete")
+          or params.message:find("full classpath indexed")
+        )
+      then
         libs_indexed = true
       end
     end,
@@ -125,7 +134,7 @@ check(
 vim.wait(60000, function()
   return libs_indexed
 end, 100)
-check(libs_indexed, "library indexing complete (window/logMessage received)")
+check(libs_indexed, "libraries indexed (window/logMessage received)")
 
 local sl, sc
 for i, l in ipairs(lines) do

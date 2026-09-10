@@ -7416,3 +7416,123 @@ fn test_e2e_qualified_defn_param_shadows_global() {
         renamed
     );
 }
+
+#[test]
+fn test_e2e_letgo_references_across_files() {
+    // References on a `:local/root` dep's var from the `.lg` file that calls
+    // it: the definition in vendor/loc plus the call site.
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let app = root.join("src/app.lg");
+    client.did_open(&app);
+
+    let (line, ch) = position_of(&app, "loc/hello");
+    let result = client.references(&app, line, ch, true);
+    let locs = result
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null for loc/hello: {}", result));
+    let uris: Vec<&str> = locs.iter().map(|l| l["uri"].as_str().unwrap()).collect();
+    assert!(
+        uris.iter()
+            .any(|u| u.ends_with("/vendor/loc/src/loc/core.lg")),
+        "the definition is a reference: {:?}",
+        uris
+    );
+    assert!(
+        uris.iter().any(|u| u.ends_with("/src/app.lg")),
+        "the call site is a reference: {:?}",
+        uris
+    );
+}
+
+#[test]
+fn test_e2e_letgo_rename_across_files() {
+    // Renaming a var of a project-local `.lg` namespace edits its definition
+    // and every call site, across files.
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    let util = root.join("src/util.lg");
+    client.did_open(&util);
+
+    let (line, ch) = position_of(&util, "defn shout");
+    let result = client.rename(&util, line, ch, "yell");
+    let changes = result["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("rename returned no changes: {}", result));
+
+    let file_of = |suffix: &str| {
+        changes
+            .iter()
+            .find(|(uri, _)| uri.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no edits for {}: {}", suffix, result))
+            .1
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+
+    let util_edits = file_of("/src/util.lg");
+    let app_edits = file_of("/src/app.lg");
+    assert_eq!(util_edits.len(), 1, "the definition: {:?}", util_edits);
+    assert_eq!(app_edits.len(), 1, "the call site: {:?}", app_edits);
+
+    let renamed = apply_edits(&std::fs::read_to_string(&util).unwrap(), &util_edits);
+    assert!(
+        renamed.contains("(defn yell"),
+        "renamed util.lg: {}",
+        renamed
+    );
+    let app = root.join("src/app.lg");
+    let renamed = apply_edits(&std::fs::read_to_string(&app).unwrap(), &app_edits);
+    assert!(
+        renamed.contains("(util/yell "),
+        "renamed app.lg: {}",
+        renamed
+    );
+}
+
+#[test]
+fn test_e2e_letgo_unused_require_diagnostic() {
+    // clj-kondo does not read `.lg`, so the native lints are what a let-go
+    // project gets: an unused `:require` is reported by clj-pulse itself.
+    let project = setup_named("letgo_project");
+    let root = project.path().canonicalize().unwrap();
+    let lgx_home = root.join("lgxhome");
+
+    let stale = root.join("src/stale.lg");
+    std::fs::write(
+        &stale,
+        "(ns stale\n  (:require [util :as util]))\n\n(defn go [] 1)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_env(&root, &[("LGX_HOME", &lgx_home)]);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+
+    client.did_open(&stale);
+    let diags = client.wait_for_diagnostics("/src/stale.lg");
+    let list = diags["diagnostics"].as_array().expect("diagnostics array");
+    let unused = list
+        .iter()
+        .find(|d| d["code"] == json!("unused-namespace"))
+        .unwrap_or_else(|| panic!("no unused-namespace diagnostic: {}", diags["diagnostics"]));
+    assert_eq!(unused["source"], json!("clj-pulse"));
+    assert!(
+        unused["message"].as_str().unwrap().contains("util"),
+        "message names the namespace: {}",
+        unused
+    );
+}

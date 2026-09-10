@@ -147,17 +147,27 @@ Modify:
 - Create: `editors/nvim/jar.lua`
 - Modify: `scripts/e2e_nvim.lua`, `README.md`
 
-- [ ] **Step 1: Write the snippet**
+- [x] **Step 1: Write the snippet**
   As designed: `setup({ client_name = ... })` registers the `BufReadCmd` autocommand. Keep it under 40 lines with no dependencies beyond `vim.lsp`.
 
-- [ ] **Step 2: Extend the Neovim gate**
+- [x] **Step 2: Extend the Neovim gate**
   Load the file, wait for `library indexing complete`, jump to `str`, show the document, assert `(defn str` in the buffer. Run: `bb e2e-nvim`. Expected: the new check passes.
 
-- [ ] **Step 3: README**
+- [x] **Step 3: README**
   Replace the caveat paragraph with a "Library navigation" sub-section embedding the snippet and stating the client name must match.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "Open jar: locations in Neovim through clojure/dependencyContents"`
+
+> Deviation: the plan assumed the fixture's `.cpcache` and jar cache are
+> committed; both are gitignored local artifacts, so the gate needs a resolved
+> classpath on the box (it has one). No change to the checks.
+> Deviation: Neovim does not recognize `jar:file://…` as a URL, so it names the
+> buffer relative to the working directory. The autocommand matches `*/jar:*`
+> as well as `jar:*` and reads the URI back out of the buffer name.
+> Deviation: the README frames the snippet as a file to save (or vendor and
+> `dofile`) rather than paste into `init.lua` — it is a module ending in
+> `return M`, which is a syntax error mid-`init.lua`.
 
 ### Task 4: let-go verification
 

@@ -1,0 +1,6 @@
+(ns util)
+
+(defn shout
+  "Adds emphasis."
+  [s]
+  (str s "!"))
