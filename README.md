@@ -523,6 +523,7 @@ bb lint       # run clippy linter
 bb test       # run tests
 bb check      # run all checks (fmt-check + lint + test), exactly as CI does
 bb bench      # compare clj-pulse with clojure-lsp on two real projects
+bb soak       # churn one long-lived server and check it against a fresh one
 bb outdated   # check outdated deps 
 bb build      # build the dev binary
 bb release    # build release binary
@@ -546,6 +547,18 @@ four configurations per corpus — each server cold and warm — printing a tabl
 and a `BENCH_JSON` line per row. `bb bench metabase` or `bb bench clj-kondo`
 runs one. The recorded tables are in [docs/MEMORY.md](docs/MEMORY.md), and the
 warm summary is under [Performance](#performance).
+
+`bb soak` drives one server through 20 rounds of churn on the same corpora —
+edits in open buffers, saves, files changed, created, deleted and renamed on
+disk, and every fifth round a 100-file batch delivered as a single
+`didChangeWatchedFiles`, the shape a branch switch has. Every action carries a
+witness the index has to reflect, and at each checkpoint the corpus is put back
+at its pinned commit and a freshly started server is asked the same questions:
+if the two disagree about a definition, a reference, a document symbol or a
+workspace symbol, the run fails and prints both answers. Memory is sampled at
+each checkpoint in the same quiesced, nothing-open state. Unlike `bb bench` it
+is a pass/fail gate. `bb soak metabase` is the long one, and the seed printed on
+every run replays a failure exactly: `bb soak clj-kondo <seed>`.
 
 > [!NOTE]
 > To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.

@@ -176,7 +176,8 @@ Each is small because the index already holds the data.
 
 ## Milestone 5 — public release
 
-Three plans, in order: correctness and coverage, the benchmark, the release.
+Four plans, in order: correctness and coverage, the benchmark, the soak run,
+the release.
 
 - [x] **Correctness and coverage before 1.0**
   - [x] Integrant keys are no longer offered as vars by the completion pools
@@ -202,6 +203,16 @@ Three plans, in order: correctness and coverage, the benchmark, the release.
       still open: the README table carries the Linux box alone until the
       maintainer runs `bb bench` on the Mac and adds its row.
   Plan: [2026-09-10-1243-release-benchmark.md](plans/2026-09-10-1243-release-benchmark.md) — done
+- [x] **Soak run** (`bb soak`): one long-lived server driven through rounds of
+      realistic churn — buffer edits, saves, files changed, created, deleted
+      and renamed on disk, and a branch-switch-shaped batch every fifth round —
+      on the same pinned corpora, with every action witnessed in the index and
+      every checkpoint compared against a freshly started server. It gates on
+      divergence, on a batch that never lands, on a JSON-RPC error or a logged
+      panic, and on memory growth across identical states. Both corpora pass
+      today: RSS flat at 1.01x over 20 rounds, no divergence, definition median
+      unchanged.
+      Plan: [2026-09-10-2206-soak-run.md](plans/2026-09-10-2206-soak-run.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
@@ -261,7 +272,8 @@ One line each, newest last. Promote or reject; never let this grow silently.
   can perceive, while a cache that answers from a stale entry navigates
   confidently to the wrong place and would mask exactly the resolution bugs
   this list already tracks. Revisit once the live-buffer path is proven under a
-  soak run, not before.
+  soak run, not before — `bb soak` exists now, and the live-buffer path came
+  through 20 rounds on both corpora without a divergence.
 - 2026-09-10 **A failing clj-kondo candidate ends the probe instead of falling
   through to the next one.** On the metabase bench corpus the same binary
   reported `kondo+native` under `bb bench` and "clj-kondo not found - native
