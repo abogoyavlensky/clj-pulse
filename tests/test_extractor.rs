@@ -1721,3 +1721,35 @@ fn test_half_typed_def_forms_extract_without_panicking() {
         assert!(extracted.is_ok(), "extraction failed for {:?}", src);
     }
 }
+
+#[test]
+fn test_cursor_in_a_schema_annotation_sees_no_parameters() {
+    // `(s/defn f [T :- T] T)` with a namespace-level schema `T`: the annotation
+    // reads the global, so the parameter must not be in scope there — renaming
+    // the parameter would otherwise rewrite the schema too.
+    let src =
+        "(ns app\n  (:require [schema.core :as s]))\n\n(def T s/Int)\n\n(s/defn f [T :- T] T)\n";
+    let annotation_col = src.lines().nth(5).unwrap().rfind(":- T").unwrap() as u32 + 3;
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(5, annotation_col),
+    );
+    assert!(
+        locals.is_empty(),
+        "the annotation is evaluated outside the vector: {:?}",
+        locals
+    );
+
+    // The body's `T` is the parameter, and it alone.
+    let body_col = src.lines().nth(5).unwrap().rfind('T').unwrap() as u32;
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(5, body_col),
+    );
+    assert_eq!(
+        locals.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+        vec!["T"],
+        "the parameter binds in the body: {:?}",
+        locals
+    );
+}

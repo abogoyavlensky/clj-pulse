@@ -2819,7 +2819,10 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
                 // scope, so this vector's params are not in scope inside it —
                 // bind nothing and stop. Anywhere else (a body, or a param
                 // binding site) the params do bind.
-                if in_vec && pos_in_or_default(*child, source, pos) {
+                if in_vec
+                    && (pos_in_or_default(*child, source, pos)
+                        || pos_in_schema_annotation(*child, source, pos))
+                {
                     return;
                 }
                 collect_binding_targets(*child, source, out);
@@ -2837,7 +2840,8 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
                     let in_or_default = params
                         .map(|p| {
                             lsp_range_contains(node_to_lsp_range(*p, source), pos)
-                                && pos_in_or_default(*p, source, pos)
+                                && (pos_in_or_default(*p, source, pos)
+                                    || pos_in_schema_annotation(*p, source, pos))
                         })
                         .unwrap_or(false);
                     if !in_or_default {
@@ -3013,6 +3017,29 @@ fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBindi
             }
         }
     }
+}
+
+/// Whether `pos` sits inside a `:-` annotation expression of a parameter
+/// vector. Like an `:or` default, the annotation is evaluated where the vector
+/// is written, not inside it, so the vector's own parameters are not in scope
+/// there: in `(s/defn f [T :- T] …)` the annotation reads the namespace-level
+/// `T`, and renaming the parameter must leave it alone.
+fn pos_in_schema_annotation(node: Node, source: &str, pos: Position) -> bool {
+    let items = named_children(node);
+    let mut i = 0;
+    while i < items.len() {
+        if is_schema_annotation_marker(items[i], source) {
+            if let Some(annotation) = items.get(i + 1) {
+                if lsp_range_contains(node_to_lsp_range(*annotation, source), pos) {
+                    return true;
+                }
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Whether `pos` sits inside an `:or {name default}` *default expression* within
