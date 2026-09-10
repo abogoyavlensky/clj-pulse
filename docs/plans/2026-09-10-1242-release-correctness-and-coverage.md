@@ -221,10 +221,76 @@ Modify:
 **Files:**
 - Modify: `AGENTS.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Update**
+- [x] **Step 1: Update**
   AGENTS.md invariants: var pools exclude keyword-fqn symbols; qualified def heads resolve by name after `:lint-as`. ROADMAP Milestone 5: tick the items this plan owns, set this plan's status to `done`.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
   Run: `bb check && bb e2e && bb e2e-nvim && bb e2e-pulse && bb e2e-calva && bb bench`
   Expected: all gates pass; the bench table is within noise of the MEMORY.md tables (the extractor changed, and AGENTS.md requires a bench run after extractor changes). Calva is required because definition results changed shape for `mu/defn` targets.
   `git commit -m "Record release plan 1 in the roadmap and invariants"`
+
+---
+
+## Status: complete (2026-09-10)
+
+All six tasks are implemented, verified and committed on
+`release-correctness-and-coverage`.
+
+### What shipped
+
+1. **Integrant keys out of the var pools.** One predicate,
+   `completion::is_var_symbol`, applied in the current-namespace,
+   alias-qualified, `:refer :all` and auto-require pools. Four tests; the
+   `:refer :all` pool turned out to be broken too, exactly as the design
+   predicted.
+2. **Qualified def-family heads.** `extractor::head_def_kind` resolves
+   `:lint-as`, then the built-in macro table, then a qualified head's name part,
+   and all three classifying paths (`process_top_level_list`, `walk_list`,
+   `walk_scope`) share it. Cache format version 15. On metabase this indexes
+   2 694 more symbols (37 675 → 40 369 over `src` + `test`), and the bench is
+   unchanged within noise.
+3. **Neovim `jar:` navigation.** `editors/nvim/jar.lua`, embedded in the README
+   and driven by `bb e2e-nvim`, which now opens clojure.core's source in a
+   real Neovim buffer.
+4. **let-go verified.** Three server e2e tests (references, cross-file rename,
+   `unused-namespace` on `.lg`) and a let-go sub-project in the Clojure Pulse
+   fixture with five checks, all green through the real extension.
+5. **`docs/SETTINGS.md`**, read from the parsers, linked from the README, and
+   checked by RELEASE.md's docs sweep. Leiningen docs corrected in README,
+   MEMORY.md and the ROADMAP backlog.
+6. **AGENTS.md and ROADMAP** updated; Milestone 5's first item is ticked.
+
+### Verification
+
+`bb check` (451 unit + 168 e2e), `bb e2e`, `bb e2e-nvim`, `bb e2e-calva`,
+`bb e2e-pulse` (21 checks) and `bb bench` all pass. Every task ended with a
+codex review; the two P2 findings it raised (schema annotations bound as
+locals, the Neovim gate depending on an uncommitted `.cpcache`) were fixed and
+re-verified, and one advisory was filed in the ROADMAP backlog.
+
+### Found on the way, filed not fixed
+
+- **Two files, one namespace.** `Index::namespaces` is keyed by namespace name,
+  so a second `(ns app)` anywhere in the workspace takes the first file's
+  aliases away and its hover and completion answer as if it required nothing.
+  Found because the new let-go fixture first used `(ns app)` beside the
+  deps.edn project's `app.clj`. In the ROADMAP backlog.
+- **`:lint-as` in the locals walker.** `walk_scope` has no config, so a head
+  `:lint-as` maps to a non-fn kind still binds its vector there. In the
+  ROADMAP backlog.
+
+### Deviations
+
+Recorded per task above.
+
+### What the plan could have specified better
+
+Three things it asserted turned out to be false, and each cost a detour:
+the fixture's `.cpcache` and jar cache are gitignored, not committed (the
+Neovim gate needed a resolution step); `when` is not a special form in either
+dialect (the Pulse hover check uses `if`); and the Clojure Pulse extension
+spells the project overrides `classpathEnabled`/`classpathCommand`, not
+nested. A plan that pins a claim about another repo's or a fixture's contents
+should name the file it read it from, the way it pinned the Rust line numbers —
+those were all still accurate.
+
