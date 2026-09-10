@@ -22,6 +22,12 @@
   [zs]
   zs)
 
+(s/defn doc-first
+  "Doc before the schema."
+  :- [s/Int]
+  [ws]
+  ws)
+
 (mu/defn- h [] 1)
 
 (defmulti m :kind)

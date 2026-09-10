@@ -526,6 +526,21 @@ fn qualified_head_def_kind(children: &[Node], source: &str) -> Option<DefKind> {
     DefKind::from_def_symbol(node_text(sym_name_node(head), source))
 }
 
+/// Where a def form's parameter vector can start: past an optional docstring,
+/// an optional attribute map, and a `:-` return schema on either side of them
+/// (`(s/defn f :- Int "doc" [x])` and `(s/defn f "doc" :- Int [x])` both
+/// parse). Everything skipped is an expression or metadata; none of it binds.
+fn skip_def_preamble(children: &[Node], start: usize, source: &str) -> usize {
+    let mut i = skip_return_schema(children, start, source);
+    if children.get(i).map(|n| n.kind()) == Some("str_lit") {
+        i += 1;
+    }
+    if children.get(i).map(|n| n.kind()) == Some("map_lit") {
+        i += 1;
+    }
+    skip_return_schema(children, i, source)
+}
+
 /// The `DefKind` a list head introduces, with the fqn that matched, for every
 /// path that classifies a defining form (definition extraction, the occurrence
 /// walker, the scope walker). `:lint-as` and the built-in macro table are
@@ -1801,12 +1816,12 @@ fn walk_def_form(
         rest_start = 3;
     }
 
-    // The return schema is an expression, not the parameter vector: record its
-    // occurrences here so the loop below never sees it. `rest_start` can sit
-    // past the end while a form is half-typed (`(defmethod foo)`), so clamp
-    // before slicing.
+    // The docstring, attribute map and return schema are all expressions or
+    // metadata: record their occurrences here so the loop below never mistakes
+    // a vector schema for the parameter vector. `rest_start` can sit past the
+    // end while a form is half-typed (`(defmethod foo)`), so clamp first.
     let rest_start = rest_start.min(children.len());
-    let params_start = skip_return_schema(children, rest_start, ctx.source);
+    let params_start = skip_def_preamble(children, rest_start, ctx.source);
     for child in &children[rest_start..params_start] {
         walk_occurrences(*child, ctx, scope, out);
     }
@@ -2861,16 +2876,8 @@ fn walk_scope_def(
 ) {
     match kind {
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro => {
-            // Skip the name, an optional `:-` return schema (on either side of
-            // the docstring) and an optional docstring / attr-map before params.
-            let mut rest = skip_return_schema(children, 2, source);
-            if children.get(rest).map(|n| n.kind()) == Some("str_lit") {
-                rest += 1;
-            }
-            if children.get(rest).map(|n| n.kind()) == Some("map_lit") {
-                rest += 1;
-            }
-            rest = skip_return_schema(children, rest, source);
+            // Skip the name and everything between it and the parameters.
+            let rest = skip_def_preamble(children, 2, source);
             if rest <= children.len() {
                 walk_scope_fn_tail(&children[rest.min(children.len())..], source, pos, out);
             }
@@ -2884,7 +2891,7 @@ fn walk_scope_def(
                     return;
                 }
             }
-            let rest = skip_return_schema(children, 3, source);
+            let rest = skip_def_preamble(children, 3, source);
             if children.len() > rest {
                 walk_scope_fn_tail(&children[rest..], source, pos, out);
             }

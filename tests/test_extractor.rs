@@ -1661,6 +1661,12 @@ fn test_vector_return_schema_is_not_the_parameter_vector() {
     };
     assert_eq!(sym("vector-schema").params, vec!["[xs]"]);
     assert_eq!(sym("seq-schema").params, vec!["[zs]"]);
+    // Schema parses the docstring on either side of the annotation.
+    assert_eq!(sym("doc-first").params, vec!["[ws]"]);
+    assert_eq!(
+        sym("doc-first").doc.as_deref(),
+        Some("Doc before the schema.")
+    );
     assert_eq!(
         sym("seq-schema").doc.as_deref(),
         Some("Doc after the schema."),
@@ -1670,11 +1676,11 @@ fn test_vector_return_schema_is_not_the_parameter_vector() {
     // The schema's own names are usages, and the parameters are locals.
     assert_eq!(
         occurrences_of(&occs, "schema.core/Int").len(),
-        2,
-        "`s/Int` in the parameter and in the return schema: {:?}",
+        3,
+        "`s/Int` in the parameter and in both return schemas: {:?}",
         occs
     );
-    for phantom in ["my.app/xs", "my.app/zs"] {
+    for phantom in ["my.app/xs", "my.app/zs", "my.app/ws"] {
         assert!(
             occurrences_of(&occs, phantom).is_empty(),
             "{} must bind as a local: {:?}",
