@@ -13,10 +13,6 @@
 //! without `CLJ_PULSE_SOAK_ROOT`. The corpus is churned in place, so
 //! [`CorpusGuard`] restores it on the way out, panic or not.
 
-// The oracle lands one commit before the driver that runs it, so everything
-// below is dead until `bb soak` exists. Removed with that commit.
-#![allow(dead_code)]
-
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1181,10 +1177,16 @@ fn location_key(location: &Value) -> String {
 fn brief(value: &Value) -> String {
     let text = value.to_string();
     if text.len() <= 300 {
-        text
-    } else {
-        format!("{}… ({} bytes)", &text[..300], text.len())
+        return text;
     }
+    // On a character boundary, not on byte 300: a Clojure identifier or a path
+    // can be non-ASCII, and slicing through one would panic in the very report
+    // that exists to explain a failure.
+    let mut cut = 300;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… ({} bytes)", &text[..cut], text.len())
 }
 
 /// What one side has that the other does not — the whole set is unreadable and
@@ -1254,13 +1256,20 @@ struct LogRecord {
 impl LogRecord {
     fn absorb(&mut self, root: &Path) {
         let text = LspClient::server_log(root);
-        if text.len() >= self.seen {
-            self.text.push_str(&text[self.seen..]);
-        } else {
-            // Truncated since the last read: what is there now is all new.
-            self.text.push_str(&text);
-        }
+        // A truncation that has already been re-grown past the old length would
+        // read as an append, and everything before the offset — a panic among
+        // it — would be skipped. `reset` is called at the one moment a
+        // truncation happens, so `seen` is only ever an offset into a file that
+        // has been growing since.
+        let from = self.seen.min(text.len());
+        self.text.push_str(&text[from..]);
         self.seen = text.len();
+    }
+
+    /// Called when the log is about to be truncated by another server starting
+    /// in the same directory: whatever the file holds next is new.
+    fn reset(&mut self) {
+        self.seen = 0;
     }
 
     /// Every panic the run logged. `install_panic_hook` records payload and
@@ -1342,6 +1351,9 @@ fn checkpoint(
     // record is taken first.
     log.absorb(root);
     let mut reference = Session::production(root);
+    // `main.rs` opens the log with `File::create`: the line above is the last
+    // moment the churned server's own record can be read intact.
+    log.reset();
     reference.client().initialize_no_wait(root);
     let reference_note = settle(&mut reference, Instant::now() + REQUEST_TIMEOUT);
     probes.trim_queries(&mut reference);
@@ -1393,6 +1405,326 @@ fn checkpoint(
         resolved: churned_answers.resolved,
         reference_resolved: reference_answers.resolved,
         reference_note,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The run
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "needs CLJ_PULSE_SOAK_ROOT pointing at a large Clojure checkout; run with `bb soak`"]
+fn soak_long_session() {
+    let Some(root) = std::env::var_os("CLJ_PULSE_SOAK_ROOT") else {
+        println!("CLJ_PULSE_SOAK_ROOT is unset — skipping. Run `bb soak`.");
+        return;
+    };
+    let root = PathBuf::from(root)
+        .canonicalize()
+        .expect("CLJ_PULSE_SOAK_ROOT does not exist");
+    let corpus = std::env::var("CLJ_PULSE_SOAK_CORPUS").unwrap_or_else(|_| "(unnamed)".into());
+    let settings = Settings::from_env(root, corpus);
+    settings.print();
+
+    let mut probes = Probes::discover(&settings.root, settings.probes);
+    probes.print(&settings.root);
+    assert!(
+        !probes.sites.is_empty(),
+        "no probe site found under {} — the oracle would compare nothing",
+        settings.root.display()
+    );
+
+    let mut churn = Churn::new(&settings.root, settings.seed);
+    assert!(
+        !churn.tracked.is_empty(),
+        "no churnable source file under {}/src",
+        settings.root.display()
+    );
+    // Created before the first edit, so a panic anywhere below still leaves the
+    // checkout at its pinned commit.
+    let guard = CorpusGuard::new(&settings.root, &churn.soak_dir);
+    let mut log = LogRecord::default();
+
+    let mut churned = Session::production(&settings.root);
+    let started = Instant::now();
+    churned.client().initialize_no_wait(&settings.root);
+    let note = settle(&mut churned, Instant::now() + REQUEST_TIMEOUT);
+    println!();
+    println!("churned server settled in {:?} ({note})", started.elapsed());
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut checkpoints: Vec<Checkpoint> = Vec::new();
+    for round in 1..=settings.rounds {
+        let bulk = settings.is_bulk(round);
+        let count = if bulk {
+            settings.bulk_files
+        } else {
+            settings.files
+        };
+        let edits = churn.draw(round, count, bulk);
+        let witnesses = churn.apply(churned.client(), &edits);
+        match converge(&mut churned, &witnesses, settings.converge_timeout) {
+            Ok(took) => println!(
+                "round {round}{}: {} edits, {} witnesses, converged in {:?}",
+                if bulk { " (bulk)" } else { "" },
+                edits.len(),
+                witnesses.len(),
+                took
+            ),
+            Err(stragglers) => {
+                println!(
+                    "round {round}: {} of {} witnesses never landed:",
+                    stragglers.len(),
+                    witnesses.len()
+                );
+                for straggler in &stragglers {
+                    println!("    {straggler}");
+                }
+                failures.push(format!(
+                    "round {round}: {} witnesses never landed (first: {})",
+                    stragglers.len(),
+                    stragglers.first().map(String::as_str).unwrap_or("-")
+                ));
+            }
+        }
+        if !churned.alive() {
+            failures.push(format!("the server exited during round {round}"));
+            break;
+        }
+        if settings.is_checkpoint(round) {
+            let point = checkpoint(
+                &mut churned,
+                &mut churn,
+                &guard,
+                &mut probes,
+                &settings,
+                &mut log,
+                round,
+            );
+            point.print(&settings);
+            point.print_json(&settings);
+            checkpoints.push(point);
+        }
+    }
+
+    // A run of zero rounds is the oracle checking itself: two servers on
+    // identical input have to agree, and agree about something, before any
+    // divergence can be blamed on churn.
+    if checkpoints.is_empty() && churned.alive() {
+        let point = checkpoint(
+            &mut churned,
+            &mut churn,
+            &guard,
+            &mut probes,
+            &settings,
+            &mut log,
+            0,
+        );
+        point.print(&settings);
+        point.print_json(&settings);
+        checkpoints.push(point);
+    }
+
+    log.absorb(&settings.root);
+    failures.extend(verdicts(&checkpoints, &settings, &churned, &log));
+
+    println!();
+    println!("soak summary");
+    println!(
+        "  {:<22} {} rounds, {} checkpoints, {:?} wall clock",
+        "ran",
+        settings.rounds,
+        checkpoints.len(),
+        started.elapsed()
+    );
+    if let (Some(first), Some(last)) = (checkpoints.first(), checkpoints.last()) {
+        println!(
+            "  {:<22} {} -> {} ({:.2}x)",
+            "rss",
+            mib(first.rss_kib),
+            mib(last.rss_kib),
+            growth(first.rss_kib, last.rss_kib).unwrap_or(f64::NAN)
+        );
+        println!(
+            "  {:<22} {} -> {}",
+            "definition median",
+            us(first.definition),
+            us(last.definition)
+        );
+    }
+    println!("  {:<22} {}", "seed", settings.seed);
+
+    println!();
+    if failures.is_empty() {
+        println!("PASS");
+    } else {
+        println!("FAIL");
+        for failure in &failures {
+            println!("  {failure}");
+        }
+        // The corpus is restored by `guard`'s `Drop` on the way out of this
+        // panic, and the exit code is what makes `bb soak` a gate.
+        panic!(
+            "{} oracle failure(s); replay with CLJ_PULSE_SOAK_SEED={}",
+            failures.len(),
+            settings.seed
+        );
+    }
+}
+
+/// Everything the oracles have to say once the rounds are done. Separate from
+/// the loop so a failure reads as one list rather than as scattered output.
+fn verdicts(
+    checkpoints: &[Checkpoint],
+    settings: &Settings,
+    churned: &Session,
+    log: &LogRecord,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for point in checkpoints {
+        for divergence in &point.divergences {
+            out.push(format!(
+                "round {}: {} diverged at {}",
+                point.round, divergence.request, divergence.site
+            ));
+        }
+        for straggler in &point.stragglers {
+            out.push(format!(
+                "round {}: the restore never landed: {straggler}",
+                point.round
+            ));
+        }
+        if point.reference_resolved == 0 {
+            out.push(format!(
+                "round {}: no definition probe resolved on the reference server — the probe set is broken, not the index",
+                point.round
+            ));
+        }
+    }
+    // Memory is compared at the first and last checkpoint alone, both sampled
+    // quiesced with nothing open and the disk at baseline: the only two states
+    // in the run that mean the same thing.
+    if let (Some(first), Some(last)) = (checkpoints.first(), checkpoints.last()) {
+        if let Some(growth) = growth(first.rss_kib, last.rss_kib) {
+            if growth > settings.rss_growth {
+                out.push(format!(
+                    "RSS grew {growth:.2}x across checkpoints ({} -> {}), over the {}x ceiling",
+                    mib(first.rss_kib),
+                    mib(last.rss_kib),
+                    settings.rss_growth
+                ));
+            }
+        }
+    }
+    for error in &churned.errors {
+        out.push(format!("the server answered an error: {error}"));
+    }
+    for panic in log.panics() {
+        out.push(format!("a handler panicked: {panic}"));
+    }
+    out
+}
+
+fn growth(first: Option<u64>, last: Option<u64>) -> Option<f64> {
+    match (first, last) {
+        (Some(first), Some(last)) if first > 0 => Some(last as f64 / first as f64),
+        _ => None,
+    }
+}
+
+impl Settings {
+    fn print(&self) {
+        println!();
+        println!("soak settings");
+        println!("  {:<22} {}", "corpus", self.corpus);
+        println!("  {:<22} {}", "root", self.root.display());
+        println!("  {:<22} {}", "seed", self.seed);
+        println!("  {:<22} {}", "rounds", self.rounds);
+        println!("  {:<22} {}", "files per round", self.files);
+        println!(
+            "  {:<22} every {} rounds, {} files",
+            "bulk round", self.bulk_every, self.bulk_files
+        );
+        println!(
+            "  {:<22} every {} rounds",
+            "checkpoint", self.checkpoint_every
+        );
+        println!("  {:<22} {:?}", "converge timeout", self.converge_timeout);
+        println!("  {:<22} {}x", "rss growth ceiling", self.rss_growth);
+        println!("  {:<22} {}", "probe sites", self.probes);
+    }
+}
+
+impl Checkpoint {
+    fn print(&self, settings: &Settings) {
+        println!();
+        println!("checkpoint after round {}", self.round);
+        println!("  {:<22} {}", "rss", mib(self.rss_kib));
+        println!(
+            "  {:<22} {} ({} of {SAMPLES} samples)",
+            "definition median",
+            us(self.definition),
+            self.definition_samples
+        );
+        println!(
+            "  {:<22} {} of {} probes (reference: {})",
+            "definitions resolved",
+            self.resolved,
+            settings
+                .probes
+                .min(self.resolved.max(self.reference_resolved)),
+            self.reference_resolved
+        );
+        println!("  {:<22} {}", "reference settled by", self.reference_note);
+        if self.divergences.is_empty() && self.stragglers.is_empty() {
+            println!("  {:<22} none", "divergences");
+        } else {
+            println!("  {:<22} {}", "divergences", self.divergences.len());
+            for divergence in &self.divergences {
+                divergence.print();
+            }
+            for straggler in &self.stragglers {
+                println!("  restore never landed: {straggler}");
+            }
+        }
+    }
+
+    /// One line per checkpoint, in the shape `bb bench` prints, so a later run
+    /// can be diffed against this one.
+    fn print_json(&self, settings: &Settings) {
+        println!(
+            "SOAK_JSON {}",
+            json!({
+                "corpus": settings.corpus,
+                "seed": settings.seed,
+                "round": self.round,
+                "rss_kib": self.rss_kib,
+                "definition_us": self.definition.map(|d| d.as_micros() as u64),
+                "definition_samples": self.definition_samples,
+                "divergences": self.divergences.len(),
+                "stragglers": self.stragglers.len(),
+                "definitions_resolved": self.resolved,
+                "reference_definitions_resolved": self.reference_resolved,
+                "reference_settled_by": self.reference_note,
+            })
+        );
+    }
+}
+
+/// Latency, in microseconds: a definition on a warm index is well under a
+/// millisecond, and "0 ms -> 0 ms" would report nothing about drift, which is
+/// the whole reason the number is here.
+fn us(d: Option<Duration>) -> String {
+    match d {
+        Some(d) => format!("{} µs", d.as_micros()),
+        None => "n/a".to_string(),
+    }
+}
+
+fn mib(kib: Option<u64>) -> String {
+    match kib {
+        Some(kib) => format!("{:.1} MiB", kib as f64 / 1024.0),
+        None => "n/a".to_string(),
     }
 }
 

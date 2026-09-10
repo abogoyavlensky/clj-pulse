@@ -164,6 +164,21 @@
                                           lsp (assoc "CLJ_PULSE_BENCH_CLOJURE_LSP" lsp))}
                             "cargo test --release --test test_bench -- --ignored --nocapture"))))}
 
+  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
+        ;; One corpus, not both: a soak is long enough that running both by
+        ;; default is a mistake. clj-kondo is the default because a checkpoint
+        ;; there costs seconds rather than a minute.
+        :task (let [[name seed] *command-line-args*
+                    name (or name "clj-kondo")
+                    dir (bench-corpus! name)]
+                (bench-prepare! dir)
+                ;; --release: the debug build churns slowly enough to change
+                ;; what the run covers in an hour.
+                (shell {:extra-env (cond-> {"CLJ_PULSE_SOAK_ROOT" (str dir)
+                                            "CLJ_PULSE_SOAK_CORPUS" name}
+                                     seed (assoc "CLJ_PULSE_SOAK_SEED" (str seed)))}
+                       "cargo test --release --test test_soak -- --ignored --nocapture"))}
+
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}
 
