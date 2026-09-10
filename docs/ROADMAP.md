@@ -176,27 +176,51 @@ Each is small because the index already holds the data.
 
 ## Milestone 5 — public release
 
-- [ ] Windows build target restored in the release matrix (commented out for
-      CI time), or documented as unsupported.
-- [ ] Settings documented in one place: every `.clj-pulse/config.edn` key with
-      its default and the matching Clojure Pulse setting.
-- [ ] Neovim setup verified against `bb e2e-nvim` and documented in README
-      (done in README; keep it true).
-- [ ] Issue templates and a short contributing note.
-- [ ] Version 1.0 tag once Milestones 0–3 are done.
+Three plans, in order: correctness and coverage, the benchmark, the release.
+
+- [ ] **Correctness and coverage before 1.0**
+  - [ ] Integrant keys are no longer offered as vars by the completion pools
+        (promoted from the Backlog).
+  - [ ] Qualified def-family heads (`mu/defn`, `s/defn`) define navigable
+        functions; on metabase one function in eight is invisible today.
+  - [ ] Neovim opens `jar:` locations through a documented snippet
+        (`editors/nvim/jar.lua`) that reads `clojure/dependencyContents`
+        (promoted from the Backlog; server-side materialization stays there).
+  - [ ] let-go verified end to end: references, rename, and diagnostics on
+        `.lg` files in the server suite, and a let-go project in the Clojure
+        Pulse e2e fixture.
+  - [ ] Settings documented in one place (`docs/SETTINGS.md`): every
+        `.clj-pulse/config.edn` key with its default and the matching Clojure
+        Pulse setting, initialization options, environment variables.
+  - [ ] Leiningen docs corrected: stage 3 runs `lein classpath`, direct deps
+        only is the fallback.
+  Plan: [2026-09-10-1242-release-correctness-and-coverage.md](plans/2026-09-10-1242-release-correctness-and-coverage.md) — in progress
+- [ ] **Benchmark against clojure-lsp**: two pinned corpora (metabase,
+      clj-kondo), both servers through the same harness, behavior-based
+      metrics, cold and warm, a README "Performance" section with the caveats
+      next to the numbers and a one-line reproduce command.
+  Plan: [2026-09-10-1243-release-benchmark.md](plans/2026-09-10-1243-release-benchmark.md) — in progress
+- [ ] **Release**
+  - [ ] Windows build target restored in the release matrix (build-only,
+        untested), proven by a `v1.0.0-rc.1` tag before the real one.
+  - [ ] Issue templates and a short contributing note.
+  - [ ] Docs sweep per RELEASE.md; stale alpha and Windows notes removed.
+  - [ ] Version 1.0.0 tag.
+  - [ ] `clojurePulse.kondo.liveMaxKb` in the Clojure Pulse extension and its
+        release (promoted from the Backlog); gates the announcement, not the
+        tag.
   Plan: —
 
 ## Backlog — unscheduled, not forgotten
 
 One line each, newest last. Promote or reject; never let this grow silently.
 
-- 2026-09-05 **Neovim and Zed cannot open `jar:` locations.** Their built-in
-  clients have no `jar:` handler, so library navigation dead-ends for two
-  priority-or-best-effort editors. Options: a documented Lua/Zed snippet that
-  reads the entry via `clojure/dependencyContents`, or a server-side fallback
-  that materializes the entry under `.clj-pulse/` and returns a `file:` URI
-  when the client is not known to handle `jar:` (`clientInfo.name`).
-  Candidate for Milestone 3.
+- 2026-09-05 **Server-side `jar:` materialization for clients without a
+  handler** (Zed, and Neovim users who skip the snippet): write the entry
+  under `.clj-pulse/` and return a `file:` URI when `clientInfo.name` is not a
+  known `jar:`-capable client. The Neovim snippet in Milestone 5 covers the
+  priority editor without it.
+
 - 2026-09-05 **clj-kondo analysis as an optional enrichment source.** Names
   defined through kondo hooks (`:analysis` output) could feed the index without
   running hook code. Pairs with "Custom macros beyond `:lint-as`" below.
@@ -210,19 +234,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
   Neovim and Zed fold from tree-sitter. A server would only add semantic kinds
   (`Comment`, `Imports`) for "fold all comments" style commands. Revisit if an
   editor in the priority list turns out to need it.
-- 2026-09-08 **Integrant keys are offered as vars by the ordinary completion
-  pools.** `(defmethod ig/init-key ::database …)` indexes a symbol named
-  `database` with the keyword fqn `:ns/database`, so the current-namespace and
-  alias pools complete it as a bare `database` / `sys/database` — a var that
-  does not exist. Found by a review of the keyword-completion branch, which
-  fixed the auto-require pool only. One filter on `fqn.starts_with(':')` in the
-  var pools, plus a decision on whether `::database` should complete as a
-  keyword instead.
-- 2026-09-09 **`clojurePulse.kondo.liveMaxKb` in the Clojure Pulse extension.**
-  The server reads `"kondo": {"liveMaxKb": …}` from editor settings already;
-  the extension needs the `package.json` setting and its settings push
-  (`../clojure-pulse-vscode`). Until then the README points at
-  `:live-max-kb` in `.clj-pulse/config.edn`.
 - 2026-09-09 **Cache the extraction per document version, not just the
   tree.** With the tree cached, a definition request on the 452 KiB bench file
   is the 21 ms definitions-and-occurrences walk, and `unused_requires` is
