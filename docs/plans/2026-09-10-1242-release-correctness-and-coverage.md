@@ -260,7 +260,7 @@ All six tasks are implemented, verified and committed on
    MEMORY.md and the ROADMAP backlog.
 6. **AGENTS.md and ROADMAP** updated; Milestone 5's first item is ticked.
 
-### Post-review fix
+### Post-review fixes
 
 A branch-wide codex review found the fallback reading a *vector* return schema
 as the parameter vector — `(mu/defn f :- [:vector :int] [xs] …)`, which is
@@ -270,6 +270,11 @@ is walked for occurrences instead, and the AGENTS.md invariant states the
 `walk_scope` limitation rather than claiming all three paths share the
 resolver. Symbol count on metabase is unchanged (40 369), so the fix costs no
 definitions.
+
+Reviewing that fix, codex found the new slice panicking on a half-typed form
+(`(defmethod foo)` — `rest_start` sits past the end), which the keystroke path
+hits constantly. Clamped, with a test over six half-typed forms, and the jar
+cache version went to 16 since extracted signatures changed again.
 
 ### Verification
 
