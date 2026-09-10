@@ -106,25 +106,40 @@ Modify:
 - Modify: `src/index/extractor.rs`, `src/index/jar_cache.rs`
 - Test: `tests/test_extractor.rs`, `tests/fixtures/snippets/qualified_defs.clj`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Snippet with `[malli.util :as mu]`, `[schema.core :as s]`, and `[clojure.spec.alpha :as spec]` requires, `(mu/defn f :- :int [x :- :int] (str x))`, `(s/defn g [y] y)`, `(mu/defn- h [] 1)`, `(mu/defmethod m :k [_] 1)`, and `(spec/def ::user string?)`. Assert symbols `f` (Defn), `g` (Defn), `h` (DefnPrivate), `m` (Defmethod) with the right names and ranges, and *no* symbol for `::user` while its keyword occurrence is still recorded. Assert the occurrences: `x` inside `f` is not a var occurrence (it is a bound local), and `str` is. Add a `:lint-as` override test: with `malli.util/defn` mapped to `clojure.core/def`, `f` is indexed as `Def`, proving the fallback never outranks the config. Check the existing `mu/defn` param-vector handling: `f`'s params must not include the `:-` return schema; if `extract_def` picks up `:-` and `:int` as params, add the fix here and a test for the signature.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
   Run: `cargo test --test test_extractor qualified_defs`
   Expected: FAIL (no symbols).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `head_def_kind` in the extractor, used by `process_top_level_list`, `walk_list`, and `walk_scope` as designed. Bump `CACHE_FORMAT_VERSION` to 15.
 
-- [ ] **Step 4: e2e**
+- [x] **Step 4: e2e**
   Add `(mu/defn scale [factor x] (* factor x))` to a `simple_project` file, with a top-level `(def factor 10)` elsewhere in the project. Assert definition, hover, and references reach `scale`; references on the parameter `factor` inside `scale` list only the local's sites, never the global `factor`; and rename of that parameter edits only the local (the parameter-shadowing regression the review asked for).
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `bb check && bb e2e`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "Resolve qualified def-family heads like mu/defn by name"`
+
+> Deviation: the e2e fixture keeps `(def factor 10)` in the same new file as
+> `(mu/defn scale …)` rather than elsewhere in the project — `core.clj`'s
+> outline is pinned by `test_e2e_document_symbols_outline`, and a global in the
+> same namespace is the sharper shadowing test (the name really does resolve
+> there).
+> Deviation: codex found that the new fallback sent `[x :- s/Int]` whole to the
+> binding collectors, inventing a local `Int` and losing the reference to the
+> schema var. Fixed in a follow-up commit (`is_schema_annotation_marker`): the
+> element after a `:-` marker is walked as a usage in both the occurrence and
+> the scope collector.
+> Advisory (not fixed, filed in the ROADMAP backlog): `walk_scope` cannot see
+> `:lint-as`, so a qualified head the config maps to a *non*-fn kind still binds
+> its vector as parameters there. Pre-existing for bare heads; fixing it means
+> threading `ExtractConfig` through `locals_in_scope_at`.
 
 ### Task 3: Neovim `jar:` snippet
 

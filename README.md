@@ -264,8 +264,68 @@ vim.lsp.enable("clj_pulse")
 vim.filetype.add({ extension = { lg = "clojure" } })
 ```
 
-`jar:` locations need a client that answers them; Neovim's built-in client
-does not, so definitions into library JARs are not opened yet.
+#### Library navigation
+
+Go-to-definition into a dependency answers with a `jar:` URI. Neovim's built-in
+client opens an empty buffer for it and fires `BufReadCmd`; the handler below
+fills that buffer from the server's `clojure/dependencyContents`. Save it as
+`~/.config/nvim/lua/clj_pulse_jar.lua`:
+
+```lua
+-- Opens `jar:` locations in Neovim.
+--
+-- Go-to-definition into a library lands on a `jar:file:///…!/clojure/core.clj`
+-- URI. Neovim's built-in LSP client creates an empty buffer for it and fires
+-- `BufReadCmd`; clj-pulse serves the entry's text through
+-- `clojure/dependencyContents`. Call `setup()` once, after `vim.lsp.enable`.
+local M = {}
+
+--- @param opts? { client_name?: string }  `client_name` must match the name
+--- the LSP client is registered under (default `"clj_pulse"`).
+function M.setup(opts)
+  local client_name = (opts or {}).client_name or "clj_pulse"
+  vim.api.nvim_create_autocmd("BufReadCmd", {
+    -- `jar:file://…` is not a URL Neovim recognizes (the scheme is not
+    -- followed by `://`), so it names the buffer relative to the working
+    -- directory: the pattern has to allow that prefix, and the URI is read
+    -- back out of the name.
+    pattern = { "jar:*", "*/jar:*" },
+    callback = function(args)
+      local uri = args.file:match("jar:.*")
+      local client = vim.lsp.get_clients({ name = client_name })[1]
+      if not uri or not client then
+        return
+      end
+      local res = client:request_sync("clojure/dependencyContents", { uri = uri }, 5000)
+      if not res or res.err or type(res.result) ~= "string" then
+        return
+      end
+      vim.bo[args.buf].modifiable = true
+      vim.api.nvim_buf_set_lines(args.buf, 0, -1, false, vim.split(res.result, "\n"))
+      vim.bo[args.buf].filetype = "clojure"
+      vim.bo[args.buf].buftype = "nofile"
+      vim.bo[args.buf].modifiable = false
+      vim.bo[args.buf].modified = false
+    end,
+  })
+end
+
+return M
+```
+
+and call it after `vim.lsp.enable`, with `client_name` matching the name the
+client is registered under (`clj_pulse` above, which is the default):
+
+```lua
+require("clj_pulse_jar").setup()
+```
+
+The same file ships as [`editors/nvim/jar.lua`](editors/nvim/jar.lua); vendor it
+and load it in one line instead:
+
+```lua
+dofile("/path/to/clj-pulse/editors/nvim/jar.lua").setup()
+```
 
 ### Zed
 

@@ -22,7 +22,12 @@ end
 vim.cmd.edit(root .. "/src/utils.clj")
 local buf = vim.api.nvim_get_current_buf()
 
+-- The `jar:` handler users are told to install (README, "Library navigation"),
+-- driven here exactly as they would drive it.
+dofile(vim.fn.fnamemodify("editors/nvim/jar.lua", ":p")).setup({ client_name = "clj-pulse" })
+
 local indexed = false
+local libs_indexed = false
 local client_id = vim.lsp.start({
   name = "clj-pulse",
   cmd = { server },
@@ -31,6 +36,9 @@ local client_id = vim.lsp.start({
     ["window/logMessage"] = function(_, params)
       if params and params.message and params.message:find("Indexed") then
         indexed = true
+      end
+      if params and params.message and params.message:find("library indexing complete") then
+        libs_indexed = true
       end
     end,
   },
@@ -111,6 +119,45 @@ check(
       > (innermost.range["end"].line - innermost.range.start.line),
   "selectionRange: the chain expands past the line the cursor is on"
 )
+
+-- `jar:` navigation: `str` in utils.clj is clojure.core's, which lives in the
+-- clojure JAR. Opening that location goes through the snippet above.
+vim.wait(60000, function()
+  return libs_indexed
+end, 100)
+check(libs_indexed, "library indexing complete (window/logMessage received)")
+
+local sl, sc
+for i, l in ipairs(lines) do
+  local s = l:find("(str ", 1, true)
+  if s then
+    sl, sc = i - 1, s
+  end
+end
+check(sl ~= nil, "found the `str` call in utils.clj")
+
+resp = vim.lsp.buf_request_sync(buf, "textDocument/definition", {
+  textDocument = { uri = vim.uri_from_bufnr(buf) },
+  position = { line = sl, character = sc },
+}, 10000) or {}
+local jar_def = resp[client_id] and resp[client_id].result
+if jar_def and jar_def[1] then
+  jar_def = jar_def[1]
+end
+check(
+  jar_def ~= nil and jar_def.uri ~= nil and jar_def.uri:match("^jar:") ~= nil,
+  "definition: `str` resolves to a jar: URI"
+)
+
+if jar_def and jar_def.uri then
+  vim.lsp.util.show_document(jar_def, "utf-16", { focus = true })
+  local jar_buf = vim.api.nvim_get_current_buf()
+  local jar_lines = vim.api.nvim_buf_get_lines(jar_buf, 0, -1, false)
+  local body = table.concat(jar_lines, "\n")
+  check(body:find("(defn str", 1, true) ~= nil, "jar: buffer holds clojure.core's source")
+  check(vim.bo[jar_buf].filetype == "clojure", "jar: buffer is a Clojure buffer")
+  check(not vim.bo[jar_buf].modifiable, "jar: buffer is read-only")
+end
 
 if failures > 0 then
   print(failures .. " check(s) FAILED")
