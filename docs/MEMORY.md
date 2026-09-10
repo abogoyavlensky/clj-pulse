@@ -72,6 +72,26 @@ only number that moved much, and only before its global cache was isolated
 - **clojure-lsp answers a definition faster once it is up** — 3-7 ms against
   our 16-34 ms — and it is answering from a fuller analysis. That row is the
   one to watch when the extractor changes.
+- **That gap is per-request re-analysis, and it scales with the open file.**
+  Every position request re-reads the buffer: `references::resolve_fqn_at`
+  calls `extractor::extract_full_tree`, which rebuilds every symbol and
+  occurrence and then scans them linearly for the cursor. The index lookup
+  after it is a hash lookup. Measured on the same warm metabase checkout,
+  through one client, 20 samples each:
+
+  | Open file | clj-pulse | clojure-lsp |
+  |---|---|---|
+  | `src/metabase/classloader/init.clj`, 190 B | 2.1 ms | 2.1 ms |
+  | `test/metabase/dashboards_rest/api_test.clj`, 452 KiB | 27.2 ms | 6.3 ms |
+
+  On a small file the two are indistinguishable and the floor is the JSON-RPC
+  round trip. The bench probes the largest `.clj` in each repo, so its
+  definition row is our worst case and not clojure-lsp's, which reads a stored
+  analysis and barely moves. The fix is scheduled in
+  [ROADMAP.md](ROADMAP.md) (Milestone 4): cache the `Analysis` per (uri,
+  version) so the walk happens once per edit rather than once per request. The
+  native lint pass on the same buffer would reuse it — `unused_requires` is
+  28 ms of its 65 ms for the same reason.
 - **Cold and warm are per server.** Cold deletes `.clj-pulse/jar-cache` for
   clj-pulse and `.lsp/.cache`, `.clj-kondo/.cache` *and* clojure-lsp's global
   `$XDG_CACHE_HOME/clojure-lsp` for clojure-lsp — the last one holds ~150 MiB

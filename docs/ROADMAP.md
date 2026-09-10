@@ -172,6 +172,19 @@ Each is small because the index already holds the data.
 - [ ] `workspace/willRenameFiles`. Rewrite the `ns` form and every require
       when a file moves.
 - [ ] Reference-count code lens, off by default.
+- [ ] **Cache the extraction per document version, not just the tree.**
+      Promoted from the Backlog on 2026-09-10: the clojure-lsp benchmark
+      priced it. Every position request re-walks the open buffer —
+      `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which
+      rebuilds every symbol and occurrence and then scans them linearly — so
+      definition latency tracks file size: 2 ms on a 190-byte file, 27 ms on
+      metabase's 452 KiB one, against clojure-lsp's 7 ms, which looks the
+      answer up in a stored analysis. `unused_requires` is 28 ms of the 65 ms
+      native lint pass on the same file for the same reason. Caching the
+      `Analysis` per (uri, version) makes the walk happen once per edit rather
+      than once per request, and the lint pass on that buffer reuses it.
+      Resolution has to stay live-buffer based ([MEMORY.md](MEMORY.md)), so the
+      cache is keyed by the version `didChange` already carries.
   Plan: —
 
 ## Milestone 5 — public release
@@ -256,13 +269,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
   fqn and the last dialect indexed wins; it should prefer the dialect of the
   file that is asking. Found by the clojure-lsp benchmark, which has to accept
   either file to time the metric at all.
-- 2026-09-09 **Cache the extraction per document version, not just the
-  tree.** With the tree cached, a definition request on the 452 KiB bench file
-  is the 21 ms definitions-and-occurrences walk, and `unused_requires` is
-  28 ms of the 65 ms native pass ([MEMORY.md](MEMORY.md)). Caching the
-  `Analysis` per version would make position requests walk nothing. Only worth
-  it if a real project's largest files make the 22 ms show.
-
 ## Best effort — do when cheap or asked
 
 - **Native cljfmt-compatible formatter** (`textDocument/formatting` and

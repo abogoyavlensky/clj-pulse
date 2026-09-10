@@ -161,6 +161,14 @@ What the tables do not say:
   caches at all, the same metabase row reads 3.4 s against 293 s.
 - clojure-lsp answers a definition faster once it is up, from a fuller
   analysis.
+- The definition row is measured on the largest file in each repo, which is a
+  worst case for clj-pulse and not for clojure-lsp: we re-read the open
+  buffer's definitions and usages on every request, while it looks the answer
+  up in the analysis it stored at startup. On the same metabase checkout, a
+  definition in a 190-byte file takes 2.1 ms from either server; in the 452 KiB
+  file it is 27 ms from clj-pulse and 6 ms from clojure-lsp. Caching that
+  analysis per document version is scheduled in
+  [docs/ROADMAP.md](docs/ROADMAP.md).
 - The 452 KiB row is clj-pulse's native lint tier alone: that file is above
   `:kondo {:live-max-kb 256}`, so clj-kondo sits out the keystroke path. The
   251 KiB row is the same measurement with clj-kondo in it. clojure-lsp runs
