@@ -175,14 +175,26 @@ Modify:
 - Create: `tests/fixtures/letgo_project/src/util.lg`, `scripts/pulse-e2e/fixture/letgo/…`
 - Modify: `tests/test_e2e.rs`, `scripts/pulse-e2e/tests.js`
 
-- [ ] **Step 1: Server e2e**
+- [x] **Step 1: Server e2e**
   `test_e2e_letgo_references_across_files`, `test_e2e_letgo_rename_across_files`, `test_e2e_letgo_unused_require_diagnostic`. Run: `cargo test --test test_e2e letgo`. Expected: PASS, or a real finding to fix in the smallest way.
 
-- [ ] **Step 2: Pulse fixture and checks**
+- [x] **Step 2: Pulse fixture and checks**
   Add the `letgo/` sub-project and the four checks to `tests.js`. Run: `bb e2e-pulse`. Expected: PASS. If the sub-project is not detected, check `projects::detect` depth and the `.gitignore` in the fixture before touching the server.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "Verify let-go support end to end, server and extension"`
+
+> Deviation: the plan's Pulse check hovers `when` for "the special-form
+> description"; `when` is a macro in both dialects, so the fixture and the check
+> use `if`, which `builtins::COMMON_SPECIAL_FORMS` actually holds.
+> Deviation: the let-go sub-project's namespaces are `lgapp`/`lgutil`, not
+> `app`/`util` — a second `(ns app)` in the same workspace made hover and
+> alias completion fail in the deps.edn project's `src/app.clj` (see the
+> ROADMAP backlog entry "Two files, one namespace"; the underlying server bug
+> is filed, not fixed here).
+> Deviation: the unused-require check writes `src/stale.lg` from the test
+> instead of leaving an unused require in the committed fixture, so the other
+> let-go tests keep a clean `app.lg`.
 
 ### Task 5: Settings page and Leiningen docs
 
