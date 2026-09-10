@@ -1697,3 +1697,21 @@ fn test_vector_return_schema_is_not_the_parameter_vector() {
         locals
     );
 }
+
+#[test]
+fn test_half_typed_def_forms_extract_without_panicking() {
+    // Every intermediate state of a form the user is typing goes through the
+    // extractor on the keystroke path: a def form with no name, no params and
+    // no body must extract cleanly, not abort the pass.
+    for src in [
+        "(ns a)\n(defn)\n",
+        "(ns a)\n(defn f)\n",
+        "(ns a)\n(defmethod foo)\n",
+        "(ns a)\n(mu/defmethod x)\n",
+        "(ns a)\n(mu/defn f :-)\n",
+        "(ns a)\n(s/defn f :- s/Int)\n",
+    ] {
+        let extracted = extract_full(src, Path::new("a.clj"));
+        assert!(extracted.is_ok(), "extraction failed for {:?}", src);
+    }
+}

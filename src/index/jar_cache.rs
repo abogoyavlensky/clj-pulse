@@ -17,7 +17,7 @@ use super::{NsMeta, Symbol};
 /// 10: `NsMeta.imports` added (`:import` parsing).
 /// 11: `DefKind::Deftest` + `NsMeta.refer_all` (layout change).
 /// 12: `Symbol.private` (layout change).
-pub const CACHE_FORMAT_VERSION: u32 = 15;
+pub const CACHE_FORMAT_VERSION: u32 = 16;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

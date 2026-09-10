@@ -1802,7 +1802,10 @@ fn walk_def_form(
     }
 
     // The return schema is an expression, not the parameter vector: record its
-    // occurrences here so the loop below never sees it.
+    // occurrences here so the loop below never sees it. `rest_start` can sit
+    // past the end while a form is half-typed (`(defmethod foo)`), so clamp
+    // before slicing.
+    let rest_start = rest_start.min(children.len());
     let params_start = skip_return_schema(children, rest_start, ctx.source);
     for child in &children[rest_start..params_start] {
         walk_occurrences(*child, ctx, scope, out);
