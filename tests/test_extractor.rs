@@ -1607,9 +1607,8 @@ fn test_schema_annotations_are_usages_not_bindings() {
     // evaluated in the enclosing scope. Binding it would invent a local
     // called `Int` and lose the reference.
     let (_, occs) = qualified_defs();
-    assert_eq!(
-        occurrences_of(&occs, "schema.core/Int").len(),
-        1,
+    assert!(
+        !occurrences_of(&occs, "schema.core/Int").is_empty(),
         "the parameter's schema is a usage: {:?}",
         occs
     );
@@ -1648,4 +1647,53 @@ fn line_of(text: &str, needle: &str) -> (u32, u32) {
         }
     }
     panic!("{:?} not found", needle);
+}
+
+#[test]
+fn test_vector_return_schema_is_not_the_parameter_vector() {
+    // malli schemas are vectors (`:- [:vector :int]`), and Schema's sequence
+    // types are too (`:- [s/Int]`): the *next* vector is the parameters.
+    let (syms, occs) = qualified_defs();
+    let sym = |name: &str| {
+        syms.iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{} not indexed: {:?}", name, syms))
+    };
+    assert_eq!(sym("vector-schema").params, vec!["[xs]"]);
+    assert_eq!(sym("seq-schema").params, vec!["[zs]"]);
+    assert_eq!(
+        sym("seq-schema").doc.as_deref(),
+        Some("Doc after the schema."),
+        "a docstring after the return schema is still a docstring"
+    );
+
+    // The schema's own names are usages, and the parameters are locals.
+    assert_eq!(
+        occurrences_of(&occs, "schema.core/Int").len(),
+        2,
+        "`s/Int` in the parameter and in the return schema: {:?}",
+        occs
+    );
+    for phantom in ["my.app/xs", "my.app/zs"] {
+        assert!(
+            occurrences_of(&occs, phantom).is_empty(),
+            "{} must bind as a local: {:?}",
+            phantom,
+            occs
+        );
+    }
+
+    let src = include_str!("fixtures/snippets/qualified_defs.clj");
+    let (line, _) = line_of(src, "  xs)");
+    let locals = clj_pulse::index::extractor::locals_in_scope_at(
+        src,
+        tower_lsp::lsp_types::Position::new(line, 3),
+    );
+    let names: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["xs"],
+        "the parameter binds, not the schema: {:?}",
+        locals
+    );
 }

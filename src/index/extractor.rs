@@ -1001,7 +1001,10 @@ fn extract_def(
     let mut params: Vec<String> = Vec::new();
 
     // Walk remaining children to find docstring, params, and multi-arity bodies
-    let mut rest_start = 2;
+    // A `:-` return schema may sit on either side of the docstring
+    // (`(s/defn f :- Int "doc" [x])` and `(s/defn f "doc" :- Int [x])` both
+    // parse), so it is skipped on both.
+    let mut rest_start = skip_return_schema(children, 2, source);
 
     // Check for docstring (str_lit right after name)
     if rest_start < children.len() && children[rest_start].kind() == "str_lit" {
@@ -1009,6 +1012,7 @@ fn extract_def(
         doc = Some(strip_string_quotes(raw));
         rest_start += 1;
     }
+    rest_start = skip_return_schema(children, rest_start, source);
 
     // Check for params: either a direct vec_lit (single arity) or list_lit children (multi-arity)
     let mut found_params = false;
@@ -1797,6 +1801,14 @@ fn walk_def_form(
         rest_start = 3;
     }
 
+    // The return schema is an expression, not the parameter vector: record its
+    // occurrences here so the loop below never sees it.
+    let params_start = skip_return_schema(children, rest_start, ctx.source);
+    for child in &children[rest_start..params_start] {
+        walk_occurrences(*child, ctx, scope, out);
+    }
+    let rest_start = params_start;
+
     let mut frame_pushed = false;
     for child in children.iter().skip(rest_start) {
         match child.kind() {
@@ -2129,6 +2141,18 @@ fn walk_letfn_form(
         walk_occurrences(*body, ctx, scope, out);
     }
     scope.pop();
+}
+
+/// The index of the first child past an optional `:-` return schema at `idx`.
+/// `(mu/defn f :- [:vector :int] [x] …)` and `(s/defn f :- [s/Int] [x] …)`
+/// annotate what the function *returns*, and that schema is very often a
+/// vector — reading it as the parameter vector would bind its contents as
+/// parameters and leave the real ones unbound.
+fn skip_return_schema(children: &[Node], idx: usize, source: &str) -> usize {
+    match children.get(idx) {
+        Some(n) if is_schema_annotation_marker(*n, source) => (idx + 2).min(children.len()),
+        _ => idx,
+    }
 }
 
 /// Whether `node` is the `:-` marker of a schema annotation. The schema-style
@@ -2834,14 +2858,16 @@ fn walk_scope_def(
 ) {
     match kind {
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro => {
-            // Skip the name and an optional docstring / attr-map before params.
-            let mut rest = 2;
+            // Skip the name, an optional `:-` return schema (on either side of
+            // the docstring) and an optional docstring / attr-map before params.
+            let mut rest = skip_return_schema(children, 2, source);
             if children.get(rest).map(|n| n.kind()) == Some("str_lit") {
                 rest += 1;
             }
             if children.get(rest).map(|n| n.kind()) == Some("map_lit") {
                 rest += 1;
             }
+            rest = skip_return_schema(children, rest, source);
             if rest <= children.len() {
                 walk_scope_fn_tail(&children[rest.min(children.len())..], source, pos, out);
             }
@@ -2855,8 +2881,9 @@ fn walk_scope_def(
                     return;
                 }
             }
-            if children.len() > 3 {
-                walk_scope_fn_tail(&children[3..], source, pos, out);
+            let rest = skip_return_schema(children, 3, source);
+            if children.len() > rest {
+                walk_scope_fn_tail(&children[rest..], source, pos, out);
             }
         }
         DefKind::Defrecord | DefKind::Deftype => {

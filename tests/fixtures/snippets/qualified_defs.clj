@@ -13,6 +13,15 @@
   [y :- s/Int]
   y)
 
+(mu/defn vector-schema :- [:vector :int]
+  [xs]
+  xs)
+
+(s/defn seq-schema :- [s/Int]
+  "Doc after the schema."
+  [zs]
+  zs)
+
 (mu/defn- h [] 1)
 
 (defmulti m :kind)

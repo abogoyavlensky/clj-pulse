@@ -164,11 +164,15 @@ and update README and this file in the same change.
   `defmethod` define, whatever library the qualifier points at. `:lint-as` is
   consulted first, so it always outranks the fallback, and the fallback applies
   only when the form's second child is a symbol, which leaves `(s/def ::user …)`
-  naming a keyword. All three paths that classify a defining form use the same
-  resolver — `process_top_level_list`, `walk_list`, `walk_scope` — or the index
-  and the scope walkers disagree about what binds. Inside a parameter vector a
-  `:-` marker annotates: `[x :- s/Int]` binds `x` and reads `s/Int`, never the
-  other way round. `NsMeta.refer_all` records
+  naming a keyword. Definition extraction (`process_top_level_list`) and the
+  occurrence walker (`walk_list`) share the resolver, or the index and the
+  occurrences disagree about what binds; `walk_scope` has neither ns metadata
+  nor `ExtractConfig`, so it applies the name-part rule alone — a head
+  `:lint-as` maps to a *non*-fn kind still binds its vector there (ROADMAP
+  backlog, 2026-09-10). A `:-` marker annotates rather than binds, wherever it
+  appears: `[x :- s/Int]` binds `x` and reads `s/Int`, and a return schema
+  (`(mu/defn f :- [:vector :int] [xs] …)`) is an expression, so the parameter
+  vector is the one after it. `NsMeta.refer_all` records
   `:refer :all` / `(:use ns)` namespaces; head resolution, completion and
   `resolve_symbol` all consult it, so `deftest` works however `clojure.test`
   was required.
