@@ -172,19 +172,6 @@ Each is small because the index already holds the data.
 - [ ] `workspace/willRenameFiles`. Rewrite the `ns` form and every require
       when a file moves.
 - [ ] Reference-count code lens, off by default.
-- [ ] **Cache the extraction per document version, not just the tree.**
-      Promoted from the Backlog on 2026-09-10: the clojure-lsp benchmark
-      priced it. Every position request re-walks the open buffer —
-      `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which
-      rebuilds every symbol and occurrence and then scans them linearly — so
-      definition latency tracks file size: 2 ms on a 190-byte file, 27 ms on
-      metabase's 452 KiB one, against clojure-lsp's 7 ms, which looks the
-      answer up in a stored analysis. `unused_requires` is 28 ms of the 65 ms
-      native lint pass on the same file for the same reason. Caching the
-      `Analysis` per (uri, version) makes the walk happen once per edit rather
-      than once per request, and the lint pass on that buffer reuses it.
-      Resolution has to stay live-buffer based ([MEMORY.md](MEMORY.md)), so the
-      cache is keyed by the version `didChange` already carries.
   Plan: —
 
 ## Milestone 5 — public release
@@ -261,6 +248,20 @@ One line each, newest last. Promote or reject; never let this grow silently.
   still binds its vector as parameters there while the occurrence walker does
   not. Narrow, but it makes local resolution and references disagree; the fix
   is threading `ExtractConfig` through `locals_in_scope_at`.
+- 2026-09-10 **Cache the extraction per document version, not just the tree.**
+  Every position request re-walks the open buffer:
+  `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which
+  rebuilds every symbol and occurrence and then scans them linearly. So
+  definition latency tracks file size — 2 ms on a 190-byte file, 27 ms on
+  metabase's 452 KiB one, against clojure-lsp's 6 ms, which reads a stored
+  analysis ([MEMORY.md](MEMORY.md)). `unused_requires` is 28 ms of the 65 ms
+  native lint pass for the same reason. Caching the `Analysis` per (uri,
+  version) would close it. **Deliberately unscheduled** (promoted to Milestone
+  4 on 2026-09-10 and returned here the same day): 27 ms is below what a user
+  can perceive, while a cache that answers from a stale entry navigates
+  confidently to the wrong place and would mask exactly the resolution bugs
+  this list already tracks. Revisit once the live-buffer path is proven under a
+  soak run, not before.
 - 2026-09-10 **A failing clj-kondo candidate ends the probe instead of falling
   through to the next one.** On the metabase bench corpus the same binary
   reported `kondo+native` under `bb bench` and "clj-kondo not found - native

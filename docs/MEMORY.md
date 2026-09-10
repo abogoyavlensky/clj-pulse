@@ -87,11 +87,13 @@ only number that moved much, and only before its global cache was isolated
   On a small file the two are indistinguishable and the floor is the JSON-RPC
   round trip. The bench probes the largest `.clj` in each repo, so its
   definition row is our worst case and not clojure-lsp's, which reads a stored
-  analysis and barely moves. The fix is scheduled in
-  [ROADMAP.md](ROADMAP.md) (Milestone 4): cache the `Analysis` per (uri,
-  version) so the walk happens once per edit rather than once per request. The
-  native lint pass on the same buffer would reuse it — `unused_requires` is
-  28 ms of its 65 ms for the same reason.
+  analysis and barely moves. Caching the `Analysis` per (uri, version) would
+  close the gap, and the native lint pass on the same buffer would reuse it
+  (`unused_requires` is 28 ms of its 65 ms for the same reason). It is in the
+  [ROADMAP.md](ROADMAP.md) backlog and deliberately unscheduled: 27 ms is below
+  what a user perceives, and a cache serving a stale entry would navigate
+  confidently to the wrong place — masking the resolution bugs that list
+  already tracks rather than fixing them.
 - **Cold and warm are per server.** Cold deletes `.clj-pulse/jar-cache` for
   clj-pulse and `.lsp/.cache`, `.clj-kondo/.cache` *and* clojure-lsp's global
   `$XDG_CACHE_HOME/clojure-lsp` for clojure-lsp — the last one holds ~150 MiB
