@@ -10,7 +10,10 @@ places carry configuration:
 3. [Environment variables](#environment-variables) — machine-level overrides.
 
 The editor layer wins over the file per key, and the file wins over the
-defaults. A key nobody sets keeps its default.
+defaults. A key nobody sets keeps its default. Clojure Pulse's own settings
+flatten the classpath keys (`classpathEnabled`, `classpathCommand`) and the
+extension nests them again before sending them on, so the two columns below
+name the same setting.
 
 ## `.clj-pulse/config.edn`
 
@@ -25,8 +28,8 @@ defaults. A key nobody sets keeps its default.
 |---|---|---|---|
 | `:projects` | `[]` — every project is detected, no overrides | yes | `clojurePulse.projects` |
 | `:projects […] :path` | required; workspace-root-relative, `"."` is the root | yes | `clojurePulse.projects[].path` |
-| `:projects […] :classpath :enabled` | `true` for the workspace root, `false` for sub-projects | yes | `clojurePulse.projects[].classpath.enabled` |
-| `:projects […] :classpath :cmd` | `clojure -A:dev:test -Spath` (deps.edn), `lein classpath` (Leiningen), none (lgx) | yes | `clojurePulse.projects[].classpath.cmd` |
+| `:projects […] :classpath :enabled` | `true` for the workspace root, `false` for sub-projects | yes | `clojurePulse.projects[].classpathEnabled` |
+| `:projects […] :classpath :cmd` | `clojure -A:dev:test -Spath` (deps.edn), `lein classpath` (Leiningen), none (lgx) | yes | `clojurePulse.projects[].classpathCommand` |
 | `:lint-as` | `{}`, over whatever `.clj-kondo/config.edn` declares | yes | — (file only) |
 | `:kondo :enabled` | `true` — use clj-kondo when the binary is found | yes | `clojurePulse.kondo.enabled` |
 | `:kondo :path` | `clj-kondo`, resolved through PATH plus the well-known install dirs | yes | `clojurePulse.kondo.path` |
