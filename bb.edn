@@ -56,13 +56,19 @@
             [dir]
             (when (fs/exists? (fs/path dir "deps.edn"))
               (println "Preparing the corpus classpath (clojure -A:dev:test -Spath) ...")
-              (let [{:keys [exit err]} (shell {:dir (str dir)
-                                               :out :string
-                                               :err :string
-                                               :continue true}
-                                              "clojure -A:dev:test -Spath")]
-                (when-not (zero? exit)
-                  (println "WARNING: preparing the classpath failed:" (str/trim (str err)))))))
+              ;; try/catch as well as :continue — the latter tolerates a
+              ;; non-zero exit, but a missing `clojure` on PATH throws before
+              ;; the process ever starts, and that must not end the run either.
+              (try
+                (let [{:keys [exit err]} (shell {:dir (str dir)
+                                                 :out :string
+                                                 :err :string
+                                                 :continue true}
+                                                "clojure -A:dev:test -Spath")]
+                  (when-not (zero? exit)
+                    (println "WARNING: preparing the classpath failed:" (str/trim (str err)))))
+                (catch Exception e
+                  (println "WARNING: could not run the clojure CLI:" (ex-message e))))))
 
           ;; --- the server we compare against ---------------------------------
           (def clojure-lsp-version "2026.07.06-14.34.19")

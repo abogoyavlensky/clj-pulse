@@ -138,6 +138,7 @@ impl Server {
             Server::ClojureLsp => vec![
                 root.join(".lsp").join(".cache"),
                 root.join(".clj-kondo").join(".cache"),
+                clojure_lsp_xdg_cache(root),
             ],
         }
     }
@@ -156,6 +157,16 @@ impl Temp {
             Temp::Warm => "warm",
         }
     }
+}
+
+/// clojure-lsp caches its JDK-source analysis *globally*, under
+/// `$XDG_CACHE_HOME/clojure-lsp` (about 150 MiB), not under the project. Left
+/// alone, a "cold" row would silently reuse whatever an earlier run — or the
+/// maintainer's own editor — left there. The bench gives it a cache of its own
+/// inside the corpus, so cold means cold and warm means what the cold run
+/// wrote.
+fn clojure_lsp_xdg_cache(root: &Path) -> PathBuf {
+    root.join(".lsp").join("bench-xdg-cache")
 }
 
 fn clear_caches(root: &Path, server: Server) {
@@ -187,9 +198,10 @@ fn run(
     // Production settings, unlike every other test in the suite: stage-3
     // classpath resolution runs and clj-kondo is used when installed, because
     // that is what a user's machine does.
+    let xdg = clojure_lsp_xdg_cache(root);
     let mut client = match binary {
         None => LspClient::start_production(root),
-        Some(path) => LspClient::start_binary(path, root, &[]),
+        Some(path) => LspClient::start_binary(path, root, &[("XDG_CACHE_HOME", xdg.as_path())]),
     }
     .with_request_timeout(ceiling);
     let pid = client.child.id();
