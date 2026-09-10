@@ -261,6 +261,15 @@ One line each, newest last. Promote or reject; never let this grow silently.
   still binds its vector as parameters there while the occurrence walker does
   not. Narrow, but it makes local resolution and references disagree; the fix
   is threading `ExtractConfig` through `locals_in_scope_at`.
+- 2026-09-10 **A failing clj-kondo candidate ends the probe instead of falling
+  through to the next one.** On the metabase bench corpus the same binary
+  reported `kondo+native` under `bb bench` and "clj-kondo not found - native
+  lints only" from a plain shell, same machine and directory: metabase ships a
+  `mise.toml` that mise will not trust, so the shim exits 1 and the probe stops
+  there rather than trying the mise install dir or Homebrew behind it. The lint
+  tier then depends on how the editor was launched, which is the problem
+  `tools::well_known_dirs` exists to solve. Trying each candidate until one
+  answers `--version` would fix it.
 - 2026-09-10 **A `.clj` file navigates into the ClojureScript copy of a core
   namespace.** With both `org.clojure/clojure` and `org.clojure/clojurescript`
   on the classpath (clj-kondo's `:test` alias, and common in full-stack
