@@ -236,6 +236,45 @@ exports.run = async () => {
     );
   }
 
+  // 10. The let-go sub-project: an `lgx.edn` project beside the deps.edn one,
+  //     with a `:local/root` dependency. Definition, hover, completion and
+  //     diagnostics all have to work on `.lg` sources.
+  const lgUri = vscode.Uri.file(`${root}/letgo/src/lgapp.lg`);
+  const lgDoc = await vscode.workspace.openTextDocument(lgUri);
+  await vscode.window.showTextDocument(lgDoc);
+  check(lgDoc.languageId === "clojure", "letgo: .lg opens as a Clojure document", lgDoc.languageId);
+
+  const lgLocs = await definitionsAt(lgUri, positionOf(lgDoc, "loc/hello"), 60000);
+  const lgTarget = lgLocs[0]?.uri ?? lgLocs[0]?.targetUri;
+  check(
+    lgLocs.length > 0 && lgTarget?.path?.endsWith("/letgo/vendor/loc/src/loc/core.lg"),
+    "letgo: definition on loc/hello lands in the :local/root dep",
+    JSON.stringify(lgLocs.map((l) => (l.uri ?? l.targetUri)?.toString()))
+  );
+
+  const lgHovers = await hoverAt(lgUri, positionOf(lgDoc, "(if greeting", 2), 30000);
+  check(
+    lgHovers.some((h) => h.includes("special form")),
+    "letgo: hover on `if` describes the special form",
+    JSON.stringify(lgHovers)
+  );
+
+  const lgItems = await completionsAt(lgUri, positionOf(lgDoc, "loc/hello", 5), 30000);
+  const lgLabels = lgItems.map((i) => (typeof i.label === "string" ? i.label : i.label?.label));
+  check(
+    lgLabels.some((l) => l === "loc/hello"),
+    "letgo: completion after `loc/` offers loc/hello",
+    JSON.stringify(lgLabels.slice(0, 20))
+  );
+
+  // clj-kondo does not read `.lg`, so this is the native lint answering.
+  const lgDiags = await diagnosticsAt(lgUri, 60000, (d) => codeOf(d) === "unused-namespace");
+  check(
+    lgDiags.some((d) => codeOf(d) === "unused-namespace" && d.message.includes("lgutil")),
+    "letgo: the unused `lgutil` require is reported as unused-namespace",
+    JSON.stringify(lgDiags.map((d) => ({ code: codeOf(d), source: d.source, message: d.message })))
+  );
+
   const failed = checks.filter((c) => !c.cond);
   if (failed.length > 0) {
     throw new Error(`${failed.length} check(s) failed: ${failed.map((c) => c.msg).join("; ")}`);

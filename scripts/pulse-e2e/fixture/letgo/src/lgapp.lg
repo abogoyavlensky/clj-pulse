@@ -1,0 +1,8 @@
+(ns lgapp
+  (:require [loc.core :as loc]
+            [lgutil :as lgutil]))
+
+(defn run [greeting]
+  (if greeting
+    (println (loc/hello greeting))
+    (println "nothing to say")))

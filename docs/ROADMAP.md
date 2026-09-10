@@ -234,6 +234,13 @@ One line each, newest last. Promote or reject; never let this grow silently.
   Neovim and Zed fold from tree-sitter. A server would only add semantic kinds
   (`Comment`, `Imports`) for "fold all comments" style commands. Revisit if an
   editor in the priority list turns out to need it.
+- 2026-09-10 **Two files, one namespace.** `Index::namespaces` is keyed by
+  namespace name, so when a monorepo holds two files declaring the same `ns`
+  (easy to hit: a `.clj` and a `.lg` project each with `(ns app)`), the last
+  one indexed owns the aliases. Hover and completion in the other file then
+  silently answer as if it required nothing, while definition — occurrence
+  based — still works. Found writing the let-go Clojure Pulse fixture; keying
+  namespace metadata by file would fix it.
 - 2026-09-10 **`:lint-as` in the locals walker.** `extractor::walk_scope` has no
   ns metadata or `ExtractConfig`, so a head the config maps to a non-fn kind
   still binds its vector as parameters there while the occurrence walker does
