@@ -276,9 +276,19 @@ Reviewing that fix, codex found the new slice panicking on a half-typed form
 hits constantly. Clamped, with a test over six half-typed forms, and the jar
 cache version went to 16 since extracted signatures changed again.
 
+Two further rounds tightened the same rule until it held everywhere: a
+docstring may sit *before* the schema (`(s/defn f "doc" :- [s/Int] [x] …)`), so
+one `skip_def_preamble` now steps over docstring, attribute map and schema in
+either order for both walkers; and a cursor inside an annotation must not see
+the vector's own parameters (`(s/defn f [T :- T] …)` reads the namespace-level
+`T`), which `pos_in_schema_annotation` now enforces the way `:or` defaults
+already did. Four review rounds in total on this task, each one finding a real
+case the previous fix had not covered — the annotation syntax has more shapes
+than it looks.
+
 ### Verification
 
-`bb check` (451 unit + 79 extractor + 168 e2e), `bb e2e`, `bb e2e-nvim`,
+`bb check` (451 unit + 81 extractor + 168 e2e), `bb e2e`, `bb e2e-nvim`,
 `bb e2e-calva`, `bb e2e-pulse` (21 checks) and `bb bench` all pass, and every
 gate was re-run after the post-review fix. Every task ended with a
 codex review; the two P2 findings it raised (schema annotations bound as
