@@ -89,7 +89,19 @@ impl LspClient {
     /// a regular e2e test using this would spawn `clojure` and behave
     /// differently on a machine with clj-kondo installed than on one without.
     pub fn start_production(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], false, Kondo::Real)
+        Self::start_binary(
+            Path::new(env!("CARGO_BIN_EXE_clj-pulse")),
+            project_root,
+            &[],
+        )
+    }
+
+    /// [`start_production`] for an arbitrary LSP server binary: the bench
+    /// drives clojure-lsp through this same client, over stdio, with the same
+    /// requests. Nothing is tuned — no kill switches, no initialization
+    /// options — because a comparison of two defaults is the only fair one.
+    pub fn start_binary(binary: &Path, project_root: &Path, envs: &[(&str, &Path)]) -> Self {
+        Self::spawn_binary(binary, project_root, envs, false, Kondo::Real, &[])
     }
 
     /// Like [`start_with_kondo`] but resolving `clj-kondo` from the host's own
@@ -148,7 +160,25 @@ impl LspClient {
         kondo: Kondo,
         args: &[&str],
     ) -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
+        Self::spawn_binary(
+            Path::new(env!("CARGO_BIN_EXE_clj-pulse")),
+            project_root,
+            envs,
+            disable_classpath_cli,
+            kondo,
+            args,
+        )
+    }
+
+    fn spawn_binary(
+        binary: &Path,
+        project_root: &Path,
+        envs: &[(&str, &Path)],
+        disable_classpath_cli: bool,
+        kondo: Kondo,
+        args: &[&str],
+    ) -> Self {
+        let mut cmd = Command::new(binary);
         cmd.args(args);
         cmd.current_dir(project_root)
             .stdin(Stdio::piped())
@@ -186,7 +216,9 @@ impl LspClient {
         for (key, value) in envs {
             cmd.env(key, value);
         }
-        let mut child = cmd.spawn().expect("failed to spawn clj-pulse");
+        let mut child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", binary.display()));
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();

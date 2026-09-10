@@ -22,9 +22,6 @@ use serde_json::{json, Value};
 
 use common::LspClient;
 
-/// The hang ceiling: a server that cannot answer a definition within this is
-/// broken, not slow. Deliberately far above any number worth reporting.
-const CEILING: Duration = Duration::from_secs(120);
 /// Per-request waits. Generous: the point is to measure, not to fail.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Samples per latency metric.
@@ -67,30 +64,140 @@ fn bench_large_project() {
         .canonicalize()
         .expect("CLJ_PULSE_BENCH_ROOT does not exist");
     let corpus = std::env::var("CLJ_PULSE_BENCH_CORPUS").unwrap_or_else(|_| "(unnamed)".into());
+    let clojure_lsp = std::env::var_os("CLJ_PULSE_BENCH_CLOJURE_LSP").map(PathBuf::from);
 
     let probes = Probes::discover(&root);
     probes.print(&root);
 
-    let row = run_clj_pulse(&root, &corpus, &probes);
-    row.print(&probes, &root);
-    row.print_json();
+    if clojure_lsp.is_none() {
+        println!();
+        println!("CLJ_PULSE_BENCH_CLOJURE_LSP is unset — measuring clj-pulse alone.");
+    }
+
+    // Fixed order, so a cold run is always the one that follows a cleared
+    // cache and a warm one always inherits what the run before it left.
+    let mut rows = Vec::new();
+    for (server, temp) in [
+        (Server::CljPulse, Temp::Cold),
+        (Server::CljPulse, Temp::Warm),
+        (Server::ClojureLsp, Temp::Cold),
+        (Server::ClojureLsp, Temp::Warm),
+    ] {
+        let binary = match server {
+            Server::CljPulse => None,
+            Server::ClojureLsp => match &clojure_lsp {
+                Some(path) => Some(path.as_path()),
+                None => continue,
+            },
+        };
+        if temp == Temp::Cold {
+            clear_caches(&root, server);
+        }
+        let row = run(server, temp, binary, &root, &corpus, &probes);
+        row.print(&probes, &root);
+        row.print_json();
+        rows.push(row);
+    }
+
+    summary(&rows, &probes);
+}
+
+/// The servers under comparison. Neither is tuned: a comparison of two
+/// defaults is the only fair one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Server {
+    CljPulse,
+    ClojureLsp,
+}
+
+impl Server {
+    fn label(self) -> &'static str {
+        match self {
+            Server::CljPulse => "clj-pulse",
+            Server::ClojureLsp => "clojure-lsp",
+        }
+    }
+
+    /// The hang ceiling. clojure-lsp analyzes the whole classpath through
+    /// clj-kondo before it answers anything, which on a large project is
+    /// minutes rather than seconds — dropping that row would hide the number
+    /// the comparison is about, so it gets a ceiling of its own.
+    fn ceiling(self) -> Duration {
+        match self {
+            Server::CljPulse => Duration::from_secs(120),
+            Server::ClojureLsp => Duration::from_secs(900),
+        }
+    }
+
+    /// What a cold run deletes. `.cpcache` is *not* here: resolving the
+    /// classpath is preparation both servers share, done before anything is
+    /// timed.
+    fn caches(self, root: &Path) -> Vec<PathBuf> {
+        match self {
+            Server::CljPulse => vec![root.join(".clj-pulse").join("jar-cache")],
+            Server::ClojureLsp => vec![
+                root.join(".lsp").join(".cache"),
+                root.join(".clj-kondo").join(".cache"),
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Temp {
+    Cold,
+    Warm,
+}
+
+impl Temp {
+    fn label(self) -> &'static str {
+        match self {
+            Temp::Cold => "cold",
+            Temp::Warm => "warm",
+        }
+    }
+}
+
+fn clear_caches(root: &Path, server: Server) {
+    for dir in server.caches(root) {
+        if dir.exists() {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => println!("cold run: removed {}", dir.display()),
+                Err(e) => println!("cold run: could not remove {}: {e}", dir.display()),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // One run of one server
 // ---------------------------------------------------------------------------
 
-fn run_clj_pulse(root: &Path, corpus: &str, probes: &Probes) -> Row {
-    let mut row = Row::new("clj-pulse", corpus);
+fn run(
+    server: Server,
+    temp: Temp,
+    binary: Option<&Path>,
+    root: &Path,
+    corpus: &str,
+    probes: &Probes,
+) -> Row {
+    let mut row = Row::new(server, temp, corpus);
+    let ceiling = server.ceiling();
 
     // Production settings, unlike every other test in the suite: stage-3
     // classpath resolution runs and clj-kondo is used when installed, because
     // that is what a user's machine does.
-    let mut client = LspClient::start_production(root).with_request_timeout(CEILING);
+    let mut client = match binary {
+        None => LspClient::start_production(root),
+        Some(path) => LspClient::start_binary(path, root, &[]),
+    }
+    .with_request_timeout(ceiling);
     let pid = client.child.id();
     let t0 = Instant::now();
     let mut watch = StageWatch::default();
-    client.initialize_no_wait(root);
+    let capabilities = client.initialize_no_wait(root);
+    let sync = SyncKind::of(&capabilities);
+    row.sync = sync;
 
     // The startup probes are open from the moment the server is, the way an
     // editor restores a session: "time to first definition" is the wait a user
@@ -104,19 +211,23 @@ fn run_clj_pulse(root: &Path, corpus: &str, probes: &Probes) -> Row {
         probes.startup_project.as_ref(),
         probes.startup_library.as_ref(),
         t0,
-        t0 + CEILING,
+        t0 + ceiling,
         &mut watch,
     );
     row.first_definition = first;
     row.first_library_definition = library;
 
-    // Settled, not merely answering: stage 3 re-resolves and re-indexes long
-    // after stage 2 has answered a definition, and sampling latency or RSS
-    // through that folds a background reindex into every number below.
+    // Settled, not merely answering: clj-pulse's stage 3 re-resolves and
+    // re-indexes long after stage 2 has answered a definition, and clojure-lsp
+    // is still publishing diagnostics across the project. Sampling latency or
+    // RSS through either folds background work into every number below.
     // Its own deadline, not what is left of the startup one: a probe that
     // never resolved must not also make the settle check report a failure.
-    let (settled, note) =
-        settle_clj_pulse(&mut client, pid, t0, Instant::now() + CEILING, &mut watch);
+    let deadline = Instant::now() + ceiling;
+    let (settled, note) = match server {
+        Server::CljPulse => settle_clj_pulse(&mut client, pid, t0, deadline, &mut watch),
+        Server::ClojureLsp => settle_clojure_lsp(&mut client, pid, t0, deadline, &mut watch),
+    };
     row.settled = settled;
     row.settle_note = note;
     row.rss_settled = rss_kib(pid);
@@ -160,21 +271,49 @@ fn run_clj_pulse(root: &Path, corpus: &str, probes: &Probes) -> Row {
         row.definition = median(&mut latencies);
     }
 
-    let large = edit_to_diagnostics(&mut client, &probes.edit_target, &mut watch, t0);
+    let large = edit_to_diagnostics(&mut client, &probes.edit_target, sync, &mut watch, t0);
     row.take_edits(large, false);
 
     // The same on a file *under* `:live-max-kb`, where clj-kondo does run on a
-    // keystroke — otherwise the bench only ever prices the native tier.
+    // keystroke — otherwise the bench only ever prices clj-pulse's native tier.
     if let Some(small) = &probes.small_target {
         reset(&mut client, &mut watch, t0);
         client.did_open(small);
         wait_for_diagnostics(&mut client, small, Version::Any, REQUEST_TIMEOUT);
-        let small_edits = edit_to_diagnostics(&mut client, small, &mut watch, t0);
+        let small_edits = edit_to_diagnostics(&mut client, small, sync, &mut watch, t0);
         row.take_edits(small_edits, true);
     }
 
     row.lint_engine = watch.lint_engine.clone();
     row
+}
+
+/// How the server wants its document changes: clj-pulse takes incremental
+/// ranges, clojure-lsp declares `TextDocumentSyncKind.Full` and would read the
+/// range's text as the *whole* buffer. Sending each what it asked for is part
+/// of measuring what its own clients pay.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SyncKind {
+    Full,
+    Incremental,
+}
+
+impl SyncKind {
+    fn of(capabilities: &Value) -> Self {
+        let sync = &capabilities["capabilities"]["textDocumentSync"];
+        let kind = sync.as_u64().or_else(|| sync["change"].as_u64());
+        match kind {
+            Some(1) => SyncKind::Full,
+            _ => SyncKind::Incremental,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SyncKind::Full => "full",
+            SyncKind::Incremental => "incremental",
+        }
+    }
 }
 
 /// Asks both startup probes for their definition until each answers correctly,
@@ -257,14 +396,68 @@ fn settle_clj_pulse(
         }
     }
 
+    quiesce(
+        client,
+        pid,
+        t0,
+        deadline,
+        watch,
+        &["window/logMessage"],
+        note,
+    )
+}
+
+/// clojure-lsp is settled when its analysis progress has ended (when it
+/// reports any) and neither a `publishDiagnostics` nor a `$/progress` has
+/// arrived for [`QUIET`] — it publishes across the whole project while it
+/// analyzes, so its own diagnostics stream is the signal. The same
+/// no-child-process rule applies: it shells out for the classpath too.
+fn settle_clojure_lsp(
+    client: &mut LspClient,
+    pid: u32,
+    t0: Instant,
+    deadline: Instant,
+    watch: &mut StageWatch,
+) -> (Option<Duration>, String) {
+    let (settled, note) = quiesce(
+        client,
+        pid,
+        t0,
+        deadline,
+        watch,
+        &["textDocument/publishDiagnostics", "$/progress"],
+        "no publishDiagnostics or $/progress".to_string(),
+    );
+    let progress = if watch.progress_end {
+        "; analysis progress reported end"
+    } else {
+        // Confirmed against the binary: with `window.workDoneProgress`
+        // advertised, a warm run reports no progress at all, so the quiet
+        // window is the signal that has to carry the check.
+        "; no analysis progress was reported"
+    };
+    (settled, format!("{note}{progress}"))
+}
+
+/// The shared tail of both settle checks: wait until nothing in `methods` has
+/// arrived for [`QUIET`] *and* the server has no child process still working.
+fn quiesce(
+    client: &mut LspClient,
+    pid: u32,
+    t0: Instant,
+    deadline: Instant,
+    watch: &mut StageWatch,
+    methods: &[&str],
+    note: String,
+) -> (Option<Duration>, String) {
     loop {
         reset(client, watch, t0);
-        let quiet = quiet_for(client, &["window/logMessage"], QUIET);
+        let quiet = quiet_for(client, methods, QUIET);
         if quiet && !has_children(pid) {
             return (Some(t0.elapsed()), note);
         }
         if Instant::now() >= deadline {
-            return (None, format!("{note}; never settled within {CEILING:?}"));
+            return (None, format!("{note}; never settled within the ceiling"));
         }
     }
 }
@@ -274,6 +467,7 @@ fn settle_clj_pulse(
 fn edit_to_diagnostics(
     client: &mut LspClient,
     path: &Path,
+    sync: SyncKind,
     watch: &mut StageWatch,
     t0: Instant,
 ) -> Edits {
@@ -284,13 +478,31 @@ fn edit_to_diagnostics(
     // Edits land at the very end of the buffer, where they cannot corrupt a
     // form the parser is mid-way through.
     let end_line = text.lines().count() as u32;
+    let mut buffer = text;
     for i in 0..SAMPLES {
         reset(client, watch, t0);
         // Versions continue past the didOpen's 1 and never repeat, so a
         // publication can always be matched to the edit that caused it.
         let version = (i + 2) as i64;
+        buffer.push('\n');
         let sent = Instant::now();
-        client.did_change_range(path, version, (end_line, 0), (end_line, 0), "\n");
+        match sync {
+            SyncKind::Incremental => {
+                client.did_change_range(path, version, (end_line, 0), (end_line, 0), "\n")
+            }
+            // The same edit, spelled the way a full-sync server's own clients
+            // have to spell it: the whole buffer, every keystroke.
+            SyncKind::Full => client.notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": {
+                        "uri": format!("file://{}", path.display()),
+                        "version": version
+                    },
+                    "contentChanges": [{ "text": buffer }]
+                }),
+            ),
+        }
         match wait_for_diagnostics(client, path, Version::Exactly(version), REQUEST_TIMEOUT) {
             Some(params) => {
                 edits.latencies.push(sent.elapsed());
@@ -460,6 +672,9 @@ struct StageWatch {
     /// The engine of the last `clojurePulse/lintStatus` seen. Kept here rather
     /// than read off the stash at the end, which the sampling loops clear.
     lint_engine: Option<String>,
+    /// Whether a `$/progress` has reported `end` — clojure-lsp's analysis
+    /// progress, when it reports one.
+    progress_end: bool,
 }
 
 impl StageWatch {
@@ -468,6 +683,10 @@ impl StageWatch {
     fn observe(&mut self, client: &LspClient, t0: Instant) {
         let elapsed = t0.elapsed();
         for msg in &client.notifications {
+            if msg["method"] == "$/progress" && msg["params"]["value"]["kind"] == "end" {
+                self.progress_end = true;
+                continue;
+            }
             if msg["method"] == "clojurePulse/lintStatus" {
                 if let Some(engine) = msg["params"]["engine"].as_str() {
                     self.lint_engine = Some(engine.to_string());
@@ -978,8 +1197,10 @@ impl Edits {
 }
 
 struct Row {
-    server: String,
+    server: Server,
+    temp: Temp,
     corpus: String,
+    sync: SyncKind,
     first_definition: Option<Duration>,
     first_library_definition: Option<Duration>,
     settled: Option<Duration>,
@@ -1008,10 +1229,12 @@ struct Row {
 }
 
 impl Row {
-    fn new(server: &str, corpus: &str) -> Self {
+    fn new(server: Server, temp: Temp, corpus: &str) -> Self {
         Self {
-            server: server.to_string(),
+            server,
+            temp,
             corpus: corpus.to_string(),
+            sync: SyncKind::Incremental,
             first_definition: None,
             first_library_definition: None,
             settled: None,
@@ -1088,15 +1311,23 @@ impl Row {
         };
 
         println!();
-        println!("{} on {}", self.server, self.corpus);
-        println!("  root            {}", root.display());
-        println!("  binary          {}", env!("CARGO_BIN_EXE_clj-pulse"));
-        println!("  kondo           {}", kondo);
-        println!("  classpath CLI   {}", classpath);
         println!(
-            "  lint engine     {}",
-            self.lint_engine.as_deref().unwrap_or("not reported")
+            "{} ({}) on {}",
+            self.server.label(),
+            self.temp.label(),
+            self.corpus
         );
+        println!("  root            {}", root.display());
+        println!("  document sync   {}", self.sync.label());
+        println!("  kondo on PATH   {}", kondo);
+        println!("  classpath CLI   {}", classpath);
+        if self.server == Server::CljPulse {
+            println!("  binary          {}", env!("CARGO_BIN_EXE_clj-pulse"));
+            println!(
+                "  lint engine     {}",
+                self.lint_engine.as_deref().unwrap_or("not reported")
+            );
+        }
         println!();
         row("metric", "value");
         println!("  {:-<34} {:-<34}", "", "");
@@ -1134,6 +1365,10 @@ impl Row {
                 "  note",
                 "the server echoes no document version; the next publication was timed",
             );
+        }
+        if self.server != Server::CljPulse {
+            println!();
+            return;
         }
         println!();
         println!("  as the server logged it");
@@ -1178,7 +1413,9 @@ impl Row {
         println!(
             "BENCH_JSON {}",
             json!({
-                "server": self.server,
+                "server": self.server.label(),
+                "temperature": self.temp.label(),
+                "document_sync": self.sync.label(),
                 "corpus": self.corpus,
                 "first_definition_ms": ms(self.first_definition),
                 "first_library_definition_ms": ms(self.first_library_definition),
@@ -1203,6 +1440,46 @@ impl Row {
             })
         );
     }
+}
+
+/// One line per configuration, in the order they ran — the shape the README
+/// and `docs/MEMORY.md` tables are built from.
+fn summary(rows: &[Row], probes: &Probes) {
+    let large = probes.edit_bytes / 1024;
+    let small = probes.small_bytes.map(|b| b / 1024);
+    println!();
+    println!(
+        "summary (fixed order: clj-pulse cold, clj-pulse warm, clojure-lsp cold, clojure-lsp warm)"
+    );
+    println!(
+        "  {:<12} {:<5} {:>9} {:>11} {:>9} {:>7} {:>7} {:>11} {:>11}",
+        "server",
+        "temp",
+        "1st def",
+        "1st lib def",
+        "settled",
+        "RSS",
+        "def",
+        format!("edit {large}K"),
+        small
+            .map(|k| format!("edit {k}K"))
+            .unwrap_or_else(|| "edit -".into()),
+    );
+    for r in rows {
+        println!(
+            "  {:<12} {:<5} {:>9} {:>11} {:>9} {:>7} {:>7} {:>11} {:>11}",
+            r.server.label(),
+            r.temp.label(),
+            ms(r.first_definition),
+            ms(r.first_library_definition),
+            ms(r.settled),
+            mib(r.rss_settled),
+            ms(r.definition),
+            ms(r.edit),
+            ms(r.small_edit),
+        );
+    }
+    println!();
 }
 
 fn row(label: &str, value: &str) {
