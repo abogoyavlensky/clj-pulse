@@ -6,7 +6,8 @@
 # It answers the three shapes clj-pulse invokes:
 #   --version       the discovery probe
 #   --dependencies  classpath cache warming; records argv for the test
-#   --lint -        a buffer lint, answered from markers found on stdin
+#   --lint -        a buffer lint, answered from markers found on stdin;
+#                   records argv too, so a test can assert the configs
 #
 # Findings are pinned to row 4, cols 4..17 — the `helpers/greet` call on the
 # fourth line of the kondo_project fixture files.
@@ -30,6 +31,9 @@ done
 
 # A buffer lint: the live text arrives on stdin, and a marker in it selects
 # the canned response. Draining stdin also proves clj-pulse closed it.
+if [ -n "$FAKE_KONDO_LOG" ]; then
+  echo "$@" >> "$FAKE_KONDO_LOG"
+fi
 source=$(cat)
 
 case "$source" in

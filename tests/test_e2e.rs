@@ -5295,6 +5295,48 @@ fn test_e2e_kondo_run_drops_native_unused_binding() {
 }
 
 #[test]
+fn test_e2e_kondo_lint_requests_report_duplicates() {
+    // clj-kondo's three unresolved linters report a name once per file unless
+    // `:report-duplicates` is set; an editor has to mark every site, so every
+    // lint run carries a second `--config` asking for that.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let log = root.join("kondo-lint.log");
+    let mut client = LspClient::start_with_kondo_env(&root, &[("FAKE_KONDO_LOG", log.as_path())]);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    client.wait_for_diagnostics("/src/app.clj");
+
+    let recorded = std::fs::read_to_string(&log).expect("the fake should have logged a lint run");
+    let lint = recorded
+        .lines()
+        .find(|line| line.contains("--lint -"))
+        .unwrap_or_else(|| panic!("no --lint run recorded: {recorded}"));
+    assert!(
+        lint.contains("--config {:output {:format :json}}"),
+        "the JSON-output config must still be passed: {lint}"
+    );
+    let duplicates = lint
+        .split("--config ")
+        .find(|part| part.contains(":report-duplicates"))
+        .unwrap_or_else(|| panic!("no --config asking for duplicates: {lint}"));
+    for linter in [
+        ":unresolved-namespace",
+        ":unresolved-symbol",
+        ":unresolved-var",
+    ] {
+        assert!(
+            duplicates.contains(&format!("{linter} {{:report-duplicates true}}")),
+            "{linter} must report every occurrence: {lint}"
+        );
+    }
+}
+
+#[test]
 fn test_e2e_kondo_findings_published_and_native_codes_ceded() {
     let project = setup_kondo_project();
     let root = project.path().canonicalize().unwrap();
@@ -5515,10 +5557,12 @@ fn test_e2e_kondo_cache_not_warmed_without_a_clj_kondo_dir() {
     let params = client.wait_for_diagnostics("/src/app.clj");
     assert_eq!(params["diagnostics"][0]["source"], json!("clj-kondo"));
 
+    // The fake logs buffer lints too, so the log's presence proves nothing;
+    // its content must show no dependency scan.
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        !log.exists(),
-        "no .clj-kondo dir means no dependency scan, got: {}",
-        std::fs::read_to_string(&log).unwrap_or_default()
+        !recorded.lines().any(|line| line.contains("--dependencies")),
+        "no .clj-kondo dir means no dependency scan, got: {recorded}"
     );
 }
 
