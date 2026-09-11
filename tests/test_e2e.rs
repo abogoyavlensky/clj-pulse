@@ -5620,6 +5620,61 @@ fn test_e2e_real_kondo_publishes_findings() {
     );
 }
 
+/// The proof the fake cannot give: a released clj-kondo honors the
+/// `:report-duplicates` config the bridge passes, so every usage of an
+/// unresolved name reaches the editor, not just the first per file.
+#[test]
+#[ignore = "requires a real clj-kondo binary on PATH"]
+fn test_e2e_real_kondo_reports_every_unresolved_occurrence() {
+    if !real_clj_kondo_available() {
+        eprintln!("SKIP: no clj-kondo on PATH — install it to run this test");
+        return;
+    }
+
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // Two sites for each of the three linters that hide duplicates by
+    // default. `clojure.string` is in clj-kondo's built-in cache, so the var
+    // check needs no `.clj-kondo` dir and no warm run.
+    let dups = root.join("src/dups.clj");
+    std::fs::write(
+        &dups,
+        "(ns dups (:require [clojure.string :as str]))\n\n\
+         (missing/a 1)\n\
+         (missing/b 2)\n\
+         (nowhere 1)\n\
+         (nowhere 2)\n\
+         (str/no-such-fn 1)\n\
+         (str/no-such-fn 2)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_real_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("linting: clj-kondo + native");
+    client.did_open(&dups);
+
+    let params = client.wait_for_diagnostics("/src/dups.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+    for (code, lines) in [
+        ("unresolved-namespace", [2, 3]),
+        ("unresolved-symbol", [4, 5]),
+        ("unresolved-var", [6, 7]),
+    ] {
+        let mut found: Vec<u64> = diags
+            .iter()
+            .filter(|d| d["code"] == json!(code) && d["source"] == json!("clj-kondo"))
+            .map(|d| d["range"]["start"]["line"].as_u64().unwrap())
+            .collect();
+        found.sort_unstable();
+        assert_eq!(
+            found, lines,
+            "{code} must mark every site, not the first per file: {params}"
+        );
+    }
+}
+
 /// `initializationOptions` pointing the server at the committed fixture
 /// export (`tests/fixtures/clojuredocs/export.json`, official shape).
 fn clojuredocs_options() -> Value {
