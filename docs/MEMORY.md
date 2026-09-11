@@ -126,6 +126,27 @@ only number that moved much, and only before its global cache was isolated
   (`jar:` for clj-pulse, `zipfile:` for clojure-lsp). A null answer is a retry,
   never a fast sample.
 
+## Soak: memory over a long session (2026-09-11)
+
+`bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,
+same Linux container as the benchmark: 60 checkpoints, 7.6 minutes, no
+divergence from the reference server at any of them, every witness landed.
+RSS, sampled quiesced with nothing open at each checkpoint:
+
+| Round | 5 | 15 | 100 | 130 | 185 | 300 |
+|---|---|---|---|---|---|---|
+| RSS | 104.0 MiB | 116.1 | 117.9 | 124.0 | 124.6 | 124.8 |
+
+A plateau, not a leak. The growth arrives in three steps (rounds 10→15,
+100→105, 125→130) with flat stretches between, and the last 115 rounds gained
+0.2 MiB — the signature of capacity doublings that are never handed back
+(hash tables, ropes, allocator arenas), not of per-edit retention, which would
+draw a straight line. 1.20x over 300 rounds, against the gate's 1.5x. The
+20-round default climbs monotonically (104 → 116 MiB) and looks like a leak
+on its own; it is the first of those steps. When a future run shows a
+straight line instead of a staircase, that is the bug this table exists to
+recognize.
+
 ## Performance baseline (clj-pulse alone, before the comparison)
 
 The history below predates the benchmark above and measures clj-pulse alone,
