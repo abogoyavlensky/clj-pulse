@@ -38,7 +38,7 @@ then the editor features users notice as missing. Guiding decisions:
    same day, one line with the date. Promote it into a milestone when it is
    scheduled; delete it when it is rejected, with the reason in Not planned.
 
-## Where we stand (September 2026, v0.5.0)
+## Where we stand (September 2026, v0.5.1)
 
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
@@ -52,8 +52,9 @@ bridge, indent-on-Enter, `jar:` content provider, ignored-form dimming,
 multi-project workspaces with graduated classpath resolution, let-go/lgx
 support. The full ns form is understood (`:as-alias`, `:rename`,
 `:refer-clojure :exclude`/`:rename`, prefix lists, `declare`). A panicking
-request fails alone instead of taking the server down, and `bb e2e-pulse` plus
-`bb bench` guard the first-priority editor and the performance baseline. Open
+request fails alone instead of taking the server down, and `bb e2e-pulse`,
+`bb bench` and `bb soak` guard the first-priority editor, the performance
+baseline and long-session stability. Open
 buffers keep one incrementally updated parse tree, so no request or lint pass
 parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 `documentHighlight` underlines the symbol under the cursor, and
