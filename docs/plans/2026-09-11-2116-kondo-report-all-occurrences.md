@@ -106,3 +106,21 @@ Modify:
   Run: `bb check && bb e2e && bb e2e-pulse`
   Expected: PASS. The Pulse gate is required: the change alters which diagnostics the editor shows.
   `git commit -m "Document that clj-kondo reports every occurrence in the editor"`
+
+---
+
+## Completion
+
+**Status: completed** (branch `kondo-report-all-occurrences`, commits 3f872eb, 8b98750, 0ab1f18).
+
+**Implemented.** `kondo::lint` passes a second `--config` (`REPORT_DUPLICATES_CONFIG`) turning on `:report-duplicates` for `unresolved-namespace`, `unresolved-symbol`, and `unresolved-var`; the warm run is untouched. The fake clj-kondo logs `--lint` argv, `test_e2e_kondo_lint_requests_report_duplicates` asserts both configs, and the ignored `test_e2e_real_kondo_reports_every_unresolved_occurrence` proves a released clj-kondo honors the flag through the bridge (two sites for each of the three linters). README, AGENTS.md, and ROADMAP updated.
+
+**Verified.** `bb check`, `bb e2e`, `bb e2e-real-kondo` (2 passed, none skipped), `bb e2e-pulse` all green. Driven once by hand through the debug binary on the originating case (alias renamed in the ns form, two stale usages): clj-kondo now publishes two `unresolved-namespace` diagnostics, lines 2 and 3. Each task's commit passed a codex review with no findings.
+
+**Issues.** None in the change. While driving the binary by hand, a project under `/tmp` got native diagnostics only, because the mise shim run from the file's directory has no pinned clj-kondo there and exits without output; that is the silent-failure Backlog entry this plan recorded, reproduced again.
+
+**Deviations.**
+- Task 2: `unresolved-var` asserted strictly rather than conditionally; clj-kondo's built-in `clojure.string` analysis makes it fire without a cache dir. The plan's `clojure.string/no-such-fn` without a require would have been an `unresolved-namespace`, so the test requires the namespace and calls `str/no-such-fn`.
+- Tracking: TaskCreate/TaskUpdate are not available in this build, so the plan document was the only tracking surface.
+
+**What the plan could have specified better.** The `unresolved-var` probe: a fully qualified `clojure.string/no-such-fn` with no require is an unresolved namespace to clj-kondo, and the built-in cache covers `clojure.*`, so the conditional assertion was unnecessary. One command against the real binary while planning would have settled both.
