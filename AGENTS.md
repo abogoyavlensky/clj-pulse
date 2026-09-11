@@ -145,7 +145,9 @@ and update README and this file in the same change.
   `unused-private-var`) and clj-kondo, spawned per lint pass when found. A
   successful kondo run owns all five codes and the native copies are dropped
   for that pass; any failure publishes the native set unchanged. One publish
-  per pass, never two.
+  per pass, never two. Every `lint` run passes `REPORT_DUPLICATES_CONFIG`, so
+  the three unresolved linters mark every site; the CLI default of one per
+  file is a terminal convenience, not an editor one.
 - The document store keeps one tree-sitter tree per open document. `open`
   parses once; `apply_changes` turns every incremental change into a
   `Tree::edit` and reparses incrementally before it returns, so the tree in

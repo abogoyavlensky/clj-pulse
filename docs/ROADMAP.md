@@ -213,6 +213,11 @@ the release.
       today: RSS flat at 1.01x over 20 rounds, no divergence, definition median
       unchanged.
       Plan: [2026-09-10-2206-soak-run.md](plans/2026-09-10-2206-soak-run.md) — done
+- [x] **clj-kondo reports every occurrence.** Its `unresolved-namespace`,
+      `unresolved-symbol`, and `unresolved-var` linters mark one site per file
+      unless `:report-duplicates` is set, so fixing one usage reveals the next.
+      Every lint run passes the flag; no setting.
+      Plan: [2026-09-11-2116-kondo-report-all-occurrences.md](plans/2026-09-11-2116-kondo-report-all-occurrences.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
@@ -291,6 +296,16 @@ One line each, newest last. Promote or reject; never let this grow silently.
   fqn and the last dialect indexed wins; it should prefer the dialect of the
   file that is asking. Found by the clojure-lsp benchmark, which has to accept
   either file to time the metric at all.
+- 2026-09-11 **A failed clj-kondo lint pass is silent.** `LINT_TIMEOUT` is 2 s
+  and the pass runs the resolved binary from the file's directory; a mise shim
+  there can pick an unpinned or untrusted config and exit without output
+  (reproduced on the metabase corpus). Either way the native set is published
+  and only a debug log line says why; `clojurePulse/lintStatus` carries a
+  `detail` for probe failures only. Fix: per-pass failure reason on
+  `lintStatus`, rate-limited warn log, a realistic default timeout with
+  cancellation of superseded runs, and `mise which` resolution of shims at
+  probe time so the per-file cwd stops deciding which binary runs.
+
 ## Best effort — do when cheap or asked
 
 - **Native cljfmt-compatible formatter** (`textDocument/formatting` and

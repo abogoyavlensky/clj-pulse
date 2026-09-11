@@ -320,6 +320,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// directly, so it needs no shell quoting.
 const JSON_OUTPUT_CONFIG: &str = "{:output {:format :json}}";
 
+/// The `--config` argument making clj-kondo mark every site. Its
+/// `unresolved-namespace`, `unresolved-symbol` and `unresolved-var` linters
+/// report a name once per file by default — a terminal convenience that keeps
+/// CLI output short, and the only three linters that hide duplicates. An
+/// editor has to show every occurrence, or fixing one squiggle reveals the
+/// next. Merged over the project's own config like every `--config`, so
+/// levels, excludes and `:lint-as` still apply.
+const REPORT_DUPLICATES_CONFIG: &str = "{:linters {:unresolved-namespace {:report-duplicates true} :unresolved-symbol {:report-duplicates true} :unresolved-var {:report-duplicates true}}}";
+
 /// Whether clj-kondo should lint this buffer.
 ///
 /// Its dialects only: `.lg` is let-go, whose core differs enough that
@@ -340,6 +349,10 @@ pub fn lints_file(path: &Path) -> bool {
 /// resolves the owning `.clj-kondo` config/cache dir from (walking up from the
 /// file, not from cwd) and what `namespace-name-mismatch` keys on.
 ///
+/// Every run asks for [`REPORT_DUPLICATES_CONFIG`]: the CLI reports an
+/// unresolved name once per file, and a squiggle on the first usage alone
+/// sends the user through the file one fix at a time.
+///
 /// `Err` is any reason we have no findings to trust — spawn failure, timeout,
 /// a crash, unparseable stdout. Callers keep their native diagnostics on
 /// `Err`; only `Ok` cedes ownership.
@@ -355,7 +368,9 @@ pub async fn lint(
         .arg("--filename")
         .arg(abs_path)
         .arg("--config")
-        .arg(JSON_OUTPUT_CONFIG);
+        .arg(JSON_OUTPUT_CONFIG)
+        .arg("--config")
+        .arg(REPORT_DUPLICATES_CONFIG);
     // clj-kondo derives the dialect from the extension, and `.bb` is not one
     // it knows — without this every babashka script lints as an unknown lang.
     if abs_path.extension().is_some_and(|e| e == "bb") {

@@ -5295,6 +5295,48 @@ fn test_e2e_kondo_run_drops_native_unused_binding() {
 }
 
 #[test]
+fn test_e2e_kondo_lint_requests_report_duplicates() {
+    // clj-kondo's three unresolved linters report a name once per file unless
+    // `:report-duplicates` is set; an editor has to mark every site, so every
+    // lint run carries a second `--config` asking for that.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let log = root.join("kondo-lint.log");
+    let mut client = LspClient::start_with_kondo_env(&root, &[("FAKE_KONDO_LOG", log.as_path())]);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    client.wait_for_diagnostics("/src/app.clj");
+
+    let recorded = std::fs::read_to_string(&log).expect("the fake should have logged a lint run");
+    let lint = recorded
+        .lines()
+        .find(|line| line.contains("--lint -"))
+        .unwrap_or_else(|| panic!("no --lint run recorded: {recorded}"));
+    assert!(
+        lint.contains("--config {:output {:format :json}}"),
+        "the JSON-output config must still be passed: {lint}"
+    );
+    let duplicates = lint
+        .split("--config ")
+        .find(|part| part.contains(":report-duplicates"))
+        .unwrap_or_else(|| panic!("no --config asking for duplicates: {lint}"));
+    for linter in [
+        ":unresolved-namespace",
+        ":unresolved-symbol",
+        ":unresolved-var",
+    ] {
+        assert!(
+            duplicates.contains(&format!("{linter} {{:report-duplicates true}}")),
+            "{linter} must report every occurrence: {lint}"
+        );
+    }
+}
+
+#[test]
 fn test_e2e_kondo_findings_published_and_native_codes_ceded() {
     let project = setup_kondo_project();
     let root = project.path().canonicalize().unwrap();
@@ -5515,10 +5557,12 @@ fn test_e2e_kondo_cache_not_warmed_without_a_clj_kondo_dir() {
     let params = client.wait_for_diagnostics("/src/app.clj");
     assert_eq!(params["diagnostics"][0]["source"], json!("clj-kondo"));
 
+    // The fake logs buffer lints too, so the log's presence proves nothing;
+    // its content must show no dependency scan.
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        !log.exists(),
-        "no .clj-kondo dir means no dependency scan, got: {}",
-        std::fs::read_to_string(&log).unwrap_or_default()
+        !recorded.lines().any(|line| line.contains("--dependencies")),
+        "no .clj-kondo dir means no dependency scan, got: {recorded}"
     );
 }
 
@@ -5574,6 +5618,61 @@ fn test_e2e_real_kondo_publishes_findings() {
             .contains("definitely-not-defined"),
         "unexpected message: {finding}"
     );
+}
+
+/// The proof the fake cannot give: a released clj-kondo honors the
+/// `:report-duplicates` config the bridge passes, so every usage of an
+/// unresolved name reaches the editor, not just the first per file.
+#[test]
+#[ignore = "requires a real clj-kondo binary on PATH"]
+fn test_e2e_real_kondo_reports_every_unresolved_occurrence() {
+    if !real_clj_kondo_available() {
+        eprintln!("SKIP: no clj-kondo on PATH — install it to run this test");
+        return;
+    }
+
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+
+    // Two sites for each of the three linters that hide duplicates by
+    // default. `clojure.string` is in clj-kondo's built-in cache, so the var
+    // check needs no `.clj-kondo` dir and no warm run.
+    let dups = root.join("src/dups.clj");
+    std::fs::write(
+        &dups,
+        "(ns dups (:require [clojure.string :as str]))\n\n\
+         (missing/a 1)\n\
+         (missing/b 2)\n\
+         (nowhere 1)\n\
+         (nowhere 2)\n\
+         (str/no-such-fn 1)\n\
+         (str/no-such-fn 2)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_real_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("linting: clj-kondo + native");
+    client.did_open(&dups);
+
+    let params = client.wait_for_diagnostics("/src/dups.clj");
+    let diags = params["diagnostics"].as_array().expect("diagnostics array");
+    for (code, lines) in [
+        ("unresolved-namespace", [2, 3]),
+        ("unresolved-symbol", [4, 5]),
+        ("unresolved-var", [6, 7]),
+    ] {
+        let mut found: Vec<u64> = diags
+            .iter()
+            .filter(|d| d["code"] == json!(code) && d["source"] == json!("clj-kondo"))
+            .map(|d| d["range"]["start"]["line"].as_u64().unwrap())
+            .collect();
+        found.sort_unstable();
+        assert_eq!(
+            found, lines,
+            "{code} must mark every site, not the first per file: {params}"
+        );
+    }
 }
 
 /// `initializationOptions` pointing the server at the committed fixture
