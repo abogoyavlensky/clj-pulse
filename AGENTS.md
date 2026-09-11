@@ -35,12 +35,39 @@ and update README and this file in the same change.
   `jar:` content through the extension's own `clojure/dependencyContents`
   provider, hover, completion, and diagnostics.
 
-- `bb bench` — a large real project (metabase, shallow-cloned into
-  `.tmp/bench/` on first run) indexed by the release binary under production
-  settings, reporting index time, symbol counts, RSS, and per-edit and
-  definition latency (`tests/test_bench.rs`). Not a pass/fail gate beyond a
-  120 s hang ceiling; compare its table against the baseline in
+- `bb bench [metabase|clj-kondo]` — the release binary and clojure-lsp, each
+  driven by the same client through the same requests, on two corpora pinned by
+  commit (`bb bench` runs both; they are checked out under `.tmp/bench/` on
+  first use, and the pinned clojure-lsp release is downloaded and checksum-
+  verified beside them). Four configurations per corpus, in a fixed order:
+  clj-pulse cold, clj-pulse warm, clojure-lsp cold, clojure-lsp warm. Every
+  metric is behavioral, so it means the same thing for both servers — time
+  until a `textDocument/definition` on a project symbol *lands where it should*,
+  the same into a JAR, RSS once the server is settled (no traffic for 2 s and no
+  child process still working), and medians of 20 definitions and 20 keystrokes
+  to `publishDiagnostics`. Each row also prints as one `BENCH_JSON` line, so a
+  later run can be diffed. Not a pass/fail gate; compare against the tables in
   [docs/MEMORY.md](docs/MEMORY.md).
+
+- `bb soak [metabase|clj-kondo]` — one long-lived server driven through rounds
+  of realistic churn on the same pinned corpora: buffer edits, saves, on-disk
+  modifications, creations, deletions, renames, and every fifth round a
+  100-file batch delivered in a *single* `didChangeWatchedFiles`, the shape a
+  branch switch has. Every action carries a witness — a uniquely named var
+  whose `workspace/symbol` answer must change because of it — and a batch that
+  has not landed within `CLJ_PULSE_SOAK_CONVERGE_TIMEOUT` fails the run. At
+  each checkpoint the buffers are closed, the corpus is restored to its pinned
+  commit, and a *freshly started* server is held to the same settle rule and
+  asked the same probe set: definition, references, `documentSymbol` and
+  `workspace/symbol` must match (as sets where order is the index's business),
+  completion and hover only have to answer. RSS is sampled there, quiesced and
+  with nothing open, which is the only state two checkpoints share. The run
+  fails on a divergence, a witness that never landed, any JSON-RPC error
+  answer, a `panicked at` in the accumulated `server.log`, or RSS growth past
+  `CLJ_PULSE_SOAK_RSS_GROWTH` (1.5x) — a gate, unlike `bb bench`. Each
+  checkpoint prints a `SOAK_JSON` line, and the seed is printed on every run:
+  `bb soak clj-kondo <seed>` replays a failure exactly. Defaults to clj-kondo
+  and 20 rounds (about half a minute); `bb soak metabase` is the long one.
 
 | Gate | Run when |
 |---|---|
@@ -49,11 +76,12 @@ and update README and this file in the same change.
 | `bb e2e-calva` | definition, `jar:`, or location-shape changes |
 | `bb e2e-nvim` | new capabilities or protocol changes |
 | `bb bench` | before a release, and after index or extractor changes |
+| `bb soak` | before a release, and after index, watcher, or document-store changes |
 
 ## Testing notes
 
 - The e2e harness (`LspClient` in `tests/common/mod.rs`, shared by
-  `test_e2e.rs` and `test_bench.rs`) is the template for new
+  `test_e2e.rs`, `test_bench.rs` and `test_soak.rs`) is the template for new
   feature tests: copy the fixture with `setup_project()`, `initialize`, `did_open`,
   then assert on raw JSON responses. `wait_for_log("Indexed")` /
   `wait_for_log("library indexing complete")` synchronize with the two
@@ -64,14 +92,19 @@ and update README and this file in the same change.
   exercise stage 3 use `LspClient::start_with_classpath_cli`. It sets
   `CLJ_PULSE_DISABLE_KONDO=1` for the same reason: the suite must behave
   identically on a machine with clj-kondo installed and one without.
+- `tests/common/sampling.rs` and `tests/common/sites.rs` hold what the bench
+  and the soak must agree about: how a settled server is recognized (the stage
+  lines, the quiet window, the no-child-process rule), how RSS is read, and
+  which cursor positions in a real corpus are worth asking a question about.
+  Neither gate keeps a private copy.
 - `CLJ_PULSE_TEST_PANIC` (non-empty) makes the server register one extra
   method, `clojurePulse/__testPanic`, whose handler panics on purpose. It is
   the only way to test the panic guard end to end; `LspClient::start_with_str_env`
   sets it. Never set in normal runs, so the method does not exist in a release.
 - `LspClient::start_production` sets *none* of the `CLJ_PULSE_DISABLE_*`
   variables, so stage 3 runs and clj-kondo is spawned when installed. It exists
-  for `bb bench` alone — a regular test using it would behave differently per
-  machine.
+  for `bb bench` and `bb soak` alone — a regular test using it would behave
+  differently per machine.
 - Test realistic Clojure, not just toy snippets: real libraries use ns/def
   metadata (`(ns ^{:doc "…"} foo)`), reader conditionals, multi-arity fns.
   The extractor must handle them (see `test_extractor.rs`).

@@ -4,7 +4,155 @@ Durable findings about clj-pulse worth keeping in one place: known gaps, their
 root causes in the code, and what a fix would involve. Complements the
 forward-looking [ROADMAP.md](ROADMAP.md).
 
-## Performance baseline
+## Benchmark against clojure-lsp
+
+`bb bench` drives clj-pulse and clojure-lsp through the same client, over
+stdio, with the same requests, on two corpora pinned by commit. Re-run it
+before a release and after index or extractor changes.
+
+- **Date:** 2026-09-10
+- **Machine:** Linux x86-64 container, 5 cores, 11 GiB RAM (Intel Haswell).
+  One box. Nothing here is a claim about a laptop, and the maintainer's macOS
+  numbers are not in yet.
+- **clj-pulse:** 0.5.0 at `e497295`, release build, production settings
+  (stage-3 classpath resolution on, clj-kondo v2026.08.04 on PATH)
+- **clojure-lsp:** 2026.07.06-14.34.19, native static Linux build, defaults —
+  no `initializationOptions`, nothing tuned on either side
+- **Corpora:** metabase at `42a8e9f7` (43 164 symbols in 2 976 namespaces),
+  clj-kondo at `13a32d1c` (2 252 symbols in 225 namespaces)
+- **Reproduce:** `bb bench metabase`, `bb bench clj-kondo`, or `bb bench` for
+  both
+
+### metabase (large)
+
+Edit target `test/metabase/dashboards_rest/api_test.clj` (452 KiB, the largest
+`.clj` in the repo), second edit target `test/metabase/collections_rest/api_test.clj`
+(251 KiB, the largest under clj-pulse's `:kondo {:live-max-kb 256}`).
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| Time to first definition | 3.4 s | 3.1 s | 293 s | 60 s |
+| Time to first library definition | 6.0 s | 3.9 s | 293 s | 60 s |
+| Time to settled | 64 s | 50 s | 295 s | 62 s |
+| RSS settled | 366 MiB | 353 MiB | 2 289 MiB | 1 798 MiB |
+| Definition (median of 20) | 25 ms | 34 ms | 6 ms | 7 ms |
+| didChange → diagnostics, 452 KiB | 373 ms | 381 ms | 1 185 ms | 1 371 ms |
+| didChange → diagnostics, 251 KiB | 895 ms | 911 ms | 795 ms | 925 ms |
+
+Repeated on the same box: clj-pulse 3.7 s / 3.4 s to first definition, 387 ms
+and 378 ms per edit; clojure-lsp 288 s cold and 57 s warm, 1 520 ms and
+1 312 ms per edit. The two runs agree within a few percent.
+
+### clj-kondo (medium)
+
+Edit target `src/clj_kondo/impl/analyzer.clj` (233 KiB — already under
+`:live-max-kb`, so there is no second row).
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| Time to first definition | 526 ms | 520 ms | 16.8 s | 2.4 s |
+| Time to first library definition | 928 ms | 521 ms | 16.8 s | 2.4 s |
+| Time to settled | 14.3 s | 4.4 s | 18.8 s | 4.4 s |
+| RSS settled | 125 MiB | 90 MiB | 238 MiB | 273 MiB |
+| Definition (median of 20) | 17 ms | 16 ms | 7 ms | 3 ms |
+| didChange → diagnostics, 233 KiB | 790 ms | 789 ms | 921 ms | 759 ms |
+
+A third run of this corpus: clj-pulse 419 ms / 513 ms, clojure-lsp 17.2 s /
+2.5 s. This corpus is stable run to run; metabase's clojure-lsp startup is the
+only number that moved much, and only before its global cache was isolated
+(see below).
+
+### What the numbers mean, and what they do not
+
+- **The two servers do different work at startup.** clojure-lsp analyzes the
+  whole classpath through clj-kondo and caches the result; clj-pulse indexes
+  the project's own sources first and the classpath in the background, and
+  reads JAR entries lazily. The "time to first definition" row is that
+  difference, not a difference in speed at the same task.
+- **clojure-lsp answers a definition faster once it is up** — 3-7 ms against
+  our 16-34 ms — and it is answering from a fuller analysis. That row is the
+  one to watch when the extractor changes.
+- **That gap is per-request re-analysis, and it scales with the open file.**
+  Every position request re-reads the buffer: `references::resolve_fqn_at`
+  calls `extractor::extract_full_tree`, which rebuilds every symbol and
+  occurrence and then scans them linearly for the cursor. The index lookup
+  after it is a hash lookup. Measured on the same warm metabase checkout,
+  through one client, 20 samples each:
+
+  | Open file | clj-pulse | clojure-lsp |
+  |---|---|---|
+  | `src/metabase/classloader/init.clj`, 190 B | 2.1 ms | 2.1 ms |
+  | `test/metabase/dashboards_rest/api_test.clj`, 452 KiB | 27.2 ms | 6.3 ms |
+
+  On a small file the two are indistinguishable and the floor is the JSON-RPC
+  round trip. The bench probes the largest `.clj` in each repo, so its
+  definition row is our worst case and not clojure-lsp's, which reads a stored
+  analysis and barely moves. Caching the `Analysis` per (uri, version) would
+  close the gap, and the native lint pass on the same buffer would reuse it
+  (`unused_requires` is 28 ms of its 65 ms for the same reason). It is in the
+  [ROADMAP.md](ROADMAP.md) backlog and deliberately unscheduled: 27 ms is below
+  what a user perceives, and a cache serving a stale entry would navigate
+  confidently to the wrong place — masking the resolution bugs that list
+  already tracks rather than fixing them.
+- **Cold and warm are per server.** Cold deletes `.clj-pulse/jar-cache` for
+  clj-pulse and `.lsp/.cache`, `.clj-kondo/.cache` *and* clojure-lsp's global
+  `$XDG_CACHE_HOME/clojure-lsp` for clojure-lsp — the last one holds ~150 MiB
+  of JDK-source analysis and lives outside the project, so the bench points
+  `XDG_CACHE_HOME` inside the corpus and clears it. Before that isolation, a
+  "cold" clojure-lsp row was reusing an earlier run's JDK analysis and its
+  metabase timings swung between 293 s and 700 s; with it they repeat.
+  `.cpcache` is *not* cleared: resolving the classpath is preparation both
+  servers share, done untimed by `bb bench` before either starts.
+- **"Settled" is not "answering".** It is: nothing logged (clj-pulse) or no
+  `publishDiagnostics`/`$/progress` (clojure-lsp) for 2 s, *and* no child
+  process of the server still running. For clj-pulse on metabase that is ~50 s,
+  almost all of it the clj-kondo dependency-cache warm over 491 classpath
+  entries — background work that does not block an answer, which is why the
+  first-definition row is 3 s. RSS and every median are sampled after it.
+- **The 452 KiB edit row is clj-pulse's native tier alone**: that file is above
+  `:kondo {:live-max-kb 256}`, so clj-kondo sits out the keystroke path. The
+  251 KiB row is the same measurement with clj-kondo in it — 373 ms against
+  895 ms, which is what the threshold buys. clojure-lsp lints every keystroke
+  through its embedded clj-kondo either way.
+- **clojure-lsp takes full document syncs.** It declares
+  `TextDocumentSyncKind.Full`, so its own clients resend the whole buffer on
+  every keystroke, and the bench does the same; clj-pulse takes incremental
+  ranges. Both are what each server asked for.
+- **clojure-lsp echoes no document version** in `publishDiagnostics`, so its
+  edit rows time the next publication for that file rather than the one
+  carrying the edit's version. clj-pulse's rows are version-matched.
+- **A definition answer only counts when it lands where it should** — the
+  project file that defines the var, or an entry inside a dependency archive
+  (`jar:` for clj-pulse, `zipfile:` for clojure-lsp). A null answer is a retry,
+  never a fast sample.
+
+## Soak: memory over a long session (2026-09-11)
+
+`bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,
+same Linux container as the benchmark: 60 checkpoints, 7.6 minutes, no
+divergence from the reference server at any of them, every witness landed.
+RSS, sampled quiesced with nothing open at each checkpoint:
+
+| Round | 5 | 15 | 100 | 130 | 185 | 300 |
+|---|---|---|---|---|---|---|
+| RSS | 104.0 MiB | 116.1 | 117.9 | 124.0 | 124.6 | 124.8 |
+
+A plateau, not a leak. The growth arrives in three steps (rounds 10→15,
+100→105, 125→130) with flat stretches between, and the last 115 rounds gained
+0.2 MiB — the signature of capacity doublings that are never handed back
+(hash tables, ropes, allocator arenas), not of per-edit retention, which would
+draw a straight line. 1.20x over 300 rounds, against the gate's 1.5x. The
+20-round default climbs monotonically (104 → 116 MiB) and looks like a leak
+on its own; it is the first of those steps. When a future run shows a
+straight line instead of a staircase, that is the bug this table exists to
+recognize.
+
+## Performance baseline (clj-pulse alone, before the comparison)
+
+The history below predates the benchmark above and measures clj-pulse alone,
+synchronized on its own log lines rather than on behavior; the numbers are not
+directly comparable with the tables above, but the trends are why the code
+looks the way it does.
 
 Measured with `bb bench`: the release binary indexing a shallow clone of
 [metabase](https://github.com/metabase/metabase) under production settings

@@ -176,7 +176,8 @@ Each is small because the index already holds the data.
 
 ## Milestone 5 — public release
 
-Three plans, in order: correctness and coverage, the benchmark, the release.
+Four plans, in order: correctness and coverage, the benchmark, the soak run,
+the release.
 
 - [x] **Correctness and coverage before 1.0**
   - [x] Integrant keys are no longer offered as vars by the completion pools
@@ -195,11 +196,23 @@ Three plans, in order: correctness and coverage, the benchmark, the release.
   - [x] Leiningen docs corrected: stage 3 runs `lein classpath`, direct deps
         only is the fallback.
   Plan: [2026-09-10-1242-release-correctness-and-coverage.md](plans/2026-09-10-1242-release-correctness-and-coverage.md) — done
-- [ ] **Benchmark against clojure-lsp**: two pinned corpora (metabase,
+- [x] **Benchmark against clojure-lsp**: two pinned corpora (metabase,
       clj-kondo), both servers through the same harness, behavior-based
       metrics, cold and warm, a README "Performance" section with the caveats
-      next to the numbers and a one-line reproduce command.
-  Plan: [2026-09-10-1243-release-benchmark.md](plans/2026-09-10-1243-release-benchmark.md) — in progress
+      next to the numbers and a one-line reproduce command. The macOS column is
+      still open: the README table carries the Linux box alone until the
+      maintainer runs `bb bench` on the Mac and adds its row.
+  Plan: [2026-09-10-1243-release-benchmark.md](plans/2026-09-10-1243-release-benchmark.md) — done
+- [x] **Soak run** (`bb soak`): one long-lived server driven through rounds of
+      realistic churn — buffer edits, saves, files changed, created, deleted
+      and renamed on disk, and a branch-switch-shaped batch every fifth round —
+      on the same pinned corpora, with every action witnessed in the index and
+      every checkpoint compared against a freshly started server. It gates on
+      divergence, on a batch that never lands, on a JSON-RPC error or a logged
+      panic, and on memory growth across identical states. Both corpora pass
+      today: RSS flat at 1.01x over 20 rounds, no divergence, definition median
+      unchanged.
+      Plan: [2026-09-10-2206-soak-run.md](plans/2026-09-10-2206-soak-run.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
@@ -246,13 +259,38 @@ One line each, newest last. Promote or reject; never let this grow silently.
   still binds its vector as parameters there while the occurrence walker does
   not. Narrow, but it makes local resolution and references disagree; the fix
   is threading `ExtractConfig` through `locals_in_scope_at`.
-- 2026-09-09 **Cache the extraction per document version, not just the
-  tree.** With the tree cached, a definition request on the 452 KiB bench file
-  is the 21 ms definitions-and-occurrences walk, and `unused_requires` is
-  28 ms of the 65 ms native pass ([MEMORY.md](MEMORY.md)). Caching the
-  `Analysis` per version would make position requests walk nothing. Only worth
-  it if a real project's largest files make the 22 ms show.
-
+- 2026-09-10 **Cache the extraction per document version, not just the tree.**
+  Every position request re-walks the open buffer:
+  `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which
+  rebuilds every symbol and occurrence and then scans them linearly. So
+  definition latency tracks file size — 2 ms on a 190-byte file, 27 ms on
+  metabase's 452 KiB one, against clojure-lsp's 6 ms, which reads a stored
+  analysis ([MEMORY.md](MEMORY.md)). `unused_requires` is 28 ms of the 65 ms
+  native lint pass for the same reason. Caching the `Analysis` per (uri,
+  version) would close it. **Deliberately unscheduled** (promoted to Milestone
+  4 on 2026-09-10 and returned here the same day): 27 ms is below what a user
+  can perceive, while a cache that answers from a stale entry navigates
+  confidently to the wrong place and would mask exactly the resolution bugs
+  this list already tracks. Revisit once the live-buffer path is proven under a
+  soak run, not before — `bb soak` exists now, and the live-buffer path came
+  through 20 rounds on both corpora without a divergence.
+- 2026-09-10 **A failing clj-kondo candidate ends the probe instead of falling
+  through to the next one.** On the metabase bench corpus the same binary
+  reported `kondo+native` under `bb bench` and "clj-kondo not found - native
+  lints only" from a plain shell, same machine and directory: metabase ships a
+  `mise.toml` that mise will not trust, so the shim exits 1 and the probe stops
+  there rather than trying the mise install dir or Homebrew behind it. The lint
+  tier then depends on how the editor was launched, which is the problem
+  `tools::well_known_dirs` exists to solve. Trying each candidate until one
+  answers `--version` would fix it.
+- 2026-09-10 **A `.clj` file navigates into the ClojureScript copy of a core
+  namespace.** With both `org.clojure/clojure` and `org.clojure/clojurescript`
+  on the classpath (clj-kondo's `:test` alias, and common in full-stack
+  projects), definition on `str/trim` in a `.clj` file answers
+  `clojure/string.cljs` out of the ClojureScript jar. The library index keys by
+  fqn and the last dialect indexed wins; it should prefer the dialect of the
+  file that is asking. Found by the clojure-lsp benchmark, which has to accept
+  either file to time the metric at all.
 ## Best effort — do when cheap or asked
 
 - **Native cljfmt-compatible formatter** (`textDocument/formatting` and

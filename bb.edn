@@ -1,7 +1,136 @@
 {:tasks
- {:requires ([babashka.fs :as fs])
+ {:requires ([babashka.fs :as fs]
+             [clojure.string :as str])
 
   :enter (println "Running task:" (:name (current-task)))
+
+  ;; --- bench corpora -------------------------------------------------------
+  ;; Pinned by commit, not by branch: a re-run months from now has to measure
+  ;; the same code, or the numbers in docs/MEMORY.md compare nothing.
+  :init (do
+          (def bench-order ["metabase" "clj-kondo"])
+
+          (def bench-corpora
+            {"metabase" {:url "https://github.com/metabase/metabase"
+                         :sha "42a8e9f77d330c90c5a4d71927fed2823897f949"}
+             "clj-kondo" {:url "https://github.com/clj-kondo/clj-kondo"
+                          :sha "13a32d1caf6278b7e4a8c4ad4936d4fc33db6cf2"}})
+
+          (defn bench-git
+            "Runs git in `dir`, returning trimmed stdout, or nil when it fails."
+            [dir & args]
+            (let [{:keys [exit out]} (apply shell {:dir (str dir)
+                                                   :out :string
+                                                   :err :string
+                                                   :continue true}
+                                            "git" args)]
+              (when (zero? exit) (str/trim out))))
+
+          (defn bench-corpus!
+            "The corpus checkout for `name`, at its pinned commit. Fetches only
+             that commit (`--depth 1`), so the clone stays shallow and a re-pin
+             costs one fetch rather than a re-clone."
+            [name]
+            (let [{:keys [url sha]} (or (get bench-corpora name)
+                                        (do (binding [*out* *err*]
+                                              (println "Unknown bench corpus:" name
+                                                       "- known:" (str/join ", " bench-order)))
+                                            (System/exit 1)))
+                  dir (fs/absolutize (fs/path ".tmp/bench" name))]
+              (when-not (fs/exists? (fs/path dir ".git"))
+                (println "Creating the bench corpus at" (str dir) "...")
+                (fs/create-dirs dir)
+                (shell {:dir (str dir)} "git init -q")
+                (shell {:dir (str dir)} "git remote add origin" url))
+              (when-not (= sha (bench-git dir "rev-parse" "HEAD"))
+                (println "Fetching" name "at" sha "...")
+                (shell {:dir (str dir)} "git fetch --depth 1 -q origin" sha)
+                (shell {:dir (str dir)} "git checkout -q --detach FETCH_HEAD"))
+              dir))
+
+          (defn bench-prepare!
+            "Resolves the corpus's dependencies *before* anything is timed, so
+             both servers start from the same prepared state: `.cpcache` written
+             and every artifact in `~/.m2`. A failure is a warning, not a stop —
+             the run then measures whatever the corpus does have."
+            [dir]
+            (when (fs/exists? (fs/path dir "deps.edn"))
+              (println "Preparing the corpus classpath (clojure -A:dev:test -Spath) ...")
+              ;; try/catch as well as :continue — the latter tolerates a
+              ;; non-zero exit, but a missing `clojure` on PATH throws before
+              ;; the process ever starts, and that must not end the run either.
+              (try
+                (let [{:keys [exit err]} (shell {:dir (str dir)
+                                                 :out :string
+                                                 :err :string
+                                                 :continue true}
+                                                "clojure -A:dev:test -Spath")]
+                  (when-not (zero? exit)
+                    (println "WARNING: preparing the classpath failed:" (str/trim (str err)))))
+                (catch Exception e
+                  (println "WARNING: could not run the clojure CLI:" (ex-message e))))))
+
+          ;; --- the server we compare against ---------------------------------
+          (def clojure-lsp-version "2026.07.06-14.34.19")
+
+          (defn clojure-lsp-asset
+            "The native release archive for this platform, or nil when there is
+             none (then the comparison is skipped, not faked)."
+            []
+            (let [os (str/lower-case (System/getProperty "os.name"))
+                  arm? (contains? #{"aarch64" "arm64"} (System/getProperty "os.arch"))]
+              (cond
+                (str/includes? os "mac")
+                (if arm?
+                  "clojure-lsp-native-macos-aarch64.zip"
+                  "clojure-lsp-native-macos-amd64.zip")
+                (str/includes? os "linux")
+                (if arm?
+                  "clojure-lsp-native-linux-aarch64.zip"
+                  ;; static: the dynamic build needs a glibc the CI box may not have
+                  "clojure-lsp-native-static-linux-amd64.zip")
+                :else nil)))
+
+          (defn sha256 [file]
+            (let [digest (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                  (fs/read-all-bytes (str file)))]
+              (str/join (map (fn [b] (format "%02x" (bit-and b 0xff))) digest))))
+
+          (defn clojure-lsp!
+            "The pinned clojure-lsp binary, downloaded once into
+             `.tmp/bench/tools/` and checked against the release's own sha256.
+             nil when this platform has no native release or the download fails
+             — the bench then reports clj-pulse alone rather than guessing."
+            []
+            (when-let [asset (clojure-lsp-asset)]
+              (let [dir (fs/absolutize (fs/path ".tmp/bench/tools"
+                                                (str "clojure-lsp-" clojure-lsp-version)))
+                    bin (fs/path dir "clojure-lsp")
+                    base (str "https://github.com/clojure-lsp/clojure-lsp/releases/download/"
+                              clojure-lsp-version "/")]
+                (when-not (fs/exists? bin)
+                  (fs/create-dirs dir)
+                  (let [zip (fs/path dir asset)
+                        sums (fs/path dir (str asset ".sha256"))]
+                    (println "Downloading clojure-lsp" clojure-lsp-version "...")
+                    (shell "curl -sSL --fail -o" (str zip) (str base asset))
+                    (if (zero? (:exit (shell {:continue true}
+                                             "curl -sSL --fail -o" (str sums)
+                                             (str base asset ".sha256"))))
+                      (let [want (first (str/split (str/trim (slurp (str sums))) (re-pattern "\\s+")))
+                            got (sha256 zip)]
+                        (when-not (= want got)
+                          (binding [*out* *err*]
+                            (println "Checksum mismatch for" asset "- expected" want "got" got))
+                          (System/exit 1))
+                        (println "Checksum verified:" got))
+                      ;; The release publishes a .sha256 beside most, but not
+                      ;; every, archive (macos-aarch64 has none).
+                      (println "WARNING: no" (str asset ".sha256")
+                               "published - skipping the checksum check"))
+                    (shell "unzip -q -o" (str zip) "-d" (str dir))))
+                (str bin))))
+          nil)
 
   fmt-check {:doc "Check code formatting"
              :task (shell "cargo fmt --all -- --check")}
@@ -18,14 +147,37 @@
   e2e {:doc "End-to-end tests (spawns real binary, speaks LSP over stdio)"
        :task (shell "cargo test --test test_e2e")}
 
-  bench {:doc "Bench against a large real Clojure repo (clones metabase into .tmp/bench on first run)"
-         :task (let [corpus ".tmp/bench/metabase"]
-                 (when-not (fs/exists? corpus)
-                   (println "Cloning the bench corpus into" corpus "...")
-                   (shell "git clone --depth 1 https://github.com/metabase/metabase" corpus))
-                 ;; --release: the debug build's numbers are not what users see.
-                 (shell {:extra-env {"CLJ_PULSE_BENCH_ROOT" (str (fs/absolutize corpus))}}
-                        "cargo test --release --test test_bench -- --ignored --nocapture"))}
+  bench {:doc "Bench clj-pulse against clojure-lsp on pinned real Clojure repos: `bb bench metabase`, `bb bench clj-kondo`, or no argument for both (checked out under .tmp/bench on first run)"
+         :task (let [lsp (try
+                           (clojure-lsp!)
+                           (catch Exception e
+                             (println "WARNING: could not obtain clojure-lsp:" (ex-message e))
+                             nil))]
+                 (when-not lsp
+                   (println "Comparing clj-pulse alone: no clojure-lsp binary."))
+                 (doseq [name (or (seq *command-line-args*) bench-order)]
+                   (let [dir (bench-corpus! name)]
+                     (bench-prepare! dir)
+                     ;; --release: the debug build's numbers are not what users see.
+                     (shell {:extra-env (cond-> {"CLJ_PULSE_BENCH_ROOT" (str dir)
+                                                 "CLJ_PULSE_BENCH_CORPUS" name}
+                                          lsp (assoc "CLJ_PULSE_BENCH_CLOJURE_LSP" lsp))}
+                            "cargo test --release --test test_bench -- --ignored --nocapture"))))}
+
+  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
+        ;; One corpus, not both: a soak is long enough that running both by
+        ;; default is a mistake. clj-kondo is the default because a checkpoint
+        ;; there costs seconds rather than a minute.
+        :task (let [[name seed] *command-line-args*
+                    name (or name "clj-kondo")
+                    dir (bench-corpus! name)]
+                (bench-prepare! dir)
+                ;; --release: the debug build churns slowly enough to change
+                ;; what the run covers in an hour.
+                (shell {:extra-env (cond-> {"CLJ_PULSE_SOAK_ROOT" (str dir)
+                                            "CLJ_PULSE_SOAK_CORPUS" name}
+                                     seed (assoc "CLJ_PULSE_SOAK_SEED" (str seed)))}
+                       "cargo test --release --test test_soak -- --ignored --nocapture"))}
 
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}

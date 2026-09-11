@@ -1,6 +1,6 @@
 # clj-pulse
 
-A fast, lightweight Clojure language server.
+A fast-starting, low-memory Clojure language server.
 
 With first-class [let-go](https://github.com/nooga/let-go) support: `.lg` projects, deps are indexed and navigable via [lgx](https://github.com/abogoyavlensky/lgx).
 
@@ -117,6 +117,64 @@ Clojure & project support:
 > or fails, a Leiningen project falls back to the direct dependencies that name
 > an explicit version and already live in `~/.m2`. See
 > [docs/MEMORY.md](docs/MEMORY.md).
+
+## Performance
+
+`bb bench` runs clj-pulse and [clojure-lsp](https://clojure-lsp.io) through the
+same client, over stdio, with the same requests, on two corpora pinned by
+commit. Every metric is behavioral. The startup rows time the wait until a
+`textDocument/definition` lands where it should; memory and the latency
+medians are sampled only after the server goes quiet and no child process of
+it is still running. Both servers run at their defaults.
+
+Warm runs — a second start with what the first left cached — on one Linux
+container (5 cores, 11 GiB, 2026-09-10): clj-pulse 0.5.0, clojure-lsp
+2026.07.06-14.34.19, metabase at `42a8e9f7`, clj-kondo at `13a32d1c`.
+
+**metabase** (1 400+ files, 43 164 symbols):
+
+| Metric | clj-pulse | clojure-lsp |
+|---|---|---|
+| Time to first definition | 3.1 s | 60 s |
+| Time to first definition inside a dependency | 3.9 s | 60 s |
+| Memory once settled | 353 MiB | 1 798 MiB |
+| Definition (median of 20) | 34 ms | 7 ms |
+| Keystroke → diagnostics, 452 KiB file | 381 ms | 1 371 ms |
+| Keystroke → diagnostics, 251 KiB file | 911 ms | 925 ms |
+
+**clj-kondo** (400 files, 2 252 symbols):
+
+| Metric | clj-pulse | clojure-lsp |
+|---|---|---|
+| Time to first definition | 520 ms | 2.4 s |
+| Time to first definition inside a dependency | 521 ms | 2.4 s |
+| Memory once settled | 90 MiB | 273 MiB |
+| Definition (median of 20) | 16 ms | 3 ms |
+| Keystroke → diagnostics, 233 KiB file | 789 ms | 759 ms |
+
+What the tables do not say:
+
+- The two servers do different work at startup. clojure-lsp analyzes the whole
+  classpath through clj-kondo before it answers; clj-pulse indexes the
+  project's sources first and the classpath in the background, and reads JAR
+  entries lazily. The first two rows are that difference. From cold, with no
+  caches at all, the same metabase row reads 3.4 s against 293 s.
+- clojure-lsp answers a definition faster once it is up, from a fuller
+  analysis.
+- The definition row is measured on the largest file in each repo, which is a
+  worst case for clj-pulse and not for clojure-lsp: we re-read the open
+  buffer's definitions and usages on every request, while it looks the answer
+  up in the analysis it stored at startup. On the same metabase checkout, a
+  definition in a 190-byte file takes 2.1 ms from either server; in the 452 KiB
+  file it is 27 ms from clj-pulse and 6 ms from clojure-lsp.
+- The 452 KiB row is clj-pulse's native lint tier alone: that file is above
+  `:kondo {:live-max-kb 256}`, so clj-kondo sits out the keystroke path. The
+  251 KiB row is the same measurement with clj-kondo in it. clojure-lsp runs
+  its embedded clj-kondo on every keystroke either way.
+- One Linux container, one run each. macOS numbers are not in yet.
+
+Cold tables, the full method, and the caveats in detail are in
+[docs/MEMORY.md](docs/MEMORY.md). To reproduce: `bb bench`.
 
 ## Linting
 
@@ -464,7 +522,8 @@ bb fmt-check  # check formatting without fixing
 bb lint       # run clippy linter
 bb test       # run tests
 bb check      # run all checks (fmt-check + lint + test), exactly as CI does
-bb bench      # index a large real project and report timings and memory
+bb bench      # compare clj-pulse with clojure-lsp on two real projects
+bb soak       # churn one long-lived server and check it against a fresh one
 bb outdated   # check outdated deps 
 bb build      # build the dev binary
 bb release    # build release binary
@@ -481,10 +540,25 @@ bb e2e-calva  # real VS Code + Calva under Xvfb
 bb e2e-pulse  # real VS Code + the Clojure Pulse extension under Xvfb
 ```
 
-`bb bench` clones [metabase](https://github.com/metabase/metabase) into
-`.tmp/bench/` the first time and indexes it with the release binary, printing
-index time, symbol counts, resident memory, and per-edit and definition
-latency. The recorded baseline is in [docs/MEMORY.md](docs/MEMORY.md).
+`bb bench` checks out [metabase](https://github.com/metabase/metabase) and
+[clj-kondo](https://github.com/clj-kondo/clj-kondo) at pinned commits under
+`.tmp/bench/`, downloads the pinned clojure-lsp release beside them, and runs
+four configurations per corpus — each server cold and warm — printing a table
+and a `BENCH_JSON` line per row. `bb bench metabase` or `bb bench clj-kondo`
+runs one. The recorded tables are in [docs/MEMORY.md](docs/MEMORY.md), and the
+warm summary is under [Performance](#performance).
+
+`bb soak` drives one server through 20 rounds of churn on the same corpora —
+edits in open buffers, saves, files changed, created, deleted and renamed on
+disk, and every fifth round a 100-file batch delivered as a single
+`didChangeWatchedFiles`, the shape a branch switch has. Every action carries a
+witness the index has to reflect, and at each checkpoint the corpus is put back
+at its pinned commit and a freshly started server is asked the same questions:
+if the two disagree about a definition, a reference, a document symbol or a
+workspace symbol, the run fails and prints both answers. Memory is sampled at
+each checkpoint in the same quiesced, nothing-open state. Unlike `bb bench` it
+is a pass/fail gate. `bb soak metabase` is the long one, and the seed printed on
+every run replays a failure exactly: `bb soak clj-kondo <seed>`.
 
 > [!NOTE]
 > To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.

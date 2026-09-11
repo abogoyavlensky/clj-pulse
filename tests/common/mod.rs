@@ -14,7 +14,17 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+pub mod sampling;
+pub mod sites;
+
 pub const TIMEOUT: Duration = Duration::from_secs(20);
+
+/// `FileChangeType`, spelled as the protocol's own numbers: the client speaks
+/// JSON, so pulling in `lsp_types` for three constants would be the only
+/// typed thing in it.
+pub const FILE_CREATED: u8 = 1;
+pub const FILE_CHANGED: u8 = 2;
+pub const FILE_DELETED: u8 = 3;
 
 /// Which `clj-kondo`, if any, the server under test may find.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -33,6 +43,10 @@ pub struct LspClient {
     pub incoming: Receiver<Value>,
     pub notifications: Vec<Value>,
     pub next_id: i64,
+    /// How long a request may take before the harness gives up on it. The
+    /// default suits the e2e fixtures; the bench raises it to its indexing
+    /// ceiling, where a first request legitimately waits out a whole index.
+    pub request_timeout: Duration,
 }
 
 impl LspClient {
@@ -85,7 +99,19 @@ impl LspClient {
     /// a regular e2e test using this would spawn `clojure` and behave
     /// differently on a machine with clj-kondo installed than on one without.
     pub fn start_production(project_root: &Path) -> Self {
-        Self::spawn(project_root, &[], false, Kondo::Real)
+        Self::start_binary(
+            Path::new(env!("CARGO_BIN_EXE_clj-pulse")),
+            project_root,
+            &[],
+        )
+    }
+
+    /// [`start_production`] for an arbitrary LSP server binary: the bench
+    /// drives clojure-lsp through this same client, over stdio, with the same
+    /// requests. Nothing is tuned — no kill switches, no initialization
+    /// options — because a comparison of two defaults is the only fair one.
+    pub fn start_binary(binary: &Path, project_root: &Path, envs: &[(&str, &Path)]) -> Self {
+        Self::spawn_binary(binary, project_root, envs, false, Kondo::Real, &[])
     }
 
     /// Like [`start_with_kondo`] but resolving `clj-kondo` from the host's own
@@ -144,7 +170,25 @@ impl LspClient {
         kondo: Kondo,
         args: &[&str],
     ) -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clj-pulse"));
+        Self::spawn_binary(
+            Path::new(env!("CARGO_BIN_EXE_clj-pulse")),
+            project_root,
+            envs,
+            disable_classpath_cli,
+            kondo,
+            args,
+        )
+    }
+
+    fn spawn_binary(
+        binary: &Path,
+        project_root: &Path,
+        envs: &[(&str, &Path)],
+        disable_classpath_cli: bool,
+        kondo: Kondo,
+        args: &[&str],
+    ) -> Self {
+        let mut cmd = Command::new(binary);
         cmd.args(args);
         cmd.current_dir(project_root)
             .stdin(Stdio::piped())
@@ -182,7 +226,9 @@ impl LspClient {
         for (key, value) in envs {
             cmd.env(key, value);
         }
-        let mut child = cmd.spawn().expect("failed to spawn clj-pulse");
+        let mut child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", binary.display()));
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -225,7 +271,15 @@ impl LspClient {
             incoming: rx,
             notifications: Vec::new(),
             next_id: 0,
+            request_timeout: TIMEOUT,
         }
+    }
+
+    /// Raises (or lowers) the per-request deadline. Builder-style, so the
+    /// bench can write `LspClient::start_production(root).with_request_timeout(…)`.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     pub fn send(&mut self, msg: Value) {
@@ -261,7 +315,7 @@ impl LspClient {
     pub fn request_with_id(&mut self, id: i64, method: &str, params: Value) -> Value {
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
 
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + self.request_timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -282,7 +336,7 @@ impl LspClient {
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
 
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + self.request_timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -375,7 +429,9 @@ impl LspClient {
     }
 
     /// [`initialize`] without the trailing wait, so a caller can time the
-    /// indexing stages itself (the bench).
+    /// indexing stages itself (the bench). Advertises `window.workDoneProgress`
+    /// and `publishDiagnostics.versionSupport` because a real editor does: the
+    /// bench compares two servers, and both have to be asked the same thing.
     pub fn initialize_no_wait(&mut self, root: &Path) -> Value {
         let root_uri = format!("file://{}", root.display());
         let result = self.request(
@@ -385,7 +441,11 @@ impl LspClient {
                 "rootUri": root_uri,
                 "workspaceFolders": [{ "uri": root_uri, "name": "bench" }],
                 "capabilities": {
-                    "textDocument": { "definition": { "linkSupport": true } },
+                    "textDocument": {
+                        "definition": { "linkSupport": true },
+                        "publishDiagnostics": { "versionSupport": true }
+                    },
+                    "window": { "workDoneProgress": true },
                     "general": { "positionEncodings": ["utf-16"] }
                 }
             }),
@@ -530,6 +590,41 @@ impl LspClient {
                     "text": text
                 }
             }),
+        );
+    }
+
+    /// `didSave` without text: the server re-reads the file from disk, the way
+    /// an editor's save notification leaves it.
+    pub fn did_save(&mut self, path: &Path) {
+        self.notify(
+            "textDocument/didSave",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) }
+            }),
+        );
+    }
+
+    pub fn did_close(&mut self, path: &Path) {
+        self.notify(
+            "textDocument/didClose",
+            json!({
+                "textDocument": { "uri": format!("file://{}", path.display()) }
+            }),
+        );
+    }
+
+    /// `workspace/didChangeWatchedFiles` for a whole batch of changes in one
+    /// notification — a branch switch arrives as one, and delivering it file by
+    /// file would measure a shape no editor produces. Each change pairs a path
+    /// with a [`FILE_CREATED`] / [`FILE_CHANGED`] / [`FILE_DELETED`] type.
+    pub fn did_change_watched_files(&mut self, changes: &[(&Path, u8)]) {
+        let changes: Vec<Value> = changes
+            .iter()
+            .map(|(path, typ)| json!({ "uri": format!("file://{}", path.display()), "type": typ }))
+            .collect();
+        self.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": changes }),
         );
     }
 
