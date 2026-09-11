@@ -1,6 +1,6 @@
 # clj-pulse
 
-A lightweight Clojure language server with instant startup.
+A fast-starting, low-memory Clojure language server.
 
 With first-class [let-go](https://github.com/nooga/let-go) support: `.lg` projects, deps are indexed and navigable via [lgx](https://github.com/abogoyavlensky/lgx).
 
