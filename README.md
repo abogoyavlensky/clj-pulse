@@ -194,7 +194,9 @@ errors, unused bindings, and the rest) and your existing
 `.clj-kondo/config.edn`: linter levels, `:lint-as`, and excludes all apply
 exactly as they do on the command line. The config is resolved from the file
 being linted, so in a monorepo each subproject's own `.clj-kondo/config.edn`
-wins over the workspace root's.
+wins over the workspace root's. One difference from the command line: clj-pulse
+asks clj-kondo to report every occurrence of an unresolved namespace, symbol,
+or var, where the CLI reports only the first in each file.
 
 When a clj-kondo run succeeds it owns the five codes above, and the native
 copies are dropped for that pass so no squiggle appears twice. When clj-kondo
