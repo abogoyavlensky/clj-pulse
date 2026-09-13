@@ -1738,6 +1738,31 @@ mod are_scope {
     }
 
     #[test]
+    fn test_are_local_references_include_quoted_template_usages() {
+        // `are` substitutes syntactically, so a quoted `form` in the template
+        // is a usage rename must rewrite; from the argv it is listed.
+        let src = "(ns x (:require [clojure.test :refer [are]]))\n(are [form] (= 3 (eval 'form)) (+ 1 2))\n";
+        let argv = Position::new(1, col(src, 1, "[form]") + 1);
+        let refs = local_references_at(src, argv, "form").expect("argv `form` is a local");
+        assert_eq!(refs.declaration.start, argv);
+        let quoted = Position::new(1, col(src, 1, "'form") + 1);
+        assert_eq!(
+            refs.usages.iter().map(|r| r.start).collect::<Vec<_>>(),
+            vec![quoted],
+            "the quoted template usage: {refs:?}"
+        );
+
+        // A `let` binding under a quote stays data: no usage.
+        let src = "(ns x)\n(let [form 1] (eval 'form))\n";
+        let argv = Position::new(1, col(src, 1, "[form") + 1);
+        let refs = local_references_at(src, argv, "form").expect("let `form` is a local");
+        assert!(
+            refs.usages.is_empty(),
+            "quoted data is not a let usage: {refs:?}"
+        );
+    }
+
+    #[test]
     fn test_are_qualified_head_binds_in_scope_walker() {
         // The locals walker has no ns metadata, so it matches the head's name
         // part: `t/are` binds like `are`.

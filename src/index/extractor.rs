@@ -3238,6 +3238,15 @@ pub fn local_references_at_tree(
         .find(|b| b.name == name)?
         .name_range;
 
+    // An `are` argv is substituted into the template syntactically, quoted
+    // data included, so `'form` in the template is a usage too — rename must
+    // rewrite it or the test breaks (`mark_quoted_symbols_used` is the lint's
+    // half of the same rule). A cursor *on* the quoted symbol still resolves
+    // nothing: the entry check above only accepts evaluated occurrences.
+    if let Some(template) = are_template_of_argv(root, source, declaration) {
+        collect_quoted_name_occurrences(template, false, source, name, &mut occurrences);
+    }
+
     let mut usages = Vec::new();
     for occ in occurrences {
         if occ == declaration {
@@ -3257,6 +3266,54 @@ pub fn local_references_at_tree(
         usages,
         destructured_key: is_destructured_key(root, source, declaration),
     })
+}
+
+/// The template expression of the `are` form whose argv holds the binding
+/// site at `declaration`, if it is one: the innermost enclosing `vec_lit` that
+/// is the second child of a list headed by `are` (name part; the locals walker
+/// has no ns metadata, see `walk_scope`). `None` for every other binding.
+fn are_template_of_argv<'a>(root: Node<'a>, source: &str, declaration: Range) -> Option<Node<'a>> {
+    let sym = find_binding_sym(root, source, declaration)?;
+    let mut node = sym;
+    while let Some(parent) = node.parent() {
+        if node.kind() == "vec_lit" && parent.kind() == "list_lit" {
+            let children = named_children(parent);
+            let is_are_argv = children
+                .first()
+                .map(|h| h.kind() == "sym_lit" && node_text(sym_name_node(*h), source) == "are")
+                == Some(true)
+                && children.get(1).map(|n| n.id()) == Some(node.id());
+            if is_are_argv {
+                return children.get(2).copied();
+            }
+        }
+        node = parent;
+    }
+    None
+}
+
+/// Ranges of every unqualified `sym_lit` named `name` that sits under a quote
+/// — the occurrences `collect_name_occurrences` skips.
+fn collect_quoted_name_occurrences(
+    node: Node,
+    quoted: bool,
+    source: &str,
+    name: &str,
+    out: &mut Vec<Range>,
+) {
+    let quoted = quoted || node.kind() == "quoting_lit";
+    if node.kind() == "sym_lit" {
+        if quoted
+            && node.child_by_field_name("namespace").is_none()
+            && node_text(sym_name_node(node), source) == name
+        {
+            out.push(node_to_lsp_range(sym_name_node(node), source));
+        }
+        return;
+    }
+    for child in named_children(node) {
+        collect_quoted_name_occurrences(child, quoted, source, name, out);
+    }
 }
 
 /// Whether the binding site at `declaration` is a name inside a
