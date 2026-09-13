@@ -2729,6 +2729,19 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
     if node.kind() == "list_lit" {
         let children = named_children(node);
         if let Some(head) = children.first() {
+            // `(are [x y] expr & values)` binds its argv in the template. This
+            // walker has no ns metadata, so it matches the head's name part
+            // alone — bare or qualified (`are`, `t/are`, `clojure.test/are`) —
+            // the rule `qualified_head_def_kind` already applies to `mu/defn`.
+            // A bare `are` in a file without clojure.test therefore binds here
+            // but not in the occurrence walker (ROADMAP backlog, 2026-09-10).
+            if head.kind() == "sym_lit"
+                && node_text(sym_name_node(*head), source) == "are"
+                && children.get(1).map(|n| n.kind()) == Some("vec_lit")
+            {
+                walk_scope_are(&children, source, pos, out);
+                return;
+            }
             // A head is a binding form when it is unqualified or explicitly
             // qualified to `clojure.core` (`(clojure.core/let …)`), matching the
             // occurrence walker's `head_is_core_form`. A qualified `s/def` etc.
@@ -2872,6 +2885,34 @@ fn walk_scope_binding_tail(
         if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
             out.extend(bound);
             walk_scope(*body, source, pos, out);
+            return;
+        }
+    }
+}
+
+/// `(are [x y] expr & values)`: the argv (`children[1]`, a `vec_lit` at the
+/// dispatch site) binds for the template `children[2]` alone; a cursor in a
+/// value sees nothing from it. The occurrence-walker twin is `walk_are_form`.
+fn walk_scope_are(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    let mut bound = Vec::new();
+    if let Some(argv) = children.get(1) {
+        collect_binding_targets(*argv, source, &mut bound);
+        // A cursor on the argv itself yields its bindings, like fn params.
+        if lsp_range_contains(node_to_lsp_range(*argv, source), pos) {
+            out.extend(bound);
+            return;
+        }
+    }
+    if let Some(template) = children.get(2) {
+        if lsp_range_contains(node_to_lsp_range(*template, source), pos) {
+            out.extend(bound);
+            walk_scope(*template, source, pos, out);
+            return;
+        }
+    }
+    for value in children.iter().skip(3) {
+        if lsp_range_contains(node_to_lsp_range(*value, source), pos) {
+            walk_scope(*value, source, pos, out);
             return;
         }
     }

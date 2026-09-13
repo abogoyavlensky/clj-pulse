@@ -117,10 +117,10 @@ walker already applies to `mu/defn`. Scope extent:
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Add the item**
+- [x] **Step 1: Add the item**
   Under "Milestone 1 — correctness of shipped features", after the
   "Keep clj-kondo off the keystroke path" item, add:
-  `- [ ] **\`are\` template arguments are locals.** \`(are [x y] expr & values)\`
+  `- [x] **\`are\` template arguments are locals.** \`(are [x y] expr & values)\`
   currently records \`x\` and \`y\` as vars of the current namespace, so
   definition, hover, completion, references, rename, documentHighlight and
   the native \`unused-binding\` lint all answer wrong inside the template.
@@ -130,8 +130,11 @@ walker already applies to `mu/defn`. Scope extent:
   followed by
   `Plan: [2026-09-13-0934-are-template-locals.md](plans/2026-09-13-0934-are-template-locals.md)`.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -am "Add ROADMAP item for are template locals"`
+
+> Deviation: no separate codex round for this docs-only commit; it is covered
+> by the final `--base master` review in Task 5.
 
 ### Task 1: Occurrence walker binds `are` argv in the template
 
@@ -140,7 +143,7 @@ walker already applies to `mu/defn`. Scope extent:
 - Modify: `src/index/jar_cache.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Next to `test_catch_and_as_arrow_bind_locals`, add, using `extract_full`
   and `occurrences_of`:
 
@@ -170,24 +173,24 @@ walker already applies to `mu/defn`. Scope extent:
   `x/…` occurrences for the incomplete shapes an editor sends mid-typing:
   `(are)`, `(are [x])`, `(are [x] )`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
   Run: `cargo test --test test_extractor are_`
   Expected: the first two FAIL (`x/a` recorded), the last two PASS already.
 
-- [ ] **Step 3: Extract the candidate list**
+- [x] **Step 3: Extract the candidate list**
   In `src/index/extractor.rs`, pull the candidate-building half of
   `macro_def_kind` into
   `fn head_fqn_candidates(head: Node, ns_meta: &NsMeta, source: &str) -> Vec<String>`
   and make `macro_def_kind` call it. Behavior unchanged.
 
-- [ ] **Step 4: Add the table and head test**
+- [x] **Step 4: Add the table and head test**
   Add `const ARE_FQNS: &[&str] = &["clojure.test/are", "cljs.test/are"];`
   and
   `fn are_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String>`
   returning the first candidate found in `ARE_FQNS`. Doc comment: why fqn
   (mirrors `deftest`), and that a bare `are` without clojure.test is a call.
 
-- [ ] **Step 5: Add `walk_are_form` and dispatch**
+- [x] **Step 5: Add `walk_are_form` and dispatch**
   `fn walk_are_form(children: &[Node], ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>)`
   next to `walk_binding_tail`, implementing the four steps in the design.
   Bind with `scope.bind_all(bound, true)`. Collect binding names with
@@ -206,15 +209,27 @@ walker already applies to `mu/defn`. Scope extent:
   dispatch, `walk_are_form` can assume the vector; a missing template
   (`(are [x])`) binds and pops with nothing walked.
 
-- [ ] **Step 6: Bump the cache format**
+- [x] **Step 6: Bump the cache format**
   `src/index/jar_cache.rs`: `CACHE_FORMAT_VERSION` 16 → 17.
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [x] **Step 7: Run the tests to verify they pass**
   Run: `cargo test --test test_extractor`
   Expected: PASS, including the existing `deftest` tests.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
   `git commit -am "Bind are template arguments as locals in the occurrence walker"`
+
+> Deviation: "exactly one head occurrence under the expected fqn" is counted
+> on the form's line — the `:refer [are]` entry in the ns form is itself an
+> occurrence of `clojure.test/are`, which the plan did not account for.
+>
+> Codex review (must fix, fixed in "Count a quoted are template argument as
+> used"): `are` substitutes syntactically, so `(are [form] (… 'form) …)` uses
+> `form` although `walk_occurrences` skips quotes; `mark_quoted_symbols_used`
+> marks quoted argv symbols used after the template walk. Advisory, not taken:
+> a local shadowing a referred `are` (`(let [are …] (are [a] …))`) still
+> dispatches to the `are` walker — the `deftest`/`let` dispatch has the same
+> property, and the shape is unrealistic.
 
 ### Task 2: Locals walker resolves `are` argv
 
@@ -222,7 +237,7 @@ walker already applies to `mu/defn`. Scope extent:
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Use `locals_in_scope_at` and `local_references_at` (already imported in the
   tree-variant test module; add a top-level import if needed). Source:
 
@@ -251,11 +266,11 @@ walker already applies to `mu/defn`. Scope extent:
   `locals_in_scope_at` equals `locals_in_scope_at_tree` for the template
   position of the `are` source.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
   Run: `cargo test --test test_extractor are_`
   Expected: the three new scope tests FAIL (`a` not in scope / `None`).
 
-- [ ] **Step 3: Add `walk_scope_are` and dispatch**
+- [x] **Step 3: Add `walk_scope_are` and dispatch**
   `fn walk_scope_are(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>)`
   next to `walk_scope_binding_tail`, implementing the three cursor cases
   with `collect_binding_targets`, `lsp_range_contains` and `walk_scope`.
@@ -266,11 +281,11 @@ walker already applies to `mu/defn`. Scope extent:
   because the walker has no ns metadata, matching `qualified_head_def_kind`;
   see the ROADMAP backlog line.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
   Run: `cargo test --test test_extractor`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Resolve are template arguments in the locals walker"`
 
 ### Task 3: Unused argv is an `unused-binding`

@@ -1665,6 +1665,93 @@ mod tree_variant {
             local_references_at(src, Position::new(0, 2), "z"),
             local_references_at_tree(&tree, src, Position::new(0, 2), "z")
         );
+
+        // An `are` template argument is a local the same way in both variants.
+        let src = "(ns a (:require [clojure.test :refer [are]]))\n(are [x y] (= x y) 1 1)\n";
+        let tree = parse_tree(src).unwrap();
+        let template = Position::new(1, 14);
+        assert_eq!(
+            locals_in_scope_at(src, template),
+            locals_in_scope_at_tree(&tree, src, template)
+        );
+        assert!(locals_in_scope_at_tree(&tree, src, template)
+            .iter()
+            .any(|b| b.name == "x"));
+    }
+}
+
+// --- `are` template arguments in the locals walker --------------------------
+
+mod are_scope {
+    use clj_pulse::index::extractor::{local_references_at, locals_in_scope_at};
+    use tower_lsp::lsp_types::Position;
+
+    const SRC: &str = "(ns x (:require [clojure.test :refer [deftest are]]))\n(deftest t\n  (are [a b] (= a b)\n    1 1\n    a 2))\n";
+
+    /// Column of `needle` on line `line` of `src`.
+    fn col(src: &str, line: usize, needle: &str) -> u32 {
+        src.lines().nth(line).unwrap().find(needle).unwrap() as u32
+    }
+
+    fn names_at(src: &str, pos: Position) -> Vec<String> {
+        locals_in_scope_at(src, pos)
+            .into_iter()
+            .map(|b| b.name)
+            .collect()
+    }
+
+    #[test]
+    fn test_are_locals_in_scope() {
+        // Inside the template `(= a b)`, both argv names are in scope.
+        let template = Position::new(2, col(SRC, 2, "(= a b)") + 3);
+        let names = names_at(SRC, template);
+        assert!(names.contains(&"a".to_string()), "template: {names:?}");
+        assert!(names.contains(&"b".to_string()), "template: {names:?}");
+
+        // A value is evaluated in the enclosing scope: neither is bound.
+        let value = Position::new(4, col(SRC, 4, "a 2"));
+        let names = names_at(SRC, value);
+        assert!(!names.contains(&"a".to_string()), "value: {names:?}");
+        assert!(!names.contains(&"b".to_string()), "value: {names:?}");
+
+        // On the argv itself the binding self-resolves, like fn params.
+        let argv = Position::new(2, col(SRC, 2, "[a b]") + 1);
+        let names = names_at(SRC, argv);
+        assert!(names.contains(&"a".to_string()), "argv: {names:?}");
+    }
+
+    #[test]
+    fn test_are_local_references_stop_at_the_template() {
+        let template_a = Position::new(2, col(SRC, 2, "(= a b)") + 3);
+        let refs = local_references_at(SRC, template_a, "a").expect("template `a` is a local");
+        let argv_a = col(SRC, 2, "[a b]") + 1;
+        assert_eq!(refs.declaration.start, Position::new(2, argv_a));
+        assert_eq!(
+            refs.usages.iter().map(|r| r.start).collect::<Vec<_>>(),
+            vec![template_a],
+            "only the template usage: {refs:?}"
+        );
+
+        // The value-line `a` is not a local at all.
+        let value_a = Position::new(4, col(SRC, 4, "a 2"));
+        assert!(local_references_at(SRC, value_a, "a").is_none());
+    }
+
+    #[test]
+    fn test_are_qualified_head_binds_in_scope_walker() {
+        // The locals walker has no ns metadata, so it matches the head's name
+        // part: `t/are` binds like `are`.
+        let src = SRC
+            .replace(
+                "[clojure.test :refer [deftest are]]",
+                "[clojure.test :as t]",
+            )
+            .replace("(deftest t", "(t/deftest t")
+            .replace("(are [a b]", "(t/are [a b]");
+        let template = Position::new(2, col(&src, 2, "(= a b)") + 3);
+        let names = names_at(&src, template);
+        assert!(names.contains(&"a".to_string()), "template: {names:?}");
+        assert!(names.contains(&"b".to_string()), "template: {names:?}");
     }
 }
 
