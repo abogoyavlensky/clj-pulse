@@ -288,26 +288,37 @@ walker already applies to `mu/defn`. Scope extent:
 - [x] **Step 5: Commit**
   `git commit -am "Resolve are template arguments in the locals walker"`
 
+> Codex review (must fix, fixed in "Rename a quoted are template argument
+> with its argv"): with the argv now a local, renaming `form` in
+> `(are [form] (… 'form) …)` rewrote the argv and left `'form`, breaking the
+> test. `local_references_at_tree` now adds quoted template occurrences when
+> the declaration is an `are` argv (`are_template_of_argv`,
+> `collect_quoted_name_occurrences`); a cursor *on* the quoted symbol still
+> resolves nothing. A second codex round on that fixup (must fix, fixed in
+> "Substitute quoted are template usages without lexical filtering"): quoted
+> occurrences went through `locals_at_node`, so a quoted `(fn [form] …)`
+> shadowed the argv; substitution is syntactic, so they now bypass the filter.
+
 ### Task 3: Unused argv is an `unused-binding`
 
 **Files:**
 - Modify: `src/diagnostics.rs` (tests module only, unless the walker needs a fix)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   Next to `flags_unused_let_binding`, add `flags_unused_are_argument`:
   source `(ns a (:require [clojure.test :refer [are]]))\n(are [x y] (= x 1) 1 2)\n`,
   `of_code(…, "unused-binding")` has exactly one diagnostic, message
   contains `y`, range on line 1 with width 1. Add
   `no_flag_for_used_are_arguments` with `(= x y)`.
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
   Run: `cargo test --lib are_argument`
   (one substring filter; cargo accepts a single positional test name)
   Expected: PASS already if Task 1 bound the argv lintable; if it FAILS,
   the bind is not lintable or the frame is popped before the template is
   walked. Fix in `walk_are_form`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -am "Test that an unused are argument is reported"`
 
 ### Task 4: e2e definition on an `are` local
@@ -316,7 +327,7 @@ walker already applies to `mu/defn`. Scope extent:
 - Modify: `tests/fixtures/simple_project/src/locals.clj`
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Extend the fixture**
+- [x] **Step 1: Extend the fixture**
   Change the ns form to `(ns simple.locals (:require [clojure.test :refer [deftest are]]))`
   and append:
 
@@ -331,7 +342,7 @@ walker already applies to `mu/defn`. Scope extent:
   test_e2e completion_local` to confirm the existing `locals.clj` tests
   still pass (they anchor on `base`/`scaled`, which are unchanged).
 
-- [ ] **Step 2: Write the failing e2e test**
+- [x] **Step 2: Write the failing e2e test**
   After `test_e2e_goto_definition_local_in_let`, add
   `test_e2e_goto_definition_are_template_local`: open `src/locals.clj`,
   `position_of(&locals, "expected (compute")` for the cursor on the template
@@ -340,17 +351,17 @@ walker already applies to `mu/defn`. Scope extent:
   site. Add a second probe: definition on `input` inside `(compute input)`
   lands on the argv `input`.
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
   Run: `cargo test --test test_e2e are_template`
   Expected: PASS. Tasks 1 and 2 are already in, so this test documents the
   behavior end to end rather than driving it; the regression it guards is the
   one the extractor unit tests demonstrated red-first.
 
-- [ ] **Step 4: Run the e2e gate**
+- [x] **Step 4: Run the e2e gate**
   Run: `bb e2e`
   Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Add e2e definition test for are template locals"`
 
 ### Task 5: Docs, gates, tick
