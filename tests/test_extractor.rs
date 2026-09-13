@@ -1752,6 +1752,22 @@ mod are_scope {
             "the quoted template usage: {refs:?}"
         );
 
+        // Quoted data is substituted whatever it looks like: a `(fn [form] …)`
+        // under the quote is not a rebinding.
+        let src = "(ns x (:require [clojure.test :refer [are]]))\n(are [form] (= '(fn [form] form) 'f) 1)\n";
+        let argv = Position::new(1, col(src, 1, "[form]") + 1);
+        let refs = local_references_at(src, argv, "form").expect("argv `form` is a local");
+        let line = src.lines().nth(1).unwrap();
+        let quoted_fn = line.find("'(fn [form]").unwrap() as u32;
+        assert_eq!(
+            refs.usages
+                .iter()
+                .map(|r| r.start.character)
+                .collect::<Vec<_>>(),
+            vec![quoted_fn + 6, quoted_fn + 12],
+            "both quoted `form`s: {refs:?}"
+        );
+
         // A `let` binding under a quote stays data: no usage.
         let src = "(ns x)\n(let [form 1] (eval 'form))\n";
         let argv = Position::new(1, col(src, 1, "[form") + 1);

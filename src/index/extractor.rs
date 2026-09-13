@@ -3238,16 +3238,17 @@ pub fn local_references_at_tree(
         .find(|b| b.name == name)?
         .name_range;
 
+    let mut usages = Vec::new();
     // An `are` argv is substituted into the template syntactically, quoted
     // data included, so `'form` in the template is a usage too — rename must
     // rewrite it or the test breaks (`mark_quoted_symbols_used` is the lint's
-    // half of the same rule). A cursor *on* the quoted symbol still resolves
-    // nothing: the entry check above only accepts evaluated occurrences.
+    // half of the same rule). Substitution ignores lexical structure, so these
+    // skip the scope filter below: a quoted `(fn [form] …)` is data, not a
+    // rebinding. A cursor *on* the quoted symbol still resolves nothing: the
+    // entry check above only accepts evaluated occurrences.
     if let Some(template) = are_template_of_argv(root, source, declaration) {
-        collect_quoted_name_occurrences(template, false, source, name, &mut occurrences);
+        collect_quoted_name_occurrences(template, false, source, name, &mut usages);
     }
-
-    let mut usages = Vec::new();
     for occ in occurrences {
         if occ == declaration {
             continue; // the binding site itself, reported as the declaration
