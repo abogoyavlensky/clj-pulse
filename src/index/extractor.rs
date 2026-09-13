@@ -2119,10 +2119,29 @@ fn walk_are_form(
     scope.bind_all(bound, true);
     if let Some(template) = children.get(2) {
         walk_occurrences(*template, ctx, scope, out);
+        mark_quoted_symbols_used(*template, false, ctx.source, scope);
     }
     scope.pop();
     for value in children.iter().skip(3) {
         walk_occurrences(*value, ctx, scope, out);
+    }
+}
+
+/// `are` substitutes its argv into the template syntactically
+/// (`clojure.template/do-template`), so an argument spelled inside quoted data
+/// — `(are [form] (= (macroexpand-1 'form) …) …)` — is used, although
+/// `walk_occurrences` rightly skips `'form` as a usage. Marks every unqualified
+/// symbol under a quote in the template used, so the lint does not report it.
+fn mark_quoted_symbols_used(node: Node, quoted: bool, source: &str, scope: &mut Scope) {
+    let quoted = quoted || node.kind() == "quoting_lit";
+    if quoted && node.kind() == "sym_lit" {
+        if node.child_by_field_name("namespace").is_none() {
+            scope.mark_used(node_text(sym_name_node(node), source));
+        }
+        return;
+    }
+    for child in named_children(node) {
+        mark_quoted_symbols_used(child, quoted, source, scope);
     }
 }
 

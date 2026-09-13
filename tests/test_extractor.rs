@@ -1185,6 +1185,31 @@ fn test_are_values_are_outside_the_template_scope() {
 }
 
 #[test]
+fn test_are_quoted_template_argument_counts_as_used() {
+    // `are` substitutes syntactically, so an argv symbol under a quote in the
+    // template is used even though the quote is not a var usage. Checked
+    // through `extract_analysis`, which surfaces the unused-binding slots.
+    let src =
+        "(ns x (:require [clojure.test :refer [are]]))\n(are [form] (= 3 (eval 'form)) (+ 1 2))";
+    let analysis = clj_pulse::index::extractor::extract_analysis_with(
+        src,
+        Path::new("x.clj"),
+        &clj_pulse::index::ExtractConfig::default(),
+    )
+    .unwrap();
+    assert!(
+        analysis.unused_bindings.is_empty(),
+        "quoted `form` is a template substitution: {:?}",
+        analysis.unused_bindings
+    );
+    assert!(
+        occurrences_of(&analysis.occurrences, "x/form").is_empty(),
+        "quoted `form` is not a var usage: {:?}",
+        analysis.occurrences
+    );
+}
+
+#[test]
 fn test_are_without_clojure_test_is_a_plain_call() {
     // A bare `are` in a file that never pulls in clojure.test is an ordinary
     // call: nothing binds, and the head is a var of the current namespace.
