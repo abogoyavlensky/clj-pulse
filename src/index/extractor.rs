@@ -484,6 +484,22 @@ fn macro_def_kind(
     source: &str,
     lint_as: &HashMap<String, DefKind>,
 ) -> Option<(String, DefKind)> {
+    head_fqn_candidates(head, ns_meta, source)
+        .into_iter()
+        .find_map(|fqn| {
+            lint_as
+                .get(&fqn)
+                .cloned()
+                .or_else(|| DefKind::from_macro_fqn(&fqn))
+                .map(|kind| (fqn, kind))
+        })
+}
+
+/// Every fqn a list head may resolve to, most specific first: the alias- or
+/// refer-resolved fqn, then the head's name under each `:refer :all` / `:use`
+/// namespace when the head is bare and not `:refer`red itself. Shared by every
+/// macro table keyed by fqn ([`macro_def_kind`], [`are_head_fqn`]).
+fn head_fqn_candidates(head: Node, ns_meta: &NsMeta, source: &str) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     // `resolve_head_fqn` falls back to the current namespace for a bare
     // unreferred head; that candidate is harmless (nothing maps it) and keeps
@@ -500,14 +516,20 @@ fn macro_def_kind(
             candidates.push(format!("{}/{}", ns, name));
         }
     }
+    candidates
+}
 
-    candidates.into_iter().find_map(|fqn| {
-        lint_as
-            .get(&fqn)
-            .cloned()
-            .or_else(|| DefKind::from_macro_fqn(&fqn))
-            .map(|kind| (fqn, kind))
-    })
+/// The `are` macros: `(are [x y] expr & values)` binds its argv in the
+/// template expression alone.
+const ARE_FQNS: &[&str] = &["clojure.test/are", "cljs.test/are"];
+
+/// The `are` fqn a list head resolves to, if any. Resolved by fqn rather than
+/// by bare name, mirroring `deftest`: a bare `are` in a file that never pulls
+/// in clojure.test is an ordinary call and binds nothing.
+fn are_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
+    head_fqn_candidates(head, ns_meta, source)
+        .into_iter()
+        .find(|fqn| ARE_FQNS.contains(&fqn.as_str()))
 }
 
 /// The def-family kind a *qualified* head names through its name part alone:
@@ -1665,6 +1687,20 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
             walk_def_form(kind, &children, ctx, scope, out);
             return;
         }
+        // `(are [x y] expr & values)`: the argv binds in the template alone.
+        // The vector is checked *before* the head is recorded — a non-vector
+        // second child falls through to the generic walk, which records the
+        // head itself, so recording it here too would double-count it.
+        if children.get(1).map(|n| n.kind()) == Some("vec_lit") {
+            if let Some(fqn) = are_head_fqn(*head, ctx.ns_meta, ctx.source) {
+                out.push(Occurrence {
+                    fqn,
+                    name_range: node_to_lsp_range(sym_name_node(*head), ctx.source),
+                });
+                walk_are_form(&children, ctx, scope, out);
+                return;
+            }
+        }
     }
 
     // A head names a core/special form only when it is unqualified or qualified
@@ -2062,6 +2098,32 @@ fn walk_binding_tail(
         walk_occurrences(*body, ctx, scope, out);
     }
     scope.pop();
+}
+
+/// `(are [x y] expr & values)`: `children[1]` (guaranteed a `vec_lit` by the
+/// dispatch site) binds locals visible in `children[2]`, the template, alone;
+/// `children[3..]` are ordinary expressions in the enclosing scope. Argv
+/// bindings are lintable: an unused template argument means a whole column of
+/// values is ignored. The template may be absent mid-typing (`(are [x])`).
+fn walk_are_form(
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Scope,
+    out: &mut Vec<Occurrence>,
+) {
+    let mut bound = Vec::new();
+    if let Some(argv) = children.get(1) {
+        collect_binding_names(*argv, ctx, scope, out, &mut bound);
+    }
+    scope.push();
+    scope.bind_all(bound, true);
+    if let Some(template) = children.get(2) {
+        walk_occurrences(*template, ctx, scope, out);
+    }
+    scope.pop();
+    for value in children.iter().skip(3) {
+        walk_occurrences(*value, ctx, scope, out);
+    }
 }
 
 /// `(fn name? [params] body…)` — optional self-name and params bind.

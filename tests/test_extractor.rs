@@ -1100,6 +1100,143 @@ fn test_catch_and_as_arrow_bind_locals() {
 }
 
 #[test]
+fn test_are_binds_template_locals_in_every_require_style() {
+    // `(are [a b] expr & values)` binds its argv in the template expression,
+    // resolved by fqn like `deftest`: however clojure.test (or cljs.test) was
+    // pulled in, `a` and `b` are locals there, never vars of the current ns.
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "(:require [clojure.test :refer [are]])",
+            "are",
+            "x.clj",
+            "clojure.test/are",
+        ),
+        (
+            "(:require [clojure.test :refer :all])",
+            "are",
+            "x.clj",
+            "clojure.test/are",
+        ),
+        ("(:use clojure.test)", "are", "x.clj", "clojure.test/are"),
+        (
+            "(:require [clojure.test :as t])",
+            "t/are",
+            "x.clj",
+            "clojure.test/are",
+        ),
+        ("", "clojure.test/are", "x.clj", "clojure.test/are"),
+        (
+            "(:require [cljs.test :as t])",
+            "t/are",
+            "x.cljs",
+            "cljs.test/are",
+        ),
+    ];
+    for (requires, head, path, head_fqn) in cases {
+        let src = format!("(ns x {requires})\n({head} [a b] (= a b) 1 1)");
+        let (_, _, occs) = extract_full(&src, Path::new(path)).unwrap();
+        assert!(
+            occurrences_of(&occs, "x/a").is_empty(),
+            "{src}: template arg `a` is a local: {occs:?}"
+        );
+        assert!(
+            occurrences_of(&occs, "x/b").is_empty(),
+            "{src}: template arg `b` is a local: {occs:?}"
+        );
+        // The `:refer [are]` entry in the ns form is an occurrence too, so
+        // count the head on its own line.
+        let heads = occurrences_of(&occs, head_fqn)
+            .into_iter()
+            .filter(|o| o.name_range.start.line == 1)
+            .count();
+        assert_eq!(
+            heads, 1,
+            "{src}: head recorded once under {head_fqn}: {occs:?}"
+        );
+        assert_eq!(
+            occurrences_of(&occs, "clojure.core/=").len(),
+            1,
+            "{src}: occurrences: {occs:?}"
+        );
+    }
+}
+
+#[test]
+fn test_are_values_are_outside_the_template_scope() {
+    // The values after the template are evaluated in the enclosing scope, so
+    // an `a` there is a var usage, not the template argument.
+    let src = "(ns x (:require [clojure.test :refer [are]]))\n(are [a] (pos? a) a (g a))";
+    let (_, _, occs) = extract_full(src, Path::new("x.clj")).unwrap();
+    let a = occurrences_of(&occs, "x/a");
+    assert_eq!(a.len(), 2, "value-position `a`s are var usages: {occs:?}");
+    let template_end = src.lines().nth(1).unwrap().find("(pos? a)").unwrap() + "(pos? a)".len();
+    for occ in &a {
+        assert_eq!(occ.name_range.start.line, 1);
+        assert!(
+            occ.name_range.start.character as usize >= template_end,
+            "`a` inside the template must not be a var usage: {occ:?}"
+        );
+    }
+    assert_eq!(
+        occurrences_of(&occs, "x/g").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+}
+
+#[test]
+fn test_are_without_clojure_test_is_a_plain_call() {
+    // A bare `are` in a file that never pulls in clojure.test is an ordinary
+    // call: nothing binds, and the head is a var of the current namespace.
+    let src = "(ns x)\n(are [a] (pos? a) 1)";
+    let (_, _, occs) = extract_full(src, Path::new("x.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "x/a").len(),
+        2,
+        "argv and template `a` are plain usages: {occs:?}"
+    );
+    assert_eq!(
+        occurrences_of(&occs, "x/are").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+}
+
+#[test]
+fn test_are_with_non_vector_second_child_is_generic() {
+    // Without an argv vector the form is walked generically, which records the
+    // head itself — it must not be recorded twice.
+    let src = "(ns x (:require [clojure.test :refer [are]]))\n(are foo bar)";
+    let (_, _, occs) = extract_full(src, Path::new("x.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "x/foo").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+    assert_eq!(
+        occurrences_of(&occs, "x/bar").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+    let heads = occurrences_of(&occs, "clojure.test/are")
+        .into_iter()
+        .filter(|o| o.name_range.start.line == 1)
+        .count();
+    assert_eq!(heads, 1, "head recorded exactly once: {occs:?}");
+
+    // The shapes an editor sends mid-typing extract cleanly and bind nothing
+    // to the current namespace.
+    for tail in ["(are)", "(are [x])", "(are [x] )"] {
+        let src = format!("(ns x (:require [clojure.test :refer [are]]))\n{tail}");
+        let (_, _, occs) = extract_full(&src, Path::new("x.clj")).unwrap();
+        assert!(
+            occs.iter().all(|o| !o.fqn.starts_with("x/")),
+            "{tail}: no current-ns occurrences: {occs:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extracts_private_flag() {
     let (_, syms) = extract(
         include_str!("fixtures/snippets/private_vars.clj"),
