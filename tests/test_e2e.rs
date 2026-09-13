@@ -695,6 +695,44 @@ fn test_e2e_goto_definition_local_in_let() {
 }
 
 #[test]
+fn test_e2e_goto_definition_are_template_local() {
+    // `(are [input expected] template & values)` binds its argv in the
+    // template: definition on a template usage lands on the argv entry.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+    let text = std::fs::read_to_string(&locals).unwrap();
+
+    let expected_def = start_of(&text, "expected]");
+    let (line, ch) = position_of(&locals, "expected (compute");
+    let r = client.goto_definition(&locals, line, ch);
+    assert!(
+        !r.is_null(),
+        "no definition for are local `expected`: {}",
+        r
+    );
+    assert!(
+        r["uri"].as_str().unwrap().ends_with("/src/locals.clj"),
+        "expected same file, got {}",
+        r
+    );
+    assert_eq!(r["range"]["start"]["line"], json!(expected_def.0));
+    assert_eq!(r["range"]["start"]["character"], json!(expected_def.1));
+
+    let input_def = start_of(&text, "input expected]");
+    let (line, ch) = position_of(&locals, "(compute input)");
+    let r = client.goto_definition(&locals, line, ch + 3);
+    assert!(!r.is_null(), "no definition for are local `input`: {}", r);
+    assert_eq!(r["range"]["start"]["line"], json!(input_def.0));
+    assert_eq!(r["range"]["start"]["character"], json!(input_def.1));
+}
+
+#[test]
 fn test_e2e_completion_local_in_let() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
