@@ -658,6 +658,30 @@ mod tests {
     }
 
     #[test]
+    fn flags_unused_are_argument() {
+        // An unused `are` template argument means a whole column of values is
+        // ignored, so it is reported like an unused `let` binding.
+        let d = of_code(
+            "(ns a (:require [clojure.test :refer [are]]))\n(are [x y] (= x 1) 1 2)\n",
+            "unused-binding",
+        );
+        assert_eq!(d.len(), 1, "diagnostics: {:?}", d);
+        let d = &d[0];
+        assert!(d.message.contains('y'), "message: {}", d.message);
+        assert_eq!(d.range.start.line, 1);
+        assert_eq!(d.range.end.character - d.range.start.character, 1);
+    }
+
+    #[test]
+    fn no_flag_for_used_are_arguments() {
+        assert!(of_code(
+            "(ns a (:require [clojure.test :refer [are]]))\n(are [x y] (= x y) 1 2)\n",
+            "unused-binding"
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn no_flag_for_used_binding() {
         assert!(of_code("(ns a)\n(defn f []\n  (let [y 1] y))\n", "unused-binding").is_empty());
     }
