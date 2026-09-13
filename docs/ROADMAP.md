@@ -219,6 +219,9 @@ the release.
       unless `:report-duplicates` is set, so fixing one usage reveals the next.
       Every lint run passes the flag; no setting.
       Plan: [2026-09-11-2116-kondo-report-all-occurrences.md](plans/2026-09-11-2116-kondo-report-all-occurrences.md) — done
+- [x] **README for the public release.** Short introduction, four strengths,
+      quick start, measured performance, and linked reference guides.
+      Plan: [2026-09-12-readme-public-release.md](plans/2026-09-12-readme-public-release.md) - done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
