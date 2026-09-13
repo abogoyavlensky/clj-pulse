@@ -1,5 +1,7 @@
 # `are` Template Locals Implementation Plan
 
+**Status: completed 2026-09-13** on branch `are-template-locals`.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `(are [x y] expr & values)` from `clojure.test` / `cljs.test` bind `x` and `y` as locals in `expr`, so definition, hover, completion, references, rename, documentHighlight and the native `unused-binding` lint treat them as locals instead of vars of the current namespace.
@@ -371,7 +373,7 @@ walker already applies to `mu/defn`. Scope extent:
 - Modify: `docs/ROADMAP.md`
 - Modify: `README.md` (verify no change needed)
 
-- [ ] **Step 1: CLAUDE.md invariant**
+- [x] **Step 1: CLAUDE.md invariant**
   After the "Defining macros resolve by fqn" paragraph in "Invariants", add
   one paragraph: `are` (`clojure.test/are`, `cljs.test/are`, table
   `ARE_FQNS`) binds its argv in the template expression only; values are
@@ -379,20 +381,20 @@ walker already applies to `mu/defn`. Scope extent:
   through `head_fqn_candidates`, the locals walker by name part alone; argv
   bindings are lintable.
 
-- [ ] **Step 2: ROADMAP**
+- [x] **Step 2: ROADMAP**
   Tick the Milestone 1 item and append ` — done` to its Plan line. In the
   Backlog, extend the 2026-09-10 "`:lint-as` in the locals walker" line with
   one sentence: `are` is matched by name part there too, so a bare `are` in a
   file without clojure.test binds in the locals walker but not in the
   occurrence walker.
 
-- [ ] **Step 3: README**
+- [x] **Step 3: README**
   In the **Rename** bullet, the parenthetical `(params, \`let\`/\`loop\`/\`for\`
   bindings, destructured names)` becomes `(params, \`let\`/\`loop\`/\`for\`
   bindings, \`clojure.test/are\` template arguments, destructured names)`.
   Nothing else in the feature list enumerates binding forms.
 
-- [ ] **Step 4: Full gates**
+- [x] **Step 4: Full gates**
   Run: `bb check` — fmt clean, clippy clean, all tests PASS.
   Run: `bb e2e-pulse` — PASS (client-visible change).
   Run: `bb e2e-calva` — PASS (definition behavior changed).
@@ -400,5 +402,50 @@ walker already applies to `mu/defn`. Scope extent:
   the extractor grew one head check per list, so no row should move outside
   its usual noise. Not a gate; note any surprise in MEMORY.md.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Document are template locals and tick the ROADMAP item"`
+
+---
+
+## Completion summary
+
+**Implemented.** `(are [x y] expr & values)` from `clojure.test` / `cljs.test`
+binds its argv in the template expression: `head_fqn_candidates` (extracted
+from `macro_def_kind`), `ARE_FQNS`, `are_head_fqn`, `walk_are_form` and
+`walk_scope_are` in `src/index/extractor.rs`; `CACHE_FORMAT_VERSION` 16 → 17.
+Definition, completion, references, rename, documentHighlight and the native
+`unused-binding` lint now treat the argv as locals; values stay enclosing-scope
+usages. Tests: 9 extractor tests, 2 diagnostics tests, 1 e2e definition test,
+the fixture `locals.clj` gained an `are` block.
+
+**Gates.** `bb check`, `bb e2e` (170 passed), `bb e2e-pulse`, `bb e2e-calva`
+all green. `bb bench clj-kondo`: 423/550 ms to first definition, 15 ms median
+definition, 766 ms per edit, 135/87 MiB RSS — within noise of the 2026-09-10
+table in `docs/MEMORY.md`. End-to-end drive through the harness confirmed
+hover (null, as for every local — hover has no local path), references,
+highlight, rename, completion and the lint on the fixture's `are` block.
+
+**Codex findings and fixups** (three review rounds on code, one on the branch):
+- `are` substitutes syntactically, quoted data included, so `'form` in a
+  template is a use: `mark_quoted_symbols_used` for the lint (commit
+  `db6d31d`), and `local_references_at_tree` lists quoted template
+  occurrences from the argv without the lexical-scope filter, so rename
+  rewrites them (`072d600`, `42076c4`).
+- Advisory, not taken: a local shadowing a referred `are` still dispatches
+  to the `are` walker (same as `deftest`/`let` today). The branch-level
+  review's only finding (auto-require offering Integrant keys) is outside
+  this diff and already covered by `is_var_symbol` in the auto-require pool.
+
+**Deviations, gathered.**
+- Task 0's docs-only commit got no separate codex round; the final
+  `--base master` review covered it.
+- Task 1: the "exactly one head occurrence" assertion counts on the form's
+  line, since `:refer [are]` in the ns form is itself an occurrence.
+- Task 5's commit also carries the plan's own tick-marks and notes.
+- The session had no TaskCreate/TaskUpdate tools; this document was the sole
+  tracking surface.
+
+**What the plan could have specified better.** The quoted-template rule —
+`are` is `do-template`, a syntactic substitution — which drove three of the
+four fixups and belongs in the design section, and that a `:refer` entry is an
+occurrence of the macro's fqn, which the head-count assertion tripped over.
