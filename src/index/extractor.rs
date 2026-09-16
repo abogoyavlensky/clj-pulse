@@ -1479,17 +1479,88 @@ pub fn alias_sites_tree(
     occurrences: &[Occurrence],
 ) -> AliasSites {
     let root = tree.root_node();
-    let mut sites = AliasSites::default();
-    for ns_form in ns_forms(root, source) {
-        collect_alias_declarations(ns_form, source, alias, &mut sites.declarations);
-    }
+    let declarations = alias_declarations(root, source)
+        .into_iter()
+        .filter(|n| node_text(*n, source) == alias)
+        .map(|n| node_to_lsp_range(n, source))
+        .collect();
     let keyword_starts: HashSet<(u32, u32)> = occurrences
         .iter()
         .filter(|o| o.fqn.starts_with(':'))
         .map(|o| (o.name_range.start.line, o.name_range.start.character))
         .collect();
-    collect_alias_usages(root, source, alias, &keyword_starts, &mut sites.usages);
-    sites
+    let mut usages = Vec::new();
+    collect_alias_usages(root, source, alias, &keyword_starts, &mut usages);
+    AliasSites {
+        declarations,
+        usages,
+    }
+}
+
+/// The alias the cursor is on, if any: an `:as`/`:as-alias` binding in the ns
+/// form, or the namespace part of a qualified symbol, auto-resolved keyword
+/// or namespaced-map prefix. Purely positional — the caller checks the name
+/// against `NsMeta.aliases`, and a `{:keys [h/x]}` binding entry names `h` too
+/// (the caller's site membership check is what rejects it). Ranges are end
+/// inclusive, so a cursor right after the alias still counts.
+pub fn alias_at_tree(tree: &tree_sitter::Tree, source: &str, pos: Position) -> Option<String> {
+    let root = tree.root_node();
+    // Declarations by range, not by node: a cursor right after the `h` of
+    // `[a :as h]` sits on the `]`, whose innermost node is the vector.
+    if let Some(declaration) = alias_declarations(root, source)
+        .into_iter()
+        .find(|n| range_contains(&node_to_lsp_range(*n, source), pos))
+    {
+        return Some(node_text(declaration, source).to_string());
+    }
+    let path = node_path_at(root, source, pos);
+    let mut node = *path.first()?;
+    // The prefix keyword of `#::h{…}`: judge it as its map. A key of that
+    // map is a child of the same node and stays a keyword.
+    if node.kind() == "kwd_lit" {
+        if let Some(map) = node.parent().filter(|p| {
+            p.kind() == "ns_map_lit"
+                && p.child_by_field_name("prefix").map(|x| x.id()) == Some(node.id())
+        }) {
+            node = map;
+        }
+    }
+    let part = match node.kind() {
+        "sym_lit" => node.child_by_field_name("namespace")?,
+        "kwd_lit" if is_auto_resolved(node, source) => node.child_by_field_name("namespace")?,
+        "ns_map_lit" => {
+            let prefix = node.child_by_field_name("prefix")?;
+            if prefix.kind() != "kwd_lit"
+                || !is_auto_resolved(prefix, source)
+                || prefix.child_by_field_name("namespace").is_some()
+            {
+                return None;
+            }
+            prefix.child_by_field_name("name")?
+        }
+        _ => return None,
+    };
+    range_contains(&node_to_lsp_range(part, source), pos)
+        .then(|| node_text(part, source).to_string())
+}
+
+/// End-inclusive containment, as `references::range_contains`: a cursor right
+/// after a token still belongs to it.
+fn range_contains(range: &Range, pos: Position) -> bool {
+    (range.start.line < pos.line
+        || (range.start.line == pos.line && range.start.character <= pos.character))
+        && (pos.line < range.end.line
+            || (pos.line == range.end.line && pos.character <= range.end.character))
+}
+
+/// Every `:as` / `:as-alias` value symbol in the `:require` and `:use`
+/// clauses of every ns form, in document order.
+fn alias_declarations<'a>(root: Node<'a>, source: &str) -> Vec<Node<'a>> {
+    let mut out = Vec::new();
+    for ns_form in ns_forms(root, source) {
+        collect_alias_declarations(ns_form, source, &mut out);
+    }
+    out
 }
 
 /// Every top-level `(ns …)` list, each branch of a reader conditional included
@@ -1518,9 +1589,9 @@ fn is_ns_form(list: Node, source: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Pushes the range of every `:as` / `:as-alias` symbol spelling `alias` in the
-/// `:require` and `:use` clauses of `ns_form`.
-fn collect_alias_declarations(ns_form: Node, source: &str, alias: &str, out: &mut Vec<Range>) {
+/// Pushes every `:as` / `:as-alias` value symbol in the `:require` and `:use`
+/// clauses of `ns_form`.
+fn collect_alias_declarations<'a>(ns_form: Node<'a>, source: &str, out: &mut Vec<Node<'a>>) {
     for clause in named_children(ns_form).into_iter().skip(2) {
         if clause.kind() != "list_lit" {
             continue;
@@ -1536,7 +1607,7 @@ fn collect_alias_declarations(ns_form: Node, source: &str, alias: &str, out: &mu
             continue;
         }
         for spec in &inner[1..] {
-            collect_alias_declarations_in_spec(*spec, source, alias, out);
+            collect_alias_declarations_in_spec(*spec, source, out);
         }
     }
 }
@@ -1544,17 +1615,15 @@ fn collect_alias_declarations(ns_form: Node, source: &str, alias: &str, out: &mu
 /// One `:require` spec, in every shape [`process_require_spec`] reads: a
 /// libspec vector, a vector of libspecs spliced by `#?@`, a prefix list whose
 /// entries are libspecs, or a reader conditional around any of those.
-fn collect_alias_declarations_in_spec(spec: Node, source: &str, alias: &str, out: &mut Vec<Range>) {
+fn collect_alias_declarations_in_spec<'a>(spec: Node<'a>, source: &str, out: &mut Vec<Node<'a>>) {
     match spec.kind() {
         "vec_lit" => {
             let items = named_children(spec);
             match items.first().map(|n| n.kind()) {
-                Some("sym_lit") => {
-                    collect_alias_declarations_in_libspec(&items, source, alias, out)
-                }
+                Some("sym_lit") => collect_alias_declarations_in_libspec(&items, source, out),
                 Some("vec_lit") => {
                     for item in items {
-                        collect_alias_declarations_in_spec(item, source, alias, out);
+                        collect_alias_declarations_in_spec(item, source, out);
                     }
                 }
                 _ => {}
@@ -1569,7 +1638,7 @@ fn collect_alias_declarations_in_spec(spec: Node, source: &str, alias: &str, out
                 if item.kind() == "vec_lit" {
                     let sub = named_children(*item);
                     if sub.first().map(|n| n.kind()) == Some("sym_lit") {
-                        collect_alias_declarations_in_libspec(&sub, source, alias, out);
+                        collect_alias_declarations_in_libspec(&sub, source, out);
                     }
                 }
             }
@@ -1577,7 +1646,7 @@ fn collect_alias_declarations_in_spec(spec: Node, source: &str, alias: &str, out
         "read_cond_lit" | "splicing_read_cond_lit" => {
             for child in named_children(spec) {
                 if child.kind() != "kwd_lit" {
-                    collect_alias_declarations_in_spec(child, source, alias, out);
+                    collect_alias_declarations_in_spec(child, source, out);
                 }
             }
         }
@@ -1586,20 +1655,18 @@ fn collect_alias_declarations_in_spec(spec: Node, source: &str, alias: &str, out
 }
 
 /// The `:as` / `:as-alias` option of one libspec (`items[0]` is its namespace).
-fn collect_alias_declarations_in_libspec(
-    items: &[Node],
+fn collect_alias_declarations_in_libspec<'a>(
+    items: &[Node<'a>],
     source: &str,
-    alias: &str,
-    out: &mut Vec<Range>,
+    out: &mut Vec<Node<'a>>,
 ) {
     for pair in items.windows(2) {
         let (option, value) = (pair[0], pair[1]);
         if option.kind() == "kwd_lit"
             && matches!(node_text(option, source), ":as" | ":as-alias")
             && value.kind() == "sym_lit"
-            && node_text(value, source) == alias
         {
-            out.push(node_to_lsp_range(value, source));
+            out.push(value);
         }
     }
 }

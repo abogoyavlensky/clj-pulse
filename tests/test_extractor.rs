@@ -2047,10 +2047,12 @@ fn test_cursor_in_a_schema_annotation_sees_no_parameters() {
 /// Renaming a require alias: which tokens spell it, and which one the cursor
 /// is on.
 mod alias_sites {
-    use clj_pulse::index::extractor::{alias_sites_tree, extract_full_tree, parse_tree};
+    use clj_pulse::index::extractor::{
+        alias_at_tree, alias_sites_tree, extract_full_tree, parse_tree,
+    };
     use clj_pulse::index::ExtractConfig;
     use std::path::Path;
-    use tower_lsp::lsp_types::Range;
+    use tower_lsp::lsp_types::{Position, Range};
 
     /// Every notation an alias appears in, one per line, plus the shapes that
     /// spell `h` without meaning the alias. The `naïve` string puts a
@@ -2141,5 +2143,44 @@ h/f
         assert_eq!(declarations, vec![(0, 31, 32), (1, 32, 33)]);
         let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
         assert_eq!(usages, vec![(2, 1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_at_finds_the_alias_under_the_cursor() {
+        let tree = parse_tree(SRC).unwrap();
+        let at = |line, ch| alias_at_tree(&tree, SRC, Position::new(line, ch));
+
+        // Start and end column of each site kind (end inclusive).
+        let sites = [
+            ((1, 19), "the `h` after :as"),
+            ((5, 0), "the `h` of h/f"),
+            ((9, 2), "the `h` of ::h/k"),
+            ((11, 3), "the `h` of #::h{"),
+            ((12, 18), "the `h` of a data-map {:keys [h/f]}"),
+        ];
+        for ((line, ch), what) in sites {
+            assert_eq!(at(line, ch).as_deref(), Some("h"), "{what} at its start");
+            assert_eq!(at(line, ch + 1).as_deref(), Some("h"), "{what} at its end");
+        }
+        // A candidate only: the membership check is what rejects a binding
+        // entry, so this names `h` too.
+        assert_eq!(
+            at(13, 17).as_deref(),
+            Some("h"),
+            "binding {{:keys [h/x]}} entry"
+        );
+
+        assert_eq!(at(5, 2), None, "the `f` of h/f");
+        assert_eq!(at(14, 1), None, "the `h` of :h/k, a literal namespace");
+        assert_eq!(at(15, 6), None, "a bare local named h");
+        assert_eq!(at(1, 14), None, "the `a` being required");
+
+        // A key inside a namespaced map is judged as itself, not as the prefix.
+        let src = "(ns t (:require [a :as h] [b :as x]))\n#::h{::x/k 1}\n";
+        let tree = parse_tree(src).unwrap();
+        let at = |ch| alias_at_tree(&tree, src, Position::new(1, ch));
+        assert_eq!(at(3).as_deref(), Some("h"), "the prefix");
+        assert_eq!(at(7).as_deref(), Some("x"), "the key's namespace");
+        assert_eq!(at(9), None, "the key's name");
     }
 }
