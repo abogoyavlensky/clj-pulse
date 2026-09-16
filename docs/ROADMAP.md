@@ -182,6 +182,11 @@ Each is small because the index already holds the data.
       when a file moves.
 - [ ] Reference-count code lens, off by default.
   Plan: —
+- [x] **Rename a require alias.** From the `:as`/`:as-alias` binding or any
+      `h/x`, `::h/x`, `#::h{…}` site, rewrite every spelling of the alias in
+      the file; `:h/x` literals and `{:keys [h/x]}` entries stay. A cursor on
+      the alias half of `h/x` renames the alias, not the var.
+  Plan: [2026-09-16-2108-rename-require-alias.md](plans/2026-09-16-2108-rename-require-alias.md) — done
 
 ## Milestone 5 — public release
 
@@ -316,6 +321,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
   `lintStatus`, rate-limited warn log, a realistic default timeout with
   cancellation of superseded runs, and `mise which` resolution of shims at
   probe time so the per-file cwd stops deciding which binary runs.
+- 2026-09-16 **References and `documentHighlight` on an alias half.** Rename
+  treats a cursor on the `h` of `h/greet` as the alias, but references and
+  highlight still resolve it to the var through `resolve_fqn_at`'s alias
+  fallback. Listing the alias's sites there (`extractor::alias_sites_tree`
+  already has them) would make the three agree, and a `:as` binding would get
+  a highlight of its own.
 
 ## Best effort — do when cheap or asked
 

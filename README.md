@@ -58,6 +58,12 @@ Language features:
   with the sources. Unqualified keywords, keywords of a library namespace, and
   keywords read through `{::keys [db]}` destructuring (where the name is also the
   binding) are refused rather than half-renamed.
+- **Alias rename** - rename a `:as` / `:as-alias` alias from its binding or
+  from any `h/x`, `::h/x` or `#::h{…}` site: every spelling of the alias in
+  the file is rewritten, and only the alias part - `h/greet` becomes
+  `help/greet`. A `:h/x` literal and a `{:keys [h/x]}` destructuring entry
+  read the literal namespace, so they are left alone. A cursor on the alias
+  half of `h/greet` renames the alias; the var is renamed from its name half.
 - **Keyword navigation** - go to definition and find references on namespaced
   keywords, including Integrant component keys: jump from `:my.app/db` in a
   `config.edn` system map (or an `#ig/ref`) to its `(defmethod ig/init-key ::db …)`.
