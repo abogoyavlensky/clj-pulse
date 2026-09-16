@@ -6800,7 +6800,7 @@ fn test_e2e_rename_alias_skips_literal_keyword_and_destructuring_entry() {
     .collect();
     expected.sort();
     assert_eq!(edited_lines, expected, "edits: {:?}", edits);
-    for needle in ["{:keys [c/x]}", ":c/site)", "(let [c 1] c)"] {
+    for needle in ["{:keys [c/x]}", "(def lit :c/site)", "(let [c 1] c)"] {
         assert!(
             !edited_lines.contains(&line_of(needle)),
             "{needle} must not be edited: {:?}",
@@ -6813,7 +6813,7 @@ fn test_e2e_rename_alias_skips_literal_keyword_and_destructuring_entry() {
     assert!(after.contains("(core/blend 1 2)"), "{after}");
     assert!(after.contains("(resolve 'core/blend)"), "{after}");
     assert!(after.contains("(def k ::core/site)"), "{after}");
-    assert!(after.contains("[{::core/keys [x]}]"), "{after}");
+    assert!(after.contains("[{::core/keys [blend]}]"), "{after}");
     assert!(after.contains("#::core{:site 1}"), "{after}");
     assert!(after.contains("{:keys [core/blend]}"), "{after}");
     assert!(after.contains("(defn g [{:keys [c/x]}] x)"), "{after}");

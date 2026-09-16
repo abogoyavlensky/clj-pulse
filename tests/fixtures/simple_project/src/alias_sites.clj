@@ -4,7 +4,7 @@
 (c/blend 1 2)
 (resolve 'c/blend)
 (def k ::c/site)
-(defn f [{::c/keys [x]}] x)
+(defn f [{::c/keys [blend]}] blend)
 (def m #::c{:site 1})
 (def data {:keys [c/blend]})
 (defn g [{:keys [c/x]}] x)
