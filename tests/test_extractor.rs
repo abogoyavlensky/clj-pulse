@@ -2126,4 +2126,20 @@ h/f
             "declaration listed as a usage"
         );
     }
+
+    #[test]
+    fn test_alias_sites_reads_every_conditional_ns_form() {
+        // A `.cljc` that binds the alias once per platform: both bindings are
+        // declarations, or the rename would leave one platform's require behind.
+        let src =
+            "#?(:clj (ns t (:require [a :as h]))\n   :cljs (ns t (:require [b :as h])))\n(h/f)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("t.cljc"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "h", &occs);
+        let declarations: Vec<(u32, u32, u32)> = sites.declarations.iter().map(triple).collect();
+        assert_eq!(declarations, vec![(0, 31, 32), (1, 32, 33)]);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(usages, vec![(2, 1, 2)]);
+    }
 }

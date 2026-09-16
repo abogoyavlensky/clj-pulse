@@ -1480,7 +1480,7 @@ pub fn alias_sites_tree(
 ) -> AliasSites {
     let root = tree.root_node();
     let mut sites = AliasSites::default();
-    if let Some(ns_form) = ns_form(root, source) {
+    for ns_form in ns_forms(root, source) {
         collect_alias_declarations(ns_form, source, alias, &mut sites.declarations);
     }
     let keyword_starts: HashSet<(u32, u32)> = occurrences
@@ -1492,24 +1492,23 @@ pub fn alias_sites_tree(
     sites
 }
 
-/// The first top-level `(ns …)` list, looking through a reader conditional the
-/// way [`extract_analysis_tree`] does.
-fn ns_form<'a>(root: Node<'a>, source: &str) -> Option<Node<'a>> {
+/// Every top-level `(ns …)` list, each branch of a reader conditional included
+/// — a `.cljc` may bind the alias once per platform, and
+/// [`extract_analysis_tree`] reads every branch the same way.
+fn ns_forms<'a>(root: Node<'a>, source: &str) -> Vec<Node<'a>> {
+    let mut forms = Vec::new();
     for child in named_children(root) {
         match child.kind() {
-            "list_lit" if is_ns_form(child, source) => return Some(child),
-            "read_cond_lit" => {
-                if let Some(form) = named_children(child)
+            "list_lit" if is_ns_form(child, source) => forms.push(child),
+            "read_cond_lit" => forms.extend(
+                named_children(child)
                     .into_iter()
-                    .find(|n| n.kind() == "list_lit" && is_ns_form(*n, source))
-                {
-                    return Some(form);
-                }
-            }
+                    .filter(|n| n.kind() == "list_lit" && is_ns_form(*n, source)),
+            ),
             _ => {}
         }
     }
-    None
+    forms
 }
 
 fn is_ns_form(list: Node, source: &str) -> bool {
