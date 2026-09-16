@@ -1439,6 +1439,296 @@ pub fn node_path_at<'a>(root: Node<'a>, source: &str, pos: Position) -> Vec<Node
     path
 }
 
+// --- require aliases -------------------------------------------------------
+
+/// Every token in a file that spells one require alias, for renaming it. The
+/// question is textual (which tokens spell `h`), not semantic, so this is a
+/// plain tree walk independent of the occurrence walker.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AliasSites {
+    /// The `:as` / `:as-alias` symbols in the ns form binding this alias.
+    pub declarations: Vec<Range>,
+    /// Every namespace part that spells the alias, in document order.
+    pub usages: Vec<Range>,
+}
+
+/// Every site in `tree` that spells `alias`:
+///
+/// - the symbol after `:as` / `:as-alias` in each libspec of the ns form,
+///   through prefix lists and reader-conditional branches — the shapes
+///   [`process_require_spec`] accepts;
+/// - the namespace part of any qualified symbol (`h/f`, `'h/f`, `` `h/f ``),
+///   quoted ones included since `(resolve 'h/f)` resolves the alias at run
+///   time;
+/// - the namespace part of an auto-resolved keyword (`::h/k`, `::h/keys`);
+/// - the prefix name of an auto-resolved namespaced map (`#::h{…}`).
+///
+/// A single-colon `:h/k` is a literal namespace the reader never resolves, so
+/// it is not a site. Nor is a `{:keys [h/x]}` entry in a binding position:
+/// `clojure.core/destructure` reads the entry's namespace verbatim (`:h/x`).
+/// `occurrences` — the file's list from [`extract_full_tree`] — tells the two
+/// apart: the occurrence walker records such an entry as a *keyword*
+/// occurrence spanning the whole entry symbol, so a qualified symbol starting
+/// where a colon-prefixed occurrence starts is a destructuring entry. The same
+/// vector as plain data (`(def m {:keys [h/f]})`) is a var occurrence and is
+/// rewritten.
+pub fn alias_sites_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    alias: &str,
+    occurrences: &[Occurrence],
+) -> AliasSites {
+    let root = tree.root_node();
+    let declarations = alias_declarations(root, source)
+        .into_iter()
+        .filter(|n| node_text(*n, source) == alias)
+        .map(|n| node_to_lsp_range(n, source))
+        .collect();
+    let keyword_starts: HashSet<(u32, u32)> = occurrences
+        .iter()
+        .filter(|o| o.fqn.starts_with(':'))
+        .map(|o| (o.name_range.start.line, o.name_range.start.character))
+        .collect();
+    let mut usages = Vec::new();
+    collect_alias_usages(root, source, alias, &keyword_starts, &mut usages);
+    AliasSites {
+        declarations,
+        usages,
+    }
+}
+
+/// The alias the cursor is on, if any: an `:as`/`:as-alias` binding in the ns
+/// form, or the namespace part of a qualified symbol, auto-resolved keyword
+/// or namespaced-map prefix. Purely positional — the caller checks the name
+/// against `NsMeta.aliases`, and a `{:keys [h/x]}` binding entry names `h` too
+/// (the caller's site membership check is what rejects it). Ranges are end
+/// inclusive, so a cursor right after the alias still counts.
+pub fn alias_at_tree(tree: &tree_sitter::Tree, source: &str, pos: Position) -> Option<String> {
+    let root = tree.root_node();
+    // Declarations by range, not by node: a cursor right after the `h` of
+    // `[a :as h]` sits on the `]`, whose innermost node is the vector.
+    if let Some(declaration) = alias_declarations(root, source)
+        .into_iter()
+        .find(|n| range_contains(&node_to_lsp_range(*n, source), pos))
+    {
+        return Some(node_text(declaration, source).to_string());
+    }
+    let path = node_path_at(root, source, pos);
+    let mut node = *path.first()?;
+    // The prefix keyword of `#::h{…}`: judge it as its map. A key of that
+    // map is a child of the same node and stays a keyword.
+    if node.kind() == "kwd_lit" {
+        if let Some(map) = node.parent().filter(|p| {
+            p.kind() == "ns_map_lit"
+                && p.child_by_field_name("prefix").map(|x| x.id()) == Some(node.id())
+        }) {
+            node = map;
+        }
+    }
+    let part = match node.kind() {
+        "sym_lit" => node.child_by_field_name("namespace")?,
+        "kwd_lit" if is_auto_resolved(node, source) => node.child_by_field_name("namespace")?,
+        "ns_map_lit" => {
+            let prefix = node.child_by_field_name("prefix")?;
+            if prefix.kind() != "kwd_lit"
+                || !is_auto_resolved(prefix, source)
+                || prefix.child_by_field_name("namespace").is_some()
+            {
+                return None;
+            }
+            prefix.child_by_field_name("name")?
+        }
+        _ => return None,
+    };
+    range_contains(&node_to_lsp_range(part, source), pos)
+        .then(|| node_text(part, source).to_string())
+}
+
+/// End-inclusive containment, as `references::range_contains`: a cursor right
+/// after a token still belongs to it.
+fn range_contains(range: &Range, pos: Position) -> bool {
+    (range.start.line < pos.line
+        || (range.start.line == pos.line && range.start.character <= pos.character))
+        && (pos.line < range.end.line
+            || (pos.line == range.end.line && pos.character <= range.end.character))
+}
+
+/// Every `:as` / `:as-alias` value symbol in the `:require` and `:use`
+/// clauses of every ns form, in document order.
+fn alias_declarations<'a>(root: Node<'a>, source: &str) -> Vec<Node<'a>> {
+    let mut out = Vec::new();
+    for ns_form in ns_forms(root, source) {
+        collect_alias_declarations(ns_form, source, &mut out);
+    }
+    out
+}
+
+/// Every top-level `(ns …)` list, each branch of a reader conditional included
+/// — a `.cljc` may bind the alias once per platform, and
+/// [`extract_analysis_tree`] reads every branch the same way.
+fn ns_forms<'a>(root: Node<'a>, source: &str) -> Vec<Node<'a>> {
+    let mut forms = Vec::new();
+    for child in named_children(root) {
+        match child.kind() {
+            "list_lit" if is_ns_form(child, source) => forms.push(child),
+            "read_cond_lit" => forms.extend(
+                named_children(child)
+                    .into_iter()
+                    .filter(|n| n.kind() == "list_lit" && is_ns_form(*n, source)),
+            ),
+            _ => {}
+        }
+    }
+    forms
+}
+
+fn is_ns_form(list: Node, source: &str) -> bool {
+    named_children(list)
+        .first()
+        .map(|head| head.kind() == "sym_lit" && node_text(*head, source) == "ns")
+        .unwrap_or(false)
+}
+
+/// Pushes every `:as` / `:as-alias` value symbol in the `:require` and `:use`
+/// clauses of `ns_form`.
+fn collect_alias_declarations<'a>(ns_form: Node<'a>, source: &str, out: &mut Vec<Node<'a>>) {
+    for clause in named_children(ns_form).into_iter().skip(2) {
+        if clause.kind() != "list_lit" {
+            continue;
+        }
+        let inner = named_children(clause);
+        let is_libspec_clause = inner
+            .first()
+            .map(|kw| {
+                kw.kind() == "kwd_lit" && matches!(node_text(*kw, source), ":require" | ":use")
+            })
+            .unwrap_or(false);
+        if !is_libspec_clause {
+            continue;
+        }
+        for spec in &inner[1..] {
+            collect_alias_declarations_in_spec(*spec, source, out);
+        }
+    }
+}
+
+/// One `:require` spec, in every shape [`process_require_spec`] reads: a
+/// libspec vector, a vector of libspecs spliced by `#?@`, a prefix list whose
+/// entries are libspecs, or a reader conditional around any of those.
+fn collect_alias_declarations_in_spec<'a>(spec: Node<'a>, source: &str, out: &mut Vec<Node<'a>>) {
+    match spec.kind() {
+        "vec_lit" => {
+            let items = named_children(spec);
+            match items.first().map(|n| n.kind()) {
+                Some("sym_lit") => collect_alias_declarations_in_libspec(&items, source, out),
+                Some("vec_lit") => {
+                    for item in items {
+                        collect_alias_declarations_in_spec(item, source, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "list_lit" => {
+            let items = named_children(spec);
+            if items.first().map(|n| n.kind()) != Some("sym_lit") {
+                return;
+            }
+            for item in &items[1..] {
+                if item.kind() == "vec_lit" {
+                    let sub = named_children(*item);
+                    if sub.first().map(|n| n.kind()) == Some("sym_lit") {
+                        collect_alias_declarations_in_libspec(&sub, source, out);
+                    }
+                }
+            }
+        }
+        "read_cond_lit" | "splicing_read_cond_lit" => {
+            for child in named_children(spec) {
+                if child.kind() != "kwd_lit" {
+                    collect_alias_declarations_in_spec(child, source, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The `:as` / `:as-alias` option of one libspec (`items[0]` is its namespace).
+fn collect_alias_declarations_in_libspec<'a>(
+    items: &[Node<'a>],
+    source: &str,
+    out: &mut Vec<Node<'a>>,
+) {
+    for pair in items.windows(2) {
+        let (option, value) = (pair[0], pair[1]);
+        if option.kind() == "kwd_lit"
+            && matches!(node_text(option, source), ":as" | ":as-alias")
+            && value.kind() == "sym_lit"
+        {
+            out.push(value);
+        }
+    }
+}
+
+/// Recursive walk pushing every namespace part that spells `alias` (see
+/// [`alias_sites_tree`] for the site kinds and the destructuring skip).
+fn collect_alias_usages(
+    node: Node,
+    source: &str,
+    alias: &str,
+    keyword_starts: &HashSet<(u32, u32)>,
+    out: &mut Vec<Range>,
+) {
+    match node.kind() {
+        "sym_lit" => {
+            if let Some(ns) = node.child_by_field_name("namespace") {
+                let start = point_to_position(node.start_position(), node.start_byte(), source);
+                let start = (start.line, start.character);
+                if node_text(ns, source) == alias && !keyword_starts.contains(&start) {
+                    out.push(node_to_lsp_range(ns, source));
+                }
+            }
+            return;
+        }
+        "kwd_lit" => {
+            if let Some(ns) = node.child_by_field_name("namespace") {
+                if is_auto_resolved(node, source) && node_text(ns, source) == alias {
+                    out.push(node_to_lsp_range(ns, source));
+                }
+            }
+            return;
+        }
+        "ns_map_lit" => {
+            if let Some(prefix) = node.child_by_field_name("prefix") {
+                if prefix.kind() == "kwd_lit"
+                    && is_auto_resolved(prefix, source)
+                    && prefix.child_by_field_name("namespace").is_none()
+                {
+                    if let Some(name) = prefix.child_by_field_name("name") {
+                        if node_text(name, source) == alias {
+                            out.push(node_to_lsp_range(name, source));
+                        }
+                    }
+                }
+            }
+            // The prefix is a child too, but as a keyword with no namespace
+            // part the general walk below records nothing for it.
+        }
+        _ => {}
+    }
+    for child in named_children(node) {
+        collect_alias_usages(child, source, alias, keyword_starts, out);
+    }
+}
+
+/// Whether a `kwd_lit` carries the `::` marker.
+fn is_auto_resolved(kwd: Node, source: &str) -> bool {
+    kwd.child_by_field_name("marker")
+        .map(|m| node_text(m, source) == "::")
+        .unwrap_or(false)
+}
+
 // --- keyword resolution ----------------------------------------------------
 
 /// Resolves a `kwd_lit` node to its canonical colon-prefixed fqn (`:ns/name`),

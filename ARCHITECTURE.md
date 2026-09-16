@@ -56,7 +56,10 @@ handlers/references.rs: keyword rename (`rename_target` → `RenameTarget::Keywo
   definitions of open buffers — and edits only the name each token ends with.
   A site it cannot rewrite that way (a `{::keys [db]}` entry, which is a symbol
   binding a local) refuses the whole rename rather than leave it reading the
-  old key.
+  old key. A require alias (`RenameTarget::Alias`) is resolved before the fqn
+  path, over the live tree alone: `extractor::alias_at_tree` names the alias
+  under the cursor and `alias_sites_tree` lists its `:as` bindings and every
+  namespace part that spells it, so the edit never leaves the document.
 
 ## Index Re-population (on file save)
 

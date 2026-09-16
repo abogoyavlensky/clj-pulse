@@ -289,6 +289,22 @@ and update README and this file in the same change.
   project buffer (one just typed has no indexed symbol); library files and
   unqualified or library-namespaced keywords are refused or filtered out in
   `rename_target`, so `prepareRename` refuses exactly what `rename` would.
+- An alias rename (`RenameTarget::Alias`) is file-local and textual: the
+  question is which tokens spell `h`, so `extractor::alias_sites_tree` walks
+  the live tree and never the index — the `:as`/`:as-alias` symbols of every
+  ns form (reader-conditional branches included) plus the namespace part of
+  each qualified symbol, `::h/x` keyword and `#::h{…}` prefix, quoted symbols
+  included since `(resolve 'h/x)` resolves the alias at run time. A `:h/x`
+  literal is never a site, and a `{:keys [h/x]}` binding entry is told apart
+  from the same map as data by the occurrence walker: a qualified symbol
+  starting where a keyword occurrence starts reads its namespace verbatim.
+  `rename_target` tries the alias before the fqn path, so a cursor on the
+  alias half of `h/greet` renames the alias, and the var is renamed from its
+  name half; `alias_at_tree` is only a candidate finder, and a cursor on a
+  token that spells the alias without being a site falls through to what the
+  fqn path makes of it. The new name is refused when the live ns form already
+  binds it as an alias or when it already qualifies a name in the file — alias
+  lookup outranks a full namespace, so either would capture existing code.
 - `documentHighlight` resolves in the same order references does:
   `references::local_refs_at` first and authoritatively, then
   `resolve_fqn_at`. It never leaves the buffer — occurrences and definitions

@@ -153,6 +153,12 @@ pub enum RenameTarget {
     /// A qualified project keyword: every site that reads it, already checked
     /// down to the range of the name its notation ends with.
     Keyword { sites: Vec<KeywordSite> },
+    /// A require alias (`[a.b :as h]`): its bindings in the ns form and every
+    /// namespace part spelling it, all in the same document.
+    Alias {
+        alias: String,
+        sites: extractor::AliasSites,
+    },
 }
 
 /// One site a keyword rename rewrites: the file, the whole token (which the
@@ -198,6 +204,16 @@ pub fn rename_target(
         return Ok(RenameTarget::Local { word, refs });
     }
 
+    // A require alias is file-local and textual — which tokens spell `h` —
+    // so it is resolved over the live tree, before the fqn path: a cursor on
+    // the alias half of `h/greet` renames the alias, and the var is renamed
+    // from its name half. Not every token spelling the alias is a site (a
+    // `{:keys [h/x]}` binding entry reads the literal `:h/x`), so a cursor on
+    // a non-site falls through to whatever the fqn path makes of it.
+    if let Some((alias, sites)) = alias_target(index, documents, uri, pos) {
+        return Ok(RenameTarget::Alias { alias, sites });
+    }
+
     let fqn = resolve_fqn_at(index, documents, uri, pos)
         .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?;
     // Keyword fqns are colon-prefixed. A keyword occurrence spans the whole
@@ -213,6 +229,82 @@ pub fn rename_target(
         anyhow::bail!("cannot rename library or built-in symbol {}", fqn);
     }
     Ok(RenameTarget::Global { fqn, sym })
+}
+
+/// The require alias under the cursor and every site that spells it, when the
+/// cursor is on one of those sites. The alias must be bound by the buffer's
+/// live ns form (`NsMeta.aliases` of one `extract_full_tree`, so an alias
+/// just typed counts) and the cursor must sit inside a declaration or a
+/// usage; a name the ns form does not bind, or a token that spells the alias
+/// without resolving it, is `None` and the caller carries on. Empty
+/// declarations with the alias bound would mean the site walk missed a
+/// libspec shape the ns parser accepts; falling through is the safe answer.
+fn alias_target(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+) -> Option<(String, extractor::AliasSites)> {
+    let path = crate::uri::to_index_path(uri)?;
+    let snapshot = documents.snapshot(uri)?;
+    let alias = extractor::alias_at_tree(&snapshot.tree, &snapshot.text, pos)?;
+    let (ns_meta, _, occs) = extractor::extract_full_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        &path,
+        &index.extract_config(),
+    )
+    .ok()?;
+    if !ns_meta.aliases.contains_key(&alias) {
+        return None;
+    }
+    let sites = extractor::alias_sites_tree(&snapshot.tree, &snapshot.text, &alias, &occs);
+    let on_site = !sites.declarations.is_empty()
+        && sites
+            .declarations
+            .iter()
+            .chain(sites.usages.iter())
+            .any(|r| range_contains(r, pos));
+    on_site.then_some((alias, sites))
+}
+
+/// Why renaming an alias to `new_name` would change what the file means, if
+/// it would. Alias lookup outranks a full namespace name, so the new name
+/// may neither be an alias the live ns form already binds (the two would
+/// merge and every `c/x` would mean a different namespace) nor spell the
+/// namespace part of anything in the file (`[clojure.set]` required and
+/// `clojure.set/union` called: an alias `clojure.set` would capture that
+/// call). The second check is the site walk itself, run for the new name.
+fn alias_capture(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    alias: &str,
+    new_name: &str,
+) -> Option<String> {
+    let path = crate::uri::to_index_path(uri)?;
+    let snapshot = documents.snapshot(uri)?;
+    let (ns_meta, _, occs) = extractor::extract_full_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        &path,
+        &index.extract_config(),
+    )
+    .ok()?;
+    if ns_meta.aliases.contains_key(new_name) {
+        return Some(format!(
+            "cannot rename alias '{}' to '{}': '{}' is already an alias in this file",
+            alias, new_name, new_name
+        ));
+    }
+    let taken = extractor::alias_sites_tree(&snapshot.tree, &snapshot.text, new_name, &occs);
+    (!taken.usages.is_empty()).then(|| {
+        format!(
+            "cannot rename alias '{}' to '{}': '{}' already qualifies names in this file, \
+             which the alias would capture",
+            alias, new_name, new_name
+        )
+    })
 }
 
 /// Everything a keyword rename can be refused for before the new name is
@@ -428,6 +520,14 @@ pub fn prepare_rename(
             .find(|site| site.uri == *uri && range_contains(&site.token, pos))
             .map(|site| site.name)
             .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?,
+        // `alias_target` only answers with the cursor on a site, so one holds it.
+        RenameTarget::Alias { sites, .. } => sites
+            .declarations
+            .iter()
+            .chain(sites.usages.iter())
+            .copied()
+            .find(|r| range_contains(r, pos))
+            .ok_or_else(|| anyhow::anyhow!("nothing to rename here"))?,
     };
     Ok(PrepareRenameResponse::Range(range))
 }
@@ -464,10 +564,11 @@ fn occurrence_range_at(
         .find(|r| range_contains(r, pos) || on_qualifier_of(line, pos, *r))
 }
 
-/// Whether `pos` sits on the alias half of a qualified usage whose name half is
-/// `name`: everything from the cursor up to the name must be identifier text
-/// closed by the `/` separator. A cursor on the `h` of `h/greet` renames
-/// `greet`, so prepareRename must report `greet`'s range.
+/// Whether `pos` sits on the qualifier half of a qualified usage whose name
+/// half is `name`: everything from the cursor up to the name must be identifier
+/// text closed by the `/` separator. A cursor on the `simple.core` of
+/// `simple.core/add` renames `add` (an alias half is caught earlier, by
+/// `alias_target`), so prepareRename must report `add`'s range.
 fn on_qualifier_of(line: &str, pos: Position, name: Range) -> bool {
     if pos.line != name.start.line || pos.character >= name.start.character {
         return false;
@@ -540,6 +641,29 @@ pub fn rename(
             }
             return Ok(Some(WorkspaceEdit {
                 changes: Some(changes),
+                ..Default::default()
+            }));
+        }
+        // Every site spells the alias and nothing but the alias: the `h` of
+        // `[a :as h]`, `h/f`, `'h/f`, `::h/k`, `#::h{…}`. Quoted symbols are
+        // in because `(resolve 'h/f)` resolves the alias at run time; a
+        // `{:keys [h/x]}` binding entry is out because it reads the literal
+        // `:h/x`. The new name must not capture anything (`alias_capture`).
+        RenameTarget::Alias { alias, sites } => {
+            if let Some(reason) = alias_capture(index, documents, &uri, &alias, &new_name) {
+                anyhow::bail!(reason);
+            }
+            let edits = sites
+                .declarations
+                .into_iter()
+                .chain(sites.usages)
+                .map(|range| TextEdit {
+                    range,
+                    new_text: new_name.clone(),
+                })
+                .collect();
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(HashMap::from([(uri, edits)])),
                 ..Default::default()
             }));
         }

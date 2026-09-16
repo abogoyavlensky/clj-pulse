@@ -2043,3 +2043,144 @@ fn test_cursor_in_a_schema_annotation_sees_no_parameters() {
         locals
     );
 }
+
+/// Renaming a require alias: which tokens spell it, and which one the cursor
+/// is on.
+mod alias_sites {
+    use clj_pulse::index::extractor::{
+        alias_at_tree, alias_sites_tree, extract_full_tree, parse_tree,
+    };
+    use clj_pulse::index::ExtractConfig;
+    use std::path::Path;
+    use tower_lsp::lsp_types::{Position, Range};
+
+    /// Every notation an alias appears in, one per line, plus the shapes that
+    /// spell `h` without meaning the alias. The `naïve` string puts a
+    /// non-ASCII character before a site, so its column is a UTF-16 count.
+    pub(super) const SRC: &str = "\
+(ns t
+  (:require [a :as h]
+            [b :as-alias h]
+            (c [d :as h])
+            #?@(:clj [[e :as h]] :cljs [[f :as h]])))
+h/f
+'h/f
+`h/f
+(str \"naïve\" h/f)
+::h/k
+(defn f [{::h/keys [x]}] x)
+#::h{:k 1}
+(def data {:keys [h/f]})
+(defn g [{:keys [h/x]}] x)
+:h/k
+(let [h 1] h)
+";
+
+    fn triple(r: &Range) -> (u32, u32, u32) {
+        assert_eq!(r.start.line, r.end.line, "a site never spans lines: {r:?}");
+        (r.start.line, r.start.character, r.end.character)
+    }
+
+    #[test]
+    fn test_alias_sites_covers_every_notation_and_skips_literals() {
+        let tree = parse_tree(SRC).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, SRC, Path::new("t.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, SRC, "h", &occs);
+
+        // `[a :as h]`, `[b :as-alias h]`, the prefix-list entry and both
+        // branches of the splicing conditional.
+        assert_eq!(
+            sites.declarations.len(),
+            5,
+            "declarations: {:?}",
+            sites.declarations
+        );
+
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(
+            usages,
+            vec![
+                (5, 0, 1),    // h/f
+                (6, 1, 2),    // 'h/f — quoted, still resolved by the reader
+                (7, 1, 2),    // `h/f
+                (8, 13, 14),  // (str "naïve" h/f): 13 UTF-16 units, 14 bytes
+                (9, 2, 3),    // ::h/k
+                (10, 12, 13), // ::h/keys directive
+                (11, 3, 4),   // #::h{…} prefix
+                (12, 18, 19), // {:keys [h/f]} as data, not a binding pattern
+            ],
+            "usages: {:?}",
+            sites.usages
+        );
+        // The binding `{:keys [h/x]}` entry reads `:h/x` verbatim, `:h/k` is a
+        // literal namespace and the `let` binds an unrelated local.
+        for (line, what) in [(13, "binding entry"), (14, ":h/k"), (15, "local h")] {
+            assert!(
+                !sites.usages.iter().any(|r| r.start.line == line),
+                "{what} on line {line} must not be a site: {:?}",
+                sites.usages
+            );
+        }
+        // Declarations never double as usages.
+        assert!(
+            sites.declarations.iter().all(|d| !sites.usages.contains(d)),
+            "declaration listed as a usage"
+        );
+    }
+
+    #[test]
+    fn test_alias_sites_reads_every_conditional_ns_form() {
+        // A `.cljc` that binds the alias once per platform: both bindings are
+        // declarations, or the rename would leave one platform's require behind.
+        let src =
+            "#?(:clj (ns t (:require [a :as h]))\n   :cljs (ns t (:require [b :as h])))\n(h/f)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("t.cljc"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "h", &occs);
+        let declarations: Vec<(u32, u32, u32)> = sites.declarations.iter().map(triple).collect();
+        assert_eq!(declarations, vec![(0, 31, 32), (1, 32, 33)]);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(usages, vec![(2, 1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_at_finds_the_alias_under_the_cursor() {
+        let tree = parse_tree(SRC).unwrap();
+        let at = |line, ch| alias_at_tree(&tree, SRC, Position::new(line, ch));
+
+        // Start and end column of each site kind (end inclusive).
+        let sites = [
+            ((1, 19), "the `h` after :as"),
+            ((5, 0), "the `h` of h/f"),
+            ((9, 2), "the `h` of ::h/k"),
+            ((11, 3), "the `h` of #::h{"),
+            ((12, 18), "the `h` of a data-map {:keys [h/f]}"),
+        ];
+        for ((line, ch), what) in sites {
+            assert_eq!(at(line, ch).as_deref(), Some("h"), "{what} at its start");
+            assert_eq!(at(line, ch + 1).as_deref(), Some("h"), "{what} at its end");
+        }
+        // A candidate only: the membership check is what rejects a binding
+        // entry, so this names `h` too.
+        assert_eq!(
+            at(13, 17).as_deref(),
+            Some("h"),
+            "binding {{:keys [h/x]}} entry"
+        );
+
+        assert_eq!(at(5, 2), None, "the `f` of h/f");
+        assert_eq!(at(14, 1), None, "the `h` of :h/k, a literal namespace");
+        assert_eq!(at(15, 6), None, "a bare local named h");
+        assert_eq!(at(1, 14), None, "the `a` being required");
+
+        // A key inside a namespaced map is judged as itself, not as the prefix.
+        let src = "(ns t (:require [a :as h] [b :as x]))\n#::h{::x/k 1}\n";
+        let tree = parse_tree(src).unwrap();
+        let at = |ch| alias_at_tree(&tree, src, Position::new(1, ch));
+        assert_eq!(at(3).as_deref(), Some("h"), "the prefix");
+        assert_eq!(at(7).as_deref(), Some("x"), "the key's namespace");
+        assert_eq!(at(9), None, "the key's name");
+    }
+}
