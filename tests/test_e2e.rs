@@ -6898,6 +6898,17 @@ fn test_e2e_rename_alias_refuses_existing_alias() {
         "expected the invalid-name refusal, got: {}",
         msg
     );
+
+    // Alias lookup outranks a full namespace: an alias named `simple.core`
+    // would capture the `simple.core/add` this buffer spells out.
+    let last_line = text.lines().count() as u32;
+    client.did_change_insert(&file, last_line, 0, "(simple.core/add 1 2)\n");
+    let msg = refused(&mut client, "simple.core");
+    assert!(
+        msg.contains("already qualifies names") && msg.contains("'simple.core'"),
+        "expected the capture refusal, got: {}",
+        msg
+    );
 }
 
 #[test]

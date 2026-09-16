@@ -268,23 +268,43 @@ fn alias_target(
     on_site.then_some((alias, sites))
 }
 
-/// The aliases the buffer's live ns form binds, for the collision check a
-/// rename makes once it knows the new name.
-fn live_aliases(index: &Index, documents: &DocumentStore, uri: &Url) -> HashMap<String, String> {
-    let Some(path) = crate::uri::to_index_path(uri) else {
-        return HashMap::new();
-    };
-    let Some(snapshot) = documents.snapshot(uri) else {
-        return HashMap::new();
-    };
-    extractor::extract_full_tree(
+/// Why renaming an alias to `new_name` would change what the file means, if
+/// it would. Alias lookup outranks a full namespace name, so the new name
+/// may neither be an alias the live ns form already binds (the two would
+/// merge and every `c/x` would mean a different namespace) nor spell the
+/// namespace part of anything in the file (`[clojure.set]` required and
+/// `clojure.set/union` called: an alias `clojure.set` would capture that
+/// call). The second check is the site walk itself, run for the new name.
+fn alias_capture(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    alias: &str,
+    new_name: &str,
+) -> Option<String> {
+    let path = crate::uri::to_index_path(uri)?;
+    let snapshot = documents.snapshot(uri)?;
+    let (ns_meta, _, occs) = extractor::extract_full_tree(
         &snapshot.tree,
         &snapshot.text,
         &path,
         &index.extract_config(),
     )
-    .map(|(ns_meta, _, _)| ns_meta.aliases)
-    .unwrap_or_default()
+    .ok()?;
+    if ns_meta.aliases.contains_key(new_name) {
+        return Some(format!(
+            "cannot rename alias '{}' to '{}': '{}' is already an alias in this file",
+            alias, new_name, new_name
+        ));
+    }
+    let taken = extractor::alias_sites_tree(&snapshot.tree, &snapshot.text, new_name, &occs);
+    (!taken.usages.is_empty()).then(|| {
+        format!(
+            "cannot rename alias '{}' to '{}': '{}' already qualifies names in this file, \
+             which the alias would capture",
+            alias, new_name, new_name
+        )
+    })
 }
 
 /// Everything a keyword rename can be refused for before the new name is
@@ -628,16 +648,10 @@ pub fn rename(
         // `[a :as h]`, `h/f`, `'h/f`, `::h/k`, `#::h{…}`. Quoted symbols are
         // in because `(resolve 'h/f)` resolves the alias at run time; a
         // `{:keys [h/x]}` binding entry is out because it reads the literal
-        // `:h/x`. Renaming onto an alias the file already binds would merge
-        // the two and make every `c/x` mean a different namespace.
+        // `:h/x`. The new name must not capture anything (`alias_capture`).
         RenameTarget::Alias { alias, sites } => {
-            if live_aliases(index, documents, &uri).contains_key(&new_name) {
-                anyhow::bail!(
-                    "cannot rename alias '{}' to '{}': '{}' is already an alias in this file",
-                    alias,
-                    new_name,
-                    new_name
-                );
+            if let Some(reason) = alias_capture(index, documents, &uri, &alias, &new_name) {
+                anyhow::bail!(reason);
             }
             let edits = sites
                 .declarations
