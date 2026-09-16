@@ -47,8 +47,15 @@ different binary, set:
 }
 ```
 
-Also available: [Calva](docs/EDITORS.md#vs-code),
-[Neovim](docs/EDITORS.md#neovim), [Zed](docs/EDITORS.md#zed), and
+If you use [Calva](https://calva.io/), set its language server path:
+
+```json
+{
+  "calva.clojureLspPath": "/path/to/clj-pulse"
+}
+```
+
+Also available: [Neovim](docs/EDITORS.md#neovim), [Zed](docs/EDITORS.md#zed), and
 [manual downloads](docs/EDITORS.md#manual-download).
 
 For full diagnostics, [install clj-kondo](https://github.com/clj-kondo/clj-kondo/blob/master/doc/install.md).
@@ -93,10 +100,9 @@ and real-world feedback are welcome.
   `:require-macros` and shadow-cljs classpaths are not supported.
 - Java support covers JDK classes, static members, and constructors.
   Instance methods, library classes, and decompilation are not supported yet.
-- Whole-document formatting is provided by the editor; Clojure Pulse bundles
-  its own formatter. The server provides indent-on-Enter.
-
-See the [roadmap](docs/ROADMAP.md) for planned work.
+- Whole-document formatting is provided by the editor. Clojure Pulse uses
+  cljfmt compiled from ClojureScript to JavaScript, bundled as a library.
+  The server provides indent-on-Enter.
 
 ## Documentation
 
