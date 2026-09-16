@@ -131,6 +131,14 @@ Small fixes that remove wrong answers. Each extractor change bumps
       (`:kondo {:live-max-kb 256}`) on the didChange pass only; one publish
       per pass stays.
   Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — done
+- [x] **`are` template arguments are locals.** `(are [x y] expr & values)`
+      currently records `x` and `y` as vars of the current namespace, so
+      definition, hover, completion, references, rename, documentHighlight and
+      the native `unused-binding` lint all answer wrong inside the template.
+      Bind the argv in the template expression only, resolved by fqn
+      (`clojure.test/are`, `cljs.test/are`) in the occurrence walker and by
+      name part in the locals walker.
+  Plan: [2026-09-13-0934-are-template-locals.md](plans/2026-09-13-0934-are-template-locals.md) — done
 
 ## Milestone 2 — completion quality
 
@@ -264,7 +272,9 @@ One line each, newest last. Promote or reject; never let this grow silently.
   ns metadata or `ExtractConfig`, so a head the config maps to a non-fn kind
   still binds its vector as parameters there while the occurrence walker does
   not. Narrow, but it makes local resolution and references disagree; the fix
-  is threading `ExtractConfig` through `locals_in_scope_at`.
+  is threading `ExtractConfig` through `locals_in_scope_at`. `are` is matched
+  by name part there too, so a bare `are` in a file without clojure.test binds
+  in the locals walker but not in the occurrence walker.
 - 2026-09-10 **Cache the extraction per document version, not just the tree.**
   Every position request re-walks the open buffer:
   `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which

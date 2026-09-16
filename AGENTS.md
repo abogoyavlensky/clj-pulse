@@ -211,6 +211,16 @@ and update README and this file in the same change.
   `:refer :all` / `(:use ns)` namespaces; head resolution, completion and
   `resolve_symbol` all consult it, so `deftest` works however `clojure.test`
   was required.
+- `are` (`clojure.test/are`, `cljs.test/are`, the table `ARE_FQNS`) binds its
+  argv in the template expression only; the values after it are usages in the
+  enclosing scope. The occurrence walker (`walk_are_form`) resolves the head by
+  fqn through `head_fqn_candidates`, the list `macro_def_kind` also reads, so
+  a bare `are` without clojure.test stays a plain call; the locals walker
+  (`walk_scope_are`) matches the name part alone. Argv bindings are lintable.
+  `are` substitutes syntactically, quoted data included, so a `'form` in the
+  template counts as a use for the lint (`mark_quoted_symbols_used`) and is a
+  usage `local_references_at` returns from the argv, or a rename would leave
+  it behind; a cursor on the quoted symbol itself still resolves nothing.
 - `NsMeta.as_aliases` never appears in `requires`: an `:as-alias` namespace is
   not loaded, so the alias resolves keywords and qualified names while a usage
   spelling the full namespace stays an unresolved namespace. `core_excludes`

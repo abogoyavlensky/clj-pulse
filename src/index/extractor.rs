@@ -484,6 +484,22 @@ fn macro_def_kind(
     source: &str,
     lint_as: &HashMap<String, DefKind>,
 ) -> Option<(String, DefKind)> {
+    head_fqn_candidates(head, ns_meta, source)
+        .into_iter()
+        .find_map(|fqn| {
+            lint_as
+                .get(&fqn)
+                .cloned()
+                .or_else(|| DefKind::from_macro_fqn(&fqn))
+                .map(|kind| (fqn, kind))
+        })
+}
+
+/// Every fqn a list head may resolve to, most specific first: the alias- or
+/// refer-resolved fqn, then the head's name under each `:refer :all` / `:use`
+/// namespace when the head is bare and not `:refer`red itself. Shared by every
+/// macro table keyed by fqn ([`macro_def_kind`], [`are_head_fqn`]).
+fn head_fqn_candidates(head: Node, ns_meta: &NsMeta, source: &str) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     // `resolve_head_fqn` falls back to the current namespace for a bare
     // unreferred head; that candidate is harmless (nothing maps it) and keeps
@@ -500,14 +516,20 @@ fn macro_def_kind(
             candidates.push(format!("{}/{}", ns, name));
         }
     }
+    candidates
+}
 
-    candidates.into_iter().find_map(|fqn| {
-        lint_as
-            .get(&fqn)
-            .cloned()
-            .or_else(|| DefKind::from_macro_fqn(&fqn))
-            .map(|kind| (fqn, kind))
-    })
+/// The `are` macros: `(are [x y] expr & values)` binds its argv in the
+/// template expression alone.
+const ARE_FQNS: &[&str] = &["clojure.test/are", "cljs.test/are"];
+
+/// The `are` fqn a list head resolves to, if any. Resolved by fqn rather than
+/// by bare name, mirroring `deftest`: a bare `are` in a file that never pulls
+/// in clojure.test is an ordinary call and binds nothing.
+fn are_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
+    head_fqn_candidates(head, ns_meta, source)
+        .into_iter()
+        .find(|fqn| ARE_FQNS.contains(&fqn.as_str()))
 }
 
 /// The def-family kind a *qualified* head names through its name part alone:
@@ -1665,6 +1687,20 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
             walk_def_form(kind, &children, ctx, scope, out);
             return;
         }
+        // `(are [x y] expr & values)`: the argv binds in the template alone.
+        // The vector is checked *before* the head is recorded — a non-vector
+        // second child falls through to the generic walk, which records the
+        // head itself, so recording it here too would double-count it.
+        if children.get(1).map(|n| n.kind()) == Some("vec_lit") {
+            if let Some(fqn) = are_head_fqn(*head, ctx.ns_meta, ctx.source) {
+                out.push(Occurrence {
+                    fqn,
+                    name_range: node_to_lsp_range(sym_name_node(*head), ctx.source),
+                });
+                walk_are_form(&children, ctx, scope, out);
+                return;
+            }
+        }
     }
 
     // A head names a core/special form only when it is unqualified or qualified
@@ -2062,6 +2098,51 @@ fn walk_binding_tail(
         walk_occurrences(*body, ctx, scope, out);
     }
     scope.pop();
+}
+
+/// `(are [x y] expr & values)`: `children[1]` (guaranteed a `vec_lit` by the
+/// dispatch site) binds locals visible in `children[2]`, the template, alone;
+/// `children[3..]` are ordinary expressions in the enclosing scope. Argv
+/// bindings are lintable: an unused template argument means a whole column of
+/// values is ignored. The template may be absent mid-typing (`(are [x])`).
+fn walk_are_form(
+    children: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Scope,
+    out: &mut Vec<Occurrence>,
+) {
+    let mut bound = Vec::new();
+    if let Some(argv) = children.get(1) {
+        collect_binding_names(*argv, ctx, scope, out, &mut bound);
+    }
+    scope.push();
+    scope.bind_all(bound, true);
+    if let Some(template) = children.get(2) {
+        walk_occurrences(*template, ctx, scope, out);
+        mark_quoted_symbols_used(*template, false, ctx.source, scope);
+    }
+    scope.pop();
+    for value in children.iter().skip(3) {
+        walk_occurrences(*value, ctx, scope, out);
+    }
+}
+
+/// `are` substitutes its argv into the template syntactically
+/// (`clojure.template/do-template`), so an argument spelled inside quoted data
+/// — `(are [form] (= (macroexpand-1 'form) …) …)` — is used, although
+/// `walk_occurrences` rightly skips `'form` as a usage. Marks every unqualified
+/// symbol under a quote in the template used, so the lint does not report it.
+fn mark_quoted_symbols_used(node: Node, quoted: bool, source: &str, scope: &mut Scope) {
+    let quoted = quoted || node.kind() == "quoting_lit";
+    if quoted && node.kind() == "sym_lit" {
+        if node.child_by_field_name("namespace").is_none() {
+            scope.mark_used(node_text(sym_name_node(node), source));
+        }
+        return;
+    }
+    for child in named_children(node) {
+        mark_quoted_symbols_used(child, quoted, source, scope);
+    }
 }
 
 /// `(fn name? [params] body…)` — optional self-name and params bind.
@@ -2648,6 +2729,19 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
     if node.kind() == "list_lit" {
         let children = named_children(node);
         if let Some(head) = children.first() {
+            // `(are [x y] expr & values)` binds its argv in the template. This
+            // walker has no ns metadata, so it matches the head's name part
+            // alone — bare or qualified (`are`, `t/are`, `clojure.test/are`) —
+            // the rule `qualified_head_def_kind` already applies to `mu/defn`.
+            // A bare `are` in a file without clojure.test therefore binds here
+            // but not in the occurrence walker (ROADMAP backlog, 2026-09-10).
+            if head.kind() == "sym_lit"
+                && node_text(sym_name_node(*head), source) == "are"
+                && children.get(1).map(|n| n.kind()) == Some("vec_lit")
+            {
+                walk_scope_are(&children, source, pos, out);
+                return;
+            }
             // A head is a binding form when it is unqualified or explicitly
             // qualified to `clojure.core` (`(clojure.core/let …)`), matching the
             // occurrence walker's `head_is_core_form`. A qualified `s/def` etc.
@@ -2791,6 +2885,34 @@ fn walk_scope_binding_tail(
         if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
             out.extend(bound);
             walk_scope(*body, source, pos, out);
+            return;
+        }
+    }
+}
+
+/// `(are [x y] expr & values)`: the argv (`children[1]`, a `vec_lit` at the
+/// dispatch site) binds for the template `children[2]` alone; a cursor in a
+/// value sees nothing from it. The occurrence-walker twin is `walk_are_form`.
+fn walk_scope_are(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    let mut bound = Vec::new();
+    if let Some(argv) = children.get(1) {
+        collect_binding_targets(*argv, source, &mut bound);
+        // A cursor on the argv itself yields its bindings, like fn params.
+        if lsp_range_contains(node_to_lsp_range(*argv, source), pos) {
+            out.extend(bound);
+            return;
+        }
+    }
+    if let Some(template) = children.get(2) {
+        if lsp_range_contains(node_to_lsp_range(*template, source), pos) {
+            out.extend(bound);
+            walk_scope(*template, source, pos, out);
+            return;
+        }
+    }
+    for value in children.iter().skip(3) {
+        if lsp_range_contains(node_to_lsp_range(*value, source), pos) {
+            walk_scope(*value, source, pos, out);
             return;
         }
     }
@@ -3117,6 +3239,16 @@ pub fn local_references_at_tree(
         .name_range;
 
     let mut usages = Vec::new();
+    // An `are` argv is substituted into the template syntactically, quoted
+    // data included, so `'form` in the template is a usage too — rename must
+    // rewrite it or the test breaks (`mark_quoted_symbols_used` is the lint's
+    // half of the same rule). Substitution ignores lexical structure, so these
+    // skip the scope filter below: a quoted `(fn [form] …)` is data, not a
+    // rebinding. A cursor *on* the quoted symbol still resolves nothing: the
+    // entry check above only accepts evaluated occurrences.
+    if let Some(template) = are_template_of_argv(root, source, declaration) {
+        collect_quoted_name_occurrences(template, false, source, name, &mut usages);
+    }
     for occ in occurrences {
         if occ == declaration {
             continue; // the binding site itself, reported as the declaration
@@ -3135,6 +3267,54 @@ pub fn local_references_at_tree(
         usages,
         destructured_key: is_destructured_key(root, source, declaration),
     })
+}
+
+/// The template expression of the `are` form whose argv holds the binding
+/// site at `declaration`, if it is one: the innermost enclosing `vec_lit` that
+/// is the second child of a list headed by `are` (name part; the locals walker
+/// has no ns metadata, see `walk_scope`). `None` for every other binding.
+fn are_template_of_argv<'a>(root: Node<'a>, source: &str, declaration: Range) -> Option<Node<'a>> {
+    let sym = find_binding_sym(root, source, declaration)?;
+    let mut node = sym;
+    while let Some(parent) = node.parent() {
+        if node.kind() == "vec_lit" && parent.kind() == "list_lit" {
+            let children = named_children(parent);
+            let is_are_argv = children
+                .first()
+                .map(|h| h.kind() == "sym_lit" && node_text(sym_name_node(*h), source) == "are")
+                == Some(true)
+                && children.get(1).map(|n| n.id()) == Some(node.id());
+            if is_are_argv {
+                return children.get(2).copied();
+            }
+        }
+        node = parent;
+    }
+    None
+}
+
+/// Ranges of every unqualified `sym_lit` named `name` that sits under a quote
+/// — the occurrences `collect_name_occurrences` skips.
+fn collect_quoted_name_occurrences(
+    node: Node,
+    quoted: bool,
+    source: &str,
+    name: &str,
+    out: &mut Vec<Range>,
+) {
+    let quoted = quoted || node.kind() == "quoting_lit";
+    if node.kind() == "sym_lit" {
+        if quoted
+            && node.child_by_field_name("namespace").is_none()
+            && node_text(sym_name_node(node), source) == name
+        {
+            out.push(node_to_lsp_range(sym_name_node(node), source));
+        }
+        return;
+    }
+    for child in named_children(node) {
+        collect_quoted_name_occurrences(child, quoted, source, name, out);
+    }
 }
 
 /// Whether the binding site at `declaration` is a name inside a

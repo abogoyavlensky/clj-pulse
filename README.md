@@ -47,8 +47,8 @@ Language features:
 - **Signature help** - argument hints while typing a call (after `(` and spaces).
 - **Find references** - locate every usage of a symbol across the project.
 - **Rename** - rename a project symbol and all of its references, or a local
-  binding (params, `let`/`loop`/`for` bindings, destructured names) within
-  its scope. The editor's rename box opens on the exact token that will change,
+  binding (params, `let`/`loop`/`for` bindings, `clojure.test/are` template
+  arguments, destructured names) within its scope. The editor's rename box opens on the exact token that will change,
   and names that cannot be renamed - library and built-in symbols,
   `:keys`-destructured bindings - are refused up front with a reason.
 - **Keyword rename** - rename a qualified keyword across the project. Each site
