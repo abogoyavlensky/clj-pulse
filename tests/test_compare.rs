@@ -39,7 +39,7 @@ mod oracle_tests {
     fn fixture_probes() -> Option<(tempfile::TempDir, Vec<Probe>)> {
         let tmp = with_kondo("oracle_tests")?;
         let analysis = oracle::run(tmp.path(), &["src"]).expect("clj-kondo runs");
-        let probes = oracle::probes(&analysis, tmp.path());
+        let probes = oracle::probes(&analysis);
         Some((tmp, probes))
     }
 

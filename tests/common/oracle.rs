@@ -421,7 +421,7 @@ impl Texts {
 
 /// Every probe the analysis supports, in a fixed order: by file, line,
 /// character, then request, so a limit takes the same ones on every run.
-pub fn probes(analysis: &Analysis, root: &Path) -> Vec<Probe> {
+pub fn probes(analysis: &Analysis) -> Vec<Probe> {
     let mut texts = Texts::default();
     let mut out = Vec::new();
 
@@ -701,7 +701,6 @@ pub fn probes(analysis: &Analysis, root: &Path) -> Vec<Probe> {
         }
     }
 
-    let _ = root;
     out.sort_by(|a, b| {
         (&a.file, a.line, a.character, a.expect.request(), &a.bucket).cmp(&(
             &b.file,
