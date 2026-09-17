@@ -33,9 +33,14 @@ For editor verification, see [Verifying changes headlessly](#verifying-changes-h
 [clj-kondo](https://github.com/clj-kondo/clj-kondo) at pinned commits under
 `.tmp/bench/`, downloads the pinned clojure-lsp release beside them, and runs
 four configurations per corpus - each server cold and warm - printing a table
-and a `BENCH_JSON` line per row. `bb bench metabase` or `bb bench clj-kondo`
-runs one. See the [benchmark records](MEMORY.md#benchmark-against-clojure-lsp)
-for the full tables and [Performance](PERFORMANCE.md) for the warm summary.
+and a `BENCH_JSON` line per row. The dependency-readiness measurement checks
+one definition per eligible Clojure dependency and reports exact coverage;
+see [the methodology](PERFORMANCE.md#methodology). Both servers resolve the
+same deps.edn classpath, even when the corpus has a bb.edn or custom LSP
+settings. The temporary `project-specs` override is restored after the run.
+`bb bench metabase` or `bb bench clj-kondo` runs one. See
+[Performance](PERFORMANCE.md) for current cold/warm tables and
+[MEMORY.md](MEMORY.md#benchmark-against-clojure-lsp) for historical results.
 
 `bb soak` drives one server through 20 rounds of churn on the same corpora -
 edits in open buffers, saves, files changed, created, deleted and renamed on

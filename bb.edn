@@ -48,24 +48,44 @@
                 (shell {:dir (str dir)} "git checkout -q --detach FETCH_HEAD"))
               dir))
 
+          (defn with-bench-classpath!
+            "Project config overrides initializationOptions in clojure-lsp.
+             Override only its classpath command in the disposable corpus,
+             preserving every other setting and restoring the original bytes."
+            [dir run]
+            (let [file (fs/path dir ".lsp/config.edn")
+                  original (when (fs/exists? file) (slurp (str file)))
+                  config (if original (binding [*read-eval* false] (read-string original)) {})]
+              (when-not (map? config)
+                (throw (ex-info "Expected a map in benchmark .lsp/config.edn" {:file (str file)})))
+              (fs/create-dirs (fs/parent file))
+              (try
+                (spit (str file) (pr-str (assoc config :project-specs
+                                              [{:project-path "deps.edn"
+                                                :classpath-cmd ["clojure" "-A:dev:test" "-Spath"]}])))
+                (run)
+                (finally
+                  (if original
+                    (spit (str file) original)
+                    (fs/delete-if-exists file))))))
+
           (defn bench-prepare!
             "Resolves the corpus's dependencies *before* anything is timed, so
              both servers start from the same prepared state: `.cpcache` written
-             and every artifact in `~/.m2`. A failure is a warning, not a stop —
-             the run then measures whatever the corpus does have."
+             and every artifact in `~/.m2`. Returns the exact classpath or nil
+             on failure; the benchmark requires success, the soak can continue."
             [dir]
             (when (fs/exists? (fs/path dir "deps.edn"))
               (println "Preparing the corpus classpath (clojure -A:dev:test -Spath) ...")
               ;; try/catch as well as :continue — the latter tolerates a
-              ;; non-zero exit, but a missing `clojure` on PATH throws before
-              ;; the process ever starts, and that must not end the run either.
+              ;; non-zero exit, but a missing `clojure` throws before startup.
+              ;; Let each caller decide whether preparation is required.
               (try
-                (let [{:keys [exit err]} (shell {:dir (str dir)
-                                                 :out :string
-                                                 :err :string
-                                                 :continue true}
-                                                "clojure -A:dev:test -Spath")]
-                  (when-not (zero? exit)
+                (let [{:keys [exit out err]} (shell {:dir (str dir)
+                                                   :out :string :err :string :continue true}
+                                                  "clojure -A:dev:test -Spath")]
+                  (if (zero? exit)
+                    (last (remove str/blank? (str/split-lines out)))
                     (println "WARNING: preparing the classpath failed:" (str/trim (str err)))))
                 (catch Exception e
                   (println "WARNING: could not run the clojure CLI:" (ex-message e))))))
@@ -156,13 +176,21 @@
                  (when-not lsp
                    (println "Comparing clj-pulse alone: no clojure-lsp binary."))
                  (doseq [name (or (seq *command-line-args*) bench-order)]
-                   (let [dir (bench-corpus! name)]
-                     (bench-prepare! dir)
+                   (let [dir (bench-corpus! name)
+                         cp (or (bench-prepare! dir)
+                                (throw (ex-info "Benchmark needs a successfully resolved classpath" {:corpus name})))
+                         cp-file (fs/path (fs/parent dir) (str name ".classpath"))]
+                     (spit (str cp-file) cp)
+                     ;; Stage 2 reads the newest .cp. A previous run with other
+                     ;; aliases must not silently supply a different classpath.
+                     (spit (str (fs/path dir ".cpcache/clj-pulse-bench.cp")) cp)
                      ;; --release: the debug build's numbers are not what users see.
-                     (shell {:extra-env (cond-> {"CLJ_PULSE_BENCH_ROOT" (str dir)
-                                                 "CLJ_PULSE_BENCH_CORPUS" name}
+                     (with-bench-classpath! dir
+                       (fn [] (shell {:extra-env (cond-> {"CLJ_PULSE_BENCH_ROOT" (str dir)
+                                                 "CLJ_PULSE_BENCH_CORPUS" name
+                                                 "CLJ_PULSE_BENCH_CLASSPATH_FILE" (str cp-file)}
                                           lsp (assoc "CLJ_PULSE_BENCH_CLOJURE_LSP" lsp))}
-                            "cargo test --release --test test_bench -- --ignored --nocapture"))))}
+                            "cargo test --release --test test_bench -- --ignored --nocapture"))))))}
 
   soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
         ;; One corpus, not both: a soak is long enough that running both by

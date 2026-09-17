@@ -35,19 +35,25 @@ and update README and this file in the same change.
   `jar:` content through the extension's own `clojure/dependencyContents`
   provider, hover, completion, and diagnostics.
 
-- `bb bench [metabase|clj-kondo]` — the release binary and clojure-lsp, each
-  driven by the same client through the same requests, on two corpora pinned by
-  commit (`bb bench` runs both; they are checked out under `.tmp/bench/` on
-  first use, and the pinned clojure-lsp release is downloaded and checksum-
-  verified beside them). Four configurations per corpus, in a fixed order:
-  clj-pulse cold, clj-pulse warm, clojure-lsp cold, clojure-lsp warm. Every
-  metric is behavioral, so it means the same thing for both servers — time
-  until a `textDocument/definition` on a project symbol *lands where it should*,
-  the same into a JAR, RSS once the server is settled (no traffic for 2 s and no
-  child process still working), and medians of 20 definitions and 20 keystrokes
-  to `publishDiagnostics`. Each row also prints as one `BENCH_JSON` line, so a
-  later run can be diffed. Not a pass/fail gate; compare against the tables in
-  [docs/MEMORY.md](docs/MEMORY.md).
+- `bb bench [metabase|clj-kondo]` - compare the release binary and clojure-lsp
+  on two pinned corpora, cold and warm, through the same JSON-RPC client.
+  Preparation captures `clojure -A:dev:test -Spath`; clojure-lsp gets that
+  command via `project-specs` in a temporary project config override, restored
+  after the run, so corpus settings or bb.edn cannot select different
+  dependencies. The newest stage-2 `.cp` is seeded with that same classpath.
+  Other server settings are unchanged.
+  The benchmark independently selects one public top-level definition per
+  eligible Clojure dependency, verifies the exact source and position, and
+  reports readiness only when every selected probe resolves. Coverage,
+  exclusions, discovery errors, and unresolved targets accompany the timing.
+  The single clojure.string probe remains a smoke check. Startup writes and
+  reads have deadlines; a wedged peer produces incomplete coverage.
+  Cold clears each server's analysis cache and the project clj-kondo cache;
+  dependency downloads and classpath preparation remain outside timing.
+  Memory and latency are sampled after background work settles. A startup
+  probe timeout makes settled time unavailable rather than inflating it.
+  `BENCH_JSON` preserves the raw measurements, inventory, and probe outcomes.
+  Not a pass/fail gate; compare against [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 - `bb soak [metabase|clj-kondo]` — one long-lived server driven through rounds
   of realistic churn on the same pinned corpora: buffer edits, saves, on-disk
@@ -292,6 +298,14 @@ and update README and this file in the same change.
   is inside that child, so `al|ias/name` has no namespace-only step; equal
   consecutive ranges collapse, and a position with no containing named node
   gets a single zero-width range rather than being dropped.
+
+## Backlog
+
+`docs/backlog/` holds known issues outside current work. Use one descriptive
+file per issue, beginning with a title and `**Status: open**`. When a plan is
+written, mark it `planned` and link the plan; when fixed, mark it `done` and
+record where it landed. Never delete entries. List every entry not marked done
+when asked for the backlog. Commit new entries separately from code.
 
 ## Releasing
 

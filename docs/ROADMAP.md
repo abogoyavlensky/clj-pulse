@@ -222,6 +222,9 @@ the release.
 - [x] **README for the public release.** Short introduction, four strengths,
       quick start, measured performance, and linked reference guides.
       Plan: [2026-09-12-readme-public-release.md](plans/2026-09-12-readme-public-release.md) - done
+- [ ] **Dependency navigation benchmark.** Measure readiness across tested
+      dependencies with coverage and cold/warm results.
+      Plan: [2026-09-16-2149-dependency-readiness-benchmark.md](plans/2026-09-16-2149-dependency-readiness-benchmark.md) - in progress
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.

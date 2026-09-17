@@ -433,25 +433,33 @@ impl LspClient {
     /// and `publishDiagnostics.versionSupport` because a real editor does: the
     /// bench compares two servers, and both have to be asked the same thing.
     pub fn initialize_no_wait(&mut self, root: &Path) -> Value {
-        let root_uri = format!("file://{}", root.display());
-        let result = self.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "rootUri": root_uri,
-                "workspaceFolders": [{ "uri": root_uri, "name": "bench" }],
-                "capabilities": {
-                    "textDocument": {
-                        "definition": { "linkSupport": true },
-                        "publishDiagnostics": { "versionSupport": true }
-                    },
-                    "window": { "workDoneProgress": true },
-                    "general": { "positionEncodings": ["utf-16"] }
-                }
-            }),
-        );
+        self.initialize_no_wait_with_options(root, json!({}))
+    }
+
+    /// Benchmark-only classpath selection; the default entry point keeps the
+    /// same empty initialization options for the soak and existing tests.
+    pub fn initialize_no_wait_with_options(&mut self, root: &Path, options: Value) -> Value {
+        let result = self.request("initialize", Self::initialize_params(root, options));
         self.notify("initialized", json!({}));
         result
+    }
+
+    pub fn initialize_params(root: &Path, options: Value) -> Value {
+        let root_uri = format!("file://{}", root.display());
+        json!({
+            "processId": std::process::id(),
+            "initializationOptions": options,
+            "rootUri": root_uri,
+            "workspaceFolders": [{ "uri": root_uri, "name": "bench" }],
+            "capabilities": {
+                "textDocument": {
+                    "definition": { "linkSupport": true },
+                    "publishDiagnostics": { "versionSupport": true }
+                },
+                "window": { "workDoneProgress": true },
+                "general": { "positionEncodings": ["utf-16"] }
+            }
+        })
     }
 
     /// The text of the first `window/logMessage` containing any of `needles`,

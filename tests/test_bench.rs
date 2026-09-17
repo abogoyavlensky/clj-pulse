@@ -13,6 +13,8 @@
 //! no metric depends on one.
 
 mod common;
+#[path = "bench/dependencies.rs"]
+mod dependencies;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +40,8 @@ const SAMPLES: usize = 20;
 const MIN_SAMPLES: usize = 15;
 /// How often a startup probe re-asks for a definition it did not get.
 const POLL: Duration = Duration::from_millis(100);
+/// Bound startup traffic so probing cannot fill a stalled server's input pipe.
+const MAX_STARTUP_IN_FLIGHT: usize = 8;
 /// `:kondo {:live-max-kb}`'s default, in bytes: above it clj-kondo sits out
 /// the keystroke path, so a file on each side of the line is measured.
 const LIVE_MAX_BYTES: u64 = 256 * 1024;
@@ -84,15 +88,15 @@ fn bench_large_project() {
         }
         let row = run(server, temp, binary, &root, &corpus, &probes);
         row.print(&probes, &root);
-        row.print_json();
+        row.print_json(&probes);
         rows.push(row);
     }
 
     summary(&rows, &probes);
 }
 
-/// The servers under comparison. Neither is tuned: a comparison of two
-/// defaults is the only fair one.
+/// Both servers use their defaults except classpath selection: clojure-lsp
+/// must use the same deps.edn command, without merging a second bb.edn classpath.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Server {
     CljPulse,
@@ -123,7 +127,10 @@ impl Server {
     /// timed.
     fn caches(self, root: &Path) -> Vec<PathBuf> {
         match self {
-            Server::CljPulse => vec![root.join(".clj-pulse").join("jar-cache")],
+            Server::CljPulse => vec![
+                root.join(".clj-pulse").join("jar-cache"),
+                root.join(".clj-kondo").join(".cache"),
+            ],
             Server::ClojureLsp => vec![
                 root.join(".lsp").join(".cache"),
                 root.join(".clj-kondo").join(".cache"),
@@ -196,7 +203,28 @@ fn run(
     let pid = client.child.id();
     let t0 = Instant::now();
     let mut watch = StageWatch::default();
-    let capabilities = client.initialize_no_wait(root);
+    let options = match server {
+        Server::CljPulse => json!({}),
+        Server::ClojureLsp => json!({"project-specs": [{"project-path":"deps.edn",
+            "classpath-cmd":["clojure", "-A:dev:test", "-Spath"]}]}),
+    };
+    let capabilities = match initialize_until(&mut client, root, options, t0 + ceiling) {
+        Ok(result) => result,
+        Err(reason) => {
+            row.settle_note = reason.clone();
+            row.dependency_outcomes = probes
+                .dependencies
+                .targets
+                .iter()
+                .map(|target| {
+                    let mut outcome = dependencies::Outcome::new(target.symbol.clone());
+                    outcome.last_failure = Some(reason.clone());
+                    outcome
+                })
+                .collect();
+            return row;
+        }
+    };
     let sync = SyncKind::of(&capabilities);
     row.sync = sync;
 
@@ -207,16 +235,53 @@ fn run(
         client.did_open(&site.file);
     }
 
-    let (first, library) = poll_definitions(
+    let dependency_uri = tower_lsp::lsp_types::Url::from_file_path(
+        root.join("src/__clj_pulse_benchmark_dependencies__.clj"),
+    )
+    .unwrap()
+    .to_string();
+    if !probes.dependencies.targets.is_empty() {
+        let message = json!({"jsonrpc":"2.0", "method":"textDocument/didOpen", "params": {
+            "textDocument": {"uri":dependency_uri, "languageId":"clojure", "version":1,
+                "text":probes.dependencies.buffer()}}});
+        if let Err(reason) = send_until(&mut client, message, t0 + ceiling) {
+            row.dependency_outcomes = probes
+                .dependencies
+                .targets
+                .iter()
+                .map(|target| {
+                    let mut outcome = dependencies::Outcome::new(target.symbol.clone());
+                    outcome.last_failure = Some(reason.clone());
+                    outcome
+                })
+                .collect();
+            return row;
+        }
+    }
+    let startup = poll_definitions(
         &mut client,
-        probes.startup_project.as_ref(),
-        probes.startup_library.as_ref(),
+        probes,
+        &dependency_uri,
         t0,
         t0 + ceiling,
         &mut watch,
     );
-    row.first_definition = first;
-    row.first_library_definition = library;
+    let startup_complete = (probes.startup_project.is_none() || startup.project.is_some())
+        && (probes.startup_library.is_none() || startup.library.is_some())
+        && (probes.dependencies.targets.is_empty()
+            || dependencies::ready_ms(&startup.dependencies).is_some());
+    row.first_definition = startup.project;
+    row.first_library_definition = startup.library;
+    row.dependency_outcomes = startup.dependencies;
+    if !startup.transport_usable {
+        return row;
+    }
+    if !probes.dependencies.targets.is_empty() {
+        client.notify(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": dependency_uri}}),
+        );
+    }
 
     // Settled, not merely answering: clj-pulse's stage 3 re-resolves and
     // re-indexes long after stage 2 has answered a definition, and clojure-lsp
@@ -229,8 +294,12 @@ fn run(
         Server::CljPulse => settle_clj_pulse(&mut client, pid, t0, deadline, &mut watch),
         Server::ClojureLsp => settle_clojure_lsp(&mut client, pid, t0, deadline, &mut watch),
     };
-    row.settled = settled;
-    row.settle_note = note;
+    row.settled = if startup_complete { settled } else { None };
+    row.settle_note = if startup_complete {
+        note
+    } else {
+        format!("{note}; sampled after incomplete startup probes, settled time unavailable")
+    };
     row.rss_settled = rss_kib(pid);
 
     // clj-pulse's own account of the same startup. Observed at poll
@@ -317,40 +386,277 @@ impl SyncKind {
     }
 }
 
-/// Asks both startup probes for their definition until each answers correctly,
-/// and returns how long each took from `t0`. Interleaved, never in sequence:
-/// the library index finishes after the project one, but a probe that never
-/// resolves must not lend its whole wait to the other's number. `None` for a
-/// probe the ceiling passed first, or one this corpus has no site for.
+struct Startup {
+    transport_usable: bool,
+    project: Option<Duration>,
+    library: Option<Duration>,
+    dependencies: Vec<dependencies::Outcome>,
+}
+
+/// Initialization can do all of a peer's analysis before returning. Treat a
+/// timeout, exit, or error as an incomplete run, not a panic losing later rows.
+fn initialize_until(
+    client: &mut LspClient,
+    root: &Path,
+    options: Value,
+    deadline: Instant,
+) -> Result<Value, String> {
+    client.next_id += 1;
+    let id = client.next_id;
+    send_until(
+        client,
+        json!({"jsonrpc":"2.0", "id":id, "method":"initialize",
+        "params":LspClient::initialize_params(root, options)}),
+        deadline,
+    )?;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("initialization deadline exceeded")?;
+        let message = client
+            .incoming
+            .recv_timeout(remaining)
+            .map_err(|e| format!("initialization failed: {e}"))?;
+        if message.get("method").is_none() && message.get("id") == Some(&json!(id)) {
+            if let Some(error) = message.get("error") {
+                return Err(format!("initialization error: {error}"));
+            }
+            send_until(
+                client,
+                json!({"jsonrpc":"2.0", "method":"initialized", "params":{}}),
+                deadline,
+            )?;
+            return Ok(message["result"].clone());
+        }
+        if let (Some(id), Some(_)) = (message.get("id"), message.get("method")) {
+            send_until(
+                client,
+                json!({"jsonrpc":"2.0", "id":id, "result":null}),
+                deadline,
+            )?;
+        }
+        client.notifications.push(message);
+    }
+}
+
+/// The ordinary test client intentionally uses blocking IO. A benchmark has
+/// to report a hung peer, including one that stops draining its input pipe.
+#[cfg(unix)]
+fn send_until(client: &mut LspClient, message: Value, deadline: Instant) -> Result<(), String> {
+    use std::io::{ErrorKind, Write};
+    use std::os::fd::AsRawFd;
+    struct RestoreFlags {
+        fd: i32,
+        flags: i32,
+    }
+    impl Drop for RestoreFlags {
+        fn drop(&mut self) {
+            unsafe {
+                libc::fcntl(self.fd, libc::F_SETFL, self.flags);
+            }
+        }
+    }
+    let fd = client.stdin.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(format!(
+            "cannot make benchmark pipe nonblocking: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let _restore = RestoreFlags { fd, flags };
+    let body = message.to_string();
+    let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    let mut remaining = frame.as_bytes();
+    while !remaining.is_empty() {
+        if Instant::now() >= deadline {
+            return Err("startup deadline exceeded writing request".into());
+        }
+        match client.stdin.write(remaining) {
+            Ok(0) => return Err("server closed its input pipe".into()),
+            Ok(written) => remaining = &remaining[written..],
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(2)),
+                );
+            }
+            Err(e) => return Err(format!("request write failed: {e}")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_until(_: &mut LspClient, _: Value, _: Instant) -> Result<(), String> {
+    Err("deadline-bounded benchmark transport requires Unix".into())
+}
+
+/// At most one request per target is outstanding. Collect answers as they arrive,
+/// regardless of request order: a slow dependency cannot block the project probe.
+/// The overall deadline bounds even a server that never answers a request.
 fn poll_definitions(
     client: &mut LspClient,
-    project: Option<&Site>,
-    library: Option<&Site>,
+    probes: &Probes,
+    dependency_uri: &str,
     t0: Instant,
     deadline: Instant,
     watch: &mut StageWatch,
-) -> (Option<Duration>, Option<Duration>) {
-    let mut answered: [Option<Duration>; 2] = [None, None];
-    let sites = [project, library];
-    loop {
-        for (i, site) in sites.iter().enumerate() {
-            let Some(site) = site else { continue };
-            if answered[i].is_some() {
+) -> Startup {
+    let sites = [
+        probes.startup_project.as_ref(),
+        probes.startup_library.as_ref(),
+    ];
+    let mut params: Vec<Option<Value>> = sites
+        .iter()
+        .map(|site| {
+            site.map(|s| json!({
+        "textDocument": {"uri": tower_lsp::lsp_types::Url::from_file_path(&s.file).unwrap()},
+        "position": {"line": s.line, "character": s.character}
+    }))
+        })
+        .collect();
+    for i in 0..probes.dependencies.targets.len() {
+        params.push(Some(json!({"textDocument": {"uri": dependency_uri},
+            "position": {"line": probes.dependencies.probe_line(i), "character": 0}})));
+    }
+    let mut outcomes: Vec<dependencies::Outcome> = sites
+        .iter()
+        .map(|site| dependencies::Outcome::new(site.map(|s| s.token.clone()).unwrap_or_default()))
+        .chain(
+            probes
+                .dependencies
+                .targets
+                .iter()
+                .map(|t| dependencies::Outcome::new(t.symbol.clone())),
+        )
+        .collect();
+    let mut pending = BTreeMap::new();
+    let mut retry = vec![t0; params.len()];
+    let mut next_probe = 0;
+    let mut transport_usable = true;
+    let mut last_progress = t0;
+    'poll: while Instant::now() < deadline {
+        let start = next_probe;
+        for offset in 0..params.len() {
+            let i = (start + offset) % params.len();
+            let param = &params[i];
+            if pending.len() >= MAX_STARTUP_IN_FLIGHT {
+                break;
+            }
+            if outcomes[i].ready_ms.is_some()
+                || retry[i] > Instant::now()
+                || pending.values().any(|&index| index == i)
+            {
                 continue;
             }
-            if answers(&definition(client, site), &site.expect) {
-                answered[i] = Some(t0.elapsed());
+            let Some(param) = param else { continue };
+            if Instant::now() >= deadline {
+                break;
             }
+            client.next_id += 1;
+            let id = client.next_id;
+            outcomes[i].attempts += 1;
+            if let Err(reason) = send_until(
+                client,
+                json!({"jsonrpc":"2.0", "id":id,
+                "method":"textDocument/definition", "params":param}),
+                deadline,
+            ) {
+                for outcome in outcomes.iter_mut().filter(|o| o.ready_ms.is_none()) {
+                    outcome.last_failure = Some(reason.clone());
+                }
+                transport_usable = false;
+                break 'poll;
+            }
+            pending.insert(id, i);
+            next_probe = (i + 1) % params.len();
         }
-        let pending = sites
+        if params
             .iter()
             .enumerate()
-            .any(|(i, site)| site.is_some() && answered[i].is_none());
-        if !pending || Instant::now() >= deadline {
-            return (answered[0], answered[1]);
+            .all(|(i, p)| p.is_none() || outcomes[i].ready_ms.is_some())
+        {
+            break;
+        }
+        let wait = deadline.saturating_duration_since(Instant::now()).min(POLL);
+        match client.incoming.recv_timeout(wait) {
+            Ok(message) => {
+                if message.get("method").is_some() {
+                    if let Some(id) = message.get("id") {
+                        if let Err(reason) = send_until(
+                            client,
+                            json!({"jsonrpc":"2.0", "id":id, "result":null}),
+                            deadline,
+                        ) {
+                            for outcome in outcomes.iter_mut().filter(|o| o.ready_ms.is_none()) {
+                                outcome.last_failure = Some(reason.clone());
+                            }
+                            transport_usable = false;
+                            break;
+                        }
+                    } else {
+                        client.notifications.push(message);
+                    }
+                } else if let Some(i) = message["id"].as_i64().and_then(|id| pending.remove(&id)) {
+                    let accepted = message.get("error").is_none()
+                        && if i < 2 {
+                            answers(&message["result"], &sites[i].unwrap().expect)
+                        } else {
+                            probes.dependencies.targets[i - 2].accepts(&message["result"])
+                        };
+                    outcomes[i].observe(&message, accepted, t0.elapsed().as_millis() as u64);
+                    retry[i] = Instant::now() + POLL;
+                } else {
+                    client.stash(message);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                for outcome in outcomes.iter_mut().filter(|o| o.ready_ms.is_none()) {
+                    outcome.last_failure = Some("server disconnected".into());
+                }
+                transport_usable = false;
+                break;
+            }
         }
         watch.observe(client, t0);
-        std::thread::sleep(POLL);
+        if last_progress.elapsed() >= Duration::from_secs(10) {
+            println!(
+                "  startup at {} s: project {}, dependencies {}/{}",
+                t0.elapsed().as_secs(),
+                if outcomes[0].ready_ms.is_some() {
+                    "ready"
+                } else {
+                    "waiting"
+                },
+                outcomes
+                    .iter()
+                    .skip(2)
+                    .filter(|o| o.ready_ms.is_some())
+                    .count(),
+                outcomes.len() - 2
+            );
+            last_progress = Instant::now();
+        }
+    }
+    // If an outstanding request hit the deadline, the peer may be wedged.
+    // Do not send cancellation/cleanup over a potentially partial frame, or
+    // wait through another settle deadline. Drop kills/reaps the child.
+    if !pending.is_empty() && Instant::now() >= deadline {
+        transport_usable = false;
+        for &i in pending.values() {
+            outcomes[i].last_failure =
+                Some("startup deadline exceeded waiting for response".into());
+        }
+    }
+    Startup {
+        transport_usable,
+        project: outcomes[0].ready_ms.map(Duration::from_millis),
+        library: outcomes[1].ready_ms.map(Duration::from_millis),
+        dependencies: outcomes.into_iter().skip(2).collect(),
     }
 }
 
@@ -705,6 +1011,7 @@ struct Probes {
     /// Definition into the project from the largest file, for the latency
     /// median.
     edit_site: Option<Site>,
+    dependencies: dependencies::Inventory,
 }
 
 impl Probes {
@@ -769,6 +1076,30 @@ impl Probes {
             startup_project,
             startup_library,
             edit_site,
+            dependencies: match std::env::var_os("CLJ_PULSE_BENCH_CLASSPATH_FILE") {
+                Some(path) => match std::fs::read_to_string(&path) {
+                    Ok(cp) => dependencies::Inventory::discover(
+                        root,
+                        std::env::split_paths(cp.trim())
+                            .map(|p| if p.is_absolute() { p } else { root.join(p) })
+                            .collect(),
+                    ),
+                    Err(e) => dependencies::Inventory {
+                        errors: vec![dependencies::Exclusion {
+                            artifact: PathBuf::from(path),
+                            reason: e.to_string(),
+                        }],
+                        ..Default::default()
+                    },
+                },
+                None => dependencies::Inventory {
+                    errors: vec![dependencies::Exclusion {
+                        artifact: root.into(),
+                        reason: "no prepared classpath supplied".into(),
+                    }],
+                    ..Default::default()
+                },
+            },
         }
     }
 
@@ -823,6 +1154,35 @@ impl Probes {
         site("first definition", &self.startup_project);
         site("first library def", &self.startup_library);
         site("definition latency", &self.edit_site);
+        println!(
+            "  dependency probes: {} / {} Clojure source-bearing entries ({} total entries)",
+            self.dependencies.targets.len(),
+            self.dependencies.source_dependencies,
+            self.dependencies.entries
+        );
+        for target in &self.dependencies.targets {
+            println!(
+                "    {} -> {}!{}:{}",
+                target.symbol,
+                target.artifact.display(),
+                target.source,
+                target.line + 1
+            );
+        }
+        for entry in &self.dependencies.excluded {
+            println!(
+                "    excluded {}: {}",
+                entry.artifact.display(),
+                entry.reason
+            );
+        }
+        for entry in &self.dependencies.errors {
+            println!(
+                "    DISCOVERY ERROR {}: {}",
+                entry.artifact.display(),
+                entry.reason
+            );
+        }
     }
 }
 
@@ -863,6 +1223,7 @@ struct Row {
     sync: SyncKind,
     first_definition: Option<Duration>,
     first_library_definition: Option<Duration>,
+    dependency_outcomes: Vec<dependencies::Outcome>,
     settled: Option<Duration>,
     settle_note: String,
     rss_settled: Option<u64>,
@@ -897,6 +1258,7 @@ impl Row {
             sync: SyncKind::Incremental,
             first_definition: None,
             first_library_definition: None,
+            dependency_outcomes: Vec::new(),
             settled: None,
             settle_note: String::new(),
             rss_settled: None,
@@ -996,6 +1358,34 @@ impl Row {
             "time to first library definition",
             &ms(self.first_library_definition),
         );
+        row("tested dependency navigation", &self.dependency_time());
+        row(
+            "dependency coverage",
+            &format!(
+                "{}/{} probes; {}/{} source dependencies selected; {} discovery errors",
+                self.dependency_outcomes
+                    .iter()
+                    .filter(|o| o.ready_ms.is_some())
+                    .count(),
+                self.dependency_outcomes.len(),
+                probes.dependencies.targets.len(),
+                probes.dependencies.source_dependencies,
+                probes.dependencies.errors.len()
+            ),
+        );
+        for outcome in self
+            .dependency_outcomes
+            .iter()
+            .filter(|o| o.ready_ms.is_none())
+        {
+            row(
+                &format!("  unresolved {}", outcome.symbol),
+                outcome
+                    .last_failure
+                    .as_deref()
+                    .unwrap_or("not attempted before deadline"),
+            );
+        }
         row("time to settled", &ms(self.settled));
         row("  settled by", &self.settle_note);
         row("RSS settled", &mib(self.rss_settled));
@@ -1054,6 +1444,9 @@ impl Row {
     /// sits out every keystroke, so it can qualify a negative but never turn
     /// one into a positive.
     fn tier_label(&self, kondo_diagnostic: bool) -> &'static str {
+        if self.server == Server::ClojureLsp {
+            return "clojure-lsp diagnostics (embedded clj-kondo and built-in linters)";
+        }
         match (kondo_diagnostic, self.lint_engine.as_deref()) {
             (true, _) => "with clj-kondo (a diagnostic carried its source)",
             (false, Some("kondo+native")) => {
@@ -1065,7 +1458,21 @@ impl Row {
     }
 
     /// One line a later run can be diffed against.
-    fn print_json(&self) {
+    fn dependency_time(&self) -> String {
+        match dependencies::ready_ms(&self.dependency_outcomes) {
+            Some(ms) => format!("{ms} ms"),
+            None => format!(
+                "incomplete ({}/{})",
+                self.dependency_outcomes
+                    .iter()
+                    .filter(|o| o.ready_ms.is_some())
+                    .count(),
+                self.dependency_outcomes.len()
+            ),
+        }
+    }
+
+    fn print_json(&self, probes: &Probes) {
         let ms = |d: Option<Duration>| match d {
             Some(d) => json!(d.as_millis() as u64),
             None => Value::Null,
@@ -1079,6 +1486,10 @@ impl Row {
                 "corpus": self.corpus,
                 "first_definition_ms": ms(self.first_definition),
                 "first_library_definition_ms": ms(self.first_library_definition),
+                "classpath_command": "clojure -A:dev:test -Spath",
+                "dependency_navigation_ms": dependencies::ready_ms(&self.dependency_outcomes),
+                "dependency_probes": self.dependency_outcomes,
+                "dependency_inventory": probes.dependencies,
                 "settled_ms": ms(self.settled),
                 "settled_by": self.settle_note,
                 "rss_settled_kib": self.rss_settled,
@@ -1116,7 +1527,7 @@ fn summary(rows: &[Row], probes: &Probes) {
         "server",
         "temp",
         "1st def",
-        "1st lib def",
+        "deps ready",
         "settled",
         "RSS",
         "def",
@@ -1131,7 +1542,7 @@ fn summary(rows: &[Row], probes: &Probes) {
             r.server.label(),
             r.temp.label(),
             ms(r.first_definition),
-            ms(r.first_library_definition),
+            r.dependency_time(),
             ms(r.settled),
             mib(r.rss_settled),
             ms(r.definition),
@@ -1176,4 +1587,152 @@ fn count(n: Option<u64>) -> String {
 fn mib(kib: Option<u64>) -> String {
     kib.map(|k| format!("{} MiB", k / 1024))
         .unwrap_or_else(|| "n/a".into())
+}
+
+#[test]
+fn dependency_probes_check_real_navigation_and_report_missing_targets() {
+    let root = common::setup_project();
+    let library = tempfile::tempdir().unwrap();
+    std::fs::create_dir(library.path().join("bench")).unwrap();
+    std::fs::write(
+        library.path().join("bench/lib.clj"),
+        "(ns bench.lib)\n(defn available [] :ok)\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.path().join(".cpcache")).unwrap();
+    let cp = std::env::join_paths([root.path().join("src"), library.path().into()]).unwrap();
+    std::fs::write(root.path().join(".cpcache/bench.cp"), cp.as_encoded_bytes()).unwrap();
+    let mut probes = Probes::discover(root.path());
+    probes.dependencies =
+        dependencies::Inventory::discover(root.path(), vec![library.path().into()]);
+    assert_eq!(probes.dependencies.targets.len(), 1);
+    // The smoke probe depends on the host's Clojure JAR, so omit it in this
+    // hermetic test. Dependency coverage is the external source directory.
+    probes.startup_library = None;
+    let mut client = LspClient::start(root.path());
+    client.initialize(root.path());
+    for site in probes.startup_sites() {
+        client.did_open(&site.file);
+    }
+    let uri = tower_lsp::lsp_types::Url::from_file_path(root.path().join("src/bench_probe.clj"))
+        .unwrap()
+        .to_string();
+    client.did_open_uri(&uri, &probes.dependencies.buffer());
+    let t0 = Instant::now();
+    let result = poll_definitions(
+        &mut client,
+        &probes,
+        &uri,
+        t0,
+        t0 + Duration::from_secs(10),
+        &mut StageWatch::default(),
+    );
+    assert!(result.project.is_some());
+    assert!(
+        dependencies::ready_ms(&result.dependencies).is_some(),
+        "{:?}",
+        result.dependencies
+    );
+
+    probes.dependencies.targets[0].symbol = "bench.lib/missing".into();
+    client.did_close(&root.path().join("src/bench_probe.clj"));
+    client.did_open_uri(&uri, &probes.dependencies.buffer());
+    let t0 = Instant::now();
+    let result = poll_definitions(
+        &mut client,
+        &probes,
+        &uri,
+        t0,
+        t0 + Duration::from_millis(200),
+        &mut StageWatch::default(),
+    );
+    assert!(t0.elapsed() < Duration::from_secs(2));
+    assert_eq!(dependencies::ready_ms(&result.dependencies), None);
+    assert!(result.dependencies[0].last_failure.is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn initialization_deadline_bounds_a_server_that_never_answers() {
+    let root = common::setup_project();
+    let mut client = LspClient::start(root.path());
+    assert_eq!(
+        unsafe { libc::kill(client.child.id() as i32, libc::SIGSTOP) },
+        0
+    );
+    let t0 = Instant::now();
+    let error = initialize_until(
+        &mut client,
+        root.path(),
+        json!({}),
+        t0 + Duration::from_millis(100),
+    )
+    .unwrap_err();
+    assert!(t0.elapsed() < Duration::from_secs(2));
+    assert!(error.contains("initialization"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn dependency_startup_deadline_bounds_a_server_that_never_answers() {
+    let root = common::setup_project();
+    let mut probes = Probes::discover(root.path());
+    probes.startup_library = None;
+    let mut client = LspClient::start(root.path());
+    client.initialize(root.path());
+    for site in probes.startup_sites() {
+        client.did_open(&site.file);
+    }
+    probes.dependencies.targets.push(dependencies::Target {
+        artifact: PathBuf::from("/missing.jar"),
+        source: "missing.clj".into(),
+        symbol: "missing/var".into(),
+        line: 0,
+        character: 0,
+    });
+    // A stopped real child consumes no requests and cannot produce responses.
+    // LspClient::drop kills and reaps it even while stopped.
+    assert_eq!(
+        unsafe { libc::kill(client.child.id() as i32, libc::SIGSTOP) },
+        0
+    );
+    let t0 = Instant::now();
+    let result = poll_definitions(
+        &mut client,
+        &probes,
+        "file:///missing.clj",
+        t0,
+        t0 + Duration::from_millis(100),
+        &mut StageWatch::default(),
+    );
+    assert!(t0.elapsed() < Duration::from_secs(2));
+    assert!(result.project.is_none());
+    assert_eq!(dependencies::ready_ms(&result.dependencies), None);
+    assert_eq!(result.dependencies[0].attempts, 1);
+    assert!(result.dependencies[0]
+        .last_failure
+        .as_ref()
+        .unwrap()
+        .contains("deadline"));
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_write_deadline_handles_pipe_backpressure() {
+    let root = common::setup_project();
+    let mut client = LspClient::start(root.path());
+    client.initialize(root.path());
+    assert_eq!(
+        unsafe { libc::kill(client.child.id() as i32, libc::SIGSTOP) },
+        0
+    );
+    let t0 = Instant::now();
+    let error = send_until(
+        &mut client,
+        json!({"payload":"x".repeat(1024 * 1024)}),
+        t0 + Duration::from_millis(100),
+    )
+    .unwrap_err();
+    assert!(error.contains("deadline"), "{error}");
+    assert!(t0.elapsed() < Duration::from_secs(2));
 }

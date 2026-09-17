@@ -5,9 +5,8 @@ A fast-starting, low-memory Clojure language server.
 ## Highlights
 
 - **Fast startup, low memory.** Navigate your project while dependencies index
-  in the background. On the recorded Metabase benchmark, the first project
-  definition was available in 3.1 seconds, with 353 MiB of memory once settled.
-  See [Performance](#performance) for the comparison and measurement details.
+  in the background. See [Performance](#performance) for measured startup,
+  dependency navigation, and memory use.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
   qualified keywords across indexed source and config files.
