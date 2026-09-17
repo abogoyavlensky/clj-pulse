@@ -433,17 +433,14 @@ impl LspClient {
     /// and `publishDiagnostics.versionSupport` because a real editor does: the
     /// bench compares two servers, and both have to be asked the same thing.
     pub fn initialize_no_wait(&mut self, root: &Path) -> Value {
-        self.initialize_no_wait_with_options(root, json!({}))
-    }
-
-    /// Benchmark-only classpath selection; the default entry point keeps the
-    /// same empty initialization options for the soak and existing tests.
-    pub fn initialize_no_wait_with_options(&mut self, root: &Path, options: Value) -> Value {
-        let result = self.request("initialize", Self::initialize_params(root, options));
+        let result = self.request("initialize", Self::initialize_params(root, json!({})));
         self.notify("initialized", json!({}));
         result
     }
 
+    /// The bench sends these itself over its deadline-aware transport, with
+    /// clojure-lsp's classpath selection in `options`; everything else sends
+    /// empty options.
     pub fn initialize_params(root: &Path, options: Value) -> Value {
         let root_uri = format!("file://{}", root.display());
         json!({

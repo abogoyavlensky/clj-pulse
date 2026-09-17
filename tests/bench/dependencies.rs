@@ -47,9 +47,17 @@ impl Target {
     }
 
     fn matches_uri(&self, uri: &str) -> bool {
+        // The server answers with the path the classpath spelled; the target
+        // holds the canonical one. Symlinked `~/.m2` or `/var` on macOS must
+        // not turn a correct answer into an unresolved probe.
+        let same = |answered: &Path, expected: &Path| {
+            answered == expected || answered.canonicalize().ok().as_deref() == Some(expected)
+        };
         if self.artifact.is_dir() {
-            return Url::parse(uri).ok().and_then(|u| u.to_file_path().ok())
-                == Some(PathBuf::from(&self.source));
+            return Url::parse(uri)
+                .ok()
+                .and_then(|u| u.to_file_path().ok())
+                .is_some_and(|p| same(&p, Path::new(&self.source)));
         }
         let decoded = percent_encoding::percent_decode_str(uri).decode_utf8_lossy();
         let pair = decoded
@@ -70,7 +78,7 @@ impl Target {
         } else {
             archive
         };
-        entry == self.source && Path::new(archive) == self.artifact
+        entry == self.source && same(Path::new(archive), &self.artifact)
     }
 }
 
@@ -91,6 +99,11 @@ pub struct Inventory {
 
 impl Inventory {
     pub fn discover(root: &Path, entries: Vec<PathBuf>) -> Self {
+        // Entries are canonicalized below; the project test must be too, or a
+        // symlinked root (macOS `/var` -> `/private/var`) counts its own
+        // source roots as dependencies.
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let root = root.as_path();
         let mut out = Self::default();
         let mut seen_paths = BTreeSet::new();
         let mut libraries = Vec::new();
