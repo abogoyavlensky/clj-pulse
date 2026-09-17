@@ -128,8 +128,11 @@ and update README and this file in the same change.
   keyword becomes a question, with the cursor at the *name part* of the token
   (`add` in `core/add`, `local` in `::local`), so the alias half is never
   asked. Sites compare as `(file, line)` multisets — two usages on one line
-  need two answers — and columns alone are `soft`, never a divergence. The
-  oracle lints what `config::source_paths` says the project's own source is,
+  need two answers — and columns alone are `soft`, never a divergence.
+  Columns are UTF-16 units on both sides (kondo counts Java chars). A
+  `:keys`/`:strs`/`:syms` directive is told from a map that merely spells the
+  word by kondo's own locals: the vector after it holds one. The oracle lints
+  what `config::source_paths` says the project's own source is,
   with the corpus's `.clj-kondo` config and `:skip-comments true`; answer sites
   outside those roots are dropped before judging. `KNOWN` in
   `test_compare.rs` is the allowlist: a divergence it matches counts as

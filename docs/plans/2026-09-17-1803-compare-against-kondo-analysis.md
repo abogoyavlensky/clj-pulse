@@ -385,6 +385,16 @@ both handled in the harness (name-part shift, tree-based destructuring check).
   harness-only table after the server table (bench/soak variables were never
   there, so a note covers all three).
 
+**Codex review after the fact (2026-09-17, branch vs master).** Three P2s,
+all fixed in one commit: the per-bucket stride dropped every rename probe
+whenever the stride was even (var-def buckets alternate references/rename),
+so the stride now runs per bucket *and* request kind; the directive check
+took a data map spelled `::keys` for destructuring, so it now asks kondo's
+own locals (a directive's vector holds one); and the cursor helpers counted
+Unicode scalars where kondo and the server count UTF-16 units. `missing` is
+counted per line, matching the verdict. MEMORY's table is the re-run: 5253
+probes, 4404 agree, 678 diverge, 153 null, 18 known.
+
 **What the plan could have specified better.** It pinned the oracle's shape
 from one fixture: the `name-col`-is-the-token-start and
 `derived-location`-is-null facts, and that kondo analyzes `(comment …)`,

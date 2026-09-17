@@ -555,7 +555,7 @@ impl Texts {
             .map(|n| n.utf8_text(text.as_bytes()).unwrap_or_default())
             .unwrap_or_default();
         if !matches!(name, "keys" | "strs" | "syms")
-            || !kwd.parent().is_some_and(|p| p.kind() == "map_lit")
+            || kwd.parent().is_none_or(|p| p.kind() != "map_lit")
         {
             return false;
         }

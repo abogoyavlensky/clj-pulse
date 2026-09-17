@@ -131,29 +131,30 @@ only number that moved much, and only before its global cache was isolated
 `bb compare` on the clj-kondo corpus, clj-kondo v2026.08.04, same Linux
 container as the benchmark: 2409 var-definitions, 36396 var-usages, 9123
 locals and 76810 keywords in the analysis of `src parser resources inlined
-extract pod-test src-profile test test-regression`; 3759 probes after the
-200-per-bucket stride, 215 files visited, answered in 24 s by a server that
-settled in 4 s. 9403 symbol and keyword tokens no oracle entry covered
-(unresolved usages, the `ns` head, unqualified keywords are counted there).
+extract pod-test src-profile test test-regression`; 5253 probes after the
+stride of 200 per bucket and request kind, 215 files visited, answered in
+30 s by a server that settled in 4 s. 9403 symbol and keyword tokens no
+oracle entry covered (unresolved usages, the `ns` head, unqualified keywords
+are counted there).
 
 | Bucket | Probes | Agree | Diverge | Known | Null |
 |---|---|---|---|---|---|
 | `keyword/alias` | 8 | 0 | 6 | 0 | 2 |
 | `keyword/keys` | 5 | 0 | 5 | 0 | 0 |
-| `keyword/qualified` | 184 | 56 | 97 | 0 | 31 |
-| `local/destructured` | 185 | 175 | 9 | 0 | 0 |
-| `local/plain` | 200 | 176 | 21 | 0 | 3 |
+| `keyword/qualified` | 276 | 86 | 145 | 0 | 45 |
+| `local/destructured` | 507 | 482 | 24 | 0 | 1 |
+| `local/plain` | 594 | 542 | 44 | 0 | 8 |
 | `var-def/declare` | 28 | 27 | 1 | 0 | 0 |
-| `var-def/def` | 200 | 190 | 10 | 0 | 0 |
+| `var-def/def` | 400 | 380 | 20 | 0 | 0 |
 | `var-def/defmacro` | 58 | 46 | 12 | 0 | 0 |
 | `var-def/defmulti` | 6 | 3 | 3 | 0 | 0 |
-| `var-def/defn` | 186 | 149 | 36 | 0 | 1 |
-| `var-def/defn-` | 152 | 145 | 7 | 0 | 0 |
+| `var-def/defn` | 372 | 298 | 73 | 0 | 1 |
+| `var-def/defn-` | 304 | 290 | 14 | 0 | 0 |
 | `var-def/defonce` | 14 | 14 | 0 | 0 | 0 |
 | `var-def/defprotocol` | 44 | 16 | 10 | 18 | 0 |
 | `var-def/defprotocol+` | 26 | 0 | 26 | 0 | 0 |
 | `var-def/defrecord` | 52 | 44 | 6 | 0 | 2 |
-| `var-def/deftest` | 198 | 196 | 2 | 0 | 0 |
+| `var-def/deftest` | 346 | 344 | 2 | 0 | 0 |
 | `var-def/deftype` | 20 | 0 | 20 | 0 | 0 |
 | `var-def/import-vars` | 98 | 23 | 75 | 0 | 0 |
 | `var-def/programs` | 6 | 3 | 3 | 0 | 0 |
@@ -171,9 +172,9 @@ settled in 4 s. 9403 symbol and keyword tokens no oracle entry covered
 | `var-usage/project/macro/aliased` | 64 | 58 | 0 | 0 | 6 |
 | `var-usage/project/macro/referred` | 135 | 134 | 0 | 0 | 1 |
 | `var-usage/project/referred` | 170 | 165 | 0 | 0 | 5 |
-| **total** | 3759 | 3069 | 538 | 18 | 133 |
+| **total** | 5253 | 4404 | 678 | 18 | 153 |
 
-`soft` (same lines, other columns) was 1. Every `known` row is the
+`soft` (same lines, other columns) was 0. Every `known` row is the
 protocol-method entry of `KNOWN`. The first-run divergences group into the
 classes filed in the ROADMAP backlog under 2026-09-17: `#_` discards indexed
 (and `#_#_` shifting `let` pairs), keywords in binding values and quoted

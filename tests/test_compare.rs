@@ -873,6 +873,29 @@ mod oracle_tests {
     }
 
     #[test]
+    fn a_map_value_spelled_keys_is_data_not_a_directive() {
+        let Some((_tmp, probes)) = fixture_probes() else {
+            return;
+        };
+        // twice.clj:11 `(def config {::keys [:a :b]})` binds nothing — kondo
+        // reports no local inside the vector — so the keyword is probed like
+        // any other, and `(::keys config)` on line 14 is its second site.
+        let data = at(&probes, "src/twice.clj", 10, 15);
+        let refs = data
+            .iter()
+            .find_map(|p| match &p.expect {
+                Expectation::References(s) => Some(s),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("references probe on the data map: {data:?}"));
+        assert_eq!(refs.exact.len(), 2, "{refs:?}");
+        assert!(data.iter().all(|p| p.bucket == "keyword/qualified"));
+        // A nested destructuring map is still a directive: kondo's local
+        // inside the vector says so, wherever the map sits.
+        assert!(at(&probes, "src/kw_destructure.clj", 5, 25).is_empty());
+    }
+
+    #[test]
     fn columns_are_utf16_units() {
         let Some((_tmp, probes)) = fixture_probes() else {
             return;
