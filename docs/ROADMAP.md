@@ -37,6 +37,10 @@ then the editor features users notice as missing. Guiding decisions:
    discussion or review that is not scheduled goes into the Backlog below the
    same day, one line with the date. Promote it into a milestone when it is
    scheduled; delete it when it is rejected, with the reason in Not planned.
+5. **A backlog item that needs more than a line** — a reproduction, corpus
+   sites, expected versus got — gets a file under `docs/backlog/`
+   (`YYYY-MM-DD-slug.md`) and the Backlog line links to it. The file moves to
+   `docs/archive/` when the item is done or rejected.
 
 ## Where we stand (September 2026, v0.5.1)
 
@@ -237,8 +241,9 @@ the release.
       one production server asked a definition, references or rename question
       at every position the analysis of a pinned corpus knows the answer to,
       judged per language construct, with an allowlist for the divergences
-      that are by design. The first run on clj-kondo found the classes listed
-      in the Backlog under 2026-09-17; each carries a bucket and a site.
+      that are by design. The first run on clj-kondo found fourteen divergence
+      classes, filed under `docs/backlog/` and linked from the Backlog
+      (2026-09-17).
       Plan: [2026-09-17-1803-compare-against-kondo-analysis.md](plans/2026-09-17-1803-compare-against-kondo-analysis.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
@@ -335,86 +340,23 @@ One line each, newest last. Promote or reject; never let this grow silently.
   fallback. Listing the alias's sites there (`extractor::alias_sites_tree`
   already has them) would make the three agree, and a `:as` binding would get
   a highlight of its own.
-- 2026-09-17 **`#_` discards are indexed** (`bb compare`, `local/plain`,
-  `var-usage/core`, `var-def/defn`). A symbol inside `#_(…)` counts as a
-  usage (`extract/clj_kondo/impl/ExtractJava.clj:48`, `entry`), and a `#_#_`
-  pair inside a `let` binding vector shifts every following pair, so the
-  values become binding names: `group-by`, `comp`, `key` at
-  `extract/clj_kondo/impl/extract_var_info.clj:144` resolve to the file
-  itself and `(extract-clojure-core-vars)` at `:148` to its own line.
-- 2026-09-17 **Keywords in `let`/`if-let` binding values are not occurrences**
-  (`keyword/qualified`, `keyword/alias`): `(:clj-kondo.impl/generated expr)`
-  at `src/clj_kondo/impl/analyzer.clj:1577` and `::types/infer-call` at
-  `:3023` are missing from references and rename, and a cursor there answers
-  null. Quoted data is a second gap of the same shape: `'{:deps {…
-  :mvn/version …}}` at `test/clj_kondo/analysis/java_test.clj:32` (12 of 15
-  sites missing) — a keyword rename that skips quoted config is a rename that
-  breaks it.
-- 2026-09-17 **Locals inside `(binding […] (let […] …))`** (`local/plain`,
-  `local/destructured`): references on `cfg-dir` at `src/clj_kondo/core.clj:133`
-  find the binding alone (1 of 5), and on the `config` rebound at `:139` reach
-  the shadowed `:keys` binding at `:113` instead of the four usages below it.
-- 2026-09-17 **`{:ns/keys [a]}` with an explicit namespace renames the local**
-  (`keyword/keys`): `{:clj-kondo/keys [config ignore]}` at
-  `src/clj_kondo/impl/analyzer/namespace.clj:571` is edited (binding and
-  usages) where `::keys`/`::alias/keys` entries are refused, so the key read
-  and the name bound part ways.
-- 2026-09-17 **`.cljs` core resolves into `clojure/core.clj`**
-  (`var-usage/library`, `var-usage/library/macro`): `not`, `declare`, `defn-`
-  in `inlined/…/cljs/tools/reader/edn.cljs` land in the Clojure jar's
-  `clojure/core.clj`, never `cljs/core.cljs`; the twin of the `.clj`-into-
-  `.cljs` entry of 2026-09-10 (`edn/read-string` at
-  `extract/clj_kondo/impl/ExtractJava.clj:63` still lands in
-  `clojure/edn.cljs`, which the gate now reports as `wrong dialect`).
-- 2026-09-17 **A `defmulti` is missing from its own references** when a
-  `declare` precedes it (`var-def/defmulti`, `var-def/declare`):
-  `inspect*` at `inlined/…/clojure/tools/reader/impl/inspect.clj:37` and
-  `analyze-dispatch-type` at `src/clj_kondo/impl/analyzer/re_frame.clj:102`
-  answer every caller and the declare, not the `defmulti` line — a rename
-  would leave the multimethod under the old name.
-- 2026-09-17 **Constructor calls are not references of a `deftype`/`defrecord`**
-  (`var-def/deftype`, `var-def/defrecord`): `(StringReader. s)` at
-  `inlined/…/cljs/tools/reader/reader_types.cljs:213` is not a site of
-  `StringReader` (`:41`), nor `(ReaderConditional. …)` at
-  `inlined/…/cljs/tools/reader/impl/utils.cljs:33`.
-- 2026-09-17 **`:lint-as` to `defprotocol` and `declare` is only half
-  honored** (`var-def/defprotocol+`, `var-def/programs`): the methods of a
-  `defprotocol+` (`:lint-as … clojure.core/defprotocol`) miss their callers —
-  `tag` at `parser/clj_kondo/impl/rewrite_clj/node/protocols.clj:10` lacks 6
-  — and `(programs rm mkdir mv)` (`:lint-as … clojure.core/declare`) at
-  `test/clj_kondo/test_utils.clj:216` refuses rename.
-- 2026-09-17 **`import-vars` re-exports are not definitions**
-  (`var-def/import-vars`, `var-usage/project/aliased`): kondo's
-  `potemkin/import-vars` config makes `coerce` at
-  `parser/clj_kondo/impl/rewrite_clj/node.clj:26` a var of that namespace, so
-  `node/string` at `parser/clj_kondo/impl/rewrite_clj/node/indent.clj:40`
-  has a definition (`protocols.clj:19`) that clj-pulse answers null to, and
-  `node/make-printable!` callers are missing from the macro's references.
-  Pairs with "clj-kondo analysis as an optional enrichment source" above.
-- 2026-09-17 **Macros referred from `.cljs` through `:require-macros`**
-  (`var-def/defmacro`): `log-source` at
-  `inlined/…/cljs/tools/reader/reader_types.clj:3` has no references in the
-  `.cljs` files that use it (`reader.cljs:14`, `:397`).
-- 2026-09-17 **One namespace in a `.clj` and a `.cljs` file shares one fqn**
-  (`var-def/defn`, `var-def/defprotocol`): `source-logging-reader?` at
-  `inlined/…/cljs/tools/reader/reader_types.cljs:260` gets a site from the
-  `.clj` macro file of the same namespace (`reader_types.clj:7`); protocol
-  methods there merge the same way.
-- 2026-09-17 **Defs nested in a wrapping macro are not definitions**
-  (`var-def/defrecord`): `(compile-when … (defrecord TaggedLiteral …))` at
-  `inlined/…/clojure/tools/reader/impl/utils.clj:34` answers null to
-  references and refuses rename.
-- 2026-09-17 **A qualified `{:keys [c/x]}` entry resolves as the keyword it
-  reads, not the local it binds** (`local/destructured`, `KNOWN` in
-  `test_compare.rs`): references from the binding token answer the one
-  keyword occurrence; from a usage of `x` they answer the local. Making
-  `references::local_refs_at` claim a qualified `:keys` entry would make the
-  two agree.
-- 2026-09-17 **`one-of` in a `for` `:let` resolves to its own line**
-  (`var-usage/project/macro`): `(one-of require-kw [:require …])` at
-  `src/clj_kondo/impl/analyzer/namespace.clj:625` answers line 625 (and later
-  usages answer the first usage in the file) instead of
-  `src/clj_kondo/impl/utils.clj:419`; something in that `for` binds the head.
+- 2026-09-17 `bb compare` on clj-kondo found fourteen divergence classes, one
+  issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
+  got, where to look, how to verify):
+  - [`#_` discards are indexed](backlog/2026-09-17-discards-are-indexed.md) — and a `#_#_` pair shifts `let` pairs.
+  - [Keywords in binding values and quoted data are not occurrences](backlog/2026-09-17-keywords-in-binding-values-and-quoted-data.md).
+  - [Locals inside `(binding […] (let […] …))` resolve wrong](backlog/2026-09-17-locals-under-binding-and-let.md).
+  - [`{:ns/keys [a]}` with an explicit namespace renames the local](backlog/2026-09-17-ns-keys-with-explicit-namespace-renames-the-local.md).
+  - [`.cljs` core resolves into `clojure/core.clj`](backlog/2026-09-17-cljs-core-resolves-into-clojure-core.md) — twin of the 2026-09-10 dialect item.
+  - [A `defmulti` is missing from its own references](backlog/2026-09-17-defmulti-missing-from-its-own-references.md).
+  - [Constructor calls are not references of a `deftype`/`defrecord`](backlog/2026-09-17-constructor-calls-are-not-references.md).
+  - [`:lint-as` to `defprotocol` and `declare` is only half honored](backlog/2026-09-17-lint-as-defprotocol-and-declare-half-honored.md).
+  - [`import-vars` re-exports are not definitions](backlog/2026-09-17-import-vars-re-exports-are-not-definitions.md).
+  - [Macros referred from `.cljs` through `:require-macros`](backlog/2026-09-17-macros-referred-through-require-macros.md).
+  - [One namespace in a `.clj` and a `.cljs` file shares one fqn](backlog/2026-09-17-clj-and-cljs-twins-share-one-fqn.md).
+  - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
+  - [A qualified `{:keys [c/x]}` entry resolves as the keyword it reads](backlog/2026-09-17-qualified-keys-entry-resolves-as-the-keyword.md) — in `KNOWN`.
+  - [`one-of` in a `for` `:let` resolves to its own line](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md).
 
 ## Best effort — do when cheap or asked
 

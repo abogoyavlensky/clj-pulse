@@ -5,7 +5,9 @@ Rust LSP server for Clojure (tower-lsp, tree-sitter). See ARCHITECTURE.md for da
 See project's various notes at docs/MEMORY.md. The active plan is
 docs/ROADMAP.md; follow its working rules: when starting an item, link its
 plan on the item's `Plan:` line, and when the plan is complete, tick the item
-and update README and this file in the same change.
+and update README and this file in the same change. A backlog item with a
+reproduction lives as a file under docs/backlog/ and its ROADMAP line links
+there.
 
 ## Verification (run before claiming anything works)
 

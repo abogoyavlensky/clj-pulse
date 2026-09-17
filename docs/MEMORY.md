@@ -175,8 +175,9 @@ are counted there).
 | **total** | 5253 | 4404 | 678 | 18 | 153 |
 
 `soft` (same lines, other columns) was 0. Every `known` row is the
-protocol-method entry of `KNOWN`. The first-run divergences group into the
-classes filed in the ROADMAP backlog under 2026-09-17: `#_` discards indexed
+protocol-method entry of `KNOWN`. The first-run divergences group into
+fourteen classes, one issue file each under `docs/backlog/2026-09-17-*.md`
+(linked from the ROADMAP backlog): `#_` discards indexed
 (and `#_#_` shifting `let` pairs), keywords in binding values and quoted
 data missing from occurrences, locals under `binding`+`let`, `{:ns/keys}`
 renaming the local, `.cljs` core landing in `clojure/core.clj`, a `defmulti`
