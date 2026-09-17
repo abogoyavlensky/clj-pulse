@@ -24,7 +24,7 @@ pub struct Site {
 
 /// Where a right answer has to land.
 pub enum Expect {
-    /// A file in the project, by path suffix.
+    /// A file in the project, by its whole path.
     File(PathBuf),
     /// An entry inside a dependency archive, by entry path without its
     /// extension: a classpath can hold `clojure/string.clj` and
@@ -303,22 +303,102 @@ pub fn definition_uris(result: &Value) -> Vec<String> {
     }
 }
 
-/// Whether the answer landed where it should. A wrong or empty answer is a
-/// retry, never a sample: a server that answers `null` in 2 ms is not fast.
-pub fn answers(result: &Value, expect: &Expect) -> bool {
+/// The dialect a source file is written in, read from its extension. A `.clj`
+/// file loads `.clj` and `.cljc` library sources, never `.cljs`; a `.cljc`
+/// file is host-agnostic and any of the three is a right answer for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialect {
+    Clj,
+    Cljs,
+    Cljc,
+}
+
+impl Dialect {
+    /// The dialect of `path`. Anything that is not `.clj` or `.cljs` — `.cljc`,
+    /// `.edn`, no extension — has no host of its own, so no library file is
+    /// the wrong dialect for it.
+    pub fn of(path: &Path) -> Self {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("clj") => Dialect::Clj,
+            Some("cljs") => Dialect::Cljs,
+            _ => Dialect::Cljc,
+        }
+    }
+
+    /// Whether a library file with extension `ext` is one this dialect loads.
+    pub fn accepts(self, ext: &str) -> bool {
+        match self {
+            Dialect::Clj => ext == "clj" || ext == "cljc",
+            Dialect::Cljs => ext == "cljs" || ext == "cljc",
+            Dialect::Cljc => ext == "clj" || ext == "cljs" || ext == "cljc",
+        }
+    }
+}
+
+/// Where a definition answer landed, judged against an [`Expect`] from the
+/// file that asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// The right file — and for an archive entry, a dialect the asker loads.
+    Landed,
+    /// The right archive entry in a dialect the asker does not load: a `.clj`
+    /// file sent into `clojure/string.cljs`. Inside the dependency, so the
+    /// bench times it; not the right declaration, so the correctness gates do
+    /// not credit it.
+    WrongDialect,
+    /// Anywhere else, or nowhere.
+    Miss,
+}
+
+/// Where the answer landed. A project file is matched by its whole path, not
+/// a suffix: clj-kondo has a `src/clj_kondo/impl/types/clojure/string.clj`
+/// that a suffix match would offer as `clojure.string`. clj-pulse navigates a
+/// JAR entry as `jar:`, clojure-lsp as `zipfile:` (its `:dependency-scheme`
+/// default); both are "inside a dependency".
+pub fn landing(result: &Value, expect: &Expect, asking: &Path) -> Landing {
     let uris = definition_uris(result);
     match expect {
         Expect::File(path) => {
-            let tail = path.to_string_lossy().to_string();
-            uris.iter().any(|u| u.ends_with(&tail))
+            // Decoded before comparing: a space or a non-ASCII letter in the
+            // checkout path arrives percent-encoded in the URI.
+            let want = path.to_string_lossy();
+            if uris.iter().any(|u| {
+                u.strip_prefix("file://").is_some_and(|p| {
+                    percent_encoding::percent_decode_str(p).decode_utf8_lossy() == want
+                })
+            }) {
+                Landing::Landed
+            } else {
+                Landing::Miss
+            }
         }
-        // clj-pulse navigates a JAR entry as `jar:`, clojure-lsp as `zipfile:`
-        // (its `:dependency-scheme` default). Both are "inside a dependency".
-        Expect::Archive(entry) => uris.iter().any(|u| {
-            (u.starts_with("jar:") || u.starts_with("zipfile:"))
-                && ["clj", "cljc", "cljs"]
-                    .iter()
-                    .any(|ext| u.ends_with(&format!("{entry}.{ext}")))
-        }),
+        Expect::Archive(entry) => {
+            let dialect = Dialect::of(asking);
+            let mut best = Landing::Miss;
+            for u in &uris {
+                if !(u.starts_with("jar:") || u.starts_with("zipfile:")) {
+                    continue;
+                }
+                let Some(ext) = ["clj", "cljc", "cljs"]
+                    .into_iter()
+                    .find(|ext| u.ends_with(&format!("{entry}.{ext}")))
+                else {
+                    continue;
+                };
+                if dialect.accepts(ext) {
+                    return Landing::Landed;
+                }
+                best = Landing::WrongDialect;
+            }
+            best
+        }
     }
+}
+
+/// Whether the answer landed inside the right file or dependency at all — the
+/// bench's view, which times a wrong-dialect landing because the index lookup
+/// it measures did happen. A wrong or empty answer is a retry, never a sample:
+/// a server that answers `null` in 2 ms is not fast.
+pub fn answers(result: &Value, expect: &Expect, asking: &Path) -> bool {
+    landing(result, expect, asking) != Landing::Miss
 }

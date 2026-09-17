@@ -37,6 +37,10 @@ then the editor features users notice as missing. Guiding decisions:
    discussion or review that is not scheduled goes into the Backlog below the
    same day, one line with the date. Promote it into a milestone when it is
    scheduled; delete it when it is rejected, with the reason in Not planned.
+5. **A backlog item that needs more than a line** — a reproduction, corpus
+   sites, expected versus got — gets a file under `docs/backlog/`
+   (`YYYY-MM-DD-slug.md`) and the Backlog line links to it. The file moves to
+   `docs/archive/` when the item is done or rejected.
 
 ## Where we stand (September 2026, v0.5.2)
 
@@ -54,8 +58,9 @@ multi-project workspaces with graduated classpath resolution, let-go/lgx
 support. The full ns form is understood (`:as-alias`, `:rename`,
 `:refer-clojure :exclude`/`:rename`, prefix lists, `declare`). A panicking
 request fails alone instead of taking the server down, and `bb e2e-pulse`,
-`bb bench` and `bb soak` guard the first-priority editor, the performance
-baseline and long-session stability. Open
+`bb bench`, `bb soak` and `bb compare` guard the first-priority editor, the
+performance baseline, long-session stability and agreement with clj-kondo's
+analysis. Open
 buffers keep one incrementally updated parse tree, so no request or lint pass
 parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 `documentHighlight` underlines the symbol under the cursor, and
@@ -236,6 +241,14 @@ the release.
 - [x] **README for the public release.** Short introduction, four strengths,
       quick start, measured performance, and linked reference guides.
       Plan: [2026-09-12-readme-public-release.md](plans/2026-09-12-readme-public-release.md) - done
+- [x] **Differential correctness against clj-kondo analysis** (`bb compare`):
+      one production server asked a definition, references or rename question
+      at every position the analysis of a pinned corpus knows the answer to,
+      judged per language construct, with an allowlist for the divergences
+      that are by design. The first run on clj-kondo found fourteen divergence
+      classes, filed under `docs/backlog/` and linked from the Backlog
+      (2026-09-17).
+      Plan: [2026-09-17-1803-compare-against-kondo-analysis.md](plans/2026-09-17-1803-compare-against-kondo-analysis.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
@@ -331,6 +344,23 @@ One line each, newest last. Promote or reject; never let this grow silently.
   fallback. Listing the alias's sites there (`extractor::alias_sites_tree`
   already has them) would make the three agree, and a `:as` binding would get
   a highlight of its own.
+- 2026-09-17 `bb compare` on clj-kondo found fourteen divergence classes, one
+  issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
+  got, where to look, how to verify):
+  - [`#_` discards are indexed](backlog/2026-09-17-discards-are-indexed.md) — and a `#_#_` pair shifts `let` pairs.
+  - [Keywords in binding values and quoted data are not occurrences](backlog/2026-09-17-keywords-in-binding-values-and-quoted-data.md).
+  - [Locals inside `(binding […] (let […] …))` resolve wrong](backlog/2026-09-17-locals-under-binding-and-let.md).
+  - [`{:ns/keys [a]}` with an explicit namespace renames the local](backlog/2026-09-17-ns-keys-with-explicit-namespace-renames-the-local.md).
+  - [`.cljs` core resolves into `clojure/core.clj`](backlog/2026-09-17-cljs-core-resolves-into-clojure-core.md) — twin of the 2026-09-10 dialect item.
+  - [A `defmulti` is missing from its own references](backlog/2026-09-17-defmulti-missing-from-its-own-references.md).
+  - [Constructor calls are not references of a `deftype`/`defrecord`](backlog/2026-09-17-constructor-calls-are-not-references.md).
+  - [`:lint-as` to `defprotocol` and `declare` is only half honored](backlog/2026-09-17-lint-as-defprotocol-and-declare-half-honored.md).
+  - [`import-vars` re-exports are not definitions](backlog/2026-09-17-import-vars-re-exports-are-not-definitions.md).
+  - [Macros referred from `.cljs` through `:require-macros`](backlog/2026-09-17-macros-referred-through-require-macros.md).
+  - [One namespace in a `.clj` and a `.cljs` file shares one fqn](backlog/2026-09-17-clj-and-cljs-twins-share-one-fqn.md).
+  - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
+  - [A qualified `{:keys [c/x]}` entry resolves as the keyword it reads](backlog/2026-09-17-qualified-keys-entry-resolves-as-the-keyword.md) — in `KNOWN`.
+  - [`one-of` in a `for` `:let` resolves to its own line](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md).
 
 ## Best effort — do when cheap or asked
 

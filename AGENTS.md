@@ -5,7 +5,9 @@ Rust LSP server for Clojure (tower-lsp, tree-sitter). See ARCHITECTURE.md for da
 See project's various notes at docs/MEMORY.md. The active plan is
 docs/ROADMAP.md; follow its working rules: when starting an item, link its
 plan on the item's `Plan:` line, and when the plan is complete, tick the item
-and update README and this file in the same change.
+and update README and this file in the same change. A backlog item with a
+reproduction lives as a file under docs/backlog/ and its ROADMAP line links
+there.
 
 ## Verification (run before claiming anything works)
 
@@ -69,6 +71,23 @@ and update README and this file in the same change.
   `bb soak clj-kondo <seed>` replays a failure exactly. Defaults to clj-kondo
   and 20 rounds (about half a minute); `bb soak metabase` is the long one.
 
+- `bb compare [metabase|clj-kondo]` — differential correctness against
+  clj-kondo's analysis on the same pinned corpora: one production server, and
+  a definition, references or rename question at every position the analysis
+  knows the answer to (`tests/test_compare.rs`, oracle in
+  `tests/common/oracle.rs`). A var usage must land on the var-definition's
+  name row (or in a library file of that namespace, in the asking file's
+  dialect); a var definition, local or qualified keyword must answer the
+  oracle's whole site set, counted per line, from references and from rename;
+  a `:keys` binding must refuse rename. The report is one row per language
+  construct (`var-usage/project/aliased`, `local/destructured`,
+  `keyword/keys`, …) with `probes`, `agree`, `diverge`, `known`, `null`,
+  `soft`, one `COMPARE_JSON` line per row, then every new divergence and the
+  known ones grouped by reason. Advisory: it fails only on a dead server, a
+  `panicked at`, an unexpected JSON-RPC error, or kondo not running;
+  `CLJ_PULSE_COMPARE_STRICT=1` fails on any new divergence too. Compare
+  against the tables in [docs/MEMORY.md](docs/MEMORY.md).
+
 | Gate | Run when |
 |---|---|
 | `bb e2e` | every server behavior change |
@@ -77,6 +96,7 @@ and update README and this file in the same change.
 | `bb e2e-nvim` | new capabilities or protocol changes |
 | `bb bench` | before a release, and after index or extractor changes |
 | `bb soak` | before a release, and after index, watcher, or document-store changes |
+| `bb compare` | after extractor, resolver, references or rename changes |
 
 ## Testing notes
 
@@ -105,6 +125,24 @@ and update README and this file in the same change.
   variables, so stage 3 runs and clj-kondo is spawned when installed. It exists
   for `bb bench` and `bb soak` alone — a regular test using it would behave
   differently per machine.
+- The compare gate's probes come from the oracle, never from our own
+  extractor: every clj-kondo var-usage, var-definition, local and qualified
+  keyword becomes a question, with the cursor at the *name part* of the token
+  (`add` in `core/add`, `local` in `::local`), so the alias half is never
+  asked. Sites compare as `(file, line)` multisets — two usages on one line
+  need two answers — and columns alone are `soft`, never a divergence.
+  Columns are UTF-16 units on both sides (kondo counts Java chars). A
+  `:keys`/`:strs`/`:syms` directive is told from a map that merely spells the
+  word by kondo's own locals: the vector after it holds one. The oracle lints
+  what `config::source_paths` says the project's own source is,
+  with the corpus's `.clj-kondo` config and `:skip-comments true`; answer sites
+  outside those roots are dropped before judging. `KNOWN` in
+  `test_compare.rs` is the allowlist: a divergence it matches counts as
+  `known` under its reason; triage adds an entry with a dated reason, a fixed
+  bug removes its entry. The same pipeline runs on `simple_project` in
+  `bb check` (`compare_simple_project`, kill switches on, library probes left
+  out), which must stay at zero new divergences; it skips when the host has
+  no clj-kondo.
 - Test realistic Clojure, not just toy snippets: real libraries use ns/def
   metadata (`(ns ^{:doc "…"} foo)`), reader conditionals, multi-arity fns.
   The extractor must handle them (see `test_extractor.rs`).
