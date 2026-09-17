@@ -3,7 +3,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
 use crate::index::jdk::{JavaClassInfo, JavaCtor, JavaMember};
-use crate::index::{CoreSymbol, DefKind, Index, Symbol};
+use crate::index::{CoreSymbol, DefKind, Dialect, Index, Symbol};
 
 use super::java::JavaTargetKind;
 use super::{resolve_symbol, ResolvedSymbol};
@@ -28,8 +28,9 @@ pub fn handle(
         None => return Ok(None),
     };
     let current_ns = index.file_ns(&path).unwrap_or_default();
+    let dialect = Dialect::of_path(&path);
 
-    let md = resolve_and_format(index, &word, &current_ns);
+    let md = resolve_and_format(index, &word, &current_ns, dialect);
 
     Ok(md.map(|value| Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -40,10 +41,18 @@ pub fn handle(
     }))
 }
 
-pub fn resolve_and_format(index: &Index, word: &str, current_ns: &str) -> Option<String> {
+/// Hover markdown for `word` as seen from `current_ns`. A library symbol is
+/// swapped for its ClojureScript copy when `dialect` is `Cljs` and one exists,
+/// so a `.cljs` buffer reads the docstring of the copy it would navigate to.
+pub fn resolve_and_format(
+    index: &Index,
+    word: &str,
+    current_ns: &str,
+    dialect: Dialect,
+) -> Option<String> {
     if let Some(resolved) = resolve_symbol(index, word, current_ns) {
         return Some(match resolved {
-            ResolvedSymbol::Project(sym) => format_for_symbol(&sym),
+            ResolvedSymbol::Project(sym) => format_for_symbol(&index.prefer_dialect(sym, dialect)),
             ResolvedSymbol::Core(core) => format_for_core(&core),
             ResolvedSymbol::SpecialForm(sf) => format_for_special_form(sf),
             ResolvedSymbol::LetgoNative(core) => format_for_letgo_native(&core),
@@ -246,7 +255,7 @@ mod tests {
     #[test]
     fn java_member_hover_has_signature_and_javadoc() {
         let (index, _zip) = crate::handlers::java::test_fixture();
-        let md = resolve_and_format(&index, "Greeter/greet", "app.core").unwrap();
+        let md = resolve_and_format(&index, "Greeter/greet", "app.core", Dialect::Clj).unwrap();
         assert!(md.contains("static String greet(String name)"), "{}", md);
         assert!(md.contains("Greet by name"), "{}", md);
     }
@@ -254,7 +263,7 @@ mod tests {
     #[test]
     fn java_class_hover_has_class_and_javadoc() {
         let (index, _zip) = crate::handlers::java::test_fixture();
-        let md = resolve_and_format(&index, "Greeter", "app.core").unwrap();
+        let md = resolve_and_format(&index, "Greeter", "app.core", Dialect::Clj).unwrap();
         assert!(md.contains("class demo.lib.Greeter"), "{}", md);
         assert!(md.contains("A greeter"), "{}", md);
     }

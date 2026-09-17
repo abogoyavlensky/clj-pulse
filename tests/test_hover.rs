@@ -2,7 +2,7 @@ use std::path::Path;
 
 use clj_pulse::handlers::hover::{format_for_symbol, resolve_and_format};
 use clj_pulse::index::scanner;
-use clj_pulse::index::Index;
+use clj_pulse::index::{Dialect, Index};
 
 fn build_test_index() -> Index {
     let root = Path::new("tests/fixtures/simple_project");
@@ -16,7 +16,7 @@ fn build_test_index() -> Index {
 #[test]
 fn test_hover_returns_doc_for_known_symbol() {
     let index = build_test_index();
-    let result = resolve_and_format(&index, "add", "simple.core").unwrap();
+    let result = resolve_and_format(&index, "add", "simple.core", Dialect::Clj).unwrap();
     assert!(result.contains("add"));
     assert!(result.contains("[a b]"));
     assert!(result.contains("Adds two numbers"));
@@ -35,14 +35,14 @@ fn test_hover_formats_as_clojure_code_block() {
 #[test]
 fn test_hover_returns_none_for_unknown() {
     let index = Index::new_with_core();
-    let result = resolve_and_format(&index, "nonexistent/fn", "any.ns");
+    let result = resolve_and_format(&index, "nonexistent/fn", "any.ns", Dialect::Clj);
     assert!(result.is_none());
 }
 
 #[test]
 fn test_hover_for_core_symbol() {
     let index = Index::new_with_core();
-    let result = resolve_and_format(&index, "map", "any.ns").unwrap();
+    let result = resolve_and_format(&index, "map", "any.ns", Dialect::Clj).unwrap();
     assert!(result.contains("map"));
     assert!(result.contains("clojure.core"));
 }
@@ -50,7 +50,7 @@ fn test_hover_for_core_symbol() {
 #[test]
 fn test_hover_for_def_kind() {
     let index = build_test_index();
-    let result = resolve_and_format(&index, "VERSION", "simple.core").unwrap();
+    let result = resolve_and_format(&index, "VERSION", "simple.core", Dialect::Clj).unwrap();
     assert!(result.contains("(def VERSION)"));
     assert!(!result.contains("defn"));
 }
