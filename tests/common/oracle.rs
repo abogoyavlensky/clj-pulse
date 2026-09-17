@@ -48,7 +48,11 @@ pub fn kondo_available() -> Option<String> {
 /// tool config in the working directory's ancestry, and a temp-dir copy of a
 /// fixture has none. The exit code is not a verdict: kondo exits 2 or 3 when
 /// it merely found something to lint.
-pub fn run(root: &Path, paths: &[&str]) -> Result<Analysis, String> {
+///
+/// `extra_config` is a second `--config` map merged over the corpus's — how a
+/// fixture without a committed `.clj-kondo/config.edn` gets the `:lint-as`
+/// a real project ships (`""` for none).
+pub fn run(root: &Path, paths: &[&str], extra_config: &str) -> Result<Analysis, String> {
     let mut cmd = Command::new("clj-kondo");
     cmd.arg("--lint");
     for p in paths {
@@ -57,6 +61,9 @@ pub fn run(root: &Path, paths: &[&str]) -> Result<Analysis, String> {
     cmd.arg("--config-dir").arg(root.join(".clj-kondo"));
     cmd.arg("--config")
         .arg("{:analysis {:locals true :keywords true} :output {:format :json}}");
+    if !extra_config.is_empty() {
+        cmd.arg("--config").arg(extra_config);
+    }
     let out = cmd
         .output()
         .map_err(|e| format!("spawning clj-kondo: {e}"))?;
@@ -217,6 +224,7 @@ pub struct NsDef {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct NsUsage {
+    pub to: String,
     pub filename: String,
     pub row: u32,
     pub col: u32,
@@ -350,9 +358,11 @@ impl Texts {
 
     /// The 0-based character of the *name part* of the token at a position:
     /// kondo's `name-col` is where the whole token starts, alias included, so
-    /// for `core/add` it points at `c`. A cursor there asks about the alias,
-    /// which is a different question (and one whose answer is known to differ,
-    /// ROADMAP 2026-09-16); the probe asks from the first character of `add`.
+    /// for `core/add` it points at `c`, and for `::local` at the colons. A
+    /// cursor on the alias asks about the alias, which is a different question
+    /// (and one whose answer is known to differ, ROADMAP 2026-09-16), and
+    /// clj-pulse ranges a keyword occurrence by its name — so both the probe
+    /// and the expected sites use the first character of `add` / `local`.
     fn name_part(&mut self, file: &Path, line: u32, character: u32) -> u32 {
         let token = self.token_at(file, line, character);
         let Some((text, _)) = self.get(file) else {
@@ -367,12 +377,15 @@ impl Texts {
         while start > 0 && !boundary(chars[start - 1]) {
             start -= 1;
         }
-        // `/` alone and a leading `/` are names, not separators; a keyword's
-        // colons stay with the namespace part.
-        match token.char_indices().find(|(i, c)| *c == '/' && *i > 0) {
-            Some((i, _)) if i + 1 < token.len() => (start + token[..i].chars().count() + 1) as u32,
-            _ => character,
-        }
+        let colons = token.len() - token.trim_start_matches(':').len();
+        // `/` alone and a leading `/` are names, not separators.
+        let after_slash = token
+            .char_indices()
+            .find(|(i, c)| *c == '/' && *i > colons)
+            .map(|(i, _)| i + 1)
+            .filter(|i| *i < token.len());
+        let offset = after_slash.unwrap_or(colons);
+        (start + token[..offset].chars().count()) as u32
     }
 
     /// Whether the symbol at a 0-based position is an entry of a `:keys`,
@@ -384,18 +397,7 @@ impl Texts {
         let Some((text, Some(tree))) = self.get(file) else {
             return false;
         };
-        let byte_col = text
-            .lines()
-            .nth(line as usize)
-            .map(|l| {
-                l.char_indices()
-                    .nth(character as usize)
-                    .map(|(b, _)| b)
-                    .unwrap_or(l.len())
-            })
-            .unwrap_or(0);
-        let point = tree_sitter::Point::new(line as usize, byte_col);
-        let Some(node) = tree.root_node().descendant_for_point_range(point, point) else {
+        let Some(node) = node_at(tree, text, line, character) else {
             return false;
         };
         let mut sym = node;
@@ -417,6 +419,54 @@ impl Texts {
             .unwrap_or_default();
         matches!(name, "keys" | "strs" | "syms")
     }
+}
+
+impl Texts {
+    /// Whether the keyword at a 0-based position is the `:keys`/`:strs`/
+    /// `:syms` directive of a destructuring map — `::c/keys` counts as a
+    /// keyword of `simple.core` for kondo, but it names no key anyone reads.
+    fn directive_at(&mut self, file: &Path, line: u32, character: u32) -> bool {
+        let Some((text, Some(tree))) = self.get(file) else {
+            return false;
+        };
+        let Some(node) = node_at(tree, text, line, character) else {
+            return false;
+        };
+        let mut kwd = node;
+        while kwd.kind() != "kwd_lit" {
+            let Some(parent) = kwd.parent() else {
+                return false;
+            };
+            kwd = parent;
+        }
+        let name = kwd
+            .child_by_field_name("name")
+            .map(|n| n.utf8_text(text.as_bytes()).unwrap_or_default())
+            .unwrap_or_default();
+        matches!(name, "keys" | "strs" | "syms")
+            && kwd.parent().is_some_and(|p| p.kind() == "map_lit")
+            && kwd
+                .next_named_sibling()
+                .is_some_and(|v| v.kind() == "vec_lit")
+    }
+}
+
+/// The smallest node at a 0-based `(line, character)`, character counted the
+/// way kondo does and tree-sitter's bytes derived from the line.
+fn node_at<'t>(
+    tree: &'t tree_sitter::Tree,
+    text: &str,
+    line: u32,
+    character: u32,
+) -> Option<tree_sitter::Node<'t>> {
+    let byte_col = text.lines().nth(line as usize).map(|l| {
+        l.char_indices()
+            .nth(character as usize)
+            .map(|(b, _)| b)
+            .unwrap_or(l.len())
+    })?;
+    let point = tree_sitter::Point::new(line as usize, byte_col);
+    tree.root_node().descendant_for_point_range(point, point)
 }
 
 /// Every probe the analysis supports, in a fixed order: by file, line,
@@ -450,6 +500,15 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         .iter()
         .map(|n| n.name.as_str())
         .chain(analysis.var_definitions.iter().map(|d| d.ns.as_str()))
+        .collect();
+    // Required but defined nowhere in the corpus: a library's. The one kind
+    // of keyword namespace `rename_target` refuses; `:db/id` under a namespace
+    // nobody defines is renamable, its sites are all in the project.
+    let library_namespaces: BTreeSet<&str> = analysis
+        .namespace_usages
+        .iter()
+        .map(|n| n.to.as_str())
+        .filter(|ns| !defined_namespaces.contains(ns))
         .collect();
 
     let mut usages_by_fqn: BTreeMap<(&str, &str), Vec<&VarUsage>> = BTreeMap::new();
@@ -542,7 +601,8 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         }
         for u in usages_by_fqn.get(fqn).into_iter().flatten() {
             if let (Some(r), Some(c)) = (u.name_row, u.name_col) {
-                exact.insert((PathBuf::from(&u.filename), r - 1, c - 1));
+                let character = texts.name_part(Path::new(&u.filename), r - 1, c - 1);
+                exact.insert((PathBuf::from(&u.filename), r - 1, character));
             }
         }
         let sites = Sites::from_exact(exact);
@@ -578,8 +638,14 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         }
     }
     for local in &analysis.locals {
+        if local.name == "_" {
+            // A discard by convention: no editor question is asked at it.
+            continue;
+        }
         let file = PathBuf::from(&local.filename);
-        let (line, character) = (local.row - 1, local.col - 1);
+        let line = local.row - 1;
+        // `{:keys [c/x]}` binds `x`; the binding's name part is the site.
+        let character = texts.name_part(&file, line, local.col - 1);
         let destructured =
             local.derived_location.is_some() || texts.destructured_at(&file, line, character);
         let bucket = if destructured {
@@ -595,7 +661,8 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 (Some(r), Some(c)) => (r, c),
                 _ => (u.row, u.col),
             };
-            let (uline, uchar) = (r - 1, c - 1);
+            let uline = r - 1;
+            let uchar = texts.name_part(Path::new(&u.filename), uline, c - 1);
             exact.insert((PathBuf::from(&u.filename), uline, uchar));
             out.push(Probe {
                 file: PathBuf::from(&u.filename),
@@ -643,20 +710,39 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         }
     }
     for ((ns, _), group) in &keywords_by_fqn {
-        let exact: BTreeSet<(PathBuf, u32, u32)> = group
-            .iter()
-            .map(|k| (PathBuf::from(&k.filename), k.row - 1, k.col - 1))
-            .collect();
-        let sites = Sites::from_exact(exact);
+        // Two site sets, because clj-pulse ranges a keyword two ways: a
+        // reference spans the whole token (`::c/site`), a rename edits its
+        // name suffix (`site`), since that suffix is what every notation of
+        // one key shares.
+        let mut token_starts = BTreeSet::new();
+        let mut name_starts = BTreeSet::new();
+        for k in group {
+            let file = PathBuf::from(&k.filename);
+            if texts.directive_at(&file, k.row - 1, k.col - 1) {
+                continue;
+            }
+            let name = texts.name_part(&file, k.row - 1, k.col - 1);
+            token_starts.insert((file.clone(), k.row - 1, k.col - 1));
+            name_starts.insert((file, k.row - 1, name));
+        }
+        if token_starts.is_empty() {
+            continue;
+        }
+        let reference_sites = Sites::from_exact(token_starts);
+        let rename_sites = Sites::from_exact(name_starts);
         // All-or-nothing in clj-pulse: one destructuring entry refuses the
-        // whole rename, and a keyword under a namespace this corpus does not
-        // define (a library's, or an alias kondo could not resolve) is refused
-        // by `rename_target`.
+        // whole rename, and a keyword of a library namespace is refused by
+        // `rename_target`.
         let refused = group.iter().any(|k| k.keys_destructuring == Some(true))
-            || !defined_namespaces.contains(ns);
+            || library_namespaces.contains(ns);
         for k in group {
             let file = PathBuf::from(&k.filename);
             let line = k.row - 1;
+            if texts.directive_at(&file, line, k.col - 1) {
+                // `::c/keys` in `{::c/keys [x]}` is a destructuring directive;
+                // there is nothing to navigate to or rename at it.
+                continue;
+            }
             let character = texts.name_part(&file, line, k.col - 1);
             let token = texts.token_at(&file, line, character);
             if k.keys_destructuring == Some(true) {
@@ -684,7 +770,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 character,
                 token: token.clone(),
                 bucket: bucket.to_string(),
-                expect: Expectation::References(sites.clone()),
+                expect: Expectation::References(reference_sites.clone()),
             });
             out.push(Probe {
                 file,
@@ -695,7 +781,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 expect: if refused {
                     Expectation::RenameRefused
                 } else {
-                    Expectation::RenameSites(sites.clone())
+                    Expectation::RenameSites(rename_sites.clone())
                 },
             });
         }
