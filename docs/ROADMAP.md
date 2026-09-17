@@ -64,7 +64,9 @@ analysis. Open
 buffers keep one incrementally updated parse tree, so no request or lint pass
 parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 `documentHighlight` underlines the symbol under the cursor, and
-`selectionRange` expands the selection along the parse tree.
+`selectionRange` expands the selection along the parse tree. A library
+namespace present in both dialects navigates to the copy matching the asking
+file: `.clj` and `.cljc` open the Clojure one, `.cljs` the ClojureScript one.
 
 Not shipped: `foldingRange`, formatting, semantic tokens, code lens,
 implementation provider, `executeCommand` refactors, `willRenameFiles`.
@@ -249,7 +251,7 @@ the release.
       classes, filed under `docs/backlog/` and linked from the Backlog
       (2026-09-17).
       Plan: [2026-09-17-1803-compare-against-kondo-analysis.md](plans/2026-09-17-1803-compare-against-kondo-analysis.md) — done
-- [ ] **A `.clj` file navigates into the ClojureScript copy of a core
+- [x] **A `.clj` file navigates into the ClojureScript copy of a core
       namespace.** With both `org.clojure/clojure` and `org.clojure/clojurescript`
       on the classpath (clj-kondo's `:test` alias, and common in full-stack
       projects), definition on `str/trim` in a `.clj` file answers
@@ -257,7 +259,7 @@ the release.
       fqn and the last dialect indexed wins; it should prefer the dialect of the
       file that is asking. Found by the clojure-lsp benchmark, which has to accept
       either file to time the metric at all.
-  Plan: [2026-09-17-2240-library-dialect-preference.md](plans/2026-09-17-2240-library-dialect-preference.md) — in progress
+  Plan: [2026-09-17-2240-library-dialect-preference.md](plans/2026-09-17-2240-library-dialect-preference.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.

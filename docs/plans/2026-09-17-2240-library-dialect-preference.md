@@ -81,10 +81,10 @@ References, rename, completion, signature help, ClojureDocs and workspace symbol
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Move the item**
+- [x] **Step 1: Move the item**
   Delete the 2026-09-10 Backlog line "A `.clj` file navigates into the ClojureScript copy of a core namespace" and add it to Milestone 5 as an unticked item directly above **Release**, keeping its text, with the line `Plan: [2026-09-17-2240-library-dialect-preference.md](plans/2026-09-17-2240-library-dialect-preference.md) — in progress`.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -am "Plan library dialect preference"` (include this plan file).
 
 ### Task 2: Dialect and shadow maps in the index
@@ -93,7 +93,7 @@ References, rename, completion, signature help, ClojureDocs and workspace symbol
 - Modify: `src/index/mod.rs`
 - Test: `src/index/mod.rs` (`mod tests`)
 
-- [ ] **Step 1: Write the failing unit tests**
+- [x] **Step 1: Write the failing unit tests**
   Add a helper that builds a library `Symbol` and `NsMeta` for a given fqn and file path with `SymbolSource::Jar`. Tests:
   - `lib_insert_prefers_clj_over_cljs_in_either_order`: insert `clojure/string.cljs` then `clojure/string.clj`, and in a second index the reverse; both `lookup("clojure.string/trim")` answer the `.clj` file, and `ns_meta("clojure.string")` the `.clj` file.
   - `lookup_for_cljs_returns_the_cljs_copy`: after both are inserted in either order, `lookup_for(…, Dialect::Cljs)` answers the `.cljs` file and `ns_meta_for(…, Dialect::Cljs)` its file; `lookup_for(…, Dialect::Clj)` the `.clj` one.
@@ -105,18 +105,18 @@ References, rename, completion, signature help, ClojureDocs and workspace symbol
   - `clear_libs_drops_the_cljs_shadow`: after `clear_libs`, `lookup_for(…, Dialect::Cljs)` is `None`.
   - `dialect_of_path`: `.cljs` is `Cljs`; `.clj`, `.cljc`, `.lg`, `.edn` and a `x.jar!/clojure/string.cljs` virtual path (`Cljs`) behave as designed.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --lib index::tests`
   Expected: compile errors for `Dialect`, `lookup_for`, `ns_meta_for`, `prefer_dialect`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `src/index/mod.rs`: `Dialect` with `of_path`; a private `fn lib_rank(path: &Path) -> u8` (0, 1, 2 per the design); fields `cljs_symbols: DashMap<String, Symbol>` and `cljs_namespaces: DashMap<String, NsMeta>` with doc comments saying they hold the ClojureScript copy a Clojure one displaced; the rank rule in `insert_lib_file` for symbols and for the namespace entry; the three methods; clearing in `clear_libs`. Keep the project-wins check exactly as it is.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --lib index::`
   Expected: PASS, including the existing `clear_libs_resets_letgo_core_marker` and `merge_project_drops_symbols_removed_from_a_rescanned_file`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Prefer the Clojure copy of a library symbol and keep the ClojureScript one aside"`
 
 ### Task 3: Definition and hover ask for their dialect
@@ -126,39 +126,41 @@ References, rename, completion, signature help, ClojureDocs and workspace symbol
 - Modify: `src/handlers/hover.rs`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e tests**
+- [x] **Step 1: Write the failing e2e tests**
   Add a helper `clojure_and_clojurescript_jars_project(cljs_first: bool) -> (TempDir, PathBuf)` next to `two_ns_jar_project`: `setup_project()`, write `clojure-x.jar` holding `clojure/string.clj` (`(ns clojure.string)` and `(defn trim "Clojure" [s] s)`) and `clojurescript-x.jar` holding `clojure/string.cljs` (`(ns clojure.string)` and `(defn trim "ClojureScript" [s] s)`), and write `.cpcache/1.cp` with both paths joined by `std::env::join_paths`, in the order `cljs_first` says. Write two consumers under `src/`: `uses_string.clj` and `uses_string.cljs`, each `(ns uses-string (:require [clojure.string :as str]))` followed by `(str/trim "x")`.
   Tests, each running both orders in a loop:
   - `test_e2e_definition_from_clj_prefers_the_clojure_jar_copy`: `initialize`, `wait_for_log("library indexing complete")`, `did_open` the `.clj` consumer, `goto_definition` on `trim` (via `position_of`); the URI starts with `jar:file://` and ends with `!/clojure/string.clj`.
   - `test_e2e_definition_from_cljs_prefers_the_clojurescript_jar_copy`: same on the `.cljs` consumer; the URI ends with `!/clojure/string.cljs`. Also `hover` on `trim` there and assert the markdown contains `ClojureScript`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --test test_e2e prefers_the_ -- --nocapture`
   Expected: FAIL. The `.clj` test fails in the `cljs_first = false` iteration (URI ends with `.cljs`), the `.cljs` test in the `cljs_first = true` iteration.
+  > Deviation: the `.clj` test already passed here — Task 2 made the primary map Clojure-preferred, so only the `.cljs` test failed (`cljs_first = true`, as predicted). The plan's expectation described the pre-Task-2 state.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
+  > Deviation: `tests/test_hover.rs` also calls `resolve_and_format` (four sites, not listed in the plan); they pass `Dialect::Clj`.
   `definition.rs`: `let dialect = Dialect::of_path(&path);` after `path` is computed; use `index.lookup_for(&fqn, dialect)`; wrap the `Project(sym)` arm and the `Core` arm's `lookup_in_ns` result in `index.prefer_dialect(sym, dialect)`; give `namespace_location` a `dialect` parameter and resolve the *target* namespace with `index.ns_meta_for(&ns, dialect)`. The alias lookup on `current_ns` stays `ns_meta` (see "Out of scope").
   In the `.cljs` e2e test, also assert navigation on the `clojure.string` symbol in the require clause lands on `!/clojure/string.cljs`, which exercises `ns_meta_for`.
   `hover.rs`: `resolve_and_format(index, word, current_ns, dialect)`, computing the dialect from `path` in `handle` and applying `prefer_dialect` in the `Project` arm; update the two unit tests.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --test test_e2e prefers_the_ -- --nocapture`
   Expected: PASS, both orders.
 
-- [ ] **Step 5: Run the whole suite**
+- [x] **Step 5: Run the whole suite**
   Run: `bb check`
   Expected: green. If `bb check` flags formatting, run `bb fmt` and re-run.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -am "Navigate into the copy of a library namespace that matches the file's dialect"`
 
 ### Task 4: Editor gates
 
-- [ ] **Step 1: Run the editor gates**
+- [x] **Step 1: Run the editor gates**
   Run: `bb e2e`, `bb e2e-pulse`, `bb e2e-calva`
   Expected: all green. Definition is client-visible and this changes which location it answers, so all three apply.
 
-- [ ] **Step 2: Run the index gates**
+- [x] **Step 2: Run the index gates**
   Run: `bb soak` (clj-kondo corpus, the default) and `bb bench clj-kondo`
   Expected: the soak passes with no divergence and RSS growth under 1.5x; the bench definition and dependency-definition rows are within noise of the tables in `docs/MEMORY.md`. The clj-kondo corpus has both `org.clojure/clojure` and `org.clojure/clojurescript` on its `:test` classpath, which is the case this plan fixes. Record the `BENCH_JSON` lines in the PR description; `bb bench metabase` is not required for this change.
 
@@ -167,19 +169,19 @@ References, rename, completion, signature help, ClojureDocs and workspace symbol
 **Files:**
 - Modify: `docs/ROADMAP.md`, `AGENTS.md`, `docs/FEATURES.md`, `README.md`
 
-- [ ] **Step 0: README**
+- [x] **Step 0: README**
   The working rules require README and AGENTS.md to change with a ticked item. Read the README feature bullets; if dependency navigation is described there, add the dialect clause in one sentence. If nothing there is affected, say so in the commit message rather than adding a line.
 
-- [ ] **Step 1: ROADMAP**
+- [x] **Step 1: ROADMAP**
   Tick the Milestone 5 item, set the Plan line to `— done`, and add one clause to "Where we stand": a library namespace present in both dialects navigates to the copy matching the asking file.
 
-- [ ] **Step 2: AGENTS.md invariant**
+- [x] **Step 2: AGENTS.md invariant**
   After the "Classpath libraries come in two shapes" bullet, add one bullet: library symbols and namespace metadata are keyed once per fqn, Clojure-preferred (`.clj` over `.cljc` over `.cljs`, whatever the insertion order); the ClojureScript copy a Clojure one displaces lives in `Index::cljs_symbols` / `cljs_namespaces`, and only `lookup_for` / `ns_meta_for` / `prefer_dialect` with `Dialect::Cljs` read it — definition and hover do, every other handler stays on the primary maps. `Dialect::of_path` decides by extension, `.cljs` alone being ClojureScript.
 
-- [ ] **Step 3: FEATURES.md**
+- [x] **Step 3: FEATURES.md**
   Under "File types", add a sentence: when a dependency ships a namespace as both `.clj` and `.cljs`, navigation and hover from a `.clj` or `.cljc` file open the Clojure copy and from a `.cljs` file the ClojureScript one.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
   Run: `bb check`
   Expected: green.
   `git commit -am "Document library dialect preference"`

@@ -218,6 +218,15 @@ there.
 - Classpath libraries come in two shapes: JARs (`SymbolSource::Jar`, navigated
   via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
+- Library symbols and namespace metadata are keyed once per fqn,
+  Clojure-preferred: `.clj` over `.cljc` over `.cljs`, whatever the insertion
+  order (`lib_rank` in `insert_lib_file`), last writer among equals. The
+  ClojureScript copy a Clojure one displaces lives in `Index::cljs_symbols` /
+  `cljs_namespaces`, and only `lookup_for` / `ns_meta_for` / `prefer_dialect`
+  with `Dialect::Cljs` read it — definition and hover do; every other handler
+  stays on the primary maps. A project symbol in the primary slot always wins,
+  shadow or not. `Dialect::of_path` decides by extension, `.cljs` alone being
+  ClojureScript, a `jar:` virtual path judged by its entry name.
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
 - Integrant EDN configs are found project-wide, not under `:paths`: the scan
   walks each project dir to `scanner::EDN_SCAN_MAX_DEPTH` (gitignore respected)
