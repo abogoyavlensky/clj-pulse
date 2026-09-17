@@ -5311,6 +5311,151 @@ fn test_e2e_kondo_found_in_a_well_known_dir_off_path() {
     );
 }
 
+/// A directory holding an executable `name` with `script` as its body: a
+/// clj-kondo that fails, a `mise` that answers `which`.
+fn dir_with_script(name: &str, script: &str) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join(name);
+    std::fs::write(&target, format!("#!/bin/sh\n{script}")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn test_e2e_kondo_probe_falls_through_a_failing_candidate() {
+    // The metabase shape: the first `clj-kondo` on the search path is a mise
+    // shim refusing an untrusted config, and a working install sits behind
+    // it. The probe must reach the second one, and lint with it.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let broken = dir_with_script(
+        "clj-kondo",
+        "echo 'mise ERROR: config not trusted' >&2\nexit 1\n",
+    );
+    let working = well_known_dir_with_fake_kondo();
+    let tool_dirs = std::env::join_paths([broken.path(), working.path()]).unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", Path::new(&tool_dirs)),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log(&format!(
+        "clj-kondo v0.0.0-fake found ({})",
+        working.path().join("clj-kondo").display()
+    ));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+}
+
+#[test]
+fn test_e2e_kondo_not_found_lists_every_candidate() {
+    // When no candidate works, the announcement names each one and why, so
+    // a user with two broken installs sees both rather than the first.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let first = dir_with_script("clj-kondo", "echo 'config not trusted' >&2\nexit 1\n");
+    let second = dir_with_script("clj-kondo", "echo 'GNU bash, version 5.2'\n");
+    let tool_dirs = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", Path::new(&tool_dirs)),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo not found — linting: native lints only");
+    let line = log_lines_containing(&client, "clj-kondo not found")
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(
+        line.contains(&first.path().join("clj-kondo").display().to_string()),
+        "{line}"
+    );
+    assert!(line.contains("config not trusted"), "{line}");
+    assert!(
+        line.contains(&second.path().join("clj-kondo").display().to_string()),
+        "{line}"
+    );
+    assert!(
+        line.contains("did not print a clj-kondo version line"),
+        "{line}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_e2e_kondo_mise_shim_resolves_to_the_real_binary() {
+    // A shim under `shims/` that refuses to run is replaced by whatever
+    // `mise which clj-kondo` names, and that binary is what lints — the
+    // diagnostics prove the resolved path ran, not the shim.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let working = well_known_dir_with_fake_kondo();
+    let real = working.path().join("clj-kondo");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let shims = tmp.path().join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shim = shims.join("clj-kondo");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\n# mise shim\necho 'mise ERROR: config not trusted' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mise = dir_with_script(
+        "mise",
+        &format!(
+            "[ \"$1\" = which ] && [ \"$2\" = clj-kondo ] && echo '{}' && exit 0\nexit 1\n",
+            real.display()
+        ),
+    );
+    let tool_dirs = std::env::join_paths([shims.as_path(), mise.path()]).unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", Path::new(&tool_dirs)),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log(&format!("clj-kondo v0.0.0-fake found ({})", real.display()));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+}
+
 #[test]
 fn test_e2e_kondo_not_found_says_where_it_looked() {
     let project = setup_kondo_project();

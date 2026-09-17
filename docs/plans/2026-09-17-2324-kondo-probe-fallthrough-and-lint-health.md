@@ -179,49 +179,51 @@ It is separate from `KondoState` on purpose: `KondoState` is compared to retire 
 - Modify: `src/server.rs`, `tests/fixtures/fake-clj-kondo/clj-kondo`
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Extend the fake**
+- [x] **Step 1: Extend the fake**
   Two stdin markers before the default branch: `*kondo-fail-here*` prints `boom: simulated crash` to stderr and exits 1 with no stdout; `*kondo-hang-here*` runs `sh -c 'echo $$ > "$FAKE_KONDO_PID_FILE"; sleep 30'` when the variable is set, so the recorded pid is a *grandchild* of clj-pulse: `kill_on_drop` alone would leave it alive, and only the process-group kill takes it down. Update the header comment.
 
-- [ ] **Step 2: Write the failing e2e tests**
+- [x] **Step 2: Write the failing e2e tests**
   Using `setup_kondo_project`, `start_with_kondo` / `start_with_kondo_env`, and the existing `wait_for_notification_where`:
   - `test_e2e_kondo_lint_failure_is_reported_once_on_lint_status`: open `src/app.clj` with `kondo-fail-here` inserted; expect a `lintStatus` with `engine == "kondo+native"` and `detail` containing `clj-kondo failed on src/app.clj` and `simulated crash`; expect one `window/logMessage` with `clj-kondo failed`; make a second edit that keeps the marker, wait for its diagnostics, and assert the count of such log messages is still 1; remove the marker, expect diagnostics carrying the fake's `unresolved-symbol` (use `kondo-finding-here`) and a `lintStatus` with no `detail` and a `clj-kondo recovered` log message.
   - `test_e2e_superseded_lint_pass_is_killed`: `start_with_kondo_env` with `FAKE_KONDO_PID_FILE`; insert `kondo-hang-here`, wait until the pid file exists (poll 5 s); insert a second change removing the marker; assert diagnostics for the second version arrive within 5 s and that `kill(pid, 0)` fails within 2 s of them.
 
-- [ ] **Step 3: Run to verify they fail**
+- [x] **Step 3: Run to verify they fail**
   Run: `cargo test --test test_e2e kondo_lint_failure -- --nocapture` and `cargo test --test test_e2e superseded_lint -- --nocapture`
   Expected: FAIL. No `detail` appears in the first; the second times out waiting for the process to die.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
   `SharedLintHealth` and `SharedLintTasks` on `KondoWarmer`; `lint_and_publish_doc(client, documents, index, warmer: &KondoWarmer, uri, pass)` with the transition logic after the join and *after* the staleness check, so a retired pass never reports; `send_lint_status(client, warmer, warming)` reading probe detail first, then the health message; `probe_and_announce` clearing health. The free `spawn_lint_pass`; route `did_open`, `did_save`, `did_change`, `did_close` and `relint_open_documents` through it; delete `lint_and_publish`. Update the warm-cache calls to the new signatures.
 
-- [ ] **Step 5: Run to verify they pass**
+- [x] **Step 5: Run to verify they pass**
   Run: `cargo test --test test_e2e kondo -- --nocapture`
   Expected: PASS, every existing kondo e2e test included.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -am "Report a failed clj-kondo pass once on lintStatus and cancel superseded passes"`
+  > Deviation: `kondo_pass` now yields `Option<Result<..>>` — `None` for "not in use" / "over live-max-kb" — so the health transition can tell a run that was never meant to happen from one that failed, instead of matching on error strings. The transition lives in two helpers (`report_lint_failure`, `report_lint_recovery`) called between the staleness check and the publish. `spawn_lint_pass` removes its own registry entry with `remove_if` on the task id, so a replacement registered mid-publish is never dropped. `relint_open_documents` became synchronous (it only spawns).
 
 ### Task 6: Discovery e2e
 
 **Files:**
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the e2e tests**
+- [x] **Step 1: Write the e2e tests**
   Next to `test_e2e_kondo_found_in_a_well_known_dir_off_path`, using `well_known_dir_with_fake_kondo`, `BARE_PATH`, and `LspClient::spawn(.., Kondo::Real)`:
   - `test_e2e_kondo_probe_falls_through_a_failing_candidate`: dir A holds a `clj-kondo` script exiting 1 with `mise ERROR: config not trusted` on stderr; dir B is `well_known_dir_with_fake_kondo()`. `CLJ_PULSE_TOOL_DIRS` = `A:B` (join with `std::env::join_paths`). Expect the log `clj-kondo v0.0.0-fake found (<B>/clj-kondo)`, then open `src/app.clj` and expect the fake's `unresolved-symbol`.
   - `test_e2e_kondo_not_found_lists_every_candidate`: both dirs fail; the `clj-kondo not found` log line names both paths.
   - `test_e2e_kondo_mise_shim_resolves_to_the_real_binary`: dir S = `<tmp>/shims` with a `clj-kondo` containing `mise` that exits 1; dir M with a `mise` script answering `which clj-kondo` with the path of dir B's fake; `CLJ_PULSE_TOOL_DIRS` = `S:M`. Expect `found (<B>/clj-kondo)` and kondo diagnostics on open, which proves the resolved path lints and not the shim.
 
-- [ ] **Step 2: Run them**
+- [x] **Step 2: Run them**
   Run: `cargo test --test test_e2e kondo -- --nocapture`
   Expected: PASS. The implementation landed in Task 3, so these pass on first run; if one fails, the probe is wrong, not the test.
 
-- [ ] **Step 3: Full check and gates**
+- [x] **Step 3: Full check and gates**
   Run: `bb check`, then `bb e2e`, then `bb e2e-pulse`
   Expected: all green. The status change is client-visible, so `bb e2e-pulse` applies; no location shape changes, so `bb e2e-calva` does not.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -am "Cover probe fall-through and mise shim resolution end to end"`
+  > Deviation: the codex checkpoint for Tasks 5 and 6 could not run — the Codex CLI hit its usage limit (resets 2026-09-18 02:26). The inline `code-review` skill stood in; re-run `review-with-codex` on the branch when the quota is back.
 
 ### Task 7: Docs
 
