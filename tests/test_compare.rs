@@ -8,12 +8,13 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
 use common::diff::{brief, brief_set, Divergence};
 use common::oracle::{self, Analysis, Expectation, Probe, Sites};
-use common::session::Session;
+use common::session::{settle, Session, REQUEST_TIMEOUT};
 use common::setup_project;
 use common::sites::{definition_uris, landing, Dialect, Expect, Landing};
 use common::LspClient;
@@ -117,9 +118,12 @@ fn ask(session: &mut Session, probe: &Probe) -> Answer {
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
     Agree,
+    /// `missing` is how many expected sites the answer lacks; zero means the
+    /// answer holds everything the oracle knows and more.
     Diverge {
         expected: String,
         got: String,
+        missing: usize,
     },
     /// An empty or `null` answer where the oracle has one: a wrong answer,
     /// reported in its own column so "resolved wrong" and "did not resolve"
@@ -208,6 +212,19 @@ fn site_keys(sites: &Sites, root: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// `sites` without the ones outside the linted roots: a file clj-pulse indexes
+/// that the oracle never read (a sub-project's, a scratch dir's) is neither
+/// side's finding.
+fn within(sites: Sites, roots: &[PathBuf]) -> Sites {
+    Sites::from_exact(
+        sites
+            .exact
+            .into_iter()
+            .filter(|(file, _, _)| roots.iter().any(|r| file.starts_with(r)))
+            .collect(),
+    )
+}
+
 fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
     if got.is_empty() && !expected.is_empty() {
         return Verdict::Null {
@@ -219,6 +236,7 @@ fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
         return Verdict::Diverge {
             expected: brief_set(&theirs, &mine),
             got: brief_set(&mine, &theirs),
+            missing: expected.exact.difference(&got.exact).count(),
         };
     }
     if expected.exact != got.exact {
@@ -227,7 +245,7 @@ fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
     Verdict::Agree
 }
 
-fn judge(probe: &Probe, answer: &Answer, root: &Path) -> Verdict {
+fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verdict {
     let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
     match (&probe.expect, answer) {
         (Expectation::Definition { file, line }, Answer::Result(result)) => {
@@ -249,6 +267,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path) -> Verdict {
                 Verdict::Agree
             } else {
                 Verdict::Diverge {
+                    missing: 1,
                     expected,
                     got: match uri_path(first) {
                         Some(p) => format!(
@@ -274,6 +293,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path) -> Verdict {
                     return Verdict::Diverge {
                         expected,
                         got: format!("wrong dialect: {}", uris.join(", ")),
+                        missing: 1,
                     }
                 }
                 Landing::Miss => {}
@@ -295,23 +315,26 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path) -> Verdict {
                 Verdict::Diverge {
                     expected,
                     got: uris.join(", "),
+                    missing: 1,
                 }
             }
         }
         (Expectation::References(sites), Answer::Result(result)) => {
-            judge_sites(sites, &location_sites(result), root)
+            judge_sites(sites, &within(location_sites(result), roots), root)
         }
         (Expectation::RenameSites(sites), Answer::Edit(edit)) => {
-            judge_sites(sites, &edit_sites(edit), root)
+            judge_sites(sites, &within(edit_sites(edit), roots), root)
         }
         (Expectation::RenameSites(sites), Answer::Refused) => Verdict::Diverge {
             expected: format!("{:?}", site_keys(sites, root)),
             got: "refused".into(),
+            missing: sites.exact.len(),
         },
         (Expectation::RenameRefused, Answer::Refused) => Verdict::Agree,
         (Expectation::RenameRefused, Answer::Edit(edit)) => Verdict::Diverge {
             expected: "refused".into(),
             got: format!("edit of {:?}", site_keys(&edit_sites(edit), root)),
+            missing: 0,
         },
         (_, Answer::Error(err)) => Verdict::Null {
             expected: format!("an answer, not {}", brief(&json!(err))),
@@ -354,6 +377,16 @@ static KNOWN: &[Known] = &[
             matches!(&probe.expect, Expectation::LibraryDefinition { ns, .. } if ns.starts_with("letgo."))
         },
         reason: "let-go core is indexed from lgx deps only",
+    },
+    // A protocol method's implementations (`(deftype T [] P (m [_] …))`,
+    // `extend-protocol`) are sites in clj-pulse — references show them and a
+    // rename must rewrite them — while kondo's analysis lists the method's
+    // callers alone. A superset answer is the difference; a missing caller is
+    // not.
+    Known {
+        bucket_prefix: "var-def/defprotocol",
+        matches: |_, verdict| matches!(verdict, Verdict::Diverge { missing: 0, .. }),
+        reason: "protocol method implementations are sites in clj-pulse; kondo lists callers only",
     },
     // `references::local_refs_at` never claims a qualified symbol ("locals
     // are never qualified"), so a cursor on the binding resolves the keyword
@@ -431,6 +464,7 @@ impl Report {
             Verdict::Diverge {
                 ref expected,
                 ref got,
+                ..
             } => (expected.clone(), got.clone()),
         };
         let divergence = Divergence {
@@ -526,6 +560,7 @@ fn ask_and_judge(
     probes: &[Probe],
     analysis: &Analysis,
     root: &Path,
+    roots: &[PathBuf],
     corpus: &str,
 ) -> Report {
     let mut report = Report {
@@ -540,7 +575,7 @@ fn ask_and_judge(
         session.client.did_open(file);
         for probe in probes {
             let answer = ask(session, probe);
-            let verdict = judge(probe, &answer, root);
+            let verdict = judge(probe, &answer, root, roots);
             report.record(probe, verdict, root);
         }
         session.client.did_close(file);
@@ -848,6 +883,10 @@ mod judge_tests {
         }
     }
 
+    fn roots() -> Vec<PathBuf> {
+        vec![PathBuf::from("/corpus/src")]
+    }
+
     fn sites(entries: &[(u32, u32)]) -> Sites {
         Sites::from_exact(
             entries
@@ -875,7 +914,7 @@ mod judge_tests {
             file: PathBuf::from("/corpus/src/b.clj"),
             line: 7,
         });
-        let verdict = judge(&p, &Answer::Result(Value::Null), root);
+        let verdict = judge(&p, &Answer::Result(Value::Null), root, &roots());
         assert!(matches!(verdict, Verdict::Null { .. }), "{verdict:?}");
         let mut report = Report::default();
         report.record(&p, verdict, root);
@@ -892,11 +931,11 @@ mod judge_tests {
             line: 7,
         });
         assert_eq!(
-            judge(&p, &Answer::Result(locations(&[(7, 6)])), root),
+            judge(&p, &Answer::Result(locations(&[(7, 6)])), root, &roots()),
             Verdict::Agree
         );
         assert!(matches!(
-            judge(&p, &Answer::Result(locations(&[(8, 6)])), root),
+            judge(&p, &Answer::Result(locations(&[(8, 6)])), root, &roots()),
             Verdict::Diverge { .. }
         ));
     }
@@ -905,7 +944,12 @@ mod judge_tests {
     fn one_answer_on_a_line_the_oracle_counts_twice_diverges() {
         let root = Path::new("/corpus");
         let p = probe(Expectation::References(sites(&[(3, 2), (9, 4), (9, 12)])));
-        let verdict = judge(&p, &Answer::Result(locations(&[(3, 2), (9, 4)])), root);
+        let verdict = judge(
+            &p,
+            &Answer::Result(locations(&[(3, 2), (9, 4)])),
+            root,
+            &roots(),
+        );
         assert!(matches!(verdict, Verdict::Diverge { .. }), "{verdict:?}");
     }
 
@@ -917,6 +961,7 @@ mod judge_tests {
             &p,
             &Answer::Result(locations(&[(3, 2), (9, 6), (9, 14)])),
             root,
+            &roots(),
         );
         assert_eq!(verdict, Verdict::Soft);
         let mut report = Report::default();
@@ -933,17 +978,20 @@ mod judge_tests {
             { "range": { "start": { "line": 3, "character": 2 }, "end": { "line": 3, "character": 3 } }, "newText": "g" },
             { "range": { "start": { "line": 9, "character": 4 }, "end": { "line": 9, "character": 5 } }, "newText": "g" }
         ] } });
-        assert_eq!(judge(&p, &Answer::Edit(changes), root), Verdict::Agree);
+        assert_eq!(
+            judge(&p, &Answer::Edit(changes), root, &roots()),
+            Verdict::Agree
+        );
         let document_changes = json!({ "documentChanges": [ { "textDocument": { "uri": "file:///corpus/src/a.clj", "version": 1 }, "edits": [
             { "range": { "start": { "line": 3, "character": 2 }, "end": { "line": 3, "character": 3 } }, "newText": "g" },
             { "range": { "start": { "line": 9, "character": 4 }, "end": { "line": 9, "character": 5 } }, "newText": "g" }
         ] } ] });
         assert_eq!(
-            judge(&p, &Answer::Edit(document_changes), root),
+            judge(&p, &Answer::Edit(document_changes), root, &roots()),
             Verdict::Agree
         );
         assert!(matches!(
-            judge(&p, &Answer::Refused, root),
+            judge(&p, &Answer::Refused, root, &roots()),
             Verdict::Diverge { .. }
         ));
     }
@@ -969,7 +1017,22 @@ mod judge_tests {
         // A refusal of the rename itself, reported with the plan's verdict.
         let p = probe(Expectation::RenameRefused);
         assert_eq!(
-            judge(&p, &Answer::Refused, Path::new("/corpus")),
+            judge(&p, &Answer::Refused, Path::new("/corpus"), &roots()),
+            Verdict::Agree
+        );
+    }
+
+    #[test]
+    fn sites_outside_the_linted_roots_are_not_judged() {
+        let root = Path::new("/corpus");
+        let p = probe(Expectation::References(sites(&[(3, 2)])));
+        let mut answer = locations(&[(3, 2)]);
+        answer.as_array_mut().unwrap().push(json!({
+            "uri": "file:///corpus/analysis/src/tools.clj",
+            "range": { "start": { "line": 1, "character": 1 }, "end": { "line": 1, "character": 2 } }
+        }));
+        assert_eq!(
+            judge(&p, &Answer::Result(answer), root, &roots()),
             Verdict::Agree
         );
     }
@@ -979,7 +1042,7 @@ mod judge_tests {
         let root = Path::new("/corpus");
         let mut p = probe(Expectation::RenameSites(sites(&[(3, 2)])));
         p.token = ":app/db".into();
-        let verdict = judge(&p, &Answer::Refused, root);
+        let verdict = judge(&p, &Answer::Refused, root, &roots());
         let mut report = Report::default();
         report.record(&p, verdict, root);
         assert!(report.new_divergences.is_empty());
@@ -1011,12 +1074,184 @@ fn compare_simple_project() {
     assert!(probes.len() > 50, "{} probes", probes.len());
     let mut session = Session::new(LspClient::start(&root));
     session.client.initialize(&root);
-    let report = ask_and_judge(&mut session, &probes, &analysis, &root, "simple_project");
+    let roots = vec![root.join("src")];
+    let report = ask_and_judge(
+        &mut session,
+        &probes,
+        &analysis,
+        &root,
+        &roots,
+        "simple_project",
+    );
     report.print();
     assert!(session.errors.is_empty(), "{:?}", session.errors);
     assert!(
         report.new_divergences.is_empty(),
         "{} new divergences (see the report above)",
         report.new_divergences.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The corpus run
+// ---------------------------------------------------------------------------
+
+fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
+/// Deterministic sampling: probes come sorted by file, line, character; a
+/// bucket with more than `limit` keeps every k-th one, so the sample spreads
+/// over the corpus instead of exhausting the limit on whichever files sort
+/// first (a vendored `inlined/` tree would otherwise be the whole library
+/// story). `files` caps how many files are visited at all, for a first look
+/// at a corpus the size of metabase.
+fn sample(probes: Vec<Probe>, limit: usize, files: Option<usize>) -> Vec<Probe> {
+    let probes: Vec<Probe> = match files {
+        Some(cap) => {
+            let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+            probes
+                .into_iter()
+                .filter(|probe| {
+                    visited.contains(&probe.file)
+                        || (visited.len() < cap && visited.insert(probe.file.clone()))
+                })
+                .collect()
+        }
+        None => probes,
+    };
+    let mut per_bucket: BTreeMap<String, usize> = BTreeMap::new();
+    for probe in &probes {
+        *per_bucket.entry(probe.bucket.clone()).or_insert(0) += 1;
+    }
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut kept: BTreeMap<String, usize> = BTreeMap::new();
+    probes
+        .into_iter()
+        .filter(|probe| {
+            let total = per_bucket[&probe.bucket];
+            let i = seen.entry(probe.bucket.clone()).or_insert(0);
+            let index = *i;
+            *i += 1;
+            let stride = total.div_ceil(limit.max(1));
+            if !index.is_multiple_of(stride) {
+                return false;
+            }
+            let k = kept.entry(probe.bucket.clone()).or_insert(0);
+            if *k >= limit {
+                return false;
+            }
+            *k += 1;
+            true
+        })
+        .collect()
+}
+
+/// clj-pulse under production settings on a pinned real corpus, asked every
+/// question its clj-kondo analysis has an answer to. Advisory by default —
+/// the report is the product — and a gate on the server dying, a panic, an
+/// unexpected JSON-RPC error, or kondo not running; `CLJ_PULSE_COMPARE_STRICT`
+/// makes any new divergence fail it too.
+#[test]
+#[ignore = "needs CLJ_PULSE_COMPARE_ROOT pointing at a pinned corpus; run with `bb compare`"]
+fn compare_corpus() {
+    let Some(root) = std::env::var_os("CLJ_PULSE_COMPARE_ROOT") else {
+        println!("CLJ_PULSE_COMPARE_ROOT is unset — skipping. Run `bb compare`.");
+        return;
+    };
+    let root = PathBuf::from(root)
+        .canonicalize()
+        .expect("CLJ_PULSE_COMPARE_ROOT does not exist");
+    let corpus = std::env::var("CLJ_PULSE_COMPARE_CORPUS").unwrap_or_else(|_| "(unnamed)".into());
+    let limit: usize = env_parse("CLJ_PULSE_COMPARE_LIMIT").unwrap_or(200);
+    let files: Option<usize> = env_parse("CLJ_PULSE_COMPARE_FILES");
+    let strict = std::env::var_os("CLJ_PULSE_COMPARE_STRICT").is_some_and(|v| !v.is_empty());
+
+    let version = oracle::kondo_available().expect("clj-kondo on PATH");
+    println!("clj-kondo: {version}");
+    if !version.contains(oracle::PINNED_KONDO) {
+        println!(
+            "WARNING: not the pinned clj-kondo {} — expectations were checked against that one",
+            oracle::PINNED_KONDO
+        );
+    }
+    let started = Instant::now();
+    // What clj-pulse indexes as the root project's own source (deps.edn
+    // `:paths`, alias `:extra-paths`, `src`/`test`), and nothing else: the
+    // oracle reads what the server reads. clj-kondo's `corpus/` of deliberately
+    // broken samples stays out on both sides.
+    let roots: Vec<PathBuf> = clj_pulse::config::source_paths(&root)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .collect();
+    let paths: Vec<String> = roots
+        .iter()
+        .map(|p| {
+            p.strip_prefix(&root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    println!("linting {}", paths.join(" "));
+    let analysis = oracle::run(&root, &path_refs, "").expect("clj-kondo runs");
+    let all = oracle::probes(&analysis);
+    let probes = sample(all, limit, files);
+    println!(
+        "analysis in {:?}: {} var-definitions, {} var-usages, {} locals, {} keywords; {} probes after sampling (limit {limit}/bucket{})",
+        started.elapsed(),
+        analysis.var_definitions.len(),
+        analysis.var_usages.len(),
+        analysis.locals.len(),
+        analysis.keywords.len(),
+        probes.len(),
+        files.map(|f| format!(", {f} files")).unwrap_or_default()
+    );
+
+    let mut session = Session::production(&root);
+    let started = Instant::now();
+    session.client.initialize_no_wait(&root);
+    let note = settle(&mut session, Instant::now() + REQUEST_TIMEOUT);
+    println!("server settled in {:?} ({note})", started.elapsed());
+
+    let started = Instant::now();
+    let report = ask_and_judge(&mut session, &probes, &analysis, &root, &roots, &corpus);
+    println!("asked in {:?}", started.elapsed());
+    report.print();
+
+    let mut failures: Vec<String> = Vec::new();
+    if !session.alive() {
+        failures.push("the server died".into());
+    }
+    let panics: Vec<String> = LspClient::server_log(&root)
+        .lines()
+        .filter(|line| line.contains("panicked at"))
+        .map(|line| line.trim().to_string())
+        .collect();
+    if !panics.is_empty() {
+        failures.push(format!(
+            "{} panic(s) in server.log: {:#?}",
+            panics.len(),
+            panics
+        ));
+    }
+    if !session.errors.is_empty() {
+        failures.push(format!(
+            "{} unexpected JSON-RPC error(s): {:#?}",
+            session.errors.len(),
+            session.errors
+        ));
+    }
+    if strict && !report.new_divergences.is_empty() {
+        failures.push(format!(
+            "{} new divergence(s) under CLJ_PULSE_COMPARE_STRICT",
+            report.new_divergences.len()
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "compare failed:\n{}",
+        failures.join("\n")
     );
 }

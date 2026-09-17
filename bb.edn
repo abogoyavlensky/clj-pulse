@@ -179,6 +179,15 @@
                                      seed (assoc "CLJ_PULSE_SOAK_SEED" (str seed)))}
                        "cargo test --release --test test_soak -- --ignored --nocapture"))}
 
+  compare {:doc "Compare clj-pulse against clj-kondo's analysis on a pinned real repo: `bb compare` (clj-kondo), `bb compare metabase`. Advisory: prints divergences by construct; CLJ_PULSE_COMPARE_STRICT=1 fails on any new one"
+           :task (let [[name] *command-line-args*
+                       name (or name "clj-kondo")
+                       dir (bench-corpus! name)]
+                   (bench-prepare! dir)
+                   (shell {:extra-env {"CLJ_PULSE_COMPARE_ROOT" (str dir)
+                                       "CLJ_PULSE_COMPARE_CORPUS" name}}
+                          "cargo test --release --test test_compare -- --ignored --nocapture"))}
+
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}
 

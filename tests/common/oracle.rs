@@ -24,6 +24,54 @@ pub const PINNED_KONDO: &str = "2026.08.04";
 /// kondo's `to` for a usage it could not resolve.
 const UNKNOWN_NS: &str = "clj-kondo/unknown-namespace";
 
+/// Names kondo attributes to `clojure.core` that no source form defines: the
+/// special forms, and the vars `RT.java` creates that `core.clj` only
+/// documents through `add-doc-and-meta`. A definition on one is a question
+/// with no answer.
+const NO_SOURCE_DEFINITION: &[&str] = &[
+    "*file*",
+    "*command-line-args*",
+    "*warn-on-reflection*",
+    "*compile-path*",
+    "*compile-files*",
+    "*unchecked-math*",
+    "*compiler-options*",
+    "*ns*",
+    "*in*",
+    "*out*",
+    "*err*",
+    "*flush-on-newline*",
+    "*print-meta*",
+    "*print-dup*",
+    "*print-readably*",
+    "*read-eval*",
+    "*clojure-version*",
+    "def",
+    "if",
+    "do",
+    "let*",
+    "quote",
+    "var",
+    "fn*",
+    "loop*",
+    "recur",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "monitor-enter",
+    "monitor-exit",
+    "new",
+    "set!",
+    ".",
+    "letfn*",
+    "case*",
+    "deftype*",
+    "reify*",
+    "import*",
+    "&",
+];
+
 // ---------------------------------------------------------------------------
 // Running kondo
 // ---------------------------------------------------------------------------
@@ -59,8 +107,11 @@ pub fn run(root: &Path, paths: &[&str], extra_config: &str) -> Result<Analysis, 
         cmd.arg(root.join(p));
     }
     cmd.arg("--config-dir").arg(root.join(".clj-kondo"));
-    cmd.arg("--config")
-        .arg("{:analysis {:locals true :keywords true} :output {:format :json}}");
+    // `:skip-comments`: clj-pulse indexes nothing inside `(comment …)`
+    // (`handlers::ignored_forms`), and kondo's default is to analyze it.
+    cmd.arg("--config").arg(
+        "{:analysis {:locals true :keywords true} :output {:format :json} :skip-comments true}",
+    );
     if !extra_config.is_empty() {
         cmd.arg("--config").arg(extra_config);
     }
@@ -152,9 +203,16 @@ pub struct VarDef {
     pub defined_by: Option<String>,
 }
 
+fn unknown_ns() -> String {
+    UNKNOWN_NS.to_string()
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct VarUsage {
     pub from: Option<String>,
+    /// Absent for a JS interop call (`js/parseInt`), which resolves to nothing
+    /// the analysis names.
+    #[serde(default = "unknown_ns")]
     pub to: String,
     pub name: String,
     pub filename: String,
@@ -224,6 +282,7 @@ pub struct NsDef {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct NsUsage {
+    #[serde(default = "unknown_ns")]
     pub to: String,
     pub filename: String,
     pub row: u32,
@@ -525,7 +584,9 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             // A synthesized usage (`fn*` behind `#(…)`) has no token of its own.
             continue;
         };
-        if u.to == UNKNOWN_NS {
+        if u.to == UNKNOWN_NS
+            || (u.to == "clojure.core" && NO_SOURCE_DEFINITION.contains(&u.name.as_str()))
+        {
             continue;
         }
         let file = PathBuf::from(&u.filename);
