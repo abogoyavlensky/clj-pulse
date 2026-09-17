@@ -883,6 +883,10 @@ struct KondoState {
     /// Why the probe failed, when it did: the `detail` the lint status
     /// carries so an editor can show it next to "native lints only".
     detail: Option<String>,
+    /// The directory the probe ran from — the workspace root — and where
+    /// every lint runs from too, so a mise shim resolves the same binary on
+    /// every pass rather than one per file's directory.
+    root: Option<std::path::PathBuf>,
 }
 
 impl KondoState {
@@ -951,6 +955,7 @@ async fn probe_and_announce(
             config: config.clone(),
             found,
             detail,
+            root: root.map(std::path::Path::to_path_buf),
         };
         // Compare the whole resolved state, not just "is clj-kondo active":
         // switching `:path` from one working binary to another, or picking up
@@ -1281,7 +1286,14 @@ async fn lint_and_publish_doc(
             return Err("clj-kondo skipped: buffer over live-max-kb".to_string());
         }
         let _permit = KONDO_LIMIT.acquire().await;
-        let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
+        let result = kondo::lint(
+            &bin,
+            &text,
+            &path,
+            engine.root.as_deref(),
+            kondo::LINT_TIMEOUT,
+        )
+        .await;
         if let Err(e) = &result {
             // Debug, not warn: a missing or wedged clj-kondo would
             // otherwise log once per keystroke.

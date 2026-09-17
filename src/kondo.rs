@@ -305,11 +305,14 @@ pub fn not_found_message(path: &str, reason: &str) -> String {
     msg
 }
 
-/// How long one buffer lint may take before it is abandoned. Normal files
-/// finish in 20-70 ms and a 4000-line file in ~0.5 s, so 2 s is slack for a
-/// cold JVM-less start under load — and short enough that a wedged binary
-/// never stalls the squiggles behind it.
-pub const LINT_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one buffer lint may take before it is abandoned: the bound for a
+/// wedged binary, not a budget for a normal run. Normal files finish in
+/// 20-70 ms and a 4000-line file in ~0.5 s, but a large file on a loaded
+/// machine can take seconds, and abandoning it publishes the native set
+/// alone. Ten seconds is generous because it never stalls the squiggles
+/// behind it: a superseded pass is aborted the moment the next one starts,
+/// and [`run`] kills the process group of a dropped future.
+pub const LINT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the `--version` discovery probe may take. Runs on `initialize`
 /// and on every config change, so it must fail fast.
@@ -353,6 +356,11 @@ pub fn lints_file(path: &Path) -> bool {
 /// unresolved name once per file, and a squiggle on the first usage alone
 /// sends the user through the file one fix at a time.
 ///
+/// `cwd` is where the binary runs from — the workspace root, the directory
+/// the probe proved it from, so a mise shim resolves the same tool on every
+/// pass instead of whatever a subdirectory's own mise config says. clj-kondo
+/// itself does not care: its config comes from `--filename`.
+///
 /// `Err` is any reason we have no findings to trust — spawn failure, timeout,
 /// a crash, unparseable stdout. Callers keep their native diagnostics on
 /// `Err`; only `Ok` cedes ownership.
@@ -360,6 +368,7 @@ pub async fn lint(
     bin: &str,
     source: &str,
     abs_path: &Path,
+    cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<Vec<Diagnostic>, String> {
     let mut cmd = tokio::process::Command::new(bin);
@@ -376,11 +385,7 @@ pub async fn lint(
     if abs_path.extension().is_some_and(|e| e == "bb") {
         cmd.arg("--lang").arg("clj");
     }
-    // Run from the file's own directory. clj-kondo does not care (it resolves
-    // its config from `--filename`), but a mise shim does: it picks the
-    // version the nearest mise config pins, and the server's own cwd is
-    // wherever the editor happened to start it.
-    if let Some(dir) = abs_path.parent().filter(|d| d.is_dir()) {
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
 
@@ -578,10 +583,13 @@ async fn probe_one(resolved: &str, cwd: Option<&Path>) -> Result<String, String>
 ///
 /// Mirrors `classpath::resolve_via_cmd`'s process handling — own process
 /// group, `kill_on_drop`, group kill on timeout — because the failure it
-/// prevents is the same: a dropped future must not orphan a child. The
-/// difference is the stdin feed, and that a non-zero exit is not by itself an
-/// error here (clj-kondo exits 2/3 with perfectly good findings), so the
-/// status is handed back for the caller to judge.
+/// prevents is the same: a dropped future must not orphan a child. Here the
+/// group kill also runs when the future is *dropped* mid-wait: a lint pass
+/// superseded by the next edit is aborted, and `kill_on_drop` reaps only the
+/// direct child, which for a mise shim is the shell around the real binary.
+/// The other difference is the stdin feed, and that a non-zero exit is not
+/// by itself an error here (clj-kondo exits 2/3 with perfectly good
+/// findings), so the status is handed back for the caller to judge.
 async fn run(
     cmd: &mut tokio::process::Command,
     bin: &str,
@@ -603,6 +611,7 @@ async fn run(
         .spawn()
         .map_err(|e| format!("failed to run `{bin}`: {e}"))?;
     let pid = child.id();
+    let mut guard = KillGroupOnDrop(pid);
 
     // Feed stdin from its own task: writing inline would deadlock on a buffer
     // large enough to fill the pipe before we start draining stdout. Dropping
@@ -622,7 +631,12 @@ async fn run(
         });
     }
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    let waited = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    // Either way the wait is over: the child exited, or the timeout branch
+    // kills the group itself. Only an abort between the spawn and this line
+    // leaves the guard armed.
+    guard.0 = None;
+    match waited {
         Ok(result) => result.map_err(|e| format!("failed to run `{bin}`: {e}")),
         Err(_elapsed) => {
             kill_group(pid);
@@ -631,8 +645,20 @@ async fn run(
     }
 }
 
-/// Kills a timed-out child and everything it spawned. `kill_on_drop` reaps
-/// only the direct child; the group kill is what stops its descendants.
+/// Kills the process group of the child it holds when dropped while armed.
+/// Armed right after the spawn, disarmed once the wait returns, so the only
+/// drop that fires is the one an aborted future takes.
+struct KillGroupOnDrop(Option<u32>);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        kill_group(self.0);
+    }
+}
+
+/// Kills a timed-out or abandoned child and everything it spawned.
+/// `kill_on_drop` reaps only the direct child; the group kill is what stops
+/// its descendants.
 fn kill_group(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     #[cfg(unix)]
@@ -931,9 +957,15 @@ echo '{"findings":[{"type":"invalid-arity","level":"error","row":3,"col":12,"end
 exit 3
 "#,
         );
-        let diags = lint(&bin, "(ns a)", Path::new("/p/src/a.clj"), TEST_TIMEOUT)
-            .await
-            .expect("exit 3 must be success");
+        let diags = lint(
+            &bin,
+            "(ns a)",
+            Path::new("/p/src/a.clj"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect("exit 3 must be success");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "a/f is called with 2 args but expects 1");
     }
@@ -958,6 +990,7 @@ exit 3
             &bin,
             "(ns live.buffer)",
             Path::new("/p/src/a.clj"),
+            None,
             TEST_TIMEOUT,
         )
         .await
@@ -988,9 +1021,15 @@ exit 3
                 seen.display()
             ),
         );
-        lint(&bin, "(println 1)", Path::new("/p/script.bb"), TEST_TIMEOUT)
-            .await
-            .unwrap();
+        lint(
+            &bin,
+            "(println 1)",
+            Path::new("/p/script.bb"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert!(std::fs::read_to_string(&seen)
             .unwrap()
             .contains("--lang clj"));
@@ -1005,9 +1044,15 @@ exit 3
             dir.path(),
             "cat > /dev/null\necho 'Exception in thread \"main\"' >&2\nexit 1\n",
         );
-        let err = lint(&bin, "(ns a)", Path::new("/p/src/a.clj"), TEST_TIMEOUT)
-            .await
-            .expect_err("exit 1 must be an error");
+        let err = lint(
+            &bin,
+            "(ns a)",
+            Path::new("/p/src/a.clj"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect_err("exit 1 must be an error");
         assert!(err.contains("Exception in thread"), "err: {err}");
     }
 
@@ -1018,9 +1063,15 @@ exit 3
         // native diagnostics — it degrades to "kondo failed".
         let dir = tempfile::TempDir::new().unwrap();
         let bin = fake_bin(dir.path(), "cat > /dev/null\nexit 0\n");
-        let err = lint(&bin, "(ns a)", Path::new("/p/src/a.clj"), TEST_TIMEOUT)
-            .await
-            .expect_err("empty stdout must be an error");
+        let err = lint(
+            &bin,
+            "(ns a)",
+            Path::new("/p/src/a.clj"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect_err("empty stdout must be an error");
         assert!(
             err.contains("unparseable") || err.contains("output"),
             "err: {err}"
@@ -1034,6 +1085,7 @@ exit 3
             "clj-kondo-definitely-not-installed",
             "(ns a)",
             Path::new("/p/src/a.clj"),
+            None,
             TEST_TIMEOUT,
         )
         .await
@@ -1059,6 +1111,7 @@ exit 3
             &bin,
             "(ns a)",
             Path::new("/p/src/a.clj"),
+            None,
             Duration::from_millis(200),
         )
         .await
@@ -1070,6 +1123,95 @@ exit 3
             !marker.exists(),
             "clj-kondo kept running after the timeout — group kill missing?"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lint_runs_from_the_given_cwd() {
+        // The workspace root, not the file's directory: the probe proved the
+        // binary from the root, and a mise shim must see the same config on
+        // every pass.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let bin = fake_bin(
+            dir.path(),
+            r#"cat > /dev/null
+printf '{"findings":[{"type":"cwd","level":"info","row":1,"col":1,"message":"%s"}]}' "$(pwd)"
+"#,
+        );
+        let file_dir = tempfile::TempDir::new().unwrap();
+        let diags = lint(
+            &bin,
+            "(ns a)",
+            &file_dir.path().join("a.clj"),
+            Some(cwd.path()),
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let wanted = cwd.path().canonicalize().unwrap();
+        let seen = Path::new(&diags[0].message).canonicalize().unwrap();
+        assert_eq!(seen, wanted, "ran from {}", diags[0].message);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lint_child_group_dies_when_the_future_is_dropped() {
+        // A superseded pass is aborted, which drops the `lint` future. The
+        // recorded pid is a *grandchild* (the fake runs `sh -c`), so
+        // `kill_on_drop` alone would leave it running: only the group kill
+        // takes it down, and a mise shim plus the binary it exec'd has this
+        // very shape.
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_file = dir.path().join("pid");
+        let bin = fake_bin(
+            dir.path(),
+            &format!(
+                "cat > /dev/null\nsh -c 'echo $$ > \"{}\"; sleep 30'\n",
+                pid_file.display()
+            ),
+        );
+        let task = tokio::spawn(async move {
+            let _ = lint(
+                &bin,
+                "(ns a)",
+                Path::new("/p/src/a.clj"),
+                None,
+                TEST_TIMEOUT,
+            )
+            .await;
+        });
+        let start = std::time::Instant::now();
+        let pid: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "fake never started"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the grandchild must be alive"
+        );
+
+        task.abort();
+        let _ = task.await;
+
+        let start = std::time::Instant::now();
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "the grandchild outlived the dropped lint future"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[cfg(unix)]
