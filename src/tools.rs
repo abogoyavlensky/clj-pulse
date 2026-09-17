@@ -110,7 +110,7 @@ pub fn resolve_all(program: &str, base: &Path) -> Vec<PathBuf> {
 /// [`resolve_all`] over an explicit PATH. Two entries naming the same file
 /// (a directory listed twice, a symlink to the first hit) collapse into one:
 /// running the same binary again would only repeat the same failure.
-fn resolve_all_in(program: &str, base: &Path, path: &OsStr) -> Vec<PathBuf> {
+pub(crate) fn resolve_all_in(program: &str, base: &Path, path: &OsStr) -> Vec<PathBuf> {
     if program.contains('/') || program.contains(std::path::MAIN_SEPARATOR) {
         return vec![base.join(program)];
     }

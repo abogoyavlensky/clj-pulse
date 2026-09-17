@@ -87,11 +87,11 @@ It is separate from `KondoState` on purpose: `KondoState` is compared to retire 
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Move the items**
+- [x] **Step 1: Move the items**
   Delete the 2026-09-10 "A failing clj-kondo candidate ends the probe…" and 2026-09-11 "A failed clj-kondo lint pass is silent" Backlog lines. Add one unticked Milestone 5 item directly above **Release**, titled **clj-kondo discovery and failure reporting**, with two sub-bullets carrying each item's text, and the line `Plan: [2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md](plans/2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md) — in progress`.
   Add a Backlog line: `2026-09-17 **Clojure Pulse tooltip shows the lintStatus detail.** The server now sends a per-pass failure reason as detail on clojurePulse/lintStatus; the extension's status-bar lint line renders engine, version and warming only.`
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -am "Plan clj-kondo probe fall-through and lint health"` (include this plan file).
 
 ### Task 2: `resolve_all` and `is_mise_shim`
@@ -100,25 +100,26 @@ It is separate from `KondoState` on purpose: `KondoState` is compared to retire 
 - Modify: `src/tools.rs`
 - Test: `src/tools.rs` (`mod tests`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `resolve_all_lists_every_executable_in_path_order`: two temp dirs each holding an executable `clj-kondo`, PATH built from `CLJ_PULSE_TOOL_DIRS` is not available inside a unit test, so build the candidate list through a private `resolve_all_in(program, base, path: &OsStr)` that `resolve_all` calls with `augmented_path()`; assert both paths in order.
   - `resolve_all_dedupes_the_same_file_listed_twice`: the same dir twice in the PATH yields one entry; a symlink to the first dir's binary in the second dir also collapses (canonical path).
   - `resolve_all_takes_an_explicit_path_as_the_only_candidate`.
   - `is_mise_shim_needs_a_shims_dir_and_a_mise_mention`: `shims/clj-kondo` whose content is `#!/bin/sh\nexec mise x -- clj-kondo "$@"` is a shim; the same content under `bin/` is not; `shims/clj-kondo` holding an ELF-like blob without `mise` is not.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --lib tools::`
   Expected: compile errors for the new functions.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `resolve_all_in`, `resolve_all`, `resolve` delegating to it, `is_mise_shim` reading at most 256 bytes with `std::fs::File` + `read`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --lib tools::`
   Expected: PASS, existing tests included.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "List every candidate binary and recognize mise shims"`
+  > Deviation: the branch was cut from `master` (PR #41 had merged), and the commit landed in two parts — the first missed a clippy `nonminimal_bool` lint, fixed in the follow-up commit. `tools::is_executable` was made `pub(crate)` here rather than in Task 3, since it is where the visibility lives.
 
 ### Task 3: The probe falls through and resolves shims
 
