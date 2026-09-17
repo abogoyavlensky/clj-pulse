@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 pub mod diff;
+pub mod oracle;
 pub mod sampling;
 pub mod session;
 pub mod sites;
