@@ -124,19 +124,40 @@ pub(crate) fn resolve_all_in(program: &str, base: &Path, path: &OsStr) -> Vec<Pa
 }
 
 /// Whether `path` is a mise shim: a file under a directory named `shims`
-/// whose head mentions `mise`. A shim resolves the tool through the mise
-/// config of the directory it runs from, and refuses to run at all when that
-/// config is untrusted — so a probe wants the binary behind it instead.
-/// Judged from the file alone, not from `MISE_DATA_DIR`, so a shim dir the
-/// user put on PATH by hand is recognized too.
+/// that is either a symlink to the `mise` binary (the shape mise installs
+/// today) or a script mentioning `mise` (the older shape, and what a
+/// hand-written wrapper looks like). A shim resolves the tool through the
+/// mise config of the directory it runs from, and refuses to run at all
+/// when that config is untrusted — so a probe wants the binary behind it
+/// instead. Judged from the file alone, not from `MISE_DATA_DIR`, so a shim
+/// dir the user put on PATH by hand is recognized too.
 pub fn is_mise_shim(path: &Path) -> bool {
-    use std::io::Read;
     if path
         .parent()
         .is_none_or(|d| d.file_name() != Some(OsStr::new("shims")))
     {
         return false;
     }
+    mise_behind_symlink(path).is_some() || head_mentions_mise(path)
+}
+
+/// The `mise` binary a symlink shim points at, when `path` is one: its
+/// canonical target is a file named `mise`. This is the mise to ask `which`
+/// of, more reliable than a PATH search — it is the very install that made
+/// the shim.
+pub fn mise_behind_symlink(path: &Path) -> Option<PathBuf> {
+    if !path.is_symlink() {
+        return None;
+    }
+    let target = std::fs::canonicalize(path).ok()?;
+    let name = target.file_name()?.to_str()?;
+    (name == "mise" || name == "mise.exe").then_some(target)
+}
+
+/// Whether the first 256 bytes of the file spell `mise`: a shell shim
+/// (`exec mise x -- clj-kondo "$@"`), not a real binary.
+fn head_mentions_mise(path: &Path) -> bool {
+    use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
@@ -317,6 +338,32 @@ mod tests {
             "a real binary that merely lives under shims/ is not a shim"
         );
         assert!(!is_mise_shim(&shims.join("missing")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_mise_shim_recognizes_a_symlink_to_the_mise_binary() {
+        // What mise installs today: every shim is a symlink to `mise`
+        // itself, an ELF binary whose header never spells its name.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let mise_bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::create_dir_all(&mise_bin).unwrap();
+        let blob = "\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0\x02\0\x3e\0";
+        let mise = executable(&mise_bin, "mise", blob);
+        let shim = shims.join("clj-kondo");
+        std::os::unix::fs::symlink(&mise, &shim).unwrap();
+        assert!(is_mise_shim(&shim));
+        assert_eq!(
+            mise_behind_symlink(&shim),
+            Some(mise.canonicalize().unwrap())
+        );
+        // A symlink to some other binary is a user's own arrangement.
+        let other = executable(&mise_bin, "clj-kondo-real", blob);
+        std::os::unix::fs::symlink(&other, shims.join("other")).unwrap();
+        assert!(!is_mise_shim(&shims.join("other")));
+        assert_eq!(mise_behind_symlink(&shims.join("other")), None);
     }
 
     #[test]

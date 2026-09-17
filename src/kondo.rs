@@ -524,10 +524,13 @@ async fn behind_mise_shim(
     cwd: Option<&Path>,
     path: &std::ffi::OsStr,
 ) -> std::path::PathBuf {
-    let Some(mise) = crate::tools::resolve_all_in("mise", base, path)
-        .into_iter()
-        .next()
-    else {
+    // A symlink shim points at the very mise that made it; a script shim
+    // says only `mise`, which is looked up like any tool.
+    let Some(mise) = crate::tools::mise_behind_symlink(shim).or_else(|| {
+        crate::tools::resolve_all_in("mise", base, path)
+            .into_iter()
+            .next()
+    }) else {
         return shim.to_path_buf();
     };
     let mise = mise.display().to_string();
@@ -1308,6 +1311,35 @@ printf '{"findings":[{"type":"cwd","level":"info","row":1,"col":1,"message":"%s"
             "the binary behind the shim is what lints"
         );
         assert_eq!(probe.version, "v2026.1.1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_resolves_a_symlink_shim_through_the_mise_it_points_at() {
+        // The shape mise installs: `shims/clj-kondo -> mise`. mise run as
+        // `clj-kondo` (argv[0]) would resolve through the cwd's config; asked
+        // `which`, the same binary names the install. The PATH here holds no
+        // `mise` at all, so the symlink target is the only way to find it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real = tmp.path().join("real");
+        let mise_dir = tmp.path().join("mise-home");
+        for d in [&shims, &real, &mise_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let target = fake_bin(&real, "echo 'clj-kondo v2026.1.1'\n");
+        let mise = fake_named(
+            &mise_dir,
+            "mise",
+            &format!(
+                "[ \"$1\" = which ] && [ \"$2\" = clj-kondo ] && echo '{target}' && exit 0\necho 'mise ERROR: config not trusted' >&2\nexit 1\n"
+            ),
+        );
+        std::os::unix::fs::symlink(&mise, shims.join("clj-kondo")).unwrap();
+        let probe = probe_version_in("clj-kondo", None, &path_of(&[&shims]))
+            .await
+            .unwrap();
+        assert_eq!(probe.bin, target);
     }
 
     #[cfg(unix)]
