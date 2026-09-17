@@ -1253,8 +1253,14 @@ fn spawn_lint_pass(
     pass: LintPass,
     delay: std::time::Duration,
 ) {
+    // Spawn, register and abort under the document's registry entry, as one
+    // step: tower-lsp runs handlers concurrently, so two triggers for one
+    // document can race here, and registering after the spawn would let
+    // the older one abort the newer one's pass — leaving the document with
+    // no diagnostics at all. The spawned task only gets *scheduled* here;
+    // it cannot reach the entry before the lock is released.
     let tasks = warmer.tasks.clone();
-    let key = uri.clone();
+    let entry = tasks.entry(uri.clone());
     let task = tokio::spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
@@ -1271,8 +1277,13 @@ fn spawn_lint_pass(
             .tasks
             .remove_if(&uri, |_, handle| handle.id() == tokio::task::id());
     });
-    if let Some(previous) = tasks.insert(key, task.abort_handle()) {
-        previous.abort();
+    match entry {
+        dashmap::mapref::entry::Entry::Occupied(mut previous) => {
+            previous.insert(task.abort_handle()).abort();
+        }
+        dashmap::mapref::entry::Entry::Vacant(slot) => {
+            slot.insert(task.abort_handle());
+        }
     }
 }
 

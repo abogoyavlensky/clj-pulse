@@ -223,6 +223,7 @@ It is separate from `KondoState` on purpose: `KondoState` is compared to retire 
 
 - [x] **Step 4: Commit**
   `git commit -am "Cover probe fall-through and mise shim resolution end to end"`
+  > Deviation: the inline review found a race in `spawn_lint_pass` — tower-lsp runs handlers through `buffer_unordered(4)`, so two triggers for one document could register out of order and the older one abort the newer pass, leaving the document without diagnostics. Fixup: spawn, register and abort happen under the document's `DashMap` entry lock (no await inside), so the order is the handler order.
   > Deviation: the codex checkpoint for Tasks 5 and 6 could not run — the Codex CLI hit its usage limit (resets 2026-09-18 02:26). The inline `code-review` skill stood in; re-run `review-with-codex` on the branch when the quota is back.
 
 ### Task 7: Docs
