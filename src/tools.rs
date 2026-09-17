@@ -131,9 +131,9 @@ fn resolve_all_in(program: &str, base: &Path, path: &OsStr) -> Vec<PathBuf> {
 /// user put on PATH by hand is recognized too.
 pub fn is_mise_shim(path: &Path) -> bool {
     use std::io::Read;
-    if !path
+    if path
         .parent()
-        .is_some_and(|d| d.file_name() == Some(OsStr::new("shims")))
+        .is_none_or(|d| d.file_name() != Some(OsStr::new("shims")))
     {
         return false;
     }
