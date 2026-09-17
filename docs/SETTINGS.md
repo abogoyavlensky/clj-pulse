@@ -91,7 +91,7 @@ test-harness-only:
 |---|---|---|
 | `CLJ_PULSE_COMPARE_ROOT` | unset | The corpus checkout to compare on; `bb compare` sets it. Unset, the corpus test skips. |
 | `CLJ_PULSE_COMPARE_CORPUS` | `(unnamed)` | The corpus name printed in the report and the `COMPARE_JSON` lines. |
-| `CLJ_PULSE_COMPARE_LIMIT` | `200` | Probes kept per bucket, taken as every k-th one across the corpus. |
+| `CLJ_PULSE_COMPARE_LIMIT` | `200` | Probes kept per bucket and request kind (references and rename are sampled apart), taken as every k-th one across the corpus. |
 | `CLJ_PULSE_COMPARE_FILES` | unset | Cap on the number of files visited, for a first look at a large corpus. |
 | `CLJ_PULSE_COMPARE_STRICT` | unset | Non-empty makes any new (not allowlisted) divergence fail the run; otherwise the run is advisory. |
 

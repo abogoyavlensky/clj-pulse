@@ -225,6 +225,16 @@ fn within(sites: Sites, roots: &[PathBuf]) -> Sites {
     )
 }
 
+/// How many expected sites the answer lacks, counted per line the way the
+/// verdict is: a site the answer ranges from another column is present.
+fn missing_sites(expected: &Sites, got: &Sites) -> usize {
+    expected
+        .per_line
+        .iter()
+        .map(|(key, n)| n.saturating_sub(got.per_line.get(key).copied().unwrap_or(0)))
+        .sum()
+}
+
 fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
     if got.is_empty() && !expected.is_empty() {
         return Verdict::Null {
@@ -236,7 +246,7 @@ fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
         return Verdict::Diverge {
             expected: brief_set(&theirs, &mine),
             got: brief_set(&mine, &theirs),
-            missing: expected.exact.difference(&got.exact).count(),
+            missing: missing_sites(expected, got),
         };
     }
     if expected.exact != got.exact {
@@ -797,7 +807,8 @@ mod oracle_tests {
             .find(|((_, line), _)| *line == 7)
             .map(|(_, n)| *n);
         assert_eq!(usage_line, Some(2), "{sites:?}");
-        assert_eq!(sites.exact.len(), 3);
+        // The def, the two on line 8, and the one after the emoji on line 17.
+        assert_eq!(sites.exact.len(), 4);
     }
 
     #[test]
@@ -842,6 +853,15 @@ mod oracle_tests {
         // alias_sites.clj:7 `(defn f [{::c/keys [blend]}] blend)` — the
         // `::c/keys` directive at column 11 gets no probe.
         assert!(at(&probes, "src/alias_sites.clj", 6, 14).is_empty());
+        // twice.clj:11 `(def config {::keys [:a :b]})` is a map value, not a
+        // binding: its `::keys` is a key somebody reads (`:14`), so both
+        // sites are probed and expected.
+        let data_key = at(&probes, "src/twice.clj", 10, 15);
+        assert!(
+            data_key.iter().any(|p| p.bucket == "keyword/qualified"
+                && matches!(&p.expect, Expectation::References(s) if s.exact.len() == 2)),
+            "{data_key:?}"
+        );
         // keywords.clj:13 `(assoc m :id (::c/thing m)))` — one site, renamable;
         // the cursor sits on `thing`, past the alias.
         let thing = at(&probes, "src/keywords.clj", 12, 20);
@@ -849,6 +869,34 @@ mod oracle_tests {
             thing.iter().any(|p| p.bucket == "keyword/alias"
                 && matches!(&p.expect, Expectation::RenameSites(s) if s.exact.len() == 1)),
             "{thing:?}"
+        );
+    }
+
+    #[test]
+    fn columns_are_utf16_units() {
+        let Some((_tmp, probes)) = fixture_probes() else {
+            return;
+        };
+        // twice.clj:17 `(defn smile [x] (str "😀" (twin x)))` — `twin` starts
+        // 27 UTF-16 units in (26 chars: the emoji is one char, two units).
+        let found = at(&probes, "src/twice.clj", 16, 27);
+        assert!(
+            found.iter().any(|p| p.token == "twin"
+                && matches!(&p.expect, Expectation::Definition { line, .. } if *line == 4)),
+            "{found:?}"
+        );
+        // And the same site is expected of the def's references at that column.
+        let def = at(&probes, "src/twice.clj", 4, 6);
+        let sites = def
+            .iter()
+            .find_map(|p| match &p.expect {
+                Expectation::References(s) => Some(s),
+                _ => None,
+            })
+            .expect("references probe");
+        assert!(
+            sites.exact.iter().any(|(_, l, c)| (*l, *c) == (16, 27)),
+            "{sites:?}"
         );
     }
 
@@ -1038,6 +1086,68 @@ mod judge_tests {
     }
 
     #[test]
+    fn missing_counts_per_line_so_a_shifted_column_is_present() {
+        let root = Path::new("/corpus");
+        // Expected: the def and one caller. Got: both lines, the caller at
+        // another column, plus an implementation site — a superset by line.
+        let p = probe(Expectation::References(sites(&[(3, 2), (9, 4)])));
+        let verdict = judge(
+            &p,
+            &Answer::Result(locations(&[(3, 2), (9, 8), (20, 3)])),
+            root,
+            &roots(),
+        );
+        assert!(
+            matches!(verdict, Verdict::Diverge { missing: 0, .. }),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn sampling_keeps_every_request_kind() {
+        let mut probes = Vec::new();
+        for i in 0..150u32 {
+            for expect in [
+                Expectation::References(sites(&[(i, 0)])),
+                Expectation::RenameSites(sites(&[(i, 0)])),
+            ] {
+                let mut p = probe(expect);
+                p.line = i;
+                probes.push(p);
+            }
+        }
+        // 300 probes, limit 200: a stride over the bucket alone would be 2 and
+        // keep only the even indices — every references probe, no rename.
+        let kept = sample(probes, 200, None);
+        let renames = kept
+            .iter()
+            .filter(|p| matches!(p.expect, Expectation::RenameSites(_)))
+            .count();
+        let references = kept.len() - renames;
+        assert_eq!((references, renames), (150, 150));
+        let capped = sample(
+            (0..500u32)
+                .map(|i| {
+                    let mut p = probe(Expectation::References(sites(&[(i, 0)])));
+                    p.line = i;
+                    p
+                })
+                .collect(),
+            200,
+            None,
+        );
+        assert!(
+            capped.len() <= 200 && capped.len() >= 160,
+            "{}",
+            capped.len()
+        );
+        assert!(
+            capped.iter().any(|p| p.line > 400),
+            "spread over the whole range"
+        );
+    }
+
+    #[test]
     fn known_divergences_are_counted_apart() {
         let root = Path::new("/corpus");
         let mut p = probe(Expectation::RenameSites(sites(&[(3, 2)])));
@@ -1101,11 +1211,14 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
 }
 
 /// Deterministic sampling: probes come sorted by file, line, character; a
-/// bucket with more than `limit` keeps every k-th one, so the sample spreads
-/// over the corpus instead of exhausting the limit on whichever files sort
-/// first (a vendored `inlined/` tree would otherwise be the whole library
-/// story). `files` caps how many files are visited at all, for a first look
-/// at a corpus the size of metabase.
+/// bucket with more than `limit` probes of one request kind keeps every k-th
+/// of them, so the sample spreads over the corpus instead of exhausting the
+/// limit on whichever files sort first (a vendored `inlined/` tree would
+/// otherwise be the whole library story). The stride runs per bucket *and*
+/// request: a var-definition bucket alternates references and rename probes,
+/// and an even stride over the bucket alone would keep one kind and drop the
+/// other entirely. `files` caps how many files are visited at all, for a
+/// first look at a corpus the size of metabase.
 fn sample(probes: Vec<Probe>, limit: usize, files: Option<usize>) -> Vec<Probe> {
     let probes: Vec<Probe> = match files {
         Some(cap) => {
@@ -1120,24 +1233,26 @@ fn sample(probes: Vec<Probe>, limit: usize, files: Option<usize>) -> Vec<Probe> 
         }
         None => probes,
     };
-    let mut per_bucket: BTreeMap<String, usize> = BTreeMap::new();
+    let key = |probe: &Probe| format!("{} {}", probe.bucket, probe.expect.request());
+    let mut per_key: BTreeMap<String, usize> = BTreeMap::new();
     for probe in &probes {
-        *per_bucket.entry(probe.bucket.clone()).or_insert(0) += 1;
+        *per_key.entry(key(probe)).or_insert(0) += 1;
     }
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut kept: BTreeMap<String, usize> = BTreeMap::new();
     probes
         .into_iter()
         .filter(|probe| {
-            let total = per_bucket[&probe.bucket];
-            let i = seen.entry(probe.bucket.clone()).or_insert(0);
+            let key = key(probe);
+            let total = per_key[&key];
+            let i = seen.entry(key.clone()).or_insert(0);
             let index = *i;
             *i += 1;
             let stride = total.div_ceil(limit.max(1));
             if !index.is_multiple_of(stride) {
                 return false;
             }
-            let k = kept.entry(probe.bucket.clone()).or_insert(0);
+            let k = kept.entry(key).or_insert(0);
             if *k >= limit {
                 return false;
             }
@@ -1199,7 +1314,7 @@ fn compare_corpus() {
     let all = oracle::probes(&analysis);
     let probes = sample(all, limit, files);
     println!(
-        "analysis in {:?}: {} var-definitions, {} var-usages, {} locals, {} keywords; {} probes after sampling (limit {limit}/bucket{})",
+        "analysis in {:?}: {} var-definitions, {} var-usages, {} locals, {} keywords; {} probes after sampling (limit {limit} per bucket and request{})",
         started.elapsed(),
         analysis.var_definitions.len(),
         analysis.var_usages.len(),

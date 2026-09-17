@@ -6,3 +6,12 @@
 
 (defn both [x]
   (+ (twin x) (twin x)))
+
+;; A map value whose key is spelled `keys`: data, not destructuring.
+(def config {::keys [:a :b]})
+
+(defn config-keys []
+  (::keys config))
+
+;; An astral character before a token: columns count UTF-16 units.
+(defn smile [x] (str "😀" (twin x)))

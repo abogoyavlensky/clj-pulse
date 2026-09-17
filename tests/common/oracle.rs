@@ -372,13 +372,59 @@ impl Sites {
 }
 
 /// The file texts a probe build reads: one read per file, for the token under
-/// each cursor and the destructuring check.
+/// each cursor and the destructuring checks. Columns everywhere here are
+/// UTF-16 units — kondo counts Java chars and the server negotiates UTF-16 —
+/// and are converted to chars or bytes only at the edge of a `str` or a tree.
 #[derive(Default)]
 struct Texts {
     by_file: BTreeMap<PathBuf, Option<(String, Option<tree_sitter::Tree>)>>,
+    /// Where every local kondo reported starts, per file: what tells a
+    /// destructuring directive from a map that merely spells `:keys`.
+    locals: BTreeMap<PathBuf, BTreeSet<(u32, u32)>>,
+}
+
+/// The char index of a UTF-16 column in `line`, clamped to its end.
+fn utf16_to_char(line: &str, col: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in line.chars().enumerate() {
+        if units >= col {
+            return i;
+        }
+        units += c.len_utf16();
+    }
+    line.chars().count()
+}
+
+/// The UTF-16 column of a byte offset in `line` (clamped).
+fn byte_to_utf16(line: &str, byte: usize) -> usize {
+    line[..byte.min(line.len())].encode_utf16().count()
+}
+
+/// The byte offset of a UTF-16 column in `line`, clamped to its end.
+fn utf16_to_byte(line: &str, col: usize) -> usize {
+    let mut units = 0;
+    for (b, c) in line.char_indices() {
+        if units >= col {
+            return b;
+        }
+        units += c.len_utf16();
+    }
+    line.len()
 }
 
 impl Texts {
+    fn with_locals(analysis: &Analysis) -> Self {
+        let mut texts = Texts::default();
+        for local in &analysis.locals {
+            texts
+                .locals
+                .entry(PathBuf::from(&local.filename))
+                .or_default()
+                .insert((local.row - 1, local.col - 1));
+        }
+        texts
+    }
+
     fn get(&mut self, file: &Path) -> Option<&(String, Option<tree_sitter::Tree>)> {
         self.by_file
             .entry(file.to_path_buf())
@@ -390,20 +436,13 @@ impl Texts {
             .as_ref()
     }
 
-    /// The token at a 0-based `(line, character)`, kondo's idea of one: up to
-    /// whitespace or a bracket, so `alias/name` stays whole and `::k` keeps its
-    /// colons. Starts from the position's token start, not the position, since
-    /// kondo's `name-col` points inside an aliased token.
-    fn token_at(&mut self, file: &Path, line: u32, character: u32) -> String {
-        let Some((text, _)) = self.get(file) else {
-            return String::new();
-        };
-        let Some(line_text) = text.lines().nth(line as usize) else {
-            return String::new();
-        };
+    /// The token's char span `[start, end)` around a UTF-16 column, kondo's
+    /// idea of one: up to whitespace or a bracket, so `alias/name` stays
+    /// whole and `::k` keeps its colons.
+    fn token_span(line_text: &str, character: u32) -> (Vec<char>, usize, usize) {
         let chars: Vec<char> = line_text.chars().collect();
         let boundary = |c: char| c.is_whitespace() || "()[]{}\"'`~@^,".contains(c);
-        let at = (character as usize).min(chars.len());
+        let at = utf16_to_char(line_text, character as usize).min(chars.len());
         let mut start = at;
         while start > 0 && !boundary(chars[start - 1]) {
             start -= 1;
@@ -412,30 +451,40 @@ impl Texts {
         while end < chars.len() && !boundary(chars[end]) {
             end += 1;
         }
+        (chars, start, end)
+    }
+
+    /// The token at a 0-based `(line, character)`. Starts from the token's
+    /// own start, not the position, since kondo's `name-col` points inside an
+    /// aliased token.
+    fn token_at(&mut self, file: &Path, line: u32, character: u32) -> String {
+        let Some((text, _)) = self.get(file) else {
+            return String::new();
+        };
+        let Some(line_text) = text.lines().nth(line as usize) else {
+            return String::new();
+        };
+        let (chars, start, end) = Self::token_span(line_text, character);
         chars[start..end].iter().collect()
     }
 
-    /// The 0-based character of the *name part* of the token at a position:
-    /// kondo's `name-col` is where the whole token starts, alias included, so
-    /// for `core/add` it points at `c`, and for `::local` at the colons. A
-    /// cursor on the alias asks about the alias, which is a different question
-    /// (and one whose answer is known to differ, ROADMAP 2026-09-16), and
-    /// clj-pulse ranges a keyword occurrence by its name — so both the probe
-    /// and the expected sites use the first character of `add` / `local`.
+    /// The 0-based UTF-16 column of the *name part* of the token at a
+    /// position: kondo's `name-col` is where the whole token starts, alias
+    /// included, so for `core/add` it points at `c`, and for `::local` at the
+    /// colons. A cursor on the alias asks about the alias, which is a
+    /// different question (and one whose answer is known to differ, ROADMAP
+    /// 2026-09-16), and clj-pulse ranges a keyword occurrence by its name — so
+    /// both the probe and the expected sites use the first character of `add`
+    /// / `local`.
     fn name_part(&mut self, file: &Path, line: u32, character: u32) -> u32 {
-        let token = self.token_at(file, line, character);
         let Some((text, _)) = self.get(file) else {
             return character;
         };
         let Some(line_text) = text.lines().nth(line as usize) else {
             return character;
         };
-        let chars: Vec<char> = line_text.chars().collect();
-        let boundary = |c: char| c.is_whitespace() || "()[]{}\"'`~@^,".contains(c);
-        let mut start = (character as usize).min(chars.len());
-        while start > 0 && !boundary(chars[start - 1]) {
-            start -= 1;
-        }
+        let (chars, start, end) = Self::token_span(line_text, character);
+        let token: String = chars[start..end].iter().collect();
         let colons = token.len() - token.trim_start_matches(':').len();
         // `/` alone and a leading `/` are names, not separators.
         let after_slash = token
@@ -444,7 +493,8 @@ impl Texts {
             .map(|(i, _)| i + 1)
             .filter(|i| *i < token.len());
         let offset = after_slash.unwrap_or(colons);
-        (start + token[..offset].chars().count()) as u32
+        let prefix: String = chars[..start].iter().collect();
+        (prefix.encode_utf16().count() + token[..offset].encode_utf16().count()) as u32
     }
 
     /// Whether the symbol at a 0-based position is an entry of a `:keys`,
@@ -478,13 +528,15 @@ impl Texts {
             .unwrap_or_default();
         matches!(name, "keys" | "strs" | "syms")
     }
-}
 
-impl Texts {
     /// Whether the keyword at a 0-based position is the `:keys`/`:strs`/
     /// `:syms` directive of a destructuring map — `::c/keys` counts as a
     /// keyword of `simple.core` for kondo, but it names no key anyone reads.
+    /// Binding position is kondo's call, not a guess from the tree: the
+    /// vector after the keyword holds a local it reported. A map that is a
+    /// value — `(def m {::keys [:a]})` — binds nothing there and reads its key.
     fn directive_at(&mut self, file: &Path, line: u32, character: u32) -> bool {
+        let locals = self.locals.get(file).cloned().unwrap_or_default();
         let Some((text, Some(tree))) = self.get(file) else {
             return false;
         };
@@ -502,28 +554,39 @@ impl Texts {
             .child_by_field_name("name")
             .map(|n| n.utf8_text(text.as_bytes()).unwrap_or_default())
             .unwrap_or_default();
-        matches!(name, "keys" | "strs" | "syms")
-            && kwd.parent().is_some_and(|p| p.kind() == "map_lit")
-            && kwd
-                .next_named_sibling()
-                .is_some_and(|v| v.kind() == "vec_lit")
+        if !matches!(name, "keys" | "strs" | "syms")
+            || !kwd.parent().is_some_and(|p| p.kind() == "map_lit")
+        {
+            return false;
+        }
+        let Some(vec) = kwd.next_named_sibling().filter(|v| v.kind() == "vec_lit") else {
+            return false;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let point = |p: tree_sitter::Point| {
+            let col = lines
+                .get(p.row)
+                .map(|l| byte_to_utf16(l, p.column))
+                .unwrap_or(p.column);
+            (p.row as u32, col as u32)
+        };
+        let (start, end) = (point(vec.start_position()), point(vec.end_position()));
+        locals.range(start..end).next().is_some()
     }
 }
 
-/// The smallest node at a 0-based `(line, character)`, character counted the
-/// way kondo does and tree-sitter's bytes derived from the line.
+/// The smallest node at a 0-based `(line, character)`, character in UTF-16
+/// units and tree-sitter's bytes derived from the line.
 fn node_at<'t>(
     tree: &'t tree_sitter::Tree,
     text: &str,
     line: u32,
     character: u32,
 ) -> Option<tree_sitter::Node<'t>> {
-    let byte_col = text.lines().nth(line as usize).map(|l| {
-        l.char_indices()
-            .nth(character as usize)
-            .map(|(b, _)| b)
-            .unwrap_or(l.len())
-    })?;
+    let byte_col = text
+        .lines()
+        .nth(line as usize)
+        .map(|l| utf16_to_byte(l, character as usize))?;
     let point = tree_sitter::Point::new(line as usize, byte_col);
     tree.root_node().descendant_for_point_range(point, point)
 }
@@ -531,7 +594,7 @@ fn node_at<'t>(
 /// Every probe the analysis supports, in a fixed order: by file, line,
 /// character, then request, so a limit takes the same ones on every run.
 pub fn probes(analysis: &Analysis) -> Vec<Probe> {
-    let mut texts = Texts::default();
+    let mut texts = Texts::with_locals(analysis);
     let mut out = Vec::new();
 
     // --- var definitions -------------------------------------------------
@@ -922,8 +985,8 @@ pub fn covered(analysis: &Analysis, file: &Path) -> BTreeSet<(u32, u32)> {
 }
 
 /// How many `sym_lit`/`kwd_lit` tokens in `text` start at a position not in
-/// `covered` — what neither side can judge. Columns are counted in characters,
-/// kondo's unit.
+/// `covered` — what neither side can judge. Columns are counted in UTF-16
+/// units, kondo's unit.
 pub fn unjudged(text: &str, covered: &BTreeSet<(u32, u32)>) -> usize {
     let Some(tree) = clj_pulse::index::extractor::parse_tree(text) else {
         return 0;
@@ -937,7 +1000,7 @@ pub fn unjudged(text: &str, covered: &BTreeSet<(u32, u32)>) -> usize {
             let start = node.start_position();
             let char_col = lines
                 .get(start.row)
-                .map(|l| l[..start.column.min(l.len())].chars().count())
+                .map(|l| l[..start.column.min(l.len())].encode_utf16().count())
                 .unwrap_or(start.column);
             if !covered.contains(&(start.row as u32, char_col as u32)) {
                 count += 1;
