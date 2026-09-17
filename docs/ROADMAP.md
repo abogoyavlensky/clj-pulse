@@ -38,11 +38,12 @@ then the editor features users notice as missing. Guiding decisions:
    same day, one line with the date. Promote it into a milestone when it is
    scheduled; delete it when it is rejected, with the reason in Not planned.
 
-## Where we stand (September 2026, v0.5.1)
+## Where we stand (September 2026, v0.5.2)
 
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
-references, rename (vars, locals and qualified keywords) with `prepareRename`,
+references, rename (vars, locals, require aliases and qualified keywords) with
+`prepareRename`,
 hover, ClojureDocs
 request, completion (fuzzy-matched and ranked, `/` and `:` triggers, keywords
 in the notation being typed, auto-require on accept, lazy
