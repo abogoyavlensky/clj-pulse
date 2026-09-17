@@ -67,6 +67,9 @@ parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 `selectionRange` expands the selection along the parse tree. A library
 namespace present in both dialects navigates to the copy matching the asking
 file: `.clj` and `.cljc` open the Clojure one, `.cljs` the ClojureScript one.
+The clj-kondo probe tries every install it can find and resolves mise shims
+to the binary behind them, and a lint pass that fails is reported once on
+`lintStatus` and in the log instead of silently publishing the native set.
 
 Not shipped: `foldingRange`, formatting, semantic tokens, code lens,
 implementation provider, `executeCommand` refactors, `willRenameFiles`.
@@ -260,7 +263,7 @@ the release.
       file that is asking. Found by the clojure-lsp benchmark, which has to accept
       either file to time the metric at all.
   Plan: [2026-09-17-2240-library-dialect-preference.md](plans/2026-09-17-2240-library-dialect-preference.md) — done
-- [ ] **clj-kondo discovery and failure reporting.**
+- [x] **clj-kondo discovery and failure reporting.**
   - A failing clj-kondo candidate ends the probe instead of falling through
     to the next one. On the metabase bench corpus the same binary reported
     `kondo+native` under `bb bench` and "clj-kondo not found - native lints
@@ -279,7 +282,7 @@ the release.
     on `lintStatus`, rate-limited warn log, a realistic default timeout with
     cancellation of superseded runs, and `mise which` resolution of shims at
     probe time so the per-file cwd stops deciding which binary runs.
-  Plan: [2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md](plans/2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md) — in progress
+  Plan: [2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md](plans/2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.

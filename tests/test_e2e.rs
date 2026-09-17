@@ -5505,9 +5505,9 @@ fn test_e2e_kondo_not_found_says_where_it_looked() {
 
 #[test]
 fn test_e2e_kondo_workspace_relative_path_lints_files_in_subdirectories() {
-    // `:path "./bin/clj-kondo"` is anchored to the workspace. A lint runs from
-    // the file's own directory (so mise shims see the project's pin), which
-    // must not turn that path into `src/bin/clj-kondo`.
+    // `:path "./bin/clj-kondo"` is anchored to the workspace: the probe
+    // resolves it to a full path once, and that path is what every lint
+    // runs, whatever directory it runs from.
     let project = setup_kondo_project();
     let root = project.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("bin")).unwrap();
