@@ -89,6 +89,122 @@ fn two_ns_jar_project() -> (tempfile::TempDir, std::path::PathBuf) {
     (project, root)
 }
 
+/// A project whose classpath holds a Clojure JAR (`clojure/string.clj`) and a
+/// ClojureScript JAR (`clojure/string.cljs`) that both define
+/// `clojure.string/trim`, in the order `cljs_first` says, with a `.clj` and a
+/// `.cljs` consumer under `src/`.
+fn clojure_and_clojurescript_jars_project(
+    cljs_first: bool,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let write_jar = |name: &str, entry: &str, source: &[u8]| {
+        let jar_path = root.join(name);
+        let jar_file = std::fs::File::create(&jar_path).unwrap();
+        let mut zip = zip::ZipWriter::new(jar_file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file(entry, opts).unwrap();
+        zip.write_all(source).unwrap();
+        zip.finish().unwrap();
+        jar_path
+    };
+    let clj_jar = write_jar(
+        "clojure-x.jar",
+        "clojure/string.clj",
+        b"(ns clojure.string)\n\n(defn trim \"Clojure\" [s] s)\n",
+    );
+    let cljs_jar = write_jar(
+        "clojurescript-x.jar",
+        "clojure/string.cljs",
+        b"(ns clojure.string)\n\n(defn trim \"ClojureScript\" [s] s)\n",
+    );
+    let jars = if cljs_first {
+        [cljs_jar, clj_jar]
+    } else {
+        [clj_jar, cljs_jar]
+    };
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(
+        cpcache.join("1.cp"),
+        std::env::join_paths(jars).unwrap().as_encoded_bytes(),
+    )
+    .unwrap();
+
+    for ext in ["clj", "cljs"] {
+        std::fs::write(
+            root.join(format!("src/uses_string.{ext}")),
+            "(ns uses-string\n  (:require [clojure.string :as str]))\n\n(str/trim \"x\")\n",
+        )
+        .unwrap();
+    }
+
+    (project, root)
+}
+
+#[test]
+fn test_e2e_definition_from_clj_prefers_the_clojure_jar_copy() {
+    // Whatever order the classpath lists the two JARs, a `.clj` file navigates
+    // into the Clojure copy of clojure.string.
+    for cljs_first in [true, false] {
+        let (_project, root) = clojure_and_clojurescript_jars_project(cljs_first);
+        let consumer = root.join("src/uses_string.clj");
+
+        let mut client = LspClient::start(&root);
+        client.initialize(&root);
+        client.wait_for_log("library indexing complete");
+        client.did_open(&consumer);
+
+        let (line, ch) = position_of(&consumer, "trim");
+        let loc = client.goto_definition(&consumer, line, ch);
+        let uri = loc["uri"].as_str().unwrap_or_default();
+        assert!(
+            uri.starts_with("jar:file://") && uri.ends_with("!/clojure/string.clj"),
+            "cljs_first={cljs_first}: expected the Clojure copy, got {loc}"
+        );
+    }
+}
+
+#[test]
+fn test_e2e_definition_from_cljs_prefers_the_clojurescript_jar_copy() {
+    // The twin: a `.cljs` file navigates into, and hovers, the ClojureScript
+    // copy, and the namespace in its require clause opens that file too.
+    for cljs_first in [true, false] {
+        let (_project, root) = clojure_and_clojurescript_jars_project(cljs_first);
+        let consumer = root.join("src/uses_string.cljs");
+
+        let mut client = LspClient::start(&root);
+        client.initialize(&root);
+        client.wait_for_log("library indexing complete");
+        client.did_open(&consumer);
+
+        let (line, ch) = position_of(&consumer, "trim");
+        let loc = client.goto_definition(&consumer, line, ch);
+        let uri = loc["uri"].as_str().unwrap_or_default();
+        assert!(
+            uri.starts_with("jar:file://") && uri.ends_with("!/clojure/string.cljs"),
+            "cljs_first={cljs_first}: expected the ClojureScript copy, got {loc}"
+        );
+
+        let hover = client.hover(&consumer, line, ch);
+        let md = hover["contents"]["value"].as_str().unwrap_or_default();
+        assert!(
+            md.contains("ClojureScript"),
+            "cljs_first={cljs_first}: expected the ClojureScript docstring, got {hover}"
+        );
+
+        let (line, ch) = position_of(&consumer, "clojure.string");
+        let loc = client.goto_definition(&consumer, line, ch);
+        let uri = loc["uri"].as_str().unwrap_or_default();
+        assert!(
+            uri.ends_with("!/clojure/string.cljs"),
+            "cljs_first={cljs_first}: expected the namespace to open its ClojureScript copy, got {loc}"
+        );
+    }
+}
+
 #[test]
 fn test_e2e_letgo_navigation_into_lgx_deps() {
     let project = setup_named("letgo_project");

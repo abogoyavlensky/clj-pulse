@@ -3,7 +3,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::{extractor, Index};
+use crate::index::{extractor, Dialect, Index};
 use crate::uri;
 
 use super::{resolve_symbol, ResolvedSymbol};
@@ -30,6 +30,9 @@ pub fn handle(
         }
     };
     let current_ns = index.file_ns(&path).unwrap_or_default();
+    // A `.cljs` buffer navigates into the ClojureScript copy of a library
+    // namespace when one exists; everything else into the Clojure one.
+    let dialect = Dialect::of_path(&path);
 
     // Local bindings (let/fn/loop/…) shadow vars, so a cursor on a locally-bound
     // name navigates to its binding site in the same file — checked before the
@@ -48,7 +51,7 @@ pub fn handle(
     let resolved = super::references::resolve_fqn_at(index, documents, &uri, pos);
     tracing::debug!("goto_definition: resolved={:?}", resolved);
     if let Some(fqn) = resolved {
-        if let Some(sym) = index.lookup(&fqn) {
+        if let Some(sym) = index.lookup_for(&fqn, dialect) {
             let location = location_for(&sym.file, sym.name_range)?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }
@@ -74,6 +77,7 @@ pub fn handle(
 
     match resolve_symbol(index, &word, &current_ns) {
         Some(ResolvedSymbol::Project(sym)) => {
+            let sym = index.prefer_dialect(sym, dialect);
             let location = location_for(&sym.file, sym.name_range)?;
             Ok(Some(GotoDefinitionResponse::Scalar(location)))
         }
@@ -82,11 +86,12 @@ pub fn handle(
             // navigate to the namespace only when the cursor is on the alias
             // declaration itself, not on a core-symbol usage in a body.
             if on_alias_declaration(documents, &uri, pos.line, &word) {
-                return namespace_location(index, &current_ns, &word);
+                return namespace_location(index, &current_ns, &word, dialect);
             }
             // Built-ins live in the clojure JAR like any other library
             // symbol; the static core list is only a doc shortcut.
             if let Some(sym) = index.lookup_in_ns("clojure.core", &core.name) {
+                let sym = index.prefer_dialect(sym, dialect);
                 let location = location_for(&sym.file, sym.name_range)?;
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
             }
@@ -98,7 +103,7 @@ pub fn handle(
         // navigate to that namespace, mirroring the Core arm above.
         Some(ResolvedSymbol::SpecialForm(_)) | Some(ResolvedSymbol::LetgoNative(_)) => {
             if on_alias_declaration(documents, &uri, pos.line, &word) {
-                return namespace_location(index, &current_ns, &word);
+                return namespace_location(index, &current_ns, &word, dialect);
             }
             Ok(None)
         }
@@ -106,7 +111,7 @@ pub fn handle(
             // The word may be a require alias (`[ring.util.response :as
             // response]` with the cursor on `response`) or a namespace name
             // itself — navigate to the top of that namespace's file.
-            if let Some(resp) = namespace_location(index, &current_ns, &word)? {
+            if let Some(resp) = namespace_location(index, &current_ns, &word, dialect)? {
                 return Ok(Some(resp));
             }
             // Last resort: built-in Java interop (class, static member, ctor).
@@ -196,11 +201,15 @@ fn on_alias_declaration(documents: &DocumentStore, uri: &Url, line: u32, word: &
 }
 
 /// Location at the top of the file defining `word`, where `word` is either a
-/// require alias of `current_ns` or a namespace name itself.
+/// require alias of `current_ns` or a namespace name itself. The alias table
+/// is read from the primary `NsMeta` of `current_ns` (an open buffer's own ns
+/// form is what `resolve_fqn_at` reads); only the *target* namespace's file is
+/// chosen by `dialect`.
 fn namespace_location(
     index: &Index,
     current_ns: &str,
     word: &str,
+    dialect: Dialect,
 ) -> Result<Option<GotoDefinitionResponse>> {
     let target_ns = index
         .ns_meta(current_ns)
@@ -208,7 +217,7 @@ fn namespace_location(
         .or_else(|| index.ns_meta(word).map(|_| word.to_string()));
 
     if let Some(ns) = target_ns {
-        if let Some(meta) = index.ns_meta(&ns) {
+        if let Some(meta) = index.ns_meta_for(&ns, dialect) {
             let location = location_for(&meta.file, Range::default())?;
             return Ok(Some(GotoDefinitionResponse::Scalar(location)));
         }

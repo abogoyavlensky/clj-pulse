@@ -80,7 +80,10 @@ Language features:
 
 Clojure & project support:
 
-- **File types:** `.clj`, `.cljs`, `.cljc`, `.lg`.
+- **File types:** `.clj`, `.cljs`, `.cljc`, `.lg`. When a dependency ships a
+  namespace as both `.clj` and `.cljs`, navigation and hover from a `.clj` or
+  `.cljc` file open the Clojure copy and from a `.cljs` file the ClojureScript
+  one, whatever order the classpath lists the JARs.
 - **ns forms:** `:as`, `:as-alias`, `:refer` (including `:refer :all` and
   `(:use ns)`), `:rename`, `:refer-clojure :exclude` / `:rename`, `:import`,
   reader conditionals, and legacy prefix lists `(clojure [set :as s] string)`.
