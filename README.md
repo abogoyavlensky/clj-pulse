@@ -532,6 +532,7 @@ bb test       # run tests
 bb check      # run all checks (fmt-check + lint + test), exactly as CI does
 bb bench      # compare clj-pulse with clojure-lsp on two real projects
 bb soak       # churn one long-lived server and check it against a fresh one
+bb compare    # judge definition/references/rename against clj-kondo's analysis
 bb outdated   # check outdated deps 
 bb build      # build the dev binary
 bb release    # build release binary
@@ -567,6 +568,13 @@ workspace symbol, the run fails and prints both answers. Memory is sampled at
 each checkpoint in the same quiesced, nothing-open state. Unlike `bb bench` it
 is a pass/fail gate. `bb soak metabase` is the long one, and the seed printed on
 every run replays a failure exactly: `bb soak clj-kondo <seed>`.
+
+`bb compare` asks one production server a definition, references or rename
+question at every position clj-kondo's analysis of the same corpus knows the
+answer to, and reports every disagreement by language construct — an oracle
+that is not our own extractor. It is advisory (the report is the product;
+`CLJ_PULSE_COMPARE_STRICT=1` makes any new divergence fail it), and the first
+run's table with what it found is in [docs/MEMORY.md](docs/MEMORY.md).
 
 > [!NOTE]
 > To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.

@@ -83,6 +83,18 @@ you set, since a `projects`-only push erases `kondo`.
 | `CLJ_PULSE_DISABLE_KONDO` | unset | Non-empty forces `:kondo {:enabled false}`: the native lints alone, whatever the config says. |
 | `CLJ_PULSE_TEST_PANIC` | unset | Test-only. Registers `clojurePulse/__testPanic`, a method that panics on purpose, so the suite can prove a panicking handler does not take the server down. Never set it in normal use. |
 
+The `bb bench`, `bb soak` and `bb compare` tasks set variables of their own
+that the test binaries read, not the server. The compare gate's, all
+test-harness-only:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CLJ_PULSE_COMPARE_ROOT` | unset | The corpus checkout to compare on; `bb compare` sets it. Unset, the corpus test skips. |
+| `CLJ_PULSE_COMPARE_CORPUS` | `(unnamed)` | The corpus name printed in the report and the `COMPARE_JSON` lines. |
+| `CLJ_PULSE_COMPARE_LIMIT` | `200` | Probes kept per bucket, taken as every k-th one across the corpus. |
+| `CLJ_PULSE_COMPARE_FILES` | unset | Cap on the number of files visited, for a first look at a large corpus. |
+| `CLJ_PULSE_COMPARE_STRICT` | unset | Non-empty makes any new (not allowlisted) divergence fail the run; otherwise the run is advisory. |
+
 ## Where the defaults live
 
 Change one of these and this page has to change with it
