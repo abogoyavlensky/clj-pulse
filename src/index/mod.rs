@@ -181,10 +181,53 @@ pub struct CoreSymbol {
     pub doc: String,
 }
 
+/// Which dialect a file asks for: the source of a `.cljs` file, or everything
+/// else. A `.cljc` file, a `.lg` file, an EDN config and a `jar:` virtual path
+/// are all judged by extension, so a `.cljs` entry inside a JAR is `Cljs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    Clj,
+    Cljs,
+}
+
+impl Dialect {
+    pub fn of_path(path: &Path) -> Dialect {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("cljs") => Dialect::Cljs,
+            _ => Dialect::Clj,
+        }
+    }
+}
+
+/// Rank of a library file when two files define the same fqn: lower wins.
+/// `.clj` is the copy a Clojure reader wants, `.cljc` serves both dialects,
+/// `.cljs` is the ClojureScript copy `Index::cljs_symbols` keeps aside.
+/// Anything else (`.lg`, a `.clj`-less entry) ranks with `.cljc`.
+fn lib_rank(path: &Path) -> u8 {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("clj") => 0,
+        Some("cljs") => CLJS_RANK,
+        _ => 1,
+    }
+}
+
+/// The `lib_rank` of a `.cljs` file, the one rank whose loser is kept aside.
+const CLJS_RANK: u8 = 2;
+
 pub struct Index {
     pub symbols: DashMap<String, Symbol>,
     pub namespaces: DashMap<String, NsMeta>,
     pub ns_symbols: DashMap<String, Vec<String>>,
+    /// The ClojureScript copy of a library symbol that a Clojure copy displaced
+    /// from `symbols` (or that arrived after one). Read only through
+    /// [`Index::lookup_for`] / [`Index::prefer_dialect`] with `Dialect::Cljs`;
+    /// library entries alone, so `clear_libs` empties it and `remove_file`
+    /// never touches it.
+    cljs_symbols: DashMap<String, Symbol>,
+    /// The ClojureScript copy of a library namespace's metadata that a Clojure
+    /// copy displaced from `namespaces`; the twin of `cljs_symbols`, read only
+    /// through [`Index::ns_meta_for`].
+    cljs_namespaces: DashMap<String, NsMeta>,
     pub file_to_ns: DashMap<PathBuf, String>,
     /// Resolved symbol usages per project file (libraries excluded).
     pub occurrences: DashMap<PathBuf, Vec<Occurrence>>,
@@ -215,12 +258,53 @@ pub struct Index {
     extract_config: RwLock<ExtractConfig>,
 }
 
+/// The dialect rule of [`Index::insert_lib_file`] for one primary/shadow map
+/// pair. `old_rank` ranks the entry already in the primary slot, or answers
+/// `None` when that entry is project-owned and must stay. Incoming rank at or
+/// below the old one takes the slot; a `.cljs` copy (rank 2) that loses or is
+/// displaced by a Clojure one lands in `shadow`; a losing `.cljc` is dropped.
+fn rank_insert<V>(
+    primary: &DashMap<String, V>,
+    shadow: &DashMap<String, V>,
+    key: String,
+    value: V,
+    rank: u8,
+    old_rank: impl Fn(&V) -> Option<u8>,
+) {
+    use dashmap::mapref::entry::Entry;
+
+    match primary.entry(key.clone()) {
+        Entry::Vacant(e) => {
+            e.insert(value);
+        }
+        Entry::Occupied(mut e) => {
+            let Some(old) = old_rank(e.get()) else {
+                return;
+            };
+            if rank <= old {
+                let displaced = e.insert(value);
+                if old == CLJS_RANK && rank < CLJS_RANK {
+                    shadow.insert(key, displaced);
+                }
+            } else if rank == CLJS_RANK {
+                shadow.insert(key, value);
+            }
+        }
+    }
+}
+
+fn is_project(sym: &Symbol) -> bool {
+    sym.source == SymbolSource::Project
+}
+
 impl Default for Index {
     fn default() -> Self {
         Self {
             symbols: DashMap::new(),
             namespaces: DashMap::new(),
             ns_symbols: DashMap::new(),
+            cljs_symbols: DashMap::new(),
+            cljs_namespaces: DashMap::new(),
             file_to_ns: DashMap::new(),
             occurrences: DashMap::new(),
             keyword_counts: DashMap::new(),
@@ -247,6 +331,33 @@ impl Index {
 
     pub fn lookup(&self, fqn: &str) -> Option<Symbol> {
         self.symbols.get(fqn).map(|r| r.clone())
+    }
+
+    /// [`Index::lookup`], but a `.cljs` requester gets the ClojureScript copy
+    /// when one exists. The primary map is read first: a project symbol there
+    /// always wins, because `insert_file` overwrites the primary slot without
+    /// touching the shadow, so a project definition inserted after both
+    /// library copies would otherwise lose to the shadow. A library that ships
+    /// only `.clj` still resolves for a `.cljs` file through the primary.
+    pub fn lookup_for(&self, fqn: &str, dialect: Dialect) -> Option<Symbol> {
+        let primary = self.lookup(fqn);
+        if dialect == Dialect::Clj || primary.as_ref().map(is_project) == Some(true) {
+            return primary;
+        }
+        self.cljs_symbols.get(fqn).map(|r| r.clone()).or(primary)
+    }
+
+    /// Swaps an already-resolved library symbol for its ClojureScript copy when
+    /// `dialect` is `Cljs` and one exists; project symbols and `Clj` pass
+    /// through untouched.
+    pub fn prefer_dialect(&self, sym: Symbol, dialect: Dialect) -> Symbol {
+        if dialect == Dialect::Clj || is_project(&sym) {
+            return sym;
+        }
+        self.cljs_symbols
+            .get(&sym.fqn)
+            .map(|r| r.clone())
+            .unwrap_or(sym)
     }
 
     /// The JDK source index, once background discovery has installed it.
@@ -284,6 +395,21 @@ impl Index {
 
     pub fn ns_meta(&self, ns: &str) -> Option<NsMeta> {
         self.namespaces.get(ns).map(|r| r.clone())
+    }
+
+    /// [`Index::ns_meta`], with the rule of [`Index::lookup_for`]: a `.cljs`
+    /// requester gets the ClojureScript copy unless the primary entry is a
+    /// project namespace (one whose file has an occurrences entry).
+    pub fn ns_meta_for(&self, ns: &str, dialect: Dialect) -> Option<NsMeta> {
+        let primary = self.ns_meta(ns);
+        let primary_is_project = primary
+            .as_ref()
+            .map(|meta| self.is_project_path(&meta.file))
+            .unwrap_or(false);
+        if dialect == Dialect::Clj || primary_is_project {
+            return primary;
+        }
+        self.cljs_namespaces.get(ns).map(|r| r.clone()).or(primary)
     }
 
     /// Records that let-go's built-in `core` namespace has been indexed, so the
@@ -495,6 +621,8 @@ impl Index {
 
         self.symbols
             .retain(|_, sym| sym.source == SymbolSource::Project);
+        self.cljs_symbols.clear();
+        self.cljs_namespaces.clear();
         self.ns_symbols.retain(|ns, fqns| {
             if fqns.iter().any(|fqn| self.symbols.contains_key(fqn)) {
                 return true;
@@ -519,9 +647,15 @@ impl Index {
     /// without ever shadowing project code. Project and library indexing run
     /// concurrently, so insertion order is nondeterministic; project sources
     /// must win regardless of which task finishes last.
+    ///
+    /// Between library files the primary slot is Clojure-preferred whatever
+    /// the classpath order: `.clj` over `.cljc` over `.cljs` (see `lib_rank`),
+    /// last writer among equals. A `.cljs` copy that loses to a Clojure one —
+    /// displaced or arriving later — goes to `cljs_symbols` /
+    /// `cljs_namespaces`, so a `.cljs` requester can still reach it; a `.cljc`
+    /// that loses is dropped. `ns_symbols` stays last-writer: it only feeds
+    /// completion name lists, and every name in it resolves through `symbols`.
     pub fn insert_lib_file(&self, meta: NsMeta, symbols: Vec<Symbol>) {
-        use dashmap::mapref::entry::Entry;
-
         // Project files always have an occurrences entry; jar virtual paths
         // and dir-lib files never do.
         let ns_owned_by_project = self
@@ -533,24 +667,27 @@ impl Index {
             return;
         }
 
+        let rank = lib_rank(&meta.file);
         let mut fqns = Vec::with_capacity(symbols.len());
         for sym in symbols {
             fqns.push(sym.fqn.clone());
-            match self.symbols.entry(sym.fqn.clone()) {
-                Entry::Occupied(mut e) => {
-                    if e.get().source != SymbolSource::Project {
-                        e.insert(sym);
-                    }
-                }
-                Entry::Vacant(e) => {
-                    e.insert(sym);
-                }
-            }
+            let fqn = sym.fqn.clone();
+            rank_insert(&self.symbols, &self.cljs_symbols, fqn, sym, rank, |old| {
+                (!is_project(old)).then(|| lib_rank(&old.file))
+            });
         }
 
         self.ns_symbols.insert(meta.name.clone(), fqns);
         self.file_to_ns.insert(meta.file.clone(), meta.name.clone());
-        self.namespaces.insert(meta.name.clone(), meta);
+        let ns_name = meta.name.clone();
+        rank_insert(
+            &self.namespaces,
+            &self.cljs_namespaces,
+            ns_name,
+            meta,
+            rank,
+            |old| Some(lib_rank(&old.file)),
+        );
     }
 }
 
@@ -617,6 +754,216 @@ mod tests {
         assert!(
             index.lookup("a/gone").is_none(),
             "a symbol removed from a re-scanned file must be dropped"
+        );
+    }
+
+    /// A library `Symbol` named `fqn`, defined in `file` inside `lib.jar`.
+    fn lib_symbol(fqn: &str, file: &str) -> Symbol {
+        let (ns, name) = fqn.split_once('/').unwrap();
+        Symbol {
+            name: name.to_string(),
+            fqn: fqn.to_string(),
+            ns: ns.to_string(),
+            kind: DefKind::Defn,
+            params: vec![],
+            doc: None,
+            file: PathBuf::from(file),
+            source: SymbolSource::Jar(PathBuf::from("/m2/lib.jar")),
+            range: Range::default(),
+            name_range: Range::default(),
+            private: false,
+        }
+    }
+
+    fn ns_meta_in(ns: &str, file: &str) -> NsMeta {
+        NsMeta {
+            name: ns.to_string(),
+            file: PathBuf::from(file),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: vec![],
+            imports: HashMap::new(),
+            refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
+        }
+    }
+
+    const CLJ: &str = "/m2/clojure.jar!/clojure/string.clj";
+    const CLJS: &str = "/m2/clojurescript.jar!/clojure/string.cljs";
+    const CLJC: &str = "/m2/lib.jar!/clojure/string.cljc";
+    const TRIM: &str = "clojure.string/trim";
+    const STRING_NS: &str = "clojure.string";
+
+    fn insert_lib(index: &Index, file: &str) {
+        index.insert_lib_file(ns_meta_in(STRING_NS, file), vec![lib_symbol(TRIM, file)]);
+    }
+
+    /// One index per insertion order of `files`.
+    fn both_orders(files: [&str; 2]) -> [Index; 2] {
+        let forward = Index::new();
+        insert_lib(&forward, files[0]);
+        insert_lib(&forward, files[1]);
+        let reverse = Index::new();
+        insert_lib(&reverse, files[1]);
+        insert_lib(&reverse, files[0]);
+        [forward, reverse]
+    }
+
+    fn file_of(sym: Option<Symbol>) -> String {
+        sym.expect("symbol").file.display().to_string()
+    }
+
+    fn ns_file_of(meta: Option<NsMeta>) -> String {
+        meta.expect("ns meta").file.display().to_string()
+    }
+
+    #[test]
+    fn lib_insert_prefers_clj_over_cljs_in_either_order() {
+        for index in both_orders([CLJS, CLJ]) {
+            assert_eq!(file_of(index.lookup(TRIM)), CLJ);
+            assert_eq!(ns_file_of(index.ns_meta(STRING_NS)), CLJ);
+        }
+    }
+
+    #[test]
+    fn lookup_for_cljs_returns_the_cljs_copy() {
+        for index in both_orders([CLJS, CLJ]) {
+            assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Cljs)), CLJS);
+            assert_eq!(
+                ns_file_of(index.ns_meta_for(STRING_NS, Dialect::Cljs)),
+                CLJS
+            );
+            assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Clj)), CLJ);
+            assert_eq!(ns_file_of(index.ns_meta_for(STRING_NS, Dialect::Clj)), CLJ);
+        }
+    }
+
+    #[test]
+    fn cljs_only_library_resolves_for_both_dialects() {
+        let index = Index::new();
+        insert_lib(&index, CLJS);
+        assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Clj)), CLJS);
+        assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Cljs)), CLJS);
+        assert_eq!(ns_file_of(index.ns_meta_for(STRING_NS, Dialect::Clj)), CLJS);
+        assert_eq!(
+            ns_file_of(index.ns_meta_for(STRING_NS, Dialect::Cljs)),
+            CLJS
+        );
+    }
+
+    #[test]
+    fn cljc_after_clj_is_dropped_and_before_clj_is_replaced() {
+        for index in both_orders([CLJC, CLJ]) {
+            assert_eq!(file_of(index.lookup(TRIM)), CLJ);
+            assert_eq!(ns_file_of(index.ns_meta(STRING_NS)), CLJ);
+            // A `.cljc` is not a ClojureScript copy: nothing lands in the shadow.
+            assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Cljs)), CLJ);
+        }
+        // `.cljc` still beats `.cljs` and is the answer for both dialects when
+        // no `.clj` exists.
+        for index in both_orders([CLJC, CLJS]) {
+            assert_eq!(file_of(index.lookup(TRIM)), CLJC);
+            assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Cljs)), CLJS);
+        }
+    }
+
+    #[test]
+    fn project_symbol_wins_over_every_dialect() {
+        let project = "/p/src/clojure/string.clj";
+        let index = Index::new();
+        let mut sym = lib_symbol(TRIM, project);
+        sym.source = SymbolSource::Project;
+        index.insert_file(ns_meta_in(STRING_NS, project), vec![sym], vec![]);
+        insert_lib(&index, CLJ);
+        insert_lib(&index, CLJS);
+        assert_eq!(file_of(index.lookup(TRIM)), project);
+        assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Cljs)), project);
+        assert_eq!(
+            ns_file_of(index.ns_meta_for(STRING_NS, Dialect::Cljs)),
+            project
+        );
+    }
+
+    #[test]
+    fn project_inserted_after_both_library_copies_still_wins() {
+        let project = "/p/src/clojure/string.clj";
+        let index = Index::new();
+        insert_lib(&index, CLJ);
+        insert_lib(&index, CLJS);
+        let mut sym = lib_symbol(TRIM, project);
+        sym.source = SymbolSource::Project;
+        index.insert_file(ns_meta_in(STRING_NS, project), vec![sym.clone()], vec![]);
+        assert_eq!(file_of(index.lookup_for(TRIM, Dialect::Cljs)), project);
+        assert_eq!(
+            ns_file_of(index.ns_meta_for(STRING_NS, Dialect::Cljs)),
+            project
+        );
+        assert_eq!(
+            index.prefer_dialect(sym.clone(), Dialect::Cljs).file,
+            PathBuf::from(project)
+        );
+    }
+
+    #[test]
+    fn prefer_dialect_swaps_only_library_symbols() {
+        let index = Index::new();
+        insert_lib(&index, CLJ);
+        insert_lib(&index, CLJS);
+        let clj = index.lookup(TRIM).unwrap();
+        assert_eq!(
+            index.prefer_dialect(clj.clone(), Dialect::Cljs).file,
+            PathBuf::from(CLJS)
+        );
+        assert_eq!(
+            index.prefer_dialect(clj.clone(), Dialect::Clj).file,
+            PathBuf::from(CLJ)
+        );
+        // A symbol with no ClojureScript copy passes through.
+        let other = lib_symbol("clojure.string/join", CLJ);
+        assert_eq!(
+            index.prefer_dialect(other.clone(), Dialect::Cljs).file,
+            PathBuf::from(CLJ)
+        );
+        // A project symbol is never swapped, even when a shadow entry exists.
+        let mut project = clj.clone();
+        project.source = SymbolSource::Project;
+        project.file = PathBuf::from("/p/src/clojure/string.clj");
+        assert_eq!(
+            index.prefer_dialect(project.clone(), Dialect::Cljs).file,
+            project.file
+        );
+    }
+
+    #[test]
+    fn clear_libs_drops_the_cljs_shadow() {
+        let index = Index::new();
+        insert_lib(&index, CLJ);
+        insert_lib(&index, CLJS);
+        assert!(index.lookup_for(TRIM, Dialect::Cljs).is_some());
+        index.clear_libs();
+        assert!(index.lookup_for(TRIM, Dialect::Cljs).is_none());
+        assert!(index.ns_meta_for(STRING_NS, Dialect::Cljs).is_none());
+    }
+
+    #[test]
+    fn dialect_of_path() {
+        use std::path::Path;
+        assert_eq!(Dialect::of_path(Path::new("/p/src/a.cljs")), Dialect::Cljs);
+        assert_eq!(Dialect::of_path(Path::new("/p/src/a.clj")), Dialect::Clj);
+        assert_eq!(Dialect::of_path(Path::new("/p/src/a.cljc")), Dialect::Clj);
+        assert_eq!(Dialect::of_path(Path::new("/p/src/a.lg")), Dialect::Clj);
+        assert_eq!(
+            Dialect::of_path(Path::new("/p/resources/config.edn")),
+            Dialect::Clj
+        );
+        assert_eq!(
+            Dialect::of_path(Path::new("/m2/x.jar!/clojure/string.cljs")),
+            Dialect::Cljs
+        );
+        assert_eq!(
+            Dialect::of_path(Path::new("/m2/x.jar!/clojure/string.clj")),
+            Dialect::Clj
         );
     }
 }
