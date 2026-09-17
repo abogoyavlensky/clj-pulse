@@ -95,6 +95,89 @@ test-harness-only:
 | `CLJ_PULSE_COMPARE_FILES` | unset | Cap on the number of files visited, for a first look at a large corpus. |
 | `CLJ_PULSE_COMPARE_STRICT` | unset | Non-empty makes any new (not allowlisted) divergence fail the run; otherwise the run is advisory. |
 
+## Configuration examples
+
+clj-pulse reads an optional `.clj-pulse/config.edn` at the workspace root and
+merges `:lint-as` from `.clj-kondo/config.edn`. The tables above list every
+setting; [Linting](LINTING.md) explains the two diagnostic tiers.
+
+### Projects and classpaths
+
+`:projects` controls per-project classpath resolution. clj-pulse detects every
+directory holding a `deps.edn`, `project.clj`, or `lgx.edn` (up to four levels
+deep, honoring `.gitignore`). It indexes their sources, reads cached
+classpaths for deps.edn projects, resolves lgx dependencies internally, and
+uses locally available direct dependencies as the Leiningen fallback.
+Project discovery needs no configuration. Each deps.edn or Leiningen project
+can also run a shell
+command that resolves its full classpath, so dependencies declared under
+aliases (`:test`, `:dev`, ...) are indexed and navigable too (lgx projects
+resolve their dependencies internally and never run a command). The command
+runs in the project's directory
+and its last stdout line is taken as the classpath; with a warm `.cpcache`
+the clojure CLI skips the JVM entirely, and on the first resolve - or after a
+deps.edn change - it may download dependencies. By default the command is
+enabled only for the workspace root:
+
+```clojure
+;; .clj-pulse/config.edn - defaults made explicit
+{:projects [{:path "."             ; "." is the workspace root
+             :classpath {:enabled true
+                         :cmd "clojure -A:dev:test -Spath"}}
+            {:path "apps/backend"  ; subprojects default to :enabled false
+             :classpath {:enabled false
+                         :cmd "clojure -A:dev:test -Spath"}}]}
+```
+
+Entries are overrides: every detected project exists whether or not it is
+listed, and an entry changes only the keys it names. The default `:cmd` is
+`clojure -A:dev:test -Spath` for deps.edn projects and `lein classpath` for
+Leiningen ones; change it to select other aliases or a different tool. Set
+`:enabled true` on a subproject to resolve its full classpath too, or
+`:enabled false` on the root to opt out - a deps.edn project then indexes
+only what `.cpcache` already holds (a Leiningen project falls back to the
+direct dependency JARs named in `project.clj`; lgx resolution is unaffected).
+Listing a path detection skipped (for example a
+gitignored checkout with its own `deps.edn`) adds it as a project. Editing
+the config applies live, no restart needed.
+
+Editors can also force a full refresh with the custom `clojurePulse/rescan`
+request: it re-runs project detection, re-reads the config, and re-resolves
+every enabled project's classpath - the way to retry a failed resolution or
+pick up a subproject created inside a gitignored directory, where no file
+watcher ever fires. The request returns null immediately and the work runs in
+the background, emitting `clojurePulse/librariesChanged` as it progresses -
+clients should simply re-request on each notification (one is guaranteed at
+the end even when nothing changed, so the panel never waits forever). While a
+classpath command
+runs, clj-pulse reports standard LSP work-done progress
+("Resolving classpath: ...") to clients that advertise the
+`window.workDoneProgress` capability, so the editor shows why library
+navigation isn't ready yet.
+
+### Custom defining macros
+
+`:lint-as` (also read from `.clj-kondo/config.edn`) tells clj-pulse to treat a
+custom macro like a built-in `def` form so the name it introduces becomes
+navigable:
+
+```clojure
+;; .clj-pulse/config.edn  (or .clj-kondo/config.edn)
+{:lint-as {my.app/defcomponent clojure.core/def}}
+```
+
+With that mapping, go-to-definition, hover, find-references, and the document
+outline all resolve a name defined by `(defcomponent thing ...)`. clj-pulse merges
+the two files (with `.clj-pulse/config.edn` winning on conflicts) and watches
+them, reloading `:lint-as` when either changes, with no restart needed. A
+project that
+already configures `:lint-as` for clj-kondo works with no extra setup. Only
+mappings to `def`-family forms (`def`, `defn`, `defmethod`, ...) take effect;
+others (such as `clojure.core/for`) are ignored.
+
+`.clj-pulse/` also holds generated data (`jar-cache/`, `server.log`), so commit
+`config.edn` and gitignore the rest.
+
 ## Where the defaults live
 
 Change one of these and this page has to change with it

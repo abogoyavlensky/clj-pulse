@@ -42,11 +42,12 @@ then the editor features users notice as missing. Guiding decisions:
    (`YYYY-MM-DD-slug.md`) and the Backlog line links to it. The file moves to
    `docs/archive/` when the item is done or rejected.
 
-## Where we stand (September 2026, v0.5.1)
+## Where we stand (September 2026, v0.5.2)
 
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
-references, rename (vars, locals and qualified keywords) with `prepareRename`,
+references, rename (vars, locals, require aliases and qualified keywords) with
+`prepareRename`,
 hover, ClojureDocs
 request, completion (fuzzy-matched and ranked, `/` and `:` triggers, keywords
 in the notation being typed, auto-require on accept, lazy
@@ -237,6 +238,9 @@ the release.
       unless `:report-duplicates` is set, so fixing one usage reveals the next.
       Every lint run passes the flag; no setting.
       Plan: [2026-09-11-2116-kondo-report-all-occurrences.md](plans/2026-09-11-2116-kondo-report-all-occurrences.md) — done
+- [x] **README for the public release.** Short introduction, four strengths,
+      quick start, measured performance, and linked reference guides.
+      Plan: [2026-09-12-readme-public-release.md](plans/2026-09-12-readme-public-release.md) - done
 - [x] **Differential correctness against clj-kondo analysis** (`bb compare`):
       one production server asked a definition, references or rename question
       at every position the analysis of a pinned corpus knows the answer to,

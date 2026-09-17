@@ -24,7 +24,7 @@ there.
 - `bb e2e-nvim` — drives the server through a real editor client
   (headless Neovim's built-in LSP client, `scripts/e2e_nvim.lua`). It resolves
   the fixture's classpath first and drives `editors/nvim/jar.lua` — the `jar:`
-  handler the README tells Neovim users to install — so a definition into the
+  handler the editor guide tells Neovim users to install — so a definition into the
   clojure JAR opens with its source.
 - `bb e2e-calva` — the user's exact setup, headless: real VS Code + real Calva
   (`calva.clojureLspPath` → our binary) under Xvfb (`scripts/calva-e2e/`).
@@ -384,3 +384,12 @@ change with them.
 See [docs/DEV_SETUP.md](docs/DEV_SETUP.md) for the full development &
 verification environment: the two environments (maintainer's Calva/macOS vs the
 headless CI box), tooling versions, and what each `bb e2e*` task covers.
+
+README.md is the short public introduction: performance, Integrant, let-go,
+and monorepo highlights, then quick start and support boundaries. Keep Rust
+out of the README. Detailed behavior belongs in [docs/FEATURES.md](docs/FEATURES.md),
+installation and editor setup in [docs/EDITORS.md](docs/EDITORS.md), diagnostics
+in [docs/LINTING.md](docs/LINTING.md), and benchmarks in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md). Update the relevant guide when
+behavior changes; keep the README concise. Configuration examples stay with
+the settings tables in [docs/SETTINGS.md](docs/SETTINGS.md).

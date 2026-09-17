@@ -175,7 +175,11 @@ are counted there).
 | **total** | 5253 | 4404 | 678 | 18 | 153 |
 
 `soft` (same lines, other columns) was 0. Every `known` row is the
-protocol-method entry of `KNOWN`. The first-run divergences group into
+protocol-method entry of `KNOWN`. The `var-usage/library/aliased` row is not
+stable between runs: a rerun on 2026-09-18 (same binary logic) had 124 agree
+and 59 diverge, every one a `.clj` file landing in the ClojureScript jar's
+`clojure/string.cljs`-style twin — the dialect item below, where the last
+jar indexed wins and the jars are indexed concurrently. The first-run divergences group into
 fourteen classes, one issue file each under `docs/backlog/2026-09-17-*.md`
 (linked from the ROADMAP backlog): `#_` discards indexed
 (and `#_#_` shifting `let` pairs), keywords in binding values and quoted

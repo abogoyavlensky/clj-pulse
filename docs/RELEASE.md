@@ -15,14 +15,17 @@ truth**. The release CI refuses to publish if the tag and `Cargo.toml` disagree.
 2. **Sweep the docs.** Docs drift is the most common release-day defect here —
    a feature lands, the prose keeps describing the world before it. Check that:
 
-   - the README feature list and Linting section match `ServerCapabilities` in
-     `src/server.rs` and the native lint codes in `src/diagnostics.rs`;
+   - the README highlights, [feature reference](FEATURES.md), and
+     [linting guide](LINTING.md) match `ServerCapabilities` in `src/server.rs`
+     and the native lint codes in `src/diagnostics.rs`;
    - the AGENTS.md invariants still describe what the code does;
    - [SETTINGS.md](SETTINGS.md) matches the parsers — every key, default, and
      environment variable it lists is the one `src/projects.rs`, `src/kondo.rs`,
      `src/settings.rs` and `src/clojuredocs.rs` actually read;
    - ROADMAP "Where we stand" and its ticked items match what ships;
-   - the editor setup snippets still work.
+   - the [editor setup snippets](EDITORS.md) still work;
+   - the README benchmark summary agrees with [PERFORMANCE.md](PERFORMANCE.md)
+     and keeps the date, versions, environment, and caveats beside the numbers.
 
    Commit any corrections before tagging.
 3. **Verify** locally: `bb check` (fmt check + clippy `-D warnings` + tests).

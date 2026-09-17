@@ -3,6 +3,63 @@
 How clj-pulse is developed and verified across two very different
 environments: the maintainer's editor, and the headless CI/agent box.
 
+## Getting started
+
+Install [mise](https://mise.jdx.dev/) for managing tool versions, then:
+
+```sh
+mise install
+```
+
+This installs the correct versions of Rust and Babashka.
+
+```sh
+bb fmt        # fix code formatting
+bb fmt-check  # check formatting without fixing
+bb lint       # run clippy linter
+bb test       # run tests
+bb check      # run all checks (fmt-check + lint + test), exactly as CI does
+bb bench      # compare clj-pulse with clojure-lsp on two real projects
+bb soak       # churn one long-lived server and check it against a fresh one
+bb compare    # judge definition/references/rename against clj-kondo's analysis
+bb outdated   # check outdated deps
+bb build      # build the dev binary
+bb release    # build release binary
+bb tag        # create and push new git tag based on version from Cargo.toml
+```
+
+For editor verification, see [Verifying changes headlessly](#verifying-changes-headlessly).
+
+`bb bench` checks out [metabase](https://github.com/metabase/metabase) and
+[clj-kondo](https://github.com/clj-kondo/clj-kondo) at pinned commits under
+`.tmp/bench/`, downloads the pinned clojure-lsp release beside them, and runs
+four configurations per corpus - each server cold and warm - printing a table
+and a `BENCH_JSON` line per row. `bb bench metabase` or `bb bench clj-kondo`
+runs one. See the [benchmark records](MEMORY.md#benchmark-against-clojure-lsp)
+for the full tables and [Performance](PERFORMANCE.md) for the warm summary.
+
+`bb soak` drives one server through 20 rounds of churn on the same corpora -
+edits in open buffers, saves, files changed, created, deleted and renamed on
+disk, and every fifth round a 100-file batch delivered as a single
+`didChangeWatchedFiles`, the shape a branch switch has. Every action carries a
+witness the index has to reflect, and at each checkpoint the corpus is put back
+at its pinned commit and a freshly started server is asked the same questions:
+if the two disagree about a definition, a reference, a document symbol or a
+workspace symbol, the run fails and prints both answers. Memory is sampled at
+each checkpoint in the same quiesced, nothing-open state. Unlike `bb bench` it
+is a pass/fail gate. `bb soak metabase` is the long one, and the seed printed on
+every run replays a failure exactly: `bb soak clj-kondo <seed>`.
+
+`bb compare` asks one production server a definition, references or rename
+question at every position clj-kondo's analysis of the same corpus knows the
+answer to, and reports every disagreement by language construct - an oracle
+that is not our own extractor. It is advisory (the report is the product;
+`CLJ_PULSE_COMPARE_STRICT=1` makes any new divergence fail it), and the first
+run's table with what it found is in [MEMORY.md](MEMORY.md).
+
+> [!NOTE]
+> To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.
+
 ## Two environments
 
 - **Maintainer (manual testing):** VS Code on **macOS** via the **Clojure
