@@ -25,7 +25,8 @@ use common::sampling::{
     STAGE3_LINES,
 };
 use common::sites::{
-    answers, definition, is_source_ish, library_site, project_site, source_files, Site,
+    answers, definition, is_source_ish, landing, library_site, project_site, source_files, Landing,
+    Site,
 };
 use common::LspClient;
 
@@ -207,7 +208,7 @@ fn run(
         client.did_open(&site.file);
     }
 
-    let (first, library) = poll_definitions(
+    let (first, library, wrong_dialect) = poll_definitions(
         &mut client,
         probes.startup_project.as_ref(),
         probes.startup_library.as_ref(),
@@ -217,6 +218,7 @@ fn run(
     );
     row.first_definition = first;
     row.first_library_definition = library;
+    row.library_wrong_dialect = wrong_dialect;
 
     // Settled, not merely answering: clj-pulse's stage 3 re-resolves and
     // re-indexes long after stage 2 has answered a definition, and clojure-lsp
@@ -264,7 +266,7 @@ fn run(
             let took = sent.elapsed();
             // A wrong or empty answer is not a sample: it would time an index
             // lookup that found nothing.
-            if answers(&answer, &site.expect) {
+            if answers(&answer, &site.expect, &site.file) {
                 latencies.push(took);
             }
         }
@@ -321,7 +323,10 @@ impl SyncKind {
 /// and returns how long each took from `t0`. Interleaved, never in sequence:
 /// the library index finishes after the project one, but a probe that never
 /// resolves must not lend its whole wait to the other's number. `None` for a
-/// probe the ceiling passed first, or one this corpus has no site for.
+/// probe the ceiling passed first, or one this corpus has no site for. The
+/// third value is whether the library answer landed in a dialect the asking
+/// file does not load (`clojure/string.cljs` from a `.clj`): timed, since the
+/// lookup happened, but flagged on the row.
 fn poll_definitions(
     client: &mut LspClient,
     project: Option<&Site>,
@@ -329,8 +334,9 @@ fn poll_definitions(
     t0: Instant,
     deadline: Instant,
     watch: &mut StageWatch,
-) -> (Option<Duration>, Option<Duration>) {
+) -> (Option<Duration>, Option<Duration>, bool) {
     let mut answered: [Option<Duration>; 2] = [None, None];
+    let mut wrong_dialect = false;
     let sites = [project, library];
     loop {
         for (i, site) in sites.iter().enumerate() {
@@ -338,8 +344,13 @@ fn poll_definitions(
             if answered[i].is_some() {
                 continue;
             }
-            if answers(&definition(client, site), &site.expect) {
-                answered[i] = Some(t0.elapsed());
+            match landing(&definition(client, site), &site.expect, &site.file) {
+                Landing::Landed => answered[i] = Some(t0.elapsed()),
+                Landing::WrongDialect => {
+                    answered[i] = Some(t0.elapsed());
+                    wrong_dialect = true;
+                }
+                Landing::Miss => {}
             }
         }
         let pending = sites
@@ -347,7 +358,7 @@ fn poll_definitions(
             .enumerate()
             .any(|(i, site)| site.is_some() && answered[i].is_none());
         if !pending || Instant::now() >= deadline {
-            return (answered[0], answered[1]);
+            return (answered[0], answered[1], wrong_dialect);
         }
         watch.observe(client, t0);
         std::thread::sleep(POLL);
@@ -863,6 +874,8 @@ struct Row {
     sync: SyncKind,
     first_definition: Option<Duration>,
     first_library_definition: Option<Duration>,
+    /// The library answer landed in the entry's other dialect.
+    library_wrong_dialect: bool,
     settled: Option<Duration>,
     settle_note: String,
     rss_settled: Option<u64>,
@@ -897,6 +910,7 @@ impl Row {
             sync: SyncKind::Incremental,
             first_definition: None,
             first_library_definition: None,
+            library_wrong_dialect: false,
             settled: None,
             settle_note: String::new(),
             rss_settled: None,
@@ -994,7 +1008,15 @@ impl Row {
         row("time to first definition", &ms(self.first_definition));
         row(
             "time to first library definition",
-            &ms(self.first_library_definition),
+            &format!(
+                "{}{}",
+                ms(self.first_library_definition),
+                if self.library_wrong_dialect {
+                    " (dialect: wrong)"
+                } else {
+                    ""
+                }
+            ),
         );
         row("time to settled", &ms(self.settled));
         row("  settled by", &self.settle_note);

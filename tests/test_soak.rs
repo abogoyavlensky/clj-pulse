@@ -24,7 +24,9 @@ use serde_json::{json, Value};
 use common::diff::{brief, brief_set, locations, symbol_set, Divergence};
 use common::sampling::{has_children, median, quiet_for, rss_kib, QUIET};
 use common::session::{settle, Session, REQUEST_TIMEOUT};
-use common::sites::{answers, definition, is_source_ish, project_sites, source_files, Site};
+use common::sites::{
+    answers, definition, is_source_ish, landing, project_sites, source_files, Landing, Site,
+};
 use common::{LspClient, FILE_CHANGED, FILE_CREATED, FILE_DELETED};
 
 // ---------------------------------------------------------------------------
@@ -913,7 +915,7 @@ fn ask_all(session: &mut Session, probes: &Probes) -> Answers {
             "position": { "line": site.line, "character": site.character }
         });
         let definition = session.request("textDocument/definition", at.clone());
-        if answers(&definition, &site.expect) {
+        if landing(&definition, &site.expect, &site.file) == Landing::Landed {
             out.resolved += 1;
         }
         out.definition.push(definition);
@@ -1190,7 +1192,7 @@ fn checkpoint(
             let took = sent.elapsed();
             // A wrong answer is a divergence, not a sample: timing an index
             // lookup that found nothing measures nothing.
-            if answers(&answer, &site.expect) {
+            if answers(&answer, &site.expect, &site.file) {
                 latencies.push(took);
             }
         }
