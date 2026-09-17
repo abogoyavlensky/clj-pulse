@@ -90,20 +90,66 @@ pub fn apply_env(cmd: &mut tokio::process::Command) {
 }
 
 /// Where a program resolves, as an absolute path — `None` when no directory
-/// holds an executable of that name. A name with a path separator is the
-/// user's explicit choice and is taken as given, relative to `base` when it
-/// is relative; a bare name is searched over the augmented PATH, where a
-/// relative entry is also read against `base`. Absolute, because the child
-/// may run from another directory than the one the name was written for.
+/// holds an executable of that name. The first of [`resolve_all`].
 pub fn resolve(program: &str, base: &Path) -> Option<PathBuf> {
+    resolve_all(program, base).into_iter().next()
+}
+
+/// Every executable `program` resolves to, in PATH order, so a caller can
+/// try the next one when the first fails to run (a mise shim refusing an
+/// untrusted config, with a Homebrew install behind it). A name with a path
+/// separator is the user's explicit choice and is the one candidate, taken
+/// as given, relative to `base` when it is relative; a bare name is searched
+/// over the augmented PATH, where a relative entry is also read against
+/// `base`. Absolute, because the child may run from another directory than
+/// the one the name was written for.
+pub fn resolve_all(program: &str, base: &Path) -> Vec<PathBuf> {
+    resolve_all_in(program, base, &augmented_path())
+}
+
+/// [`resolve_all`] over an explicit PATH. Two entries naming the same file
+/// (a directory listed twice, a symlink to the first hit) collapse into one:
+/// running the same binary again would only repeat the same failure.
+fn resolve_all_in(program: &str, base: &Path, path: &OsStr) -> Vec<PathBuf> {
     if program.contains('/') || program.contains(std::path::MAIN_SEPARATOR) {
-        return Some(base.join(program));
+        return vec![base.join(program)];
     }
-    let path = augmented_path();
-    std::env::split_paths(&path)
+    let mut seen = std::collections::HashSet::new();
+    std::env::split_paths(path)
         .map(|dir| base.join(dir))
         .flat_map(|dir| candidates_in(&dir, program))
-        .find(|p| is_executable(p))
+        .filter(|p| is_executable(p))
+        .filter(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
+        .collect()
+}
+
+/// Whether `path` is a mise shim: a file under a directory named `shims`
+/// whose head mentions `mise`. A shim resolves the tool through the mise
+/// config of the directory it runs from, and refuses to run at all when that
+/// config is untrusted — so a probe wants the binary behind it instead.
+/// Judged from the file alone, not from `MISE_DATA_DIR`, so a shim dir the
+/// user put on PATH by hand is recognized too.
+pub fn is_mise_shim(path: &Path) -> bool {
+    use std::io::Read;
+    if !path
+        .parent()
+        .is_some_and(|d| d.file_name() == Some(OsStr::new("shims")))
+    {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 256];
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return false,
+        }
+    }
+    head[..filled].windows(4).any(|w| w == b"mise")
 }
 
 fn candidates_in(dir: &Path, program: &str) -> Vec<PathBuf> {
@@ -117,7 +163,7 @@ fn candidates_in(dir: &Path, program: &str) -> Vec<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -125,7 +171,7 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
@@ -193,6 +239,84 @@ mod tests {
             resolve("./bin/clj-kondo", base),
             Some(PathBuf::from("/ws/./bin/clj-kondo"))
         );
+    }
+
+    /// An executable file named `name` under `dir`, holding `content`.
+    #[cfg(unix)]
+    fn executable(dir: &Path, name: &str, content: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, content).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_all_lists_every_executable_in_path_order() {
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        let in_a = executable(a.path(), "clj-kondo", "#!/bin/sh\nexit 1\n");
+        let in_b = executable(b.path(), "clj-kondo", "#!/bin/sh\nexit 0\n");
+        // A dir holding a non-executable of that name contributes nothing.
+        let c = tempfile::TempDir::new().unwrap();
+        std::fs::write(c.path().join("clj-kondo"), "not runnable").unwrap();
+        let path = std::env::join_paths([a.path(), c.path(), b.path()]).unwrap();
+        assert_eq!(
+            resolve_all_in("clj-kondo", Path::new("/"), &path),
+            vec![in_a, in_b]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_all_dedupes_the_same_file_listed_twice() {
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        let in_a = executable(a.path(), "clj-kondo", "#!/bin/sh\nexit 0\n");
+        // A symlink in another dir to the same binary is the same candidate:
+        // running it twice would only repeat the same failure.
+        std::os::unix::fs::symlink(&in_a, b.path().join("clj-kondo")).unwrap();
+        let path = std::env::join_paths([a.path(), a.path(), b.path()]).unwrap();
+        assert_eq!(
+            resolve_all_in("clj-kondo", Path::new("/"), &path),
+            vec![in_a]
+        );
+    }
+
+    #[test]
+    fn resolve_all_takes_an_explicit_path_as_the_only_candidate() {
+        let path = std::env::join_paths(["/usr/bin", "/bin"]).unwrap();
+        assert_eq!(
+            resolve_all_in("/opt/x/clj-kondo", Path::new("/ws"), &path),
+            vec![PathBuf::from("/opt/x/clj-kondo")]
+        );
+        assert_eq!(
+            resolve_all_in("./bin/clj-kondo", Path::new("/ws"), &path),
+            vec![PathBuf::from("/ws/./bin/clj-kondo")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_mise_shim_needs_a_shims_dir_and_a_mise_mention() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = "#!/bin/sh\nexec mise x -- clj-kondo \"$@\"\n";
+        assert!(is_mise_shim(&executable(&shims, "clj-kondo", script)));
+        assert!(
+            !is_mise_shim(&executable(&bin, "clj-kondo", script)),
+            "the same script outside a shims dir is some wrapper of the user's own"
+        );
+        let blob = "\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0\x02\0\x3e\0";
+        assert!(
+            !is_mise_shim(&executable(&shims, "other", blob)),
+            "a real binary that merely lives under shims/ is not a shim"
+        );
+        assert!(!is_mise_shim(&shims.join("missing")));
     }
 
     #[test]
