@@ -359,11 +359,14 @@ pub fn landing(result: &Value, expect: &Expect, asking: &Path) -> Landing {
     let uris = definition_uris(result);
     match expect {
         Expect::File(path) => {
+            // Decoded before comparing: a space or a non-ASCII letter in the
+            // checkout path arrives percent-encoded in the URI.
             let want = path.to_string_lossy();
-            if uris
-                .iter()
-                .any(|u| u.strip_prefix("file://").is_some_and(|p| p == want))
-            {
+            if uris.iter().any(|u| {
+                u.strip_prefix("file://").is_some_and(|p| {
+                    percent_encoding::percent_decode_str(p).decode_utf8_lossy() == want
+                })
+            }) {
                 Landing::Landed
             } else {
                 Landing::Miss

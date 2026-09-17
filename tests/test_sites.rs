@@ -38,6 +38,13 @@ fn file_landing_is_exact_not_a_suffix() {
         Landing::Miss
     );
     assert_eq!(landing(&json!(null), &expect, asking), Landing::Miss);
+    // A checkout under a directory with a space: the URI is percent-encoded,
+    // the expected path is not.
+    let spaced = Expect::File(PathBuf::from("/my corpus/src/a.clj"));
+    assert_eq!(
+        landing(&at("file:///my%20corpus/src/a.clj"), &spaced, asking),
+        Landing::Landed
+    );
 }
 
 #[test]
