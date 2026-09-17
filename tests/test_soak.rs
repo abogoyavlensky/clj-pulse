@@ -21,10 +21,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use common::sampling::{
-    has_children, median, quiet_for, rss_kib, QUIET, STAGE2_LINES, STAGE3_ANNOUNCE_GRACE,
-    STAGE3_LINES,
-};
+use common::diff::{brief, brief_set, locations, symbol_set, Divergence};
+use common::sampling::{has_children, median, quiet_for, rss_kib, QUIET};
+use common::session::{settle, Session, REQUEST_TIMEOUT};
 use common::sites::{answers, definition, is_source_ish, project_sites, source_files, Site};
 use common::{LspClient, FILE_CHANGED, FILE_CREATED, FILE_DELETED};
 
@@ -763,115 +762,10 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
 
-// ---------------------------------------------------------------------------
-// One server, and everything that has gone wrong with it
-// ---------------------------------------------------------------------------
-
-/// A client plus the liveness record for the server behind it. Every request
-/// goes through here: a JSON-RPC error answer is a liveness failure — the panic
-/// guard answers a panicked handler with exactly one — so it is recorded rather
-/// than merely returned. A request that never answers panics inside the client
-/// and takes the run down with it, which is the same verdict by a louder route.
-struct Session {
-    client: LspClient,
-    errors: Vec<String>,
-}
-
-impl Session {
-    fn new(client: LspClient) -> Self {
-        Self {
-            client,
-            errors: Vec::new(),
-        }
-    }
-
-    /// A server on `root` under production settings — stage 3 runs and
-    /// clj-kondo is spawned when installed, because that is what the machine
-    /// under a real editor does.
-    fn production(root: &Path) -> Self {
-        Self::new(LspClient::start_production(root).with_request_timeout(REQUEST_TIMEOUT))
-    }
-
-    fn client(&mut self) -> &mut LspClient {
-        &mut self.client
-    }
-
-    fn pid(&self) -> u32 {
-        self.client.child.id()
-    }
-
-    fn request(&mut self, method: &str, params: Value) -> Value {
-        let msg = self.client.request_full(method, params.clone());
-        if let Some(error) = msg.get("error") {
-            self.errors
-                .push(format!("{method} answered {error}: {params}"));
-        }
-        msg["result"].clone()
-    }
-
-    /// Whether the server process is still running. A handler that panics is
-    /// answered by the guard, so a dead process here means something worse.
-    fn alive(&mut self) -> bool {
-        matches!(self.client.child.try_wait(), Ok(None))
-    }
-}
-
-/// Generous, like the bench's: the point is to find divergence, not to fail on
-/// a slow machine.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Definitions timed per checkpoint.
 const SAMPLES: usize = 20;
 /// How often a convergence poll re-asks.
 const POLL: Duration = Duration::from_millis(100);
-
-/// Settles a server the way the bench does: stage 2 (or stage 3, when it is
-/// coming) has reported, no child process is still working, and nothing has
-/// been logged for [`QUIET`]. Waiting for `Indexed` alone would compare a
-/// settled server against one still indexing its libraries, and invent
-/// divergences that are nothing but a race.
-fn settle(session: &mut Session, deadline: Instant) -> String {
-    let terminal: Vec<&str> = STAGE2_LINES
-        .iter()
-        .chain(STAGE3_LINES.iter())
-        .copied()
-        .collect();
-    let remaining = |deadline: Instant| deadline.saturating_duration_since(Instant::now());
-    let stage = session
-        .client
-        .log_line_within(&terminal, remaining(deadline));
-    let mut note = match &stage {
-        Some(line) => line.trim_start_matches("clj-pulse: ").to_string(),
-        None => "no library stage reported".to_string(),
-    };
-    let stage3 = stage
-        .as_deref()
-        .is_some_and(|l| STAGE3_LINES.iter().any(|s| l.contains(s)));
-    if !stage3
-        && session
-            .client
-            .log_line_within(&["resolving classpath via"], STAGE3_ANNOUNCE_GRACE)
-            .is_some()
-    {
-        match session
-            .client
-            .log_line_within(&STAGE3_LINES, remaining(deadline))
-        {
-            Some(line) => note = line.trim_start_matches("clj-pulse: ").to_string(),
-            None => note.push_str("; stage 3 announced but never reported"),
-        }
-    }
-    let pid = session.pid();
-    loop {
-        session.client.clear_notifications();
-        let quiet = quiet_for(&mut session.client, &["window/logMessage"], QUIET);
-        if quiet && !has_children(pid) {
-            return note;
-        }
-        if Instant::now() >= deadline {
-            return format!("{note}; never settled");
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The probe set
@@ -1046,22 +940,6 @@ fn ask_all(session: &mut Session, probes: &Probes) -> Answers {
     out
 }
 
-/// One place the churned server and a fresh one disagree.
-struct Divergence {
-    request: String,
-    site: String,
-    churned: String,
-    reference: String,
-}
-
-impl Divergence {
-    fn print(&self) {
-        println!("  {} at {}", self.request, self.site);
-        println!("    churned:   {}", self.churned);
-        println!("    reference: {}", self.reference);
-    }
-}
-
 fn compare(
     churned: &Answers,
     reference: &Answers,
@@ -1079,8 +957,8 @@ fn compare(
                 out.push(Divergence {
                     request: "definition".into(),
                     site: where_.clone(),
-                    churned: brief(a),
-                    reference: brief(b),
+                    mine: brief(a),
+                    theirs: brief(b),
                 });
             }
         }
@@ -1092,8 +970,8 @@ fn compare(
                 out.push(Divergence {
                     request: "references".into(),
                     site: where_,
-                    churned: brief_set(&a, &b),
-                    reference: brief_set(&b, &a),
+                    mine: brief_set(&a, &b),
+                    theirs: brief_set(&b, &a),
                 });
             }
         }
@@ -1107,8 +985,8 @@ fn compare(
                 out.push(Divergence {
                     request: "documentSymbol".into(),
                     site: rel(file),
-                    churned: brief(a),
-                    reference: brief(b),
+                    mine: brief(a),
+                    theirs: brief(b),
                 });
             }
         }
@@ -1123,82 +1001,13 @@ fn compare(
                 out.push(Divergence {
                     request: "workspace/symbol".into(),
                     site: format!("query {query:?}"),
-                    churned: brief_set(&a, &b),
-                    reference: brief_set(&b, &a),
+                    mine: brief_set(&a, &b),
+                    theirs: brief_set(&b, &a),
                 });
             }
         }
     }
     out
-}
-
-/// A `Location[]` answer as a set of `uri@line:col-line:col`.
-fn locations(result: &Value) -> BTreeSet<String> {
-    result
-        .as_array()
-        .map(|items| items.iter().map(location_key).collect())
-        .unwrap_or_default()
-}
-
-/// A `SymbolInformation[]` answer as a set: name plus where it is. Ranking
-/// depends on occurrence counts, which a churned index counts in its own order,
-/// so only the set is something two servers owe each other.
-fn symbol_set(result: &Value) -> BTreeSet<String> {
-    result
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| {
-                    format!(
-                        "{} {}",
-                        item["name"].as_str().unwrap_or_default(),
-                        location_key(&item["location"])
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn location_key(location: &Value) -> String {
-    let range = &location["range"];
-    format!(
-        "{}@{}:{}-{}:{}",
-        location["uri"].as_str().unwrap_or_default(),
-        range["start"]["line"],
-        range["start"]["character"],
-        range["end"]["line"],
-        range["end"]["character"]
-    )
-}
-
-/// A JSON answer, short enough to read in a failure report.
-fn brief(value: &Value) -> String {
-    let text = value.to_string();
-    if text.len() <= 300 {
-        return text;
-    }
-    // On a character boundary, not on byte 300: a Clojure identifier or a path
-    // can be non-ASCII, and slicing through one would panic in the very report
-    // that exists to explain a failure.
-    let mut cut = 300;
-    while cut > 0 && !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}… ({} bytes)", &text[..cut], text.len())
-}
-
-/// What one side has that the other does not — the whole set is unreadable and
-/// the difference is the finding.
-fn brief_set(mine: &BTreeSet<String>, theirs: &BTreeSet<String>) -> String {
-    let extra: Vec<&String> = mine.difference(theirs).take(5).collect();
-    format!(
-        "{} entries, {} not in the other: {:?}",
-        mine.len(),
-        mine.difference(theirs).count(),
-        extra
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,7 +1490,7 @@ impl Checkpoint {
         } else {
             println!("  {:<22} {}", "divergences", self.divergences.len());
             for divergence in &self.divergences {
-                divergence.print();
+                divergence.print("churned", "reference");
             }
             for straggler in &self.stragglers {
                 println!("  restore never landed: {straggler}");
