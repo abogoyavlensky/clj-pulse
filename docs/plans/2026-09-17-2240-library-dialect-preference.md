@@ -185,3 +185,21 @@ References, rename, completion, signature help, ClojureDocs and workspace symbol
   Run: `bb check`
   Expected: green.
   `git commit -am "Document library dialect preference"`
+
+---
+
+## Status: completed (2026-09-17)
+
+**Implemented.** `Dialect` and `lib_rank` in `src/index/mod.rs`; the two shadow maps `cljs_symbols` / `cljs_namespaces` filled by a shared `rank_insert` helper that `insert_lib_file` applies to symbols and to the namespace entry; `lookup_for`, `ns_meta_for`, `prefer_dialect`; `clear_libs` empties the shadows. Definition and hover pass the requesting file's dialect; `namespace_location` picks the target file with `ns_meta_for`. Nine unit tests, two e2e tests over both classpath orders, docs (ROADMAP, AGENTS.md, FEATURES.md).
+
+**Verification.** `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva` green. `bb soak` (clj-kondo, seed 17236205946125804982): 0 divergences, RSS 0.92x. `bb bench clj-kondo` within noise of `docs/MEMORY.md` (clj-pulse first definition 427/411 ms cold/warm, first library definition 831/415 ms, definition median 16/14 ms, RSS 134/90 MiB). Driven by hand over JSON-RPC against real `clojure-1.12.5.jar` + `clojurescript-1.12.145.jar` with the ClojureScript JAR first: `.clj` → `clojure/string.clj`, `.cljs` → `clojure/string.cljs`, for `str/trim`, the require-clause namespace, and hover.
+
+**Issues.** Codex's Task 3 run hit `test_e2e_did_change_configuration_toggles_stage3` once (`status` read as `resolving` right after `full classpath indexed`), while my gates were running concurrently; 5/5 green in isolation and untouched by this change. A pre-existing timing race worth a Backlog line.
+
+**Deviations (all intent-preserving).**
+- Task 3 Step 2: the `.clj` e2e test already passed once Task 2 landed; only the `.cljs` one failed, as the plan predicted for that iteration.
+- Task 3 Step 3: `tests/test_hover.rs` also calls `resolve_and_format` (four sites); they pass `Dialect::Clj`.
+- Task 5 Step 0: README unchanged; its highlights do not describe which copy of a namespace opens.
+- No session task list: the `TaskCreate` tool was not available in this session, so the plan document was the only tracking surface.
+
+**What the plan could have specified better.** List every caller of `resolve_and_format` (the integration test in `tests/test_hover.rs` was missed), and phrase the Task 3 "verify they fail" expectation for the post-Task-2 state.
