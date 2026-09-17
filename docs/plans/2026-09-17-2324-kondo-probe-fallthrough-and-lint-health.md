@@ -127,26 +127,27 @@ It is separate from `KondoState` on purpose: `KondoState` is compared to retire 
 - Modify: `src/kondo.rs`
 - Test: `src/kondo.rs` (`mod tests`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   The existing `fake_bin(dir, script)` helper writes `dir/clj-kondo`. Add `fake_named(dir, name, script)` beside it for a `mise` fake. Tests, each building PATH through the `CLJ_PULSE_TOOL_DIRS` variable is not safe in a parallel test binary, so pass an explicit PATH the way `bare_names_resolve_only_to_executables` does not: give `probe_version` a private sibling `probe_version_in(bin, cwd, path: &OsStr)` that the public one calls with `augmented_path()`, and test the sibling.
   - `probe_falls_through_a_failing_candidate`: dir A's `clj-kondo` prints `mise ERROR: config not trusted` to stderr and exits 1; dir B's prints `clj-kondo v2026.1.1`. PATH `A:B`. The probe answers `v2026.1.1` with `bin` = B's path.
   - `probe_error_lists_every_candidate_tried`: both fail; the error contains both paths and both reasons.
   - `probe_resolves_a_mise_shim_through_mise_which`: dir S is named `shims` and its `clj-kondo` contains `mise` and exits 1 whatever the argument; dir R holds the real fake answering `--version`; dir M holds a `mise` fake that on `which clj-kondo` prints R's `clj-kondo` path. PATH `S:M`. The probe answers with `bin` = R's path.
   - `probe_keeps_the_shim_when_mise_which_fails`: same, but the `mise` fake exits 1 and the shim answers `--version` itself; `bin` is the shim path.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --lib kondo::tests::probe`
   Expected: FAIL (compile error on `probe_version_in`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `probe_version_in`: candidates from `tools::resolve_all_in`; for each, the shim step then the `--version` step as described in the design; collect reasons; return the first success. Keep the existing "wrapper prints a banner then fails" rejection per candidate. `mise which` runs through `run` with `PROBE_TIMEOUT`, cwd = `cwd`, and its stdout trimmed must name an existing executable (`tools::is_executable` made `pub(crate)`).
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --lib kondo::`
   Expected: PASS, including `probe_version_of_a_missing_binary_says_where_it_looked`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Probe every clj-kondo candidate and resolve mise shims to the real binary"`
+  > Deviation: codex found that the plan's `is_mise_shim` (first 256 bytes contain `mise`) misses the shape mise actually installs — every shim is a *symlink to the `mise` binary* (verified on this host: `shims/clj-kondo -> ~/.local/bin/mise`, an ELF with no `mise` in its header). Fixup commit `655de87`: `is_mise_shim` also accepts a symlink under `shims/` whose canonical target is named `mise`, and `behind_mise_shim` asks *that* mise (`tools::mise_behind_symlink`) before searching PATH for one. Tests cover both shapes.
 
 ### Task 4: Lint from the root, longer timeout, kill on drop
 
@@ -154,22 +155,22 @@ It is separate from `KondoState` on purpose: `KondoState` is compared to retire 
 - Modify: `src/kondo.rs`, `src/server.rs`
 - Test: `src/kondo.rs` (`mod tests`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `lint_runs_from_the_given_cwd`: a fake that prints `pwd` into the findings message; call `lint(bin, src, path, Some(tmp), ..)` and assert the message names `tmp`, not the file's directory.
   - `lint_child_group_dies_when_the_future_is_dropped`: a fake that runs `sh -c 'echo $$ > <file>; sleep 30'` so the recorded pid is a grandchild; start `lint` in a task, wait for the pid file, abort the task, then poll `libc::kill(pid, 0)` until it fails, within 2 s. `kill_on_drop` already kills the direct child, so a direct-child pid would not test the guard.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --lib kondo::tests::lint_`
   Expected: the first fails to compile (new parameter); once it compiles, the second fails because the grandchild outlives the drop.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `lint(bin, source, abs_path, cwd: Option<&Path>, timeout)`, setting `current_dir(cwd)` when given and dropping the per-file directory logic and its comment. `LINT_TIMEOUT = 10 s` with the new doc comment. In `run`, a `struct KillOnDrop(Option<u32>)` with `Drop` calling `kill_group`, armed after `spawn`, disarmed (`.0 = None`) once `wait_with_output` returns. In `server.rs`, `KondoState.root: Option<PathBuf>` set from `root` in `probe_and_announce`, and `lint_and_publish_doc` passes `engine.root.as_deref()`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --lib kondo::` and `cargo build`
   Expected: PASS; the build is clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Lint from the workspace root, allow 10 s, kill a dropped clj-kondo"`
 
 ### Task 5: Lint health on `lintStatus`
