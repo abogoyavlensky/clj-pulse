@@ -236,6 +236,38 @@ exports.run = async () => {
     );
   }
 
+  // 9b. Require-alias rename, from the alias half of `ig/init-key` in the
+  //     buffer the keyword rename just edited: one file, the `:as ig` binding
+  //     plus every `ig/…`, and nothing else.
+  const aliasEdit = await poll(60000, async () => {
+    const e = await vscode.commands.executeCommand(
+      "vscode.executeDocumentRenameProvider",
+      dbUri,
+      positionOf(dbDoc, "ig/init-key", 0),
+      "integrant"
+    );
+    return e && e.size > 0 ? e : undefined;
+  });
+  const aliasEdits = aliasEdit?.get(dbUri) ?? [];
+  check(
+    aliasEdit?.size === 1 && aliasEdits.length === 4,
+    "rename alias ig returns one WorkspaceEdit for db.clj alone: the binding and three usages",
+    aliasEdit === undefined
+      ? "rename provider returned nothing"
+      : `${aliasEdit.size} file(s), ${aliasEdits.length} edit(s)`
+  );
+  if (aliasEdit) {
+    check(await vscode.workspace.applyEdit(aliasEdit), "VS Code applies the alias rename");
+    const dbText = dbDoc.getText();
+    check(
+      dbText.includes("[integrant.core :as integrant]") &&
+        !dbText.includes("ig/") &&
+        (dbText.match(/integrant\//g) ?? []).length === 3,
+      "db.clj: the :as binding and every ig/ usage became integrant",
+      JSON.stringify(dbText)
+    );
+  }
+
   // 10. The let-go sub-project: an `lgx.edn` project beside the deps.edn one,
   //     with a `:local/root` dependency. Definition, hover, completion and
   //     diagnostics all have to work on `.lg` sources.

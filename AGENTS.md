@@ -211,6 +211,16 @@ and update README and this file in the same change.
   `:refer :all` / `(:use ns)` namespaces; head resolution, completion and
   `resolve_symbol` all consult it, so `deftest` works however `clojure.test`
   was required.
+- `are` (`clojure.test/are`, `cljs.test/are`, the table `ARE_FQNS`) binds its
+  argv in the template expression only; the values after it are usages in the
+  enclosing scope. The occurrence walker (`walk_are_form`) resolves the head by
+  fqn through `head_fqn_candidates`, the list `macro_def_kind` also reads, so
+  a bare `are` without clojure.test stays a plain call; the locals walker
+  (`walk_scope_are`) matches the name part alone. Argv bindings are lintable.
+  `are` substitutes syntactically, quoted data included, so a `'form` in the
+  template counts as a use for the lint (`mark_quoted_symbols_used`) and is a
+  usage `local_references_at` returns from the argv, or a rename would leave
+  it behind; a cursor on the quoted symbol itself still resolves nothing.
 - `NsMeta.as_aliases` never appears in `requires`: an `:as-alias` namespace is
   not loaded, so the alias resolves keywords and qualified names while a usage
   spelling the full namespace stays an unresolved namespace. `core_excludes`
@@ -279,6 +289,22 @@ and update README and this file in the same change.
   project buffer (one just typed has no indexed symbol); library files and
   unqualified or library-namespaced keywords are refused or filtered out in
   `rename_target`, so `prepareRename` refuses exactly what `rename` would.
+- An alias rename (`RenameTarget::Alias`) is file-local and textual: the
+  question is which tokens spell `h`, so `extractor::alias_sites_tree` walks
+  the live tree and never the index — the `:as`/`:as-alias` symbols of every
+  ns form (reader-conditional branches included) plus the namespace part of
+  each qualified symbol, `::h/x` keyword and `#::h{…}` prefix, quoted symbols
+  included since `(resolve 'h/x)` resolves the alias at run time. A `:h/x`
+  literal is never a site, and a `{:keys [h/x]}` binding entry is told apart
+  from the same map as data by the occurrence walker: a qualified symbol
+  starting where a keyword occurrence starts reads its namespace verbatim.
+  `rename_target` tries the alias before the fqn path, so a cursor on the
+  alias half of `h/greet` renames the alias, and the var is renamed from its
+  name half; `alias_at_tree` is only a candidate finder, and a cursor on a
+  token that spells the alias without being a site falls through to what the
+  fqn path makes of it. The new name is refused when the live ns form already
+  binds it as an alias or when it already qualifies a name in the file — alias
+  lookup outranks a full namespace, so either would capture existing code.
 - `documentHighlight` resolves in the same order references does:
   `references::local_refs_at` first and authoritatively, then
   `resolve_fqn_at`. It never leaves the buffer — occurrences and definitions

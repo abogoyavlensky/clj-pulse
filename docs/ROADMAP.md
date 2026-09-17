@@ -131,6 +131,14 @@ Small fixes that remove wrong answers. Each extractor change bumps
       (`:kondo {:live-max-kb 256}`) on the didChange pass only; one publish
       per pass stays.
   Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — done
+- [x] **`are` template arguments are locals.** `(are [x y] expr & values)`
+      currently records `x` and `y` as vars of the current namespace, so
+      definition, hover, completion, references, rename, documentHighlight and
+      the native `unused-binding` lint all answer wrong inside the template.
+      Bind the argv in the template expression only, resolved by fqn
+      (`clojure.test/are`, `cljs.test/are`) in the occurrence walker and by
+      name part in the locals walker.
+  Plan: [2026-09-13-0934-are-template-locals.md](plans/2026-09-13-0934-are-template-locals.md) — done
 
 ## Milestone 2 — completion quality
 
@@ -174,6 +182,11 @@ Each is small because the index already holds the data.
       when a file moves.
 - [ ] Reference-count code lens, off by default.
   Plan: —
+- [x] **Rename a require alias.** From the `:as`/`:as-alias` binding or any
+      `h/x`, `::h/x`, `#::h{…}` site, rewrite every spelling of the alias in
+      the file; `:h/x` literals and `{:keys [h/x]}` entries stay. A cursor on
+      the alias half of `h/x` renames the alias, not the var.
+  Plan: [2026-09-16-2108-rename-require-alias.md](plans/2026-09-16-2108-rename-require-alias.md) — done
 
 ## Milestone 5 — public release
 
@@ -267,7 +280,9 @@ One line each, newest last. Promote or reject; never let this grow silently.
   ns metadata or `ExtractConfig`, so a head the config maps to a non-fn kind
   still binds its vector as parameters there while the occurrence walker does
   not. Narrow, but it makes local resolution and references disagree; the fix
-  is threading `ExtractConfig` through `locals_in_scope_at`.
+  is threading `ExtractConfig` through `locals_in_scope_at`. `are` is matched
+  by name part there too, so a bare `are` in a file without clojure.test binds
+  in the locals walker but not in the occurrence walker.
 - 2026-09-10 **Cache the extraction per document version, not just the tree.**
   Every position request re-walks the open buffer:
   `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which
@@ -309,6 +324,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
   `lintStatus`, rate-limited warn log, a realistic default timeout with
   cancellation of superseded runs, and `mise which` resolution of shims at
   probe time so the per-file cwd stops deciding which binary runs.
+- 2026-09-16 **References and `documentHighlight` on an alias half.** Rename
+  treats a cursor on the `h` of `h/greet` as the alias, but references and
+  highlight still resolve it to the var through `resolve_fqn_at`'s alias
+  fallback. Listing the alias's sites there (`extractor::alias_sites_tree`
+  already has them) would make the three agree, and a `:as` binding would get
+  a highlight of its own.
 
 ## Best effort — do when cheap or asked
 

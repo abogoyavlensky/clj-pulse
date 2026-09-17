@@ -1100,6 +1100,168 @@ fn test_catch_and_as_arrow_bind_locals() {
 }
 
 #[test]
+fn test_are_binds_template_locals_in_every_require_style() {
+    // `(are [a b] expr & values)` binds its argv in the template expression,
+    // resolved by fqn like `deftest`: however clojure.test (or cljs.test) was
+    // pulled in, `a` and `b` are locals there, never vars of the current ns.
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "(:require [clojure.test :refer [are]])",
+            "are",
+            "x.clj",
+            "clojure.test/are",
+        ),
+        (
+            "(:require [clojure.test :refer :all])",
+            "are",
+            "x.clj",
+            "clojure.test/are",
+        ),
+        ("(:use clojure.test)", "are", "x.clj", "clojure.test/are"),
+        (
+            "(:require [clojure.test :as t])",
+            "t/are",
+            "x.clj",
+            "clojure.test/are",
+        ),
+        ("", "clojure.test/are", "x.clj", "clojure.test/are"),
+        (
+            "(:require [cljs.test :as t])",
+            "t/are",
+            "x.cljs",
+            "cljs.test/are",
+        ),
+    ];
+    for (requires, head, path, head_fqn) in cases {
+        let src = format!("(ns x {requires})\n({head} [a b] (= a b) 1 1)");
+        let (_, _, occs) = extract_full(&src, Path::new(path)).unwrap();
+        assert!(
+            occurrences_of(&occs, "x/a").is_empty(),
+            "{src}: template arg `a` is a local: {occs:?}"
+        );
+        assert!(
+            occurrences_of(&occs, "x/b").is_empty(),
+            "{src}: template arg `b` is a local: {occs:?}"
+        );
+        // The `:refer [are]` entry in the ns form is an occurrence too, so
+        // count the head on its own line.
+        let heads = occurrences_of(&occs, head_fqn)
+            .into_iter()
+            .filter(|o| o.name_range.start.line == 1)
+            .count();
+        assert_eq!(
+            heads, 1,
+            "{src}: head recorded once under {head_fqn}: {occs:?}"
+        );
+        assert_eq!(
+            occurrences_of(&occs, "clojure.core/=").len(),
+            1,
+            "{src}: occurrences: {occs:?}"
+        );
+    }
+}
+
+#[test]
+fn test_are_values_are_outside_the_template_scope() {
+    // The values after the template are evaluated in the enclosing scope, so
+    // an `a` there is a var usage, not the template argument.
+    let src = "(ns x (:require [clojure.test :refer [are]]))\n(are [a] (pos? a) a (g a))";
+    let (_, _, occs) = extract_full(src, Path::new("x.clj")).unwrap();
+    let a = occurrences_of(&occs, "x/a");
+    assert_eq!(a.len(), 2, "value-position `a`s are var usages: {occs:?}");
+    let template_end = src.lines().nth(1).unwrap().find("(pos? a)").unwrap() + "(pos? a)".len();
+    for occ in &a {
+        assert_eq!(occ.name_range.start.line, 1);
+        assert!(
+            occ.name_range.start.character as usize >= template_end,
+            "`a` inside the template must not be a var usage: {occ:?}"
+        );
+    }
+    assert_eq!(
+        occurrences_of(&occs, "x/g").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+}
+
+#[test]
+fn test_are_quoted_template_argument_counts_as_used() {
+    // `are` substitutes syntactically, so an argv symbol under a quote in the
+    // template is used even though the quote is not a var usage. Checked
+    // through `extract_analysis`, which surfaces the unused-binding slots.
+    let src =
+        "(ns x (:require [clojure.test :refer [are]]))\n(are [form] (= 3 (eval 'form)) (+ 1 2))";
+    let analysis = clj_pulse::index::extractor::extract_analysis_with(
+        src,
+        Path::new("x.clj"),
+        &clj_pulse::index::ExtractConfig::default(),
+    )
+    .unwrap();
+    assert!(
+        analysis.unused_bindings.is_empty(),
+        "quoted `form` is a template substitution: {:?}",
+        analysis.unused_bindings
+    );
+    assert!(
+        occurrences_of(&analysis.occurrences, "x/form").is_empty(),
+        "quoted `form` is not a var usage: {:?}",
+        analysis.occurrences
+    );
+}
+
+#[test]
+fn test_are_without_clojure_test_is_a_plain_call() {
+    // A bare `are` in a file that never pulls in clojure.test is an ordinary
+    // call: nothing binds, and the head is a var of the current namespace.
+    let src = "(ns x)\n(are [a] (pos? a) 1)";
+    let (_, _, occs) = extract_full(src, Path::new("x.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "x/a").len(),
+        2,
+        "argv and template `a` are plain usages: {occs:?}"
+    );
+    assert_eq!(
+        occurrences_of(&occs, "x/are").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+}
+
+#[test]
+fn test_are_with_non_vector_second_child_is_generic() {
+    // Without an argv vector the form is walked generically, which records the
+    // head itself — it must not be recorded twice.
+    let src = "(ns x (:require [clojure.test :refer [are]]))\n(are foo bar)";
+    let (_, _, occs) = extract_full(src, Path::new("x.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "x/foo").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+    assert_eq!(
+        occurrences_of(&occs, "x/bar").len(),
+        1,
+        "occurrences: {occs:?}"
+    );
+    let heads = occurrences_of(&occs, "clojure.test/are")
+        .into_iter()
+        .filter(|o| o.name_range.start.line == 1)
+        .count();
+    assert_eq!(heads, 1, "head recorded exactly once: {occs:?}");
+
+    // The shapes an editor sends mid-typing extract cleanly and bind nothing
+    // to the current namespace.
+    for tail in ["(are)", "(are [x])", "(are [x] )"] {
+        let src = format!("(ns x (:require [clojure.test :refer [are]]))\n{tail}");
+        let (_, _, occs) = extract_full(&src, Path::new("x.clj")).unwrap();
+        assert!(
+            occs.iter().all(|o| !o.fqn.starts_with("x/")),
+            "{tail}: no current-ns occurrences: {occs:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extracts_private_flag() {
     let (_, syms) = extract(
         include_str!("fixtures/snippets/private_vars.clj"),
@@ -1503,6 +1665,134 @@ mod tree_variant {
             local_references_at(src, Position::new(0, 2), "z"),
             local_references_at_tree(&tree, src, Position::new(0, 2), "z")
         );
+
+        // An `are` template argument is a local the same way in both variants.
+        let src = "(ns a (:require [clojure.test :refer [are]]))\n(are [x y] (= x y) 1 1)\n";
+        let tree = parse_tree(src).unwrap();
+        let template = Position::new(1, 14);
+        assert_eq!(
+            locals_in_scope_at(src, template),
+            locals_in_scope_at_tree(&tree, src, template)
+        );
+        assert!(locals_in_scope_at_tree(&tree, src, template)
+            .iter()
+            .any(|b| b.name == "x"));
+    }
+}
+
+// --- `are` template arguments in the locals walker --------------------------
+
+mod are_scope {
+    use clj_pulse::index::extractor::{local_references_at, locals_in_scope_at};
+    use tower_lsp::lsp_types::Position;
+
+    const SRC: &str = "(ns x (:require [clojure.test :refer [deftest are]]))\n(deftest t\n  (are [a b] (= a b)\n    1 1\n    a 2))\n";
+
+    /// Column of `needle` on line `line` of `src`.
+    fn col(src: &str, line: usize, needle: &str) -> u32 {
+        src.lines().nth(line).unwrap().find(needle).unwrap() as u32
+    }
+
+    fn names_at(src: &str, pos: Position) -> Vec<String> {
+        locals_in_scope_at(src, pos)
+            .into_iter()
+            .map(|b| b.name)
+            .collect()
+    }
+
+    #[test]
+    fn test_are_locals_in_scope() {
+        // Inside the template `(= a b)`, both argv names are in scope.
+        let template = Position::new(2, col(SRC, 2, "(= a b)") + 3);
+        let names = names_at(SRC, template);
+        assert!(names.contains(&"a".to_string()), "template: {names:?}");
+        assert!(names.contains(&"b".to_string()), "template: {names:?}");
+
+        // A value is evaluated in the enclosing scope: neither is bound.
+        let value = Position::new(4, col(SRC, 4, "a 2"));
+        let names = names_at(SRC, value);
+        assert!(!names.contains(&"a".to_string()), "value: {names:?}");
+        assert!(!names.contains(&"b".to_string()), "value: {names:?}");
+
+        // On the argv itself the binding self-resolves, like fn params.
+        let argv = Position::new(2, col(SRC, 2, "[a b]") + 1);
+        let names = names_at(SRC, argv);
+        assert!(names.contains(&"a".to_string()), "argv: {names:?}");
+    }
+
+    #[test]
+    fn test_are_local_references_stop_at_the_template() {
+        let template_a = Position::new(2, col(SRC, 2, "(= a b)") + 3);
+        let refs = local_references_at(SRC, template_a, "a").expect("template `a` is a local");
+        let argv_a = col(SRC, 2, "[a b]") + 1;
+        assert_eq!(refs.declaration.start, Position::new(2, argv_a));
+        assert_eq!(
+            refs.usages.iter().map(|r| r.start).collect::<Vec<_>>(),
+            vec![template_a],
+            "only the template usage: {refs:?}"
+        );
+
+        // The value-line `a` is not a local at all.
+        let value_a = Position::new(4, col(SRC, 4, "a 2"));
+        assert!(local_references_at(SRC, value_a, "a").is_none());
+    }
+
+    #[test]
+    fn test_are_local_references_include_quoted_template_usages() {
+        // `are` substitutes syntactically, so a quoted `form` in the template
+        // is a usage rename must rewrite; from the argv it is listed.
+        let src = "(ns x (:require [clojure.test :refer [are]]))\n(are [form] (= 3 (eval 'form)) (+ 1 2))\n";
+        let argv = Position::new(1, col(src, 1, "[form]") + 1);
+        let refs = local_references_at(src, argv, "form").expect("argv `form` is a local");
+        assert_eq!(refs.declaration.start, argv);
+        let quoted = Position::new(1, col(src, 1, "'form") + 1);
+        assert_eq!(
+            refs.usages.iter().map(|r| r.start).collect::<Vec<_>>(),
+            vec![quoted],
+            "the quoted template usage: {refs:?}"
+        );
+
+        // Quoted data is substituted whatever it looks like: a `(fn [form] …)`
+        // under the quote is not a rebinding.
+        let src = "(ns x (:require [clojure.test :refer [are]]))\n(are [form] (= '(fn [form] form) 'f) 1)\n";
+        let argv = Position::new(1, col(src, 1, "[form]") + 1);
+        let refs = local_references_at(src, argv, "form").expect("argv `form` is a local");
+        let line = src.lines().nth(1).unwrap();
+        let quoted_fn = line.find("'(fn [form]").unwrap() as u32;
+        assert_eq!(
+            refs.usages
+                .iter()
+                .map(|r| r.start.character)
+                .collect::<Vec<_>>(),
+            vec![quoted_fn + 6, quoted_fn + 12],
+            "both quoted `form`s: {refs:?}"
+        );
+
+        // A `let` binding under a quote stays data: no usage.
+        let src = "(ns x)\n(let [form 1] (eval 'form))\n";
+        let argv = Position::new(1, col(src, 1, "[form") + 1);
+        let refs = local_references_at(src, argv, "form").expect("let `form` is a local");
+        assert!(
+            refs.usages.is_empty(),
+            "quoted data is not a let usage: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_are_qualified_head_binds_in_scope_walker() {
+        // The locals walker has no ns metadata, so it matches the head's name
+        // part: `t/are` binds like `are`.
+        let src = SRC
+            .replace(
+                "[clojure.test :refer [deftest are]]",
+                "[clojure.test :as t]",
+            )
+            .replace("(deftest t", "(t/deftest t")
+            .replace("(are [a b]", "(t/are [a b]");
+        let template = Position::new(2, col(&src, 2, "(= a b)") + 3);
+        let names = names_at(&src, template);
+        assert!(names.contains(&"a".to_string()), "template: {names:?}");
+        assert!(names.contains(&"b".to_string()), "template: {names:?}");
     }
 }
 
@@ -1752,4 +2042,145 @@ fn test_cursor_in_a_schema_annotation_sees_no_parameters() {
         "the parameter binds in the body: {:?}",
         locals
     );
+}
+
+/// Renaming a require alias: which tokens spell it, and which one the cursor
+/// is on.
+mod alias_sites {
+    use clj_pulse::index::extractor::{
+        alias_at_tree, alias_sites_tree, extract_full_tree, parse_tree,
+    };
+    use clj_pulse::index::ExtractConfig;
+    use std::path::Path;
+    use tower_lsp::lsp_types::{Position, Range};
+
+    /// Every notation an alias appears in, one per line, plus the shapes that
+    /// spell `h` without meaning the alias. The `naïve` string puts a
+    /// non-ASCII character before a site, so its column is a UTF-16 count.
+    pub(super) const SRC: &str = "\
+(ns t
+  (:require [a :as h]
+            [b :as-alias h]
+            (c [d :as h])
+            #?@(:clj [[e :as h]] :cljs [[f :as h]])))
+h/f
+'h/f
+`h/f
+(str \"naïve\" h/f)
+::h/k
+(defn f [{::h/keys [x]}] x)
+#::h{:k 1}
+(def data {:keys [h/f]})
+(defn g [{:keys [h/x]}] x)
+:h/k
+(let [h 1] h)
+";
+
+    fn triple(r: &Range) -> (u32, u32, u32) {
+        assert_eq!(r.start.line, r.end.line, "a site never spans lines: {r:?}");
+        (r.start.line, r.start.character, r.end.character)
+    }
+
+    #[test]
+    fn test_alias_sites_covers_every_notation_and_skips_literals() {
+        let tree = parse_tree(SRC).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, SRC, Path::new("t.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, SRC, "h", &occs);
+
+        // `[a :as h]`, `[b :as-alias h]`, the prefix-list entry and both
+        // branches of the splicing conditional.
+        assert_eq!(
+            sites.declarations.len(),
+            5,
+            "declarations: {:?}",
+            sites.declarations
+        );
+
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(
+            usages,
+            vec![
+                (5, 0, 1),    // h/f
+                (6, 1, 2),    // 'h/f — quoted, still resolved by the reader
+                (7, 1, 2),    // `h/f
+                (8, 13, 14),  // (str "naïve" h/f): 13 UTF-16 units, 14 bytes
+                (9, 2, 3),    // ::h/k
+                (10, 12, 13), // ::h/keys directive
+                (11, 3, 4),   // #::h{…} prefix
+                (12, 18, 19), // {:keys [h/f]} as data, not a binding pattern
+            ],
+            "usages: {:?}",
+            sites.usages
+        );
+        // The binding `{:keys [h/x]}` entry reads `:h/x` verbatim, `:h/k` is a
+        // literal namespace and the `let` binds an unrelated local.
+        for (line, what) in [(13, "binding entry"), (14, ":h/k"), (15, "local h")] {
+            assert!(
+                !sites.usages.iter().any(|r| r.start.line == line),
+                "{what} on line {line} must not be a site: {:?}",
+                sites.usages
+            );
+        }
+        // Declarations never double as usages.
+        assert!(
+            sites.declarations.iter().all(|d| !sites.usages.contains(d)),
+            "declaration listed as a usage"
+        );
+    }
+
+    #[test]
+    fn test_alias_sites_reads_every_conditional_ns_form() {
+        // A `.cljc` that binds the alias once per platform: both bindings are
+        // declarations, or the rename would leave one platform's require behind.
+        let src =
+            "#?(:clj (ns t (:require [a :as h]))\n   :cljs (ns t (:require [b :as h])))\n(h/f)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("t.cljc"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "h", &occs);
+        let declarations: Vec<(u32, u32, u32)> = sites.declarations.iter().map(triple).collect();
+        assert_eq!(declarations, vec![(0, 31, 32), (1, 32, 33)]);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(usages, vec![(2, 1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_at_finds_the_alias_under_the_cursor() {
+        let tree = parse_tree(SRC).unwrap();
+        let at = |line, ch| alias_at_tree(&tree, SRC, Position::new(line, ch));
+
+        // Start and end column of each site kind (end inclusive).
+        let sites = [
+            ((1, 19), "the `h` after :as"),
+            ((5, 0), "the `h` of h/f"),
+            ((9, 2), "the `h` of ::h/k"),
+            ((11, 3), "the `h` of #::h{"),
+            ((12, 18), "the `h` of a data-map {:keys [h/f]}"),
+        ];
+        for ((line, ch), what) in sites {
+            assert_eq!(at(line, ch).as_deref(), Some("h"), "{what} at its start");
+            assert_eq!(at(line, ch + 1).as_deref(), Some("h"), "{what} at its end");
+        }
+        // A candidate only: the membership check is what rejects a binding
+        // entry, so this names `h` too.
+        assert_eq!(
+            at(13, 17).as_deref(),
+            Some("h"),
+            "binding {{:keys [h/x]}} entry"
+        );
+
+        assert_eq!(at(5, 2), None, "the `f` of h/f");
+        assert_eq!(at(14, 1), None, "the `h` of :h/k, a literal namespace");
+        assert_eq!(at(15, 6), None, "a bare local named h");
+        assert_eq!(at(1, 14), None, "the `a` being required");
+
+        // A key inside a namespaced map is judged as itself, not as the prefix.
+        let src = "(ns t (:require [a :as h] [b :as x]))\n#::h{::x/k 1}\n";
+        let tree = parse_tree(src).unwrap();
+        let at = |ch| alias_at_tree(&tree, src, Position::new(1, ch));
+        assert_eq!(at(3).as_deref(), Some("h"), "the prefix");
+        assert_eq!(at(7).as_deref(), Some("x"), "the key's namespace");
+        assert_eq!(at(9), None, "the key's name");
+    }
 }

@@ -695,6 +695,44 @@ fn test_e2e_goto_definition_local_in_let() {
 }
 
 #[test]
+fn test_e2e_goto_definition_are_template_local() {
+    // `(are [input expected] template & values)` binds its argv in the
+    // template: definition on a template usage lands on the argv entry.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let locals = root.join("src/locals.clj");
+    client.did_open(&locals);
+    let text = std::fs::read_to_string(&locals).unwrap();
+
+    let expected_def = start_of(&text, "expected]");
+    let (line, ch) = position_of(&locals, "expected (compute");
+    let r = client.goto_definition(&locals, line, ch);
+    assert!(
+        !r.is_null(),
+        "no definition for are local `expected`: {}",
+        r
+    );
+    assert!(
+        r["uri"].as_str().unwrap().ends_with("/src/locals.clj"),
+        "expected same file, got {}",
+        r
+    );
+    assert_eq!(r["range"]["start"]["line"], json!(expected_def.0));
+    assert_eq!(r["range"]["start"]["character"], json!(expected_def.1));
+
+    let input_def = start_of(&text, "input expected]");
+    let (line, ch) = position_of(&locals, "(compute input)");
+    let r = client.goto_definition(&locals, line, ch + 3);
+    assert!(!r.is_null(), "no definition for are local `input`: {}", r);
+    assert_eq!(r["range"]["start"]["line"], json!(input_def.0));
+    assert_eq!(r["range"]["start"]["character"], json!(input_def.1));
+}
+
+#[test]
 fn test_e2e_completion_local_in_let() {
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
@@ -6643,10 +6681,278 @@ fn test_e2e_rename_refuses_library_keyword() {
     );
 }
 
+/// The edits of a rename answer for the one file ending in `suffix`, and an
+/// assertion that no other file was touched — an alias is bound per file.
+fn single_file_edits(result: &Value, suffix: &str) -> Vec<Value> {
+    let changes = result["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected WorkspaceEdit.changes: {}", result));
+    assert_eq!(
+        changes.len(),
+        1,
+        "an alias rename edits its own file alone: {:?}",
+        changes.keys().collect::<Vec<_>>()
+    );
+    let (uri, edits) = changes.iter().next().unwrap();
+    assert!(
+        uri.ends_with(suffix),
+        "edited {} instead of {}",
+        uri,
+        suffix
+    );
+    edits.as_array().unwrap().clone()
+}
+
 #[test]
-fn test_e2e_prepare_rename_on_alias_half_reports_the_name() {
-    // A cursor on the `h` of `h/greet` renames `greet`, so prepareRename must
-    // report `greet`'s range in *this* file — never the definition's file.
+fn test_e2e_rename_alias_from_its_binding() {
+    // A cursor on the `h` of `[helpers :as h]` renames the alias: the binding
+    // and every `h/…` in the file, each edit covering exactly the `h`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, ":as h]");
+    let result = client.rename(&file, line, ch + 4, "help");
+    let edits = single_file_edits(&result, "/src/ns_options.clj");
+    assert_eq!(edits.len(), 2, "the binding and h/greet: {:?}", edits);
+    for edit in &edits {
+        assert_eq!(edit["newText"], json!("help"));
+        assert_eq!(
+            edit["range"]["end"]["character"].as_u64().unwrap(),
+            edit["range"]["start"]["character"].as_u64().unwrap() + 1,
+            "each edit covers the one-letter alias: {:?}",
+            edit
+        );
+    }
+    let after = apply_edits(&text, &edits);
+    assert!(after.contains("(simple [helpers :as help])"), "{after}");
+    assert!(after.contains("(help/greet who)"), "{after}");
+    assert!(!after.contains("h/greet"), "{after}");
+}
+
+#[test]
+fn test_e2e_rename_as_alias_from_a_keyword_usage() {
+    // `:as-alias` binds an alias too, and a cursor on the alias half of an
+    // auto-resolved keyword starts the rename from there.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "::cfg/port");
+    let result = client.rename(&file, line, ch + 2, "conf");
+    let edits = single_file_edits(&result, "/src/ns_options.clj");
+    assert_eq!(edits.len(), 2, "the binding and ::cfg/port: {:?}", edits);
+    let after = apply_edits(&text, &edits);
+    assert!(after.contains("[simple.config :as-alias conf]"), "{after}");
+    assert!(after.contains("(get system ::conf/port)"), "{after}");
+    assert!(!after.contains("cfg"), "{after}");
+}
+
+#[test]
+fn test_e2e_rename_alias_skips_literal_keyword_and_destructuring_entry() {
+    // Every notation that resolves the alias is rewritten — quoted symbols,
+    // `::c/…` keywords, the `#::c{}` prefix, a `{:keys [c/…]}` written as data
+    // — while a `:c/…` literal, a `{:keys [c/x]}` binding entry and a local
+    // named `c` stay: the reader never resolves an alias there.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/alias_sites.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "#::c{");
+    let result = client.rename(&file, line, ch + 3, "core");
+    let edits = single_file_edits(&result, "/src/alias_sites.clj");
+
+    let line_of = |needle: &str| start_of(&text, needle).0;
+    let mut edited_lines: Vec<u32> = edits
+        .iter()
+        .map(|e| e["range"]["start"]["line"].as_u64().unwrap() as u32)
+        .collect();
+    edited_lines.sort();
+    let mut expected: Vec<u32> = [
+        ":as c]",
+        "(c/blend 1 2)",
+        "'c/blend",
+        "::c/site)",
+        "::c/keys",
+        "#::c{",
+        "{:keys [c/blend]}",
+    ]
+    .iter()
+    .map(|n| line_of(n))
+    .collect();
+    expected.sort();
+    assert_eq!(edited_lines, expected, "edits: {:?}", edits);
+    for needle in ["{:keys [c/x]}", "(def lit :c/site)", "(let [c 1] c)"] {
+        assert!(
+            !edited_lines.contains(&line_of(needle)),
+            "{needle} must not be edited: {:?}",
+            edits
+        );
+    }
+
+    let after = apply_edits(&text, &edits);
+    assert!(after.contains("[simple.core :as core]"), "{after}");
+    assert!(after.contains("(core/blend 1 2)"), "{after}");
+    assert!(after.contains("(resolve 'core/blend)"), "{after}");
+    assert!(after.contains("(def k ::core/site)"), "{after}");
+    assert!(after.contains("[{::core/keys [blend]}]"), "{after}");
+    assert!(after.contains("#::core{:site 1}"), "{after}");
+    assert!(after.contains("{:keys [core/blend]}"), "{after}");
+    assert!(after.contains("(defn g [{:keys [c/x]}] x)"), "{after}");
+    assert!(after.contains("(def lit :c/site)"), "{after}");
+    assert!(after.contains("(let [c 1] c)"), "{after}");
+}
+
+#[test]
+fn test_e2e_rename_from_destructuring_entry_refuses_like_keyword_rename() {
+    // The `c` of a binding `{:keys [c/x]}` spells the alias but is not a site
+    // (the entry reads the literal `:c/x`), so the alias path stands aside and
+    // the keyword path refuses the entry as it always has — from `rename` and
+    // `prepareRename` alike.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let file = root.join("src/alias_sites.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (line, ch) = start_of(&text, "[c/x]");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", file.display()) },
+            "position": { "line": line, "character": ch + 1 },
+            "newName": "core"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("destructuring"),
+        "expected the destructuring refusal, got: {}",
+        msg
+    );
+    let prepare_msg = client.prepare_rename_error(&file, line, ch + 1);
+    assert_eq!(
+        prepare_msg, msg,
+        "prepareRename refuses exactly what rename does"
+    );
+}
+
+#[test]
+fn test_e2e_rename_alias_refuses_existing_alias() {
+    // Renaming `h` to `cfg` would merge two aliases and make every `cfg/…`
+    // mean a different namespace; a `/` in the new name is no symbol at all.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+    let (line, ch) = start_of(&text, "h/greet");
+
+    let refused = |client: &mut LspClient, new_name: &str| -> String {
+        let error = client.request_expect_error(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": format!("file://{}", file.display()) },
+                "position": { "line": line, "character": ch },
+                "newName": new_name
+            }),
+        );
+        error["message"].as_str().unwrap().to_string()
+    };
+    let msg = refused(&mut client, "cfg");
+    assert!(
+        msg.contains("already an alias") && msg.contains("'cfg'"),
+        "expected the collision refusal, got: {}",
+        msg
+    );
+    let msg = refused(&mut client, "bad/name");
+    assert!(
+        msg.contains("not a valid symbol name"),
+        "expected the invalid-name refusal, got: {}",
+        msg
+    );
+
+    // Alias lookup outranks a full namespace: an alias named `simple.core`
+    // would capture the `simple.core/add` this buffer spells out.
+    let last_line = text.lines().count() as u32;
+    client.did_change_insert(&file, last_line, 0, "(simple.core/add 1 2)\n");
+    let msg = refused(&mut client, "simple.core");
+    assert!(
+        msg.contains("already qualifies names") && msg.contains("'simple.core'"),
+        "expected the capture refusal, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_e2e_rename_alias_uses_unsaved_edits() {
+    // An unsaved line above the ns form moves every site; the edits must land
+    // where the buffer has them now.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/ns_options.clj");
+    client.did_open(&file);
+    client.did_change_insert(&file, 0, 0, ";; shifts every form below by one line\n");
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (usage_line, usage_ch) = start_of(&text, "h/greet");
+    let (decl_line, decl_ch) = start_of(&text, ":as h]");
+    let result = client.rename(&file, usage_line + 1, usage_ch, "help");
+    let mut edits = single_file_edits(&result, "/src/ns_options.clj");
+    edits.sort_by_key(|e| e["range"]["start"]["line"].as_u64().unwrap());
+    let expected: Vec<Value> = [(decl_line, decl_ch + 4), (usage_line, usage_ch)]
+        .iter()
+        .map(|&(l, c)| {
+            json!({
+                "range": {
+                    "start": { "line": l + 1, "character": c },
+                    "end": { "line": l + 1, "character": c + 1 }
+                },
+                "newText": "help"
+            })
+        })
+        .collect();
+    assert_eq!(
+        edits, expected,
+        "edits must use the buffer's current ranges"
+    );
+}
+
+#[test]
+fn test_e2e_prepare_rename_on_alias_half_reports_the_alias() {
+    // A cursor on the `h` of `h/greet` renames the alias, so prepareRename
+    // reports the `h` alone; the var is still renamed from its name half.
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
 
@@ -6659,16 +6965,23 @@ fn test_e2e_prepare_rename_on_alias_half_reports_the_name() {
 
     let (line, ch) = start_of(&text, "h/greet");
     let range = client.prepare_rename(&file, line, ch);
-    let name_ch = ch + "h/".len() as u32;
     assert_eq!(
-        range["start"],
-        json!({ "line": line, "character": name_ch }),
+        range,
+        json!({
+            "start": { "line": line, "character": ch },
+            "end": { "line": line, "character": ch + 1 }
+        }),
         "alias-half prepareRename: {}",
         range
     );
+
+    let name_ch = ch + "h/".len() as u32;
+    let range = client.prepare_rename(&file, line, name_ch);
     assert_eq!(
-        range["end"],
-        json!({ "line": line, "character": name_ch + "greet".len() as u32 })
+        range["start"],
+        json!({ "line": line, "character": name_ch }),
+        "name-half prepareRename: {}",
+        range
     );
 }
 
