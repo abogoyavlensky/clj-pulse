@@ -2,6 +2,8 @@
 
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status: completed 2026-09-17** on branch `kondo-probe-and-lint-health`.
+
 **Goal:** The clj-kondo probe tries every candidate binary until one answers, resolves mise shims to the real binary at probe time, and a lint pass that fails is reported once on `clojurePulse/lintStatus` and in the log instead of silently publishing the native set; the lint timeout becomes realistic because a superseded run is killed the moment a newer pass starts. Closes the ROADMAP Backlog items of 2026-09-10 ("A failing clj-kondo candidate ends the probe instead of falling through to the next one") and 2026-09-11 ("A failed clj-kondo lint pass is silent"), promoted to Milestone 5.
 
 **Tech Stack:** Rust, tower-lsp 0.20, tokio. Tests: unit tests in `src/kondo.rs` and `src/tools.rs`, e2e in `tests/test_e2e.rs` on `tests/fixtures/kondo_project` with the committed fake `tests/fixtures/fake-clj-kondo/clj-kondo`.
@@ -231,19 +233,36 @@ It is separate from `KondoState` on purpose: `KondoState` is compared to retire 
 **Files:**
 - Modify: `docs/ROADMAP.md`, `AGENTS.md`, `docs/LINTING.md`, `README.md`
 
-- [ ] **Step 1: ROADMAP**
+- [x] **Step 1: ROADMAP**
   Tick the Milestone 5 item, set the Plan line to `— done`, and add to "Where we stand": the clj-kondo probe tries every candidate and resolves mise shims, and a failed pass is reported on `lintStatus`.
 
-- [ ] **Step 2: AGENTS.md**
+- [x] **Step 2: AGENTS.md**
   Rewrite the "Child processes…" invariant's last sentence: a bare `:kondo {:path}` is resolved at probe time by trying *every* executable of that name on the augmented PATH in order (`tools::resolve_all`), a mise shim being replaced by what `mise which` prints when that works; the winning path is what lints, from the workspace root, never from the file's directory. Add one bullet: a lint pass that fails stores its reason in `KondoWarmer.health` (separate from `KondoState`, which retires in-flight passes) and reports it once per distinct reason as `detail` on `clojurePulse/lintStatus` plus a warning log, cleared on the next success and on every re-probe; every pass, engine-change re-lints included, is spawned through `spawn_lint_pass` over the one `KondoWarmer.tasks` registry, which aborts the previous pass for that document, and `kondo::run` group-kills its child on drop, which is why `LINT_TIMEOUT` can be 10 s.
 
-- [ ] **Step 3: LINTING.md**
+- [x] **Step 3: LINTING.md**
   Add a short section "When clj-kondo fails": what the status bar and log say, that native lints stay, that the message appears once per distinct reason, the 10 s bound, and that the probe tries every install it can find and resolves mise shims through `mise which`, so a `mise.toml` mise will not trust no longer hides a Homebrew install.
 
-- [ ] **Step 4: README**
+- [x] **Step 4: README**
   Check the README's diagnostics sentence; add nothing unless it describes discovery. State in the commit message that it was checked.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
   Run: `bb check`
   Expected: green.
   `git commit -am "Document clj-kondo discovery and failure reporting"`
+
+---
+
+## Completion summary
+
+**Implemented.** `tools::resolve_all` lists every executable of a name over the augmented PATH (canonical-path de-duplicated), and `kondo::probe_version` tries each until one answers `--version`, joining every failure into the "not found" reason. A mise shim is recognized by shape — a symlink to `mise` under `shims/` (what mise installs today) or a script there mentioning `mise` — and replaced by what `mise which` prints, the shim staying the candidate when that fails. Every lint runs the proven binary from the workspace root. A failed pass is recorded in `KondoWarmer.health` and reported once per distinct reason (warning log + `detail` on `clojurePulse/lintStatus`, `engine` still `kondo+native`), with a "recovered" line on the next success; a re-probe clears it. All lint triggers go through `spawn_lint_pass` over one per-document abort registry, `kondo::run` group-kills its child when its future is dropped, and `LINT_TIMEOUT` is 10 s. Unit tests in `tools.rs`/`kondo.rs`, five e2e tests, two new fake markers. `bb check`, `bb e2e`, `bb e2e-pulse` green; the ignored real-kondo e2e tests pass; a manual drive of the binary with only the mise shims dir on PATH resolved the shim to `~/.local/share/mise/installs/clj-kondo/2026.08.04/clj-kondo` and published clj-kondo findings.
+
+**Issues encountered.** The Codex CLI ran out of quota after Task 4 (resets 2026-09-18 02:26); the inline `code-review` skill stood in for Tasks 5–7 and found one real race (below). Re-run `review-with-codex --base master` on the branch when the quota is back.
+
+**Deviations (all recorded under their tasks).**
+- Branch cut from `master` (PR #41 had merged); Task 2's commit landed in two parts after a missed clippy lint; `tools::is_executable` made `pub(crate)` in Task 2 rather than Task 3.
+- Task 3: `is_mise_shim` also accepts a symlink whose canonical target is named `mise`, and `behind_mise_shim` asks that mise before searching PATH — the plan's byte-sniffing alone misses what mise actually installs (codex finding, verified on this host).
+- Task 5: `kondo_pass` yields `Option<Result<..>>` so the health transition never matches on error strings; the transition lives in `report_lint_failure` / `report_lint_recovery`; `relint_open_documents` became synchronous.
+- Task 5 fixup: spawn, register and abort in `spawn_lint_pass` happen under the document's `DashMap` entry lock — tower-lsp runs handlers through `buffer_unordered(4)`, so registering after the spawn could let an older trigger abort the newer pass and leave the document with no diagnostics.
+- Task 7: also rewrote the stale "lint runs from the file's own directory" comment on `test_e2e_kondo_workspace_relative_path_lints_files_in_subdirectories`.
+
+**What the plan could have specified better.** The mise shim shape: the plan assumed a script mentioning `mise`, but current mise installs symlinks to its own binary; a one-line `ls -la ~/.local/share/mise/shims` during planning would have caught it. And that tower-lsp runs handlers concurrently, which is what makes the registry's ordering a correctness question rather than a detail.
