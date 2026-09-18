@@ -283,6 +283,13 @@ the release.
     cancellation of superseded runs, and `mise which` resolution of shims at
     probe time so the per-file cwd stops deciding which binary runs.
   Plan: [2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md](plans/2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md) — done
+- [ ] **Discards and comments are gaps.** `#_` forms and `;` comments are
+      named children in tree-sitter-clojure, so today they are indexed as code
+      and shift every positional walk (a `#_#_` pair or a comment inside a
+      `let` vector re-pairs the bindings after it). Issue:
+      [`#_` discards are indexed](backlog/2026-09-17-discards-are-indexed.md)
+      (Backlog, 2026-09-17).
+      Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — in progress
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
@@ -355,7 +362,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-17 `bb compare` on clj-kondo found fourteen divergence classes, one
   issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
   got, where to look, how to verify):
-  - [`#_` discards are indexed](backlog/2026-09-17-discards-are-indexed.md) — and a `#_#_` pair shifts `let` pairs.
   - [Keywords in binding values and quoted data are not occurrences](backlog/2026-09-17-keywords-in-binding-values-and-quoted-data.md).
   - [Locals inside `(binding […] (let […] …))` resolve wrong](backlog/2026-09-17-locals-under-binding-and-let.md).
   - [`{:ns/keys [a]}` with an explicit namespace renames the local](backlog/2026-09-17-ns-keys-with-explicit-namespace-renames-the-local.md).
