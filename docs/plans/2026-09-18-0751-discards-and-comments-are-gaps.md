@@ -70,10 +70,10 @@ Because a stacked `#_#_x (f)` is one `dis_expr` node, skipping the node skips bo
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Move the item**
+- [x] **Step 1: Move the item**
   Remove the `#_` discards sub-bullet from the 2026-09-17 `bb compare` Backlog entry. Add an unticked Milestone 5 item directly above **Release**: **Discards and comments are gaps.** `#_` forms and `;` comments are named children in tree-sitter-clojure, so today they are indexed as code and shift every positional walk (a `#_#_` pair or a comment inside a `let` vector re-pairs the bindings after it). Link the issue file, and the line `Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — in progress`.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -am "Plan discards and comments as gaps"` (include this plan file).
 
 ### Task 2: Extractor tests and the fix
@@ -82,7 +82,7 @@ Because a stacked `#_#_x (f)` is one `dis_expr` node, skipping the node skips bo
 - Modify: `src/index/extractor.rs`, `src/index/jar_cache.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   Next to `test_qualified_usages_skips_reader_discard`, using `extract_analysis_with`, `occurrences_of`, `locals_in_scope_at` and `local_references_at` as the existing tests do:
   - `test_discarded_forms_are_not_occurrences`: `(ns x)\n(defn f [] #_unused/sym #_(g 1) (h 2))` with `g` and `h` defined in the file; `occurrences_of(.., "x/g")` is empty, `x/h` has one.
   - `test_stacked_discard_in_let_vector_does_not_shift_pairs`: `(ns x)\n(defn f [] nil)\n(let [a 1\n      #_#_x (f)\n      b 2]\n  (+ a b))`; no occurrence of `x/f`; `locals_in_scope_at` inside `(+ a b)` names exactly `a` and `b`; `local_references_at` on `b` finds the binding and one usage; `unused_bindings` is empty.
@@ -93,19 +93,23 @@ Because a stacked `#_#_x (f)` is one `dis_expr` node, skipping the node skips bo
   - `test_alias_sites_include_discarded_usages`: `(ns x (:require [y.z :as h]))\n#_(h/one)\n(h/two)` with `alias_sites_tree` (see its existing tests for the call shape); the sites include the `h` of both usages.
   - `test_keys_directive_separated_by_a_gap_still_rejects_rename`: in `tests/test_e2e.rs` or the references unit tests, whichever holds today's `:keys` rejection test, add `{:keys #_old [a]}` and `{:keys ;; c\n [a]}` variants; `prepareRename` on `a` refuses with the destructuring message.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --test test_extractor discard`, `cargo test --test test_extractor comment_in_let`, `cargo test --test test_extractor gap_before`, and the `:keys` gap test by its name
   Expected: the let, comment, argv and `:keys` gap cases FAIL today; the top-level and alias cases may already pass, and the alias one must *keep* passing after the filter lands.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `is_gap`, `all_named_children` (the raw loop) and `named_children` filtering through it, the two root loops, the `walk_occurrences` arm, `collect_alias_usages` on `all_named_children`, the gap-skipping step back in `is_destructured_key`, and `CACHE_FORMAT_VERSION = 18`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --test test_extractor` then `bb check`
   Expected: PASS and green. If a positional test elsewhere breaks, it was relying on a comment being counted; fix the walker, not the test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Treat discards and comments as gaps in the extractor"`
+
+> Deviation: the `:keys`-gap test lives in `tests/test_extractor.rs` (asserting `LocalRefs.destructured_key`, the flag `rename_target` reads) rather than in `test_e2e.rs`; it exercises `is_destructured_key` directly without a server.
+> Note: `test_gap_before_argv_does_not_shift_defn` and `test_discarded_top_level_def_is_not_a_symbol` already passed before the fix (def-form parsing tolerated gaps); kept as regression guards.
+> Note: `bb check` initially failed on `test_e2e_kondo_cache_not_warmed_without_a_clj_kondo_dir` on `master` too — an empty, gitignored `tests/fixtures/kondo_project/.clj-kondo/` left by an earlier run; removed, not a code change.
 
 ### Task 3: Corpus verification
 

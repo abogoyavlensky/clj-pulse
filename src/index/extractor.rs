@@ -375,8 +375,7 @@ pub fn extract_analysis_tree(
     };
     let mut symbols = Vec::new();
 
-    for i in 0..root.named_child_count() {
-        let child = root.named_child(i).unwrap();
+    for child in named_children(root) {
         match child.kind() {
             "list_lit" => {
                 process_top_level_list(child, source, file, &mut ns_meta, &mut symbols, cfg)
@@ -408,8 +407,7 @@ pub fn extract_analysis_tree(
     };
     let mut occurrences = Vec::new();
     let mut scope = Scope::new();
-    for i in 0..root.named_child_count() {
-        let child = root.named_child(i).unwrap();
+    for child in named_children(root) {
         walk_occurrences(child, &ctx, &mut scope, &mut occurrences);
     }
     // Every walk that pushes a frame pops it, so nothing is left holding
@@ -1344,7 +1342,29 @@ fn strip_string_quotes(s: &str) -> String {
     }
 }
 
+/// A node the reader discards or ignores: never a form, never an argument
+/// position. tree-sitter-clojure declares no grammar extras, so a `;`
+/// comment and a `#_` discard are ordinary named children of the form they
+/// sit in; `named_children` skips them so every positional walker counts
+/// forms alone. A stacked `#_#_x (f)` is one `dis_expr` node, so skipping it
+/// skips both discarded forms. Metadata nodes are *not* gaps:
+/// `has_private_meta` reads a symbol's `meta_lit` children through the same
+/// helper.
+fn is_gap(node: Node) -> bool {
+    matches!(node.kind(), "comment" | "dis_expr")
+}
+
+/// The named children of `node` that are forms: gaps (`is_gap`) left out.
 fn named_children(node: Node) -> Vec<Node> {
+    all_named_children(node)
+        .into_iter()
+        .filter(|child| !is_gap(*child))
+        .collect()
+}
+
+/// Every named child, gaps included. For walks that must see discarded text
+/// on purpose — see `collect_alias_usages`.
+fn all_named_children(node: Node) -> Vec<Node> {
     let mut result = Vec::new();
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
@@ -1717,7 +1737,10 @@ fn collect_alias_usages(
         }
         _ => {}
     }
-    for child in named_children(node) {
+    // Gaps included, unlike every other walk: an alias rename is textual and
+    // file-local, and a `#_(h/x)` left on the old alias breaks the moment it
+    // is uncommented.
+    for child in all_named_children(node) {
         collect_alias_usages(child, source, alias, keyword_starts, out);
     }
 }
@@ -1931,6 +1954,9 @@ fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mu
         // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
         // macros do reference real vars, so walk those.
         "quoting_lit" => {}
+        // A gap handed over directly (`named_children` never yields one)
+        // records nothing: the reader drops what a discard or comment holds.
+        "comment" | "dis_expr" => {}
         _ => {
             for child in named_children(node) {
                 walk_occurrences(child, ctx, scope, out);
@@ -3622,7 +3648,13 @@ fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
     if vec.parent().map(|g| g.kind()) != Some("map_lit") {
         return false;
     }
-    vec.prev_named_sibling()
+    // The directive is the previous *form*: step back over a comment or a
+    // discard between it and the vector (`{:keys #_old [a]}`).
+    let mut directive = vec.prev_named_sibling();
+    while let Some(gap) = directive.filter(|n| is_gap(*n)) {
+        directive = gap.prev_named_sibling();
+    }
+    directive
         .map(|kw| {
             // The directive may be namespaced (`{:user/keys [name]}`,
             // `{::keys [name]}`), which binds the same way — match on the
