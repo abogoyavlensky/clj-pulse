@@ -40,8 +40,9 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
-          # - target: x86_64-pc-windows-msvc
-          #   runner: windows-latest
+          # Build-only: nothing runs on Windows in CI (see ci.yml).
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -51,9 +52,17 @@ jobs:
       # cache off: a mise cache hit restores only a phantom symlink without
       # the ~/.rustup toolchain, so `rustup target add` would fail (see ci.yml)
       - uses: jdx/mise-action@v3.6.1
+        if: runner.os != 'Windows'
         with:
           install_args: "rust"
           cache: false
+
+      # mise on Windows installs every tool in .mise.toml and fails on the
+      # clojure plugin's Unix post-install hook; rustup pins the same version.
+      - name: Install pinned Rust toolchain (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: scripts/rustup-pinned.sh
 
       - name: Add cross-compilation target
         run: rustup target add ${{ matrix.target }}
@@ -79,11 +88,11 @@ jobs:
           tar czf ../../../clj-pulse-${{ matrix.target }}.tar.gz clj-pulse
           cd ../../..
 
-      # - name: Package (windows)
-      #   if: runner.os == 'Windows'
-      #   shell: pwsh
-      #   run: |
-      #     Compress-Archive -Path target/${{ matrix.target }}/release/clj-pulse.exe -DestinationPath clj-pulse-${{ matrix.target }}.zip
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/clj-pulse.exe -DestinationPath clj-pulse-${{ matrix.target }}.zip
 
       - uses: actions/upload-artifact@v4
         with:

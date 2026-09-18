@@ -100,7 +100,9 @@ work" (see also the quick reference in [AGENTS.md](../AGENTS.md)):
 
 - `bb check` — fmt *check* + clippy `-D warnings` + all tests. CI runs the
   same, so a green `bb check` means a green CI; it fails on unformatted code
-  rather than rewriting it. `bb fmt` is the fixer.
+  rather than rewriting it. `bb fmt` is the fixer. Neither covers Windows:
+  only the release workflow builds that target, so a `#[cfg(unix)]` helper
+  that leaves dead code behind on Windows fails on the tag, not before.
 - `bb e2e` — spawns the real binary, speaks framed JSON-RPC over stdio like an
   editor (`tests/test_e2e.rs`): definition (project + `jar:` URIs), completion,
   hover, didChange, `workspace/textDocumentContent`.

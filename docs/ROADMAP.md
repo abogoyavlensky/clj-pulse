@@ -295,11 +295,14 @@ the release.
       divergences on this fix alone.
       Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — done
 - [ ] **Release**
-  - [ ] Windows build target restored in the release matrix (build-only,
-        untested), proven by a `v1.0.0-rc.1` tag before the real one.
+  - [x] Windows build target restored in the release matrix (build-only,
+        untested); proven green once on a PR-side build job that was then
+        dropped to keep the PR pipeline lean.
+  - [ ] `v0.6.0` tag proves the full matrix, Windows `.zip` included,
+        before the real one.
   - [ ] Issue templates and a short contributing note.
   - [ ] Docs sweep per RELEASE.md; stale alpha and Windows notes removed.
-  - [ ] Version 1.0.0 tag.
+  - [ ] Version 0.6.0 tag.
   - [ ] `clojurePulse.kondo.liveMaxKb` in the Clojure Pulse extension and its
         release (promoted from the Backlog); gates the announcement, not the
         tag.
