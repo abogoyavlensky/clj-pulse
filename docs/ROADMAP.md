@@ -42,7 +42,7 @@ then the editor features users notice as missing. Guiding decisions:
    (`YYYY-MM-DD-slug.md`) and the Backlog line links to it. The file moves to
    `docs/archive/` when the item is done or rejected.
 
-## Where we stand (September 2026, v0.5.3)
+## Where we stand (September 2026, v0.5.4)
 
 Shipped: definition (project, JAR, git and `:local/root` deps, JDK sources,
 locals, keywords, Integrant keys, protocol and multimethod declarations),
