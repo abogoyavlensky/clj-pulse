@@ -54,7 +54,10 @@ Pushing the tag triggers `.github/workflows/release.yml`:
    - `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
    - `x86_64-pc-windows-msvc`
 
-   Unix targets are packaged as `.tar.gz`, Windows as `.zip`.
+   Unix targets are packaged as `.tar.gz`, Windows as `.zip`. The Windows
+   binary is build-only: `ci.yml` compiles it (clippy over every target, then
+   a release build) on each push and pull request, so a tag never discovers
+   a Windows compile error, but no test or e2e gate runs on Windows.
 3. **`release`** — generates `sha256` checksums (`checksums.txt`) and publishes a
    GitHub Release via `softprops/action-gh-release` with **auto-generated release
    notes** and all artifacts attached.
@@ -62,7 +65,8 @@ Pushing the tag triggers `.github/workflows/release.yml`:
    (`scripts/generate-formula.sh`) and pushes `Formula/clj-pulse.rb` to
    [`abogoyavlensky/homebrew-tap`](https://github.com/abogoyavlensky/homebrew-tap).
    It commits only when the formula changed, so a re-run is a clean no-op. macOS
-   and Linux (Intel + ARM) only; the Windows artifact is skipped.
+   and Linux (Intel + ARM) only; the Windows `.zip` is a release download and
+   never enters the formula.
 
 Users install by downloading the archive for their platform from the
 [releases page](https://github.com/abogoyavlensky/clj-pulse/releases) (verifying

@@ -871,7 +871,9 @@ mod tests {
         p.display().to_string()
     }
 
-    /// A PATH of exactly these directories.
+    /// A PATH of exactly these directories. Only the shim-resolution tests
+    /// (Unix: they write shell scripts) call it.
+    #[cfg(unix)]
     fn path_of(dirs: &[&Path]) -> std::ffi::OsString {
         std::env::join_paths(dirs).unwrap()
     }

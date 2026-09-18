@@ -45,3 +45,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Tests
         run: bb test
+
+  # Proves the Windows release target compiles and links before a tag does
+  # (the release matrix builds it, and nothing else on Windows runs). Clippy
+  # covers the test targets too, since `#[cfg(unix)]` helpers leave otherwise
+  # dead code behind; the tests themselves are not run (the harness writes
+  # shell scripts and speaks POSIX signals).
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      # cache off — see the lint-fmt job
+      - uses: jdx/mise-action@v3.6.1
+        with:
+          install_args: "rust"
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - name: Linting
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --release

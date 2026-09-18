@@ -295,8 +295,11 @@ the release.
       divergences on this fix alone.
       Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — done
 - [ ] **Release**
-  - [ ] Windows build target restored in the release matrix (build-only,
-        untested), proven by a `v1.0.0-rc.1` tag before the real one.
+  - [x] Windows build target restored in the release matrix (build-only,
+        untested); `ci.yml` compiles it on every push (clippy over all
+        targets + release build), so a compile error surfaces before a tag.
+  - [ ] `v1.0.0-rc.1` tag proves the full matrix, Windows `.zip` included,
+        before the real one.
   - [ ] Issue templates and a short contributing note.
   - [ ] Docs sweep per RELEASE.md; stale alpha and Windows notes removed.
   - [ ] Version 1.0.0 tag.

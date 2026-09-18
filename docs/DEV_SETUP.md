@@ -100,7 +100,10 @@ work" (see also the quick reference in [AGENTS.md](../AGENTS.md)):
 
 - `bb check` — fmt *check* + clippy `-D warnings` + all tests. CI runs the
   same, so a green `bb check` means a green CI; it fails on unformatted code
-  rather than rewriting it. `bb fmt` is the fixer.
+  rather than rewriting it. `bb fmt` is the fixer. The one thing CI checks
+  that `bb check` cannot is the Windows build (`build-windows` in `ci.yml`:
+  clippy over all targets and a release build on `windows-latest`), so a
+  `#[cfg(unix)]` helper that leaves dead code on Windows only fails there.
 - `bb e2e` — spawns the real binary, speaks framed JSON-RPC over stdio like an
   editor (`tests/test_e2e.rs`): definition (project + `jar:` URIs), completion,
   hover, didChange, `workspace/textDocumentContent`.
