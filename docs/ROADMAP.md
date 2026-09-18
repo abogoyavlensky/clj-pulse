@@ -298,11 +298,11 @@ the release.
   - [x] Windows build target restored in the release matrix (build-only,
         untested); `ci.yml` compiles it on every push (clippy over all
         targets + release build), so a compile error surfaces before a tag.
-  - [ ] `v1.0.0-rc.1` tag proves the full matrix, Windows `.zip` included,
+  - [ ] `v0.6.0` tag proves the full matrix, Windows `.zip` included,
         before the real one.
   - [ ] Issue templates and a short contributing note.
   - [ ] Docs sweep per RELEASE.md; stale alpha and Windows notes removed.
-  - [ ] Version 1.0.0 tag.
+  - [ ] Version 0.6.0 tag.
   - [ ] `clojurePulse.kondo.liveMaxKb` in the Clojure Pulse extension and its
         release (promoted from the Backlog); gates the announcement, not the
         tag.
