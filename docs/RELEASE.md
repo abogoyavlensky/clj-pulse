@@ -55,9 +55,10 @@ Pushing the tag triggers `.github/workflows/release.yml`:
    - `x86_64-pc-windows-msvc`
 
    Unix targets are packaged as `.tar.gz`, Windows as `.zip`. The Windows
-   binary is build-only: `ci.yml` compiles it (clippy over every target, then
-   a release build) on each push and pull request, so a tag never discovers
-   a Windows compile error, but no test or e2e gate runs on Windows.
+   binary is build-only and the tag is the first time it is compiled: no
+   job in `ci.yml` runs on Windows, and no test or e2e gate does either. On
+   Windows the pinned toolchain comes from `scripts/rustup-pinned.sh` (rustup
+   reading `.mise.toml`), since mise there tries every tool in the file.
 3. **`release`** — generates `sha256` checksums (`checksums.txt`) and publishes a
    GitHub Release via `softprops/action-gh-release` with **auto-generated release
    notes** and all artifacts attached.

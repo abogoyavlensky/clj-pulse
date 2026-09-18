@@ -296,8 +296,8 @@ the release.
       Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
-        untested); `ci.yml` compiles it on every push (clippy over all
-        targets + release build), so a compile error surfaces before a tag.
+        untested); proven green once on a PR-side build job that was then
+        dropped to keep the PR pipeline lean.
   - [ ] `v0.6.0` tag proves the full matrix, Windows `.zip` included,
         before the real one.
   - [ ] Issue templates and a short contributing note.

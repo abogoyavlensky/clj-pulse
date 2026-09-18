@@ -4,8 +4,8 @@ babashka = "1.12.215"
 
 # Verification-only tools (bb e2e-nvim / e2e-calva / e2e-pulse / e2e-real /
 # e2e-real-kondo); `bb check` needs only rust + babashka, and CI installs just
-# those (`install_args` in .github/workflows). The Windows CI jobs read the
-# rust version above through scripts/rustup-pinned.sh instead of mise.
+# those (`install_args` in .github/workflows). The Windows release build reads
+# the rust version above through scripts/rustup-pinned.sh instead of mise.
 neovim = "0.12.5"
 java = "temurin-25"
 clojure = "1.12.5.1664"

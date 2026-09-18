@@ -13,10 +13,10 @@ there.
 
 - `bb check` — fmt *check* + clippy `-D warnings` + all tests. CI runs the
   same, so a green `bb check` means a green CI; it fails on unformatted code
-  instead of rewriting it, and `bb fmt` is the fixer. CI also builds the
-  Windows target (`build-windows` in `ci.yml`: clippy over all targets plus a
-  release build, never the tests), which `bb check` cannot: a `#[cfg(unix)]`
-  test helper must not leave dead code behind on Windows.
+  instead of rewriting it, and `bb fmt` is the fixer. The release workflow
+  alone builds the Windows target (build-only, never the tests), so a
+  `#[cfg(unix)]` test helper must not leave dead code behind on Windows —
+  nothing before the tag would catch it.
 - `bb e2e` — end-to-end: spawns the real binary, speaks framed JSON-RPC over
   stdio like an editor (`tests/test_e2e.rs`). Covers definition (project +
   jar: URIs), Integrant keyword navigation (`config.edn` key → `ig/init-key`
