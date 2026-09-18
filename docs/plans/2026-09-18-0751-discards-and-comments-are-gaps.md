@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The extractor never records a symbol inside a `#_` discard as an occurrence, a binding or a definition, and a discard or a `;` comment inside a binding vector, an argv position or any other positional form no longer shifts what follows it. Closes the backlog issue [`#_` discards are indexed](../backlog/2026-09-17-discards-are-indexed.md) (ROADMAP Backlog, 2026-09-17, promoted to Milestone 5).
+**Goal:** The extractor never records a symbol inside a `#_` discard as an occurrence, a binding or a definition, and a discard or a `;` comment inside a binding vector, an argv position or any other positional form no longer shifts what follows it. Closes the backlog issue [`#_` discards are indexed](../archive/2026-09-17-discards-are-indexed.md) (ROADMAP Backlog, 2026-09-17, promoted to Milestone 5).
 
 **Tech Stack:** Rust, tree-sitter-clojure 0.1. Tests: `tests/test_extractor.rs`, then `bb compare` on the clj-kondo corpus.
 
@@ -136,16 +136,34 @@ Because a stacked `#_#_x (f)` is one `dis_expr` node, skipping the node skips bo
 **Files:**
 - Modify: `docs/ROADMAP.md`, `AGENTS.md`; move the issue file.
 
-- [ ] **Step 1: ROADMAP and archive**
+- [x] **Step 1: ROADMAP and archive**
   Tick the item, set the Plan line to `— done`, `git mv docs/backlog/2026-09-17-discards-are-indexed.md docs/archive/` and point the item's issue link at the new path. Add to "Where we stand": discards and comments are gaps for the extractor.
 
-- [ ] **Step 2: AGENTS.md**
+- [x] **Step 2: AGENTS.md**
   Add an invariant after the `are` bullet: `comment` and `dis_expr` are named children in tree-sitter-clojure 0.1 (no grammar extras), so `extractor::named_children` filters them (`is_gap`) and every positional walk counts forms alone; `walk_occurrences` also refuses a gap node handed to it directly. Metadata nodes are not gaps. `collect_alias_usages` walks `all_named_children` on purpose, so an alias rename rewrites a discarded `h/x` too, and `is_destructured_key` steps back over gaps to find the `:keys` directive. `code_action.rs` keeps its own unfiltered helper on purpose: clean-ns preserves comments among specs, and `collect_bare` counts a symbol inside a discard as a use so a require is kept rather than dropped. Any extractor output change bumps `CACHE_FORMAT_VERSION`.
 
-- [ ] **Step 3: README**
+- [x] **Step 3: README**
   Check the README's feature bullets; nothing there describes extraction details, so no change is expected. Say so in the commit message.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
   Run: `bb check`
   Expected: green.
   `git commit -am "Document discards and comments as gaps"`
+
+---
+
+## Completion summary (2026-09-18)
+
+**Status: complete.** Branch `discards-are-gaps`, five commits on top of `release 0.5.3`.
+
+**Implemented.** `extractor::is_gap` / `named_children` (filtering) / `all_named_children` (raw); both root loops go through the filter; `walk_occurrences` refuses a gap node; `collect_alias_usages` walks `all_named_children` on purpose; `is_destructured_key` steps back over gaps; `CACHE_FORMAT_VERSION` 17 → 18. Nine extractor tests (`mod gaps`, two alias-site cases). `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva` green; `bb compare clj-kondo` 677 → 450 divergences against a same-day `master` baseline, no new divergence class; MEMORY.md, ROADMAP, AGENTS.md updated, issue archived. README untouched (nothing there describes extraction).
+
+**Deviations, gathered.**
+- The `:keys`-gap test asserts `LocalRefs.destructured_key` in `test_extractor.rs` rather than going through `prepareRename` in `test_e2e.rs`.
+- Codex must-fix after Task 2: with no occurrences inside a discard, an alias rename would rewrite a discarded `{:keys [h/x]}` binding entry. Added `discarded_keyword_starts` (walks each discard's forms with a scratch context, only to find keyword-occurrence starts) plus a regression test. Commit 63c2c3b.
+- MEMORY.md got the whole compare table with a baseline column, not four updated rows: the fix moved nearly every bucket.
+- `bb bench clj-kondo` was cut short by a session restart after the clj-pulse cold row (within noise of the 2026-09-10 table); not re-run.
+
+**Issues met.** `bb check` failed on `master` too because an empty gitignored `tests/fixtures/kondo_project/.clj-kondo/` was left by an earlier run; removed. A `pkill -f` pattern matched its own shell and killed one compare run; restarted.
+
+**What the plan could have specified better.** It predicted the fix would clear four buckets; the `;` comment case it added "because it is the same defect" was in fact the dominant one and moved the whole table, so the record step should have asked for a baseline run and a full-table update from the start. It also missed that removing occurrences inside discards takes away the signal `alias_sites_tree` used to tell a discarded binding entry from data — the codex checkpoint caught it.

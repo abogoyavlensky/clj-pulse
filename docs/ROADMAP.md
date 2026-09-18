@@ -70,6 +70,9 @@ file: `.clj` and `.cljc` open the Clojure one, `.cljs` the ClojureScript one.
 The clj-kondo probe tries every install it can find and resolves mise shims
 to the binary behind them, and a lint pass that fails is reported once on
 `lintStatus` and in the log instead of silently publishing the native set.
+Discards and comments are gaps for the extractor: nothing inside a `#_` form
+is indexed, and a `;` comment or discard inside a binding vector, a
+destructuring map or a def form no longer shifts what follows it.
 
 Not shipped: `foldingRange`, formatting, semantic tokens, code lens,
 implementation provider, `executeCommand` refactors, `willRenameFiles`.
@@ -283,13 +286,14 @@ the release.
     cancellation of superseded runs, and `mise which` resolution of shims at
     probe time so the per-file cwd stops deciding which binary runs.
   Plan: [2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md](plans/2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md) — done
-- [ ] **Discards and comments are gaps.** `#_` forms and `;` comments are
-      named children in tree-sitter-clojure, so today they are indexed as code
-      and shift every positional walk (a `#_#_` pair or a comment inside a
-      `let` vector re-pairs the bindings after it). Issue:
-      [`#_` discards are indexed](backlog/2026-09-17-discards-are-indexed.md)
-      (Backlog, 2026-09-17).
-      Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — in progress
+- [x] **Discards and comments are gaps.** `#_` forms and `;` comments are
+      named children in tree-sitter-clojure, so they were indexed as code and
+      shifted every positional walk (a `#_#_` pair or a comment inside a
+      `let` vector re-paired the bindings after it). Issue:
+      [`#_` discards are indexed](archive/2026-09-17-discards-are-indexed.md)
+      (Backlog, 2026-09-17). `bb compare` on clj-kondo went from 677 to 450
+      divergences on this fix alone.
+      Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
