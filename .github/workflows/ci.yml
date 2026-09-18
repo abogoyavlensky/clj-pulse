@@ -55,11 +55,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      # cache off — see the lint-fmt job
-      - uses: jdx/mise-action@v3.6.1
-        with:
-          install_args: "rust"
-          cache: false
+      # No mise here: on Windows it installs every tool in .mise.toml and the
+      # clojure plugin's post-install hook is a Unix script. The runner's own
+      # rustup installs the version .mise.toml pins instead.
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: scripts/rustup-pinned.sh
       - uses: Swatinem/rust-cache@v2
       - name: Linting
         run: cargo clippy --all-targets -- -D warnings

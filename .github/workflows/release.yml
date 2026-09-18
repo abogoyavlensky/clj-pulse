@@ -52,9 +52,17 @@ jobs:
       # cache off: a mise cache hit restores only a phantom symlink without
       # the ~/.rustup toolchain, so `rustup target add` would fail (see ci.yml)
       - uses: jdx/mise-action@v3.6.1
+        if: runner.os != 'Windows'
         with:
           install_args: "rust"
           cache: false
+
+      # mise on Windows installs every tool in .mise.toml and fails on the
+      # clojure plugin's Unix post-install hook; rustup pins the same version.
+      - name: Install pinned Rust toolchain (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: scripts/rustup-pinned.sh
 
       - name: Add cross-compilation target
         run: rustup target add ${{ matrix.target }}
