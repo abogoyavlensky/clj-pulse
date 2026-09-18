@@ -2309,6 +2309,39 @@ h/f
     }
 
     #[test]
+    fn test_alias_sites_skip_discarded_binding_entries() {
+        // Inside a discard the extractor records no occurrences, so the
+        // binding-entry exclusion has to come from a walk of the discard
+        // itself: `{:keys [h/x]}` in a binding position reads `:h/x` verbatim
+        // whether or not the form is commented out, while the same vector as
+        // data is a site. `#_#_` stacks and a discard nested in a discard are
+        // examined the same way.
+        let src = "\
+(ns x (:require [y.z :as h]))
+#_(let [{:keys [h/x]} {}] x)
+#_(def m {:keys [h/f]})
+#_#_(fn [{:keys [h/y]}] y) (fn [{::h/keys [z]}] z)
+#_(do #_(let [{:keys [h/w]} {}] w))
+(h/two)
+";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("x.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "h", &occs);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(
+            usages,
+            vec![
+                (2, 17, 18), // {:keys [h/f]} as data
+                (3, 35, 36), // ::h/keys directive, auto-resolved
+                (5, 1, 2),   // h/two
+            ],
+            "usages: {:?}",
+            sites.usages
+        );
+    }
+
+    #[test]
     fn test_alias_at_finds_the_alias_under_the_cursor() {
         let tree = parse_tree(SRC).unwrap();
         let at = |line, ch| alias_at_tree(&tree, SRC, Position::new(line, ch));

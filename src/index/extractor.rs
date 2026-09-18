@@ -1492,6 +1492,11 @@ pub struct AliasSites {
 /// where a colon-prefixed occurrence starts is a destructuring entry. The same
 /// vector as plain data (`(def m {:keys [h/f]})`) is a var occurrence and is
 /// rewritten.
+///
+/// A `#_` discard is a site too — the text breaks the moment it is
+/// uncommented — but the extractor records nothing inside one, so the file's
+/// occurrences cannot tell a discarded binding entry from discarded data.
+/// [`discarded_keyword_starts`] walks each discard's forms for that alone.
 pub fn alias_sites_tree(
     tree: &tree_sitter::Tree,
     source: &str,
@@ -1504,11 +1509,12 @@ pub fn alias_sites_tree(
         .filter(|n| node_text(*n, source) == alias)
         .map(|n| node_to_lsp_range(n, source))
         .collect();
-    let keyword_starts: HashSet<(u32, u32)> = occurrences
+    let mut keyword_starts: HashSet<(u32, u32)> = occurrences
         .iter()
         .filter(|o| o.fqn.starts_with(':'))
         .map(|o| (o.name_range.start.line, o.name_range.start.character))
         .collect();
+    discarded_keyword_starts(root, source, &mut keyword_starts);
     let mut usages = Vec::new();
     collect_alias_usages(root, source, alias, &keyword_starts, &mut usages);
     AliasSites {
@@ -1688,6 +1694,53 @@ fn collect_alias_declarations_in_libspec<'a>(
         {
             out.push(value);
         }
+    }
+}
+
+/// Adds the start of every keyword occurrence inside a `#_` discard under
+/// `node` to `out`: the occurrence walker never enters a discard, so the
+/// binding-entry exclusion of [`alias_sites_tree`] needs its own walk of the
+/// discarded forms. It runs the ordinary walker over each discard's forms
+/// with an empty namespace context — which key a `{::alias/keys [x]}`
+/// directive resolves to does not matter here, only that its entries are
+/// keyword occurrences — and a scratch scope, so nothing it binds or leaves
+/// unused reaches the file's analysis. Every discarded form is walked by
+/// its nearest enclosing discard alone: the walker skips a nested discard,
+/// and this scan finds that one for itself.
+fn discarded_keyword_starts(node: Node, source: &str, out: &mut HashSet<(u32, u32)>) {
+    if node.kind() == "dis_expr" {
+        let ns_meta = NsMeta {
+            name: String::new(),
+            file: std::path::PathBuf::new(),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: Vec::new(),
+            imports: HashMap::new(),
+            refer_all: Vec::new(),
+            as_aliases: Vec::new(),
+            core_excludes: Vec::new(),
+        };
+        let lint_as = HashMap::new();
+        let ctx = OccurrenceCtx {
+            source,
+            ns_meta: &ns_meta,
+            def_names: HashSet::new(),
+            lint_as: &lint_as,
+        };
+        let mut scope = Scope::new();
+        let mut occurrences = Vec::new();
+        for form in named_children(node) {
+            walk_occurrences(form, &ctx, &mut scope, &mut occurrences);
+        }
+        out.extend(
+            occurrences
+                .iter()
+                .filter(|o| o.fqn.starts_with(':'))
+                .map(|o| (o.name_range.start.line, o.name_range.start.character)),
+        );
+    }
+    for child in all_named_children(node) {
+        discarded_keyword_starts(child, source, out);
     }
 }
 
