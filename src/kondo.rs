@@ -305,11 +305,14 @@ pub fn not_found_message(path: &str, reason: &str) -> String {
     msg
 }
 
-/// How long one buffer lint may take before it is abandoned. Normal files
-/// finish in 20-70 ms and a 4000-line file in ~0.5 s, so 2 s is slack for a
-/// cold JVM-less start under load — and short enough that a wedged binary
-/// never stalls the squiggles behind it.
-pub const LINT_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one buffer lint may take before it is abandoned: the bound for a
+/// wedged binary, not a budget for a normal run. Normal files finish in
+/// 20-70 ms and a 4000-line file in ~0.5 s, but a large file on a loaded
+/// machine can take seconds, and abandoning it publishes the native set
+/// alone. Ten seconds is generous because it never stalls the squiggles
+/// behind it: a superseded pass is aborted the moment the next one starts,
+/// and [`run`] kills the process group of a dropped future.
+pub const LINT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the `--version` discovery probe may take. Runs on `initialize`
 /// and on every config change, so it must fail fast.
@@ -353,6 +356,11 @@ pub fn lints_file(path: &Path) -> bool {
 /// unresolved name once per file, and a squiggle on the first usage alone
 /// sends the user through the file one fix at a time.
 ///
+/// `cwd` is where the binary runs from — the workspace root, the directory
+/// the probe proved it from, so a mise shim resolves the same tool on every
+/// pass instead of whatever a subdirectory's own mise config says. clj-kondo
+/// itself does not care: its config comes from `--filename`.
+///
 /// `Err` is any reason we have no findings to trust — spawn failure, timeout,
 /// a crash, unparseable stdout. Callers keep their native diagnostics on
 /// `Err`; only `Ok` cedes ownership.
@@ -360,6 +368,7 @@ pub async fn lint(
     bin: &str,
     source: &str,
     abs_path: &Path,
+    cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<Vec<Diagnostic>, String> {
     let mut cmd = tokio::process::Command::new(bin);
@@ -376,11 +385,7 @@ pub async fn lint(
     if abs_path.extension().is_some_and(|e| e == "bb") {
         cmd.arg("--lang").arg("clj");
     }
-    // Run from the file's own directory. clj-kondo does not care (it resolves
-    // its config from `--filename`), but a mise shim does: it picks the
-    // version the nearest mise config pins, and the server's own cwd is
-    // wherever the editor happened to start it.
-    if let Some(dir) = abs_path.parent().filter(|d| d.is_dir()) {
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
 
@@ -448,35 +453,116 @@ pub struct Probe {
     pub bin: String,
 }
 
-/// Runs `<bin> --version` and returns the version it reports.
+/// Runs `<bin> --version` on every candidate the name resolves to, in PATH
+/// order, and returns the first that reports a clj-kondo version.
 ///
-/// `None` covers every "no usable clj-kondo here" case: the binary is absent
-/// (bare names are resolved through PATH by `Command`, so this doubles as
-/// discovery), it fails, it times out, or it is some *other* tool whose
-/// `--version` we would otherwise happily accept.
+/// `Err` covers every "no usable clj-kondo here" case: the binary is absent
+/// (bare names are resolved over the augmented PATH, so this doubles as
+/// discovery), every candidate fails or times out, or each is some *other*
+/// tool whose `--version` we would otherwise happily accept. A candidate
+/// that fails is not the end of the search: a mise shim first on PATH that
+/// refuses an untrusted `mise.toml` must not hide the Homebrew install
+/// behind it, or the lint tier depends on how the editor was launched.
 pub async fn probe_version(bin: &str, cwd: Option<&Path>) -> Result<Probe, String> {
-    // Resolve the name ourselves, to an absolute path, so the answer names the
+    probe_version_in(bin, cwd, &crate::tools::augmented_path()).await
+}
+
+/// [`probe_version`] over an explicit PATH.
+async fn probe_version_in(
+    bin: &str,
+    cwd: Option<&Path>,
+    path: &std::ffi::OsStr,
+) -> Result<Probe, String> {
+    // Resolve the name ourselves, to absolute paths, so the answer names the
     // file that ran — the one thing a user with two installs needs to know —
     // so "not found" can say where it looked, and so a workspace-relative
-    // `:path` still works when a lint runs from the file's own directory.
+    // `:path` still works whatever directory a lint runs from.
     let base = cwd
         .filter(|d| d.is_dir())
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
-    let Some(resolved) = crate::tools::resolve(bin, &base) else {
+    let candidates = crate::tools::resolve_all_in(bin, &base, path);
+    if candidates.is_empty() {
         return Err(format!(
             "`{bin}` not found on {}",
             crate::tools::describe_search()
         ));
+    }
+    let mut reasons = Vec::new();
+    for candidate in candidates {
+        let candidate = match crate::tools::is_mise_shim(&candidate) {
+            true => behind_mise_shim(bin, &candidate, &base, cwd, path).await,
+            false => candidate,
+        };
+        let resolved = candidate.display().to_string();
+        match probe_one(&resolved, cwd).await {
+            Ok(version) => {
+                return Ok(Probe {
+                    version,
+                    bin: resolved,
+                })
+            }
+            Err(reason) => reasons.push(reason),
+        }
+    }
+    Err(reasons.join("; "))
+}
+
+/// The binary a mise shim stands for, asked of `mise which` from `cwd` — the
+/// shim itself when mise is not found, fails, or names nothing runnable.
+///
+/// A shim resolves its tool through the mise config of the directory it runs
+/// from and refuses outright when that config is untrusted; `mise which`
+/// answers the same question without running the tool. Every lint then runs
+/// that binary directly, from the workspace root, so a subdirectory's own
+/// mise config can no longer pick a different one per file.
+async fn behind_mise_shim(
+    bin: &str,
+    shim: &Path,
+    base: &Path,
+    cwd: Option<&Path>,
+    path: &std::ffi::OsStr,
+) -> std::path::PathBuf {
+    // A symlink shim points at the very mise that made it; a script shim
+    // says only `mise`, which is looked up like any tool.
+    let Some(mise) = crate::tools::mise_behind_symlink(shim).or_else(|| {
+        crate::tools::resolve_all_in("mise", base, path)
+            .into_iter()
+            .next()
+    }) else {
+        return shim.to_path_buf();
     };
-    let resolved = resolved.display().to_string();
-    let mut cmd = tokio::process::Command::new(&resolved);
+    let mise = mise.display().to_string();
+    let mut cmd = tokio::process::Command::new(&mise);
+    cmd.arg("which").arg(bin);
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    let Ok(output) = run(&mut cmd, &mise, None, PROBE_TIMEOUT).await else {
+        return shim.to_path_buf();
+    };
+    if !output.status.success() {
+        return shim.to_path_buf();
+    }
+    let answer = String::from_utf8_lossy(&output.stdout);
+    let answer = Path::new(answer.trim());
+    match crate::tools::is_executable(answer) {
+        true => answer.to_path_buf(),
+        false => shim.to_path_buf(),
+    }
+}
+
+/// `<resolved> --version` on one candidate: the version it reports, or why
+/// it is not a clj-kondo we can lint with. Every reason names the file, so
+/// the joined error of a failed search reads as a list of what was tried.
+async fn probe_one(resolved: &str, cwd: Option<&Path>) -> Result<String, String> {
+    let mut cmd = tokio::process::Command::new(resolved);
     cmd.arg("--version");
     if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
-    let output = run(&mut cmd, &resolved, None, PROBE_TIMEOUT).await?;
+    let output = run(&mut cmd, resolved, None, PROBE_TIMEOUT).await?;
     // A wrapper script that prints a version banner and then fails is not a
     // clj-kondo we can lint with; treat it as absent rather than spawn it once
     // per keystroke.
@@ -491,10 +577,7 @@ pub async fn probe_version(bin: &str, cwd: Option<&Path>) -> Result<Probe, Strin
     stdout
         .lines()
         .find_map(|line| line.trim().strip_prefix("clj-kondo "))
-        .map(|version| Probe {
-            version: version.trim().to_string(),
-            bin: resolved.clone(),
-        })
+        .map(|version| version.trim().to_string())
         .ok_or_else(|| format!("`{resolved} --version` did not print a clj-kondo version line"))
 }
 
@@ -503,10 +586,13 @@ pub async fn probe_version(bin: &str, cwd: Option<&Path>) -> Result<Probe, Strin
 ///
 /// Mirrors `classpath::resolve_via_cmd`'s process handling — own process
 /// group, `kill_on_drop`, group kill on timeout — because the failure it
-/// prevents is the same: a dropped future must not orphan a child. The
-/// difference is the stdin feed, and that a non-zero exit is not by itself an
-/// error here (clj-kondo exits 2/3 with perfectly good findings), so the
-/// status is handed back for the caller to judge.
+/// prevents is the same: a dropped future must not orphan a child. Here the
+/// group kill also runs when the future is *dropped* mid-wait: a lint pass
+/// superseded by the next edit is aborted, and `kill_on_drop` reaps only the
+/// direct child, which for a mise shim is the shell around the real binary.
+/// The other difference is the stdin feed, and that a non-zero exit is not
+/// by itself an error here (clj-kondo exits 2/3 with perfectly good
+/// findings), so the status is handed back for the caller to judge.
 async fn run(
     cmd: &mut tokio::process::Command,
     bin: &str,
@@ -528,6 +614,7 @@ async fn run(
         .spawn()
         .map_err(|e| format!("failed to run `{bin}`: {e}"))?;
     let pid = child.id();
+    let mut guard = KillGroupOnDrop(pid);
 
     // Feed stdin from its own task: writing inline would deadlock on a buffer
     // large enough to fill the pipe before we start draining stdout. Dropping
@@ -547,7 +634,12 @@ async fn run(
         });
     }
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    let waited = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    // Either way the wait is over: the child exited, or the timeout branch
+    // kills the group itself. Only an abort between the spawn and this line
+    // leaves the guard armed.
+    guard.0 = None;
+    match waited {
         Ok(result) => result.map_err(|e| format!("failed to run `{bin}`: {e}")),
         Err(_elapsed) => {
             kill_group(pid);
@@ -556,8 +648,20 @@ async fn run(
     }
 }
 
-/// Kills a timed-out child and everything it spawned. `kill_on_drop` reaps
-/// only the direct child; the group kill is what stops its descendants.
+/// Kills the process group of the child it holds when dropped while armed.
+/// Armed right after the spawn, disarmed once the wait returns, so the only
+/// drop that fires is the one an aborted future takes.
+struct KillGroupOnDrop(Option<u32>);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        kill_group(self.0);
+    }
+}
+
+/// Kills a timed-out or abandoned child and everything it spawned.
+/// `kill_on_drop` reaps only the direct child; the group kill is what stops
+/// its descendants.
 fn kill_group(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     #[cfg(unix)]
@@ -751,6 +855,27 @@ mod tests {
         p.display().to_string()
     }
 
+    /// [`fake_bin`] for a stand-in of some other program — a `mise` that
+    /// answers `which`, a shim.
+    #[cfg(unix)]
+    fn fake_named(dir: &Path, name: &str, script: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\n[ \"$1\" = --exec-probe ] && exit 0\n{script}"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&p);
+        p.display().to_string()
+    }
+
+    /// A PATH of exactly these directories.
+    fn path_of(dirs: &[&Path]) -> std::ffi::OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
     /// Blocks until `bin` can actually be exec'd.
     ///
     /// Writing an executable and immediately running it races in a
@@ -835,9 +960,15 @@ echo '{"findings":[{"type":"invalid-arity","level":"error","row":3,"col":12,"end
 exit 3
 "#,
         );
-        let diags = lint(&bin, "(ns a)", Path::new("/p/src/a.clj"), TEST_TIMEOUT)
-            .await
-            .expect("exit 3 must be success");
+        let diags = lint(
+            &bin,
+            "(ns a)",
+            Path::new("/p/src/a.clj"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect("exit 3 must be success");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "a/f is called with 2 args but expects 1");
     }
@@ -862,6 +993,7 @@ exit 3
             &bin,
             "(ns live.buffer)",
             Path::new("/p/src/a.clj"),
+            None,
             TEST_TIMEOUT,
         )
         .await
@@ -892,9 +1024,15 @@ exit 3
                 seen.display()
             ),
         );
-        lint(&bin, "(println 1)", Path::new("/p/script.bb"), TEST_TIMEOUT)
-            .await
-            .unwrap();
+        lint(
+            &bin,
+            "(println 1)",
+            Path::new("/p/script.bb"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert!(std::fs::read_to_string(&seen)
             .unwrap()
             .contains("--lang clj"));
@@ -909,9 +1047,15 @@ exit 3
             dir.path(),
             "cat > /dev/null\necho 'Exception in thread \"main\"' >&2\nexit 1\n",
         );
-        let err = lint(&bin, "(ns a)", Path::new("/p/src/a.clj"), TEST_TIMEOUT)
-            .await
-            .expect_err("exit 1 must be an error");
+        let err = lint(
+            &bin,
+            "(ns a)",
+            Path::new("/p/src/a.clj"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect_err("exit 1 must be an error");
         assert!(err.contains("Exception in thread"), "err: {err}");
     }
 
@@ -922,9 +1066,15 @@ exit 3
         // native diagnostics — it degrades to "kondo failed".
         let dir = tempfile::TempDir::new().unwrap();
         let bin = fake_bin(dir.path(), "cat > /dev/null\nexit 0\n");
-        let err = lint(&bin, "(ns a)", Path::new("/p/src/a.clj"), TEST_TIMEOUT)
-            .await
-            .expect_err("empty stdout must be an error");
+        let err = lint(
+            &bin,
+            "(ns a)",
+            Path::new("/p/src/a.clj"),
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect_err("empty stdout must be an error");
         assert!(
             err.contains("unparseable") || err.contains("output"),
             "err: {err}"
@@ -938,6 +1088,7 @@ exit 3
             "clj-kondo-definitely-not-installed",
             "(ns a)",
             Path::new("/p/src/a.clj"),
+            None,
             TEST_TIMEOUT,
         )
         .await
@@ -963,6 +1114,7 @@ exit 3
             &bin,
             "(ns a)",
             Path::new("/p/src/a.clj"),
+            None,
             Duration::from_millis(200),
         )
         .await
@@ -974,6 +1126,95 @@ exit 3
             !marker.exists(),
             "clj-kondo kept running after the timeout — group kill missing?"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lint_runs_from_the_given_cwd() {
+        // The workspace root, not the file's directory: the probe proved the
+        // binary from the root, and a mise shim must see the same config on
+        // every pass.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let bin = fake_bin(
+            dir.path(),
+            r#"cat > /dev/null
+printf '{"findings":[{"type":"cwd","level":"info","row":1,"col":1,"message":"%s"}]}' "$(pwd)"
+"#,
+        );
+        let file_dir = tempfile::TempDir::new().unwrap();
+        let diags = lint(
+            &bin,
+            "(ns a)",
+            &file_dir.path().join("a.clj"),
+            Some(cwd.path()),
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let wanted = cwd.path().canonicalize().unwrap();
+        let seen = Path::new(&diags[0].message).canonicalize().unwrap();
+        assert_eq!(seen, wanted, "ran from {}", diags[0].message);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lint_child_group_dies_when_the_future_is_dropped() {
+        // A superseded pass is aborted, which drops the `lint` future. The
+        // recorded pid is a *grandchild* (the fake runs `sh -c`), so
+        // `kill_on_drop` alone would leave it running: only the group kill
+        // takes it down, and a mise shim plus the binary it exec'd has this
+        // very shape.
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_file = dir.path().join("pid");
+        let bin = fake_bin(
+            dir.path(),
+            &format!(
+                "cat > /dev/null\nsh -c 'echo $$ > \"{}\"; sleep 30'\n",
+                pid_file.display()
+            ),
+        );
+        let task = tokio::spawn(async move {
+            let _ = lint(
+                &bin,
+                "(ns a)",
+                Path::new("/p/src/a.clj"),
+                None,
+                TEST_TIMEOUT,
+            )
+            .await;
+        });
+        let start = std::time::Instant::now();
+        let pid: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "fake never started"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the grandchild must be alive"
+        );
+
+        task.abort();
+        let _ = task.await;
+
+        let start = std::time::Instant::now();
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "the grandchild outlived the dropped lint future"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[cfg(unix)]
@@ -998,6 +1239,126 @@ exit 3
             err.contains("did not print a clj-kondo version line"),
             "{err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_falls_through_a_failing_candidate() {
+        // The metabase shape: a mise shim first on PATH refuses an untrusted
+        // config and exits 1, and a Homebrew install behind it works.
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        fake_bin(
+            a.path(),
+            "echo 'mise ERROR: config not trusted' >&2\nexit 1\n",
+        );
+        let good = fake_bin(b.path(), "echo 'clj-kondo v2026.1.1'\n");
+        let probe = probe_version_in("clj-kondo", None, &path_of(&[a.path(), b.path()]))
+            .await
+            .unwrap();
+        assert_eq!(probe.version, "v2026.1.1");
+        assert_eq!(probe.bin, good);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_error_lists_every_candidate_tried() {
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        let first = fake_bin(a.path(), "echo 'config not trusted' >&2\nexit 1\n");
+        let second = fake_bin(b.path(), "echo 'GNU bash, version 5.2'\n");
+        let err = probe_version_in("clj-kondo", None, &path_of(&[a.path(), b.path()]))
+            .await
+            .unwrap_err();
+        assert!(err.contains(&first), "{err}");
+        assert!(err.contains("config not trusted"), "{err}");
+        assert!(err.contains(&second), "{err}");
+        assert!(
+            err.contains("did not print a clj-kondo version line"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_resolves_a_mise_shim_through_mise_which() {
+        // The shim refuses to run whatever it is asked, as it does under an
+        // untrusted config; `mise which` still knows the installed binary.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real = tmp.path().join("real");
+        let mise = tmp.path().join("mise-bin");
+        for d in [&shims, &real, &mise] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        fake_bin(
+            &shims,
+            "# mise shim\necho 'mise ERROR: config not trusted' >&2\nexit 1\n",
+        );
+        let target = fake_bin(&real, "echo 'clj-kondo v2026.1.1'\n");
+        fake_named(
+            &mise,
+            "mise",
+            &format!(
+                "[ \"$1\" = which ] && [ \"$2\" = clj-kondo ] && echo '{target}' && exit 0\nexit 1\n"
+            ),
+        );
+        let probe = probe_version_in("clj-kondo", None, &path_of(&[&shims, &mise]))
+            .await
+            .unwrap();
+        assert_eq!(
+            probe.bin, target,
+            "the binary behind the shim is what lints"
+        );
+        assert_eq!(probe.version, "v2026.1.1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_resolves_a_symlink_shim_through_the_mise_it_points_at() {
+        // The shape mise installs: `shims/clj-kondo -> mise`. mise run as
+        // `clj-kondo` (argv[0]) would resolve through the cwd's config; asked
+        // `which`, the same binary names the install. The PATH here holds no
+        // `mise` at all, so the symlink target is the only way to find it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real = tmp.path().join("real");
+        let mise_dir = tmp.path().join("mise-home");
+        for d in [&shims, &real, &mise_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let target = fake_bin(&real, "echo 'clj-kondo v2026.1.1'\n");
+        let mise = fake_named(
+            &mise_dir,
+            "mise",
+            &format!(
+                "[ \"$1\" = which ] && [ \"$2\" = clj-kondo ] && echo '{target}' && exit 0\necho 'mise ERROR: config not trusted' >&2\nexit 1\n"
+            ),
+        );
+        std::os::unix::fs::symlink(&mise, shims.join("clj-kondo")).unwrap();
+        let probe = probe_version_in("clj-kondo", None, &path_of(&[&shims]))
+            .await
+            .unwrap();
+        assert_eq!(probe.bin, target);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_keeps_the_shim_when_mise_which_fails() {
+        // A working shim setup must keep working: the shim answers itself
+        // when `mise which` has nothing to say.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let mise = tmp.path().join("mise-bin");
+        for d in [&shims, &mise] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let shim = fake_bin(&shims, "# mise shim\necho 'clj-kondo v2026.1.1'\n");
+        fake_named(&mise, "mise", "exit 1\n");
+        let probe = probe_version_in("clj-kondo", None, &path_of(&[&shims, &mise]))
+            .await
+            .unwrap();
+        assert_eq!(probe.bin, shim);
     }
 
     #[tokio::test]

@@ -5311,6 +5311,151 @@ fn test_e2e_kondo_found_in_a_well_known_dir_off_path() {
     );
 }
 
+/// A directory holding an executable `name` with `script` as its body: a
+/// clj-kondo that fails, a `mise` that answers `which`.
+fn dir_with_script(name: &str, script: &str) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join(name);
+    std::fs::write(&target, format!("#!/bin/sh\n{script}")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn test_e2e_kondo_probe_falls_through_a_failing_candidate() {
+    // The metabase shape: the first `clj-kondo` on the search path is a mise
+    // shim refusing an untrusted config, and a working install sits behind
+    // it. The probe must reach the second one, and lint with it.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let broken = dir_with_script(
+        "clj-kondo",
+        "echo 'mise ERROR: config not trusted' >&2\nexit 1\n",
+    );
+    let working = well_known_dir_with_fake_kondo();
+    let tool_dirs = std::env::join_paths([broken.path(), working.path()]).unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", Path::new(&tool_dirs)),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log(&format!(
+        "clj-kondo v0.0.0-fake found ({})",
+        working.path().join("clj-kondo").display()
+    ));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+}
+
+#[test]
+fn test_e2e_kondo_not_found_lists_every_candidate() {
+    // When no candidate works, the announcement names each one and why, so
+    // a user with two broken installs sees both rather than the first.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let first = dir_with_script("clj-kondo", "echo 'config not trusted' >&2\nexit 1\n");
+    let second = dir_with_script("clj-kondo", "echo 'GNU bash, version 5.2'\n");
+    let tool_dirs = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", Path::new(&tool_dirs)),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo not found — linting: native lints only");
+    let line = log_lines_containing(&client, "clj-kondo not found")
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(
+        line.contains(&first.path().join("clj-kondo").display().to_string()),
+        "{line}"
+    );
+    assert!(line.contains("config not trusted"), "{line}");
+    assert!(
+        line.contains(&second.path().join("clj-kondo").display().to_string()),
+        "{line}"
+    );
+    assert!(
+        line.contains("did not print a clj-kondo version line"),
+        "{line}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_e2e_kondo_mise_shim_resolves_to_the_real_binary() {
+    // A shim under `shims/` that refuses to run is replaced by whatever
+    // `mise which clj-kondo` names, and that binary is what lints — the
+    // diagnostics prove the resolved path ran, not the shim.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let working = well_known_dir_with_fake_kondo();
+    let real = working.path().join("clj-kondo");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let shims = tmp.path().join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shim = shims.join("clj-kondo");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\n# mise shim\necho 'mise ERROR: config not trusted' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mise = dir_with_script(
+        "mise",
+        &format!(
+            "[ \"$1\" = which ] && [ \"$2\" = clj-kondo ] && echo '{}' && exit 0\nexit 1\n",
+            real.display()
+        ),
+    );
+    let tool_dirs = std::env::join_paths([shims.as_path(), mise.path()]).unwrap();
+
+    let mut client = LspClient::spawn(
+        &root,
+        &[
+            ("CLJ_PULSE_TOOL_DIRS", Path::new(&tool_dirs)),
+            ("PATH", Path::new(BARE_PATH)),
+        ],
+        true,
+        Kondo::Real,
+    );
+    client.initialize(&root);
+    client.wait_for_log(&format!("clj-kondo v0.0.0-fake found ({})", real.display()));
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+}
+
 #[test]
 fn test_e2e_kondo_not_found_says_where_it_looked() {
     let project = setup_kondo_project();
@@ -5360,9 +5505,9 @@ fn test_e2e_kondo_not_found_says_where_it_looked() {
 
 #[test]
 fn test_e2e_kondo_workspace_relative_path_lints_files_in_subdirectories() {
-    // `:path "./bin/clj-kondo"` is anchored to the workspace. A lint runs from
-    // the file's own directory (so mise shims see the project's pin), which
-    // must not turn that path into `src/bin/clj-kondo`.
+    // `:path "./bin/clj-kondo"` is anchored to the workspace: the probe
+    // resolves it to a full path once, and that path is what every lint
+    // runs, whatever directory it runs from.
     let project = setup_kondo_project();
     let root = project.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("bin")).unwrap();
@@ -5413,6 +5558,155 @@ fn test_e2e_kondo_path_that_is_a_command_line_is_explained() {
     let mut client = LspClient::start_with_kondo(&root);
     client.initialize(&root);
     client.wait_for_log("names a program, not a command line");
+}
+
+/// The `window/logMessage` texts stashed so far that contain `needle`.
+fn log_lines_containing(client: &LspClient, needle: &str) -> Vec<String> {
+    client
+        .notifications
+        .iter()
+        .filter(|m| m["method"] == "window/logMessage")
+        .filter_map(|m| m["params"]["message"].as_str().map(str::to_string))
+        .filter(|m| m.contains(needle))
+        .collect()
+}
+
+#[test]
+fn test_e2e_kondo_lint_failure_is_reported_once_on_lint_status() {
+    // A pass whose clj-kondo run fails publishes the native set, as before —
+    // but says so: once per distinct reason on the log and as `detail` on
+    // `lintStatus`, cleared when a run succeeds again. Before this, the status
+    // bar kept saying "clj-kondo + native" while nothing from clj-kondo came.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let app = root.join("src/app.clj");
+    std::fs::write(
+        &app,
+        "(ns kondo.app)\n;; kondo-fail-here\n(defn run []\n  (helpers/greet \"world\"))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start_with_kondo(&root);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    client.did_open(&app);
+    let params = client.wait_for_diagnostics("/src/app.clj");
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())],
+        "a failed run leaves the native set in place"
+    );
+    let status = client.wait_for_notification_where("clojurePulse/lintStatus", |p| {
+        p["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("clj-kondo failed"))
+    });
+    assert_eq!(status["engine"], json!("kondo+native"), "{status}");
+    assert_eq!(status["version"], json!("v0.0.0-fake"), "{status}");
+    let detail = status["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("clj-kondo failed on src/app.clj"),
+        "{detail}"
+    );
+    assert!(detail.contains("simulated crash"), "{detail}");
+    assert!(detail.contains("native lints only"), "{detail}");
+    client.wait_for_log("clj-kondo failed on src/app.clj");
+    assert_eq!(log_lines_containing(&client, "clj-kondo failed").len(), 1);
+
+    // The same failure again is not news: no second warning.
+    client.did_change_range(&app, 2, (0, 0), (0, 0), ";; typing\n");
+    let params = client.wait_for_notification_where("textDocument/publishDiagnostics", |p| {
+        p["version"] == json!(2)
+    });
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-namespace".to_string(), "clj-pulse".to_string())]
+    );
+    assert_eq!(
+        log_lines_containing(&client, "clj-kondo failed").len(),
+        1,
+        "one warning per distinct reason, not one per pass"
+    );
+
+    // A run that succeeds clears the failure, and says so once too.
+    client.clear_notifications();
+    client.did_change_range(&app, 3, (2, 0), (2, 18), ";; kondo-finding-here");
+    let params = client.wait_for_notification_where("textDocument/publishDiagnostics", |p| {
+        p["version"] == json!(3)
+    });
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+    client.wait_for_log("clj-kondo recovered");
+    let status = client.wait_for_notification_where("clojurePulse/lintStatus", |p| {
+        p["engine"] == json!("kondo+native") && p.get("detail").is_none()
+    });
+    assert_eq!(status["version"], json!("v0.0.0-fake"), "{status}");
+    assert_eq!(log_lines_containing(&client, "clj-kondo failed").len(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_e2e_superseded_lint_pass_is_killed() {
+    // A pass still running when the next edit arrives is aborted, and the
+    // clj-kondo it spawned dies with it — the whole process group, so a shim
+    // plus the binary it exec'd both go, not just the direct child. The fake
+    // records a grandchild's pid for exactly that reason.
+    let project = setup_kondo_project();
+    let root = project.path().canonicalize().unwrap();
+    let pid_file = root.join("kondo.pid");
+
+    let mut client = LspClient::start_with_kondo_env(&root, &[("FAKE_KONDO_PID_FILE", &pid_file)]);
+    client.initialize(&root);
+    client.wait_for_log("clj-kondo v0.0.0-fake found");
+
+    let app = root.join("src/app.clj");
+    client.did_open(&app);
+    client.wait_for_diagnostics("/src/app.clj");
+    client.clear_notifications();
+
+    client.did_change_range(&app, 2, (0, 0), (0, 0), ";; kondo-hang-here\n");
+    let start = Instant::now();
+    let pid: i32 = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            break pid;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the hanging pass never started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the fake must be running");
+
+    // The next edit supersedes the hanging pass: its diagnostics arrive well
+    // inside the 10 s lint timeout, and the abandoned process is gone.
+    client.did_change_range(&app, 3, (0, 0), (1, 0), "");
+    let start = Instant::now();
+    let params = client.wait_for_notification_where("textDocument/publishDiagnostics", |p| {
+        p["version"] == json!(3)
+    });
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the superseding pass waited on the hung one"
+    );
+    assert_eq!(
+        diagnostic_codes(&params),
+        vec![("unresolved-symbol".to_string(), "clj-kondo".to_string())]
+    );
+    let start = Instant::now();
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the superseded clj-kondo (pid {pid}) is still running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

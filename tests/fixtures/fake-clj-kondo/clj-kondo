@@ -9,6 +9,12 @@
 #   --lint -        a buffer lint, answered from markers found on stdin;
 #                   records argv too, so a test can assert the configs
 #
+# Two markers make a lint go wrong on purpose, and come before the finding
+# markers so a file carrying both fails: `kondo-fail-here` is a crash (stderr,
+# exit 1, no stdout), and `kondo-hang-here` records a *grandchild's* pid in
+# `$FAKE_KONDO_PID_FILE` and sleeps — only a process-group kill takes that
+# grandchild down, which is what a superseded pass must do.
+#
 # Findings are pinned to row 4, cols 4..17 — the `helpers/greet` call on the
 # fourth line of the kondo_project fixture files.
 
@@ -37,6 +43,18 @@ fi
 source=$(cat)
 
 case "$source" in
+  *kondo-fail-here*)
+    echo 'boom: simulated crash' >&2
+    exit 1
+    ;;
+  *kondo-hang-here*)
+    if [ -n "$FAKE_KONDO_PID_FILE" ]; then
+      sh -c 'echo $$ > "$FAKE_KONDO_PID_FILE"; sleep 30'
+    else
+      sleep 30
+    fi
+    exit 1
+    ;;
   *kondo-unresolved-ns-here*)
     # Exit 2: warnings found. A success code, like 0 and 3.
     printf '%s\n' '{"findings":[{"type":"unresolved-namespace","level":"warning","filename":"-","row":4,"col":4,"end-row":4,"end-col":17,"langs":[],"message":"Unresolved namespace helpers. Are you missing a require?"}],"summary":{"error":0,"warning":1,"info":0}}'

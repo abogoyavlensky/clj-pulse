@@ -208,8 +208,30 @@ there.
   Dock-launched editor's bare PATH still finds them. `CLJ_PULSE_TOOL_DIRS`
   (PATH-style) replaces that list; the discovery e2e tests set it, so they
   never depend on what the host has installed. A bare `:kondo {:path}` is
-  resolved to a full path at probe time and that file is what lints; the
+  resolved at probe time by trying *every* executable of that name on the
+  augmented PATH in order (`tools::resolve_all`, de-duplicated by canonical
+  path) until one answers `--version`; a mise shim — a symlink to `mise`
+  under `shims/`, or a script there that mentions it — is replaced by what
+  `mise which` prints when that works, the shim staying the candidate when
+  it does not. The winning path is what lints, from the workspace root,
+  never from the file's directory, so one binary serves every file. When
+  every candidate fails, the error lists each path with its reason; the
   probe's failure reason travels as `detail` on `clojurePulse/lintStatus`.
+- A lint pass whose clj-kondo run fails stores its reason in
+  `KondoWarmer.health` — separate from `KondoState`, which is compared to
+  retire in-flight passes — and reports it once per distinct reason: a
+  warning log line and the same text as `detail` on `clojurePulse/lintStatus`
+  (`engine` stays `kondo+native`), cleared with a "recovered" line on the
+  next success and on every re-probe. "Not in use" and "over live-max-kb"
+  are not failures. Every pass — open, save, the debounced change, and the
+  engine-change re-lint alike — is spawned through `spawn_lint_pass` over
+  the one `KondoWarmer.tasks` registry, which aborts the previous pass for
+  that document under the document's entry lock (handlers run
+  concurrently, so registering after the spawn could let an older trigger
+  abort the newer pass); `kondo::run` group-kills its child when its future
+  is dropped (`KillGroupOnDrop`), so a shim and what it exec'd die with the
+  pass, which is why `LINT_TIMEOUT` can be 10 s: it bounds a wedged binary,
+  not a normal run.
 - `CLJ_PULSE_DISABLE_KONDO` (non-empty) forces `:kondo {:enabled false}`, the
   twin of `CLJ_PULSE_DISABLE_CLASSPATH_CLI`. `LspClient::start` sets it, so no
   test depends on a host clj-kondo; kondo tests opt in with

@@ -67,6 +67,9 @@ parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 `selectionRange` expands the selection along the parse tree. A library
 namespace present in both dialects navigates to the copy matching the asking
 file: `.clj` and `.cljc` open the Clojure one, `.cljs` the ClojureScript one.
+The clj-kondo probe tries every install it can find and resolves mise shims
+to the binary behind them, and a lint pass that fails is reported once on
+`lintStatus` and in the log instead of silently publishing the native set.
 
 Not shipped: `foldingRange`, formatting, semantic tokens, code lens,
 implementation provider, `executeCommand` refactors, `willRenameFiles`.
@@ -260,6 +263,26 @@ the release.
       file that is asking. Found by the clojure-lsp benchmark, which has to accept
       either file to time the metric at all.
   Plan: [2026-09-17-2240-library-dialect-preference.md](plans/2026-09-17-2240-library-dialect-preference.md) — done
+- [x] **clj-kondo discovery and failure reporting.**
+  - A failing clj-kondo candidate ends the probe instead of falling through
+    to the next one. On the metabase bench corpus the same binary reported
+    `kondo+native` under `bb bench` and "clj-kondo not found - native lints
+    only" from a plain shell, same machine and directory: metabase ships a
+    `mise.toml` that mise will not trust, so the shim exits 1 and the probe
+    stops there rather than trying the mise install dir or Homebrew behind
+    it. The lint tier then depends on how the editor was launched, which is
+    the problem `tools::well_known_dirs` exists to solve. Trying each
+    candidate until one answers `--version` would fix it.
+  - A failed clj-kondo lint pass is silent. `LINT_TIMEOUT` is 2 s and the
+    pass runs the resolved binary from the file's directory; a mise shim
+    there can pick an unpinned or untrusted config and exit without output
+    (reproduced on the metabase corpus). Either way the native set is
+    published and only a debug log line says why; `clojurePulse/lintStatus`
+    carries a `detail` for probe failures only. Fix: per-pass failure reason
+    on `lintStatus`, rate-limited warn log, a realistic default timeout with
+    cancellation of superseded runs, and `mise which` resolution of shims at
+    probe time so the per-file cwd stops deciding which binary runs.
+  Plan: [2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md](plans/2026-09-17-2324-kondo-probe-fallthrough-and-lint-health.md) — done
 - [ ] **Release**
   - [ ] Windows build target restored in the release matrix (build-only,
         untested), proven by a `v1.0.0-rc.1` tag before the real one.
@@ -323,24 +346,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
   this list already tracks. Revisit once the live-buffer path is proven under a
   soak run, not before — `bb soak` exists now, and the live-buffer path came
   through 20 rounds on both corpora without a divergence.
-- 2026-09-10 **A failing clj-kondo candidate ends the probe instead of falling
-  through to the next one.** On the metabase bench corpus the same binary
-  reported `kondo+native` under `bb bench` and "clj-kondo not found - native
-  lints only" from a plain shell, same machine and directory: metabase ships a
-  `mise.toml` that mise will not trust, so the shim exits 1 and the probe stops
-  there rather than trying the mise install dir or Homebrew behind it. The lint
-  tier then depends on how the editor was launched, which is the problem
-  `tools::well_known_dirs` exists to solve. Trying each candidate until one
-  answers `--version` would fix it.
-- 2026-09-11 **A failed clj-kondo lint pass is silent.** `LINT_TIMEOUT` is 2 s
-  and the pass runs the resolved binary from the file's directory; a mise shim
-  there can pick an unpinned or untrusted config and exit without output
-  (reproduced on the metabase corpus). Either way the native set is published
-  and only a debug log line says why; `clojurePulse/lintStatus` carries a
-  `detail` for probe failures only. Fix: per-pass failure reason on
-  `lintStatus`, rate-limited warn log, a realistic default timeout with
-  cancellation of superseded runs, and `mise which` resolution of shims at
-  probe time so the per-file cwd stops deciding which binary runs.
 - 2026-09-16 **References and `documentHighlight` on an alias half.** Rename
   treats a cursor on the `h` of `h/greet` as the alias, but references and
   highlight still resolve it to the var through `resolve_fqn_at`'s alias
@@ -364,6 +369,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
   - [A qualified `{:keys [c/x]}` entry resolves as the keyword it reads](backlog/2026-09-17-qualified-keys-entry-resolves-as-the-keyword.md) — in `KNOWN`.
   - [`one-of` in a `for` `:let` resolves to its own line](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md).
+- 2026-09-17 **Clojure Pulse tooltip shows the `lintStatus` detail.** The
+  server now sends a per-pass failure reason as `detail` on
+  `clojurePulse/lintStatus`; the extension's status-bar lint line renders
+  `engine`, `version` and `warming` only.
 
 ## Best effort — do when cheap or asked
 

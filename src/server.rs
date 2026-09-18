@@ -883,6 +883,10 @@ struct KondoState {
     /// Why the probe failed, when it did: the `detail` the lint status
     /// carries so an editor can show it next to "native lints only".
     detail: Option<String>,
+    /// The directory the probe ran from — the workspace root — and where
+    /// every lint runs from too, so a mise shim resolves the same binary on
+    /// every pass rather than one per file's directory.
+    root: Option<std::path::PathBuf>,
 }
 
 impl KondoState {
@@ -910,7 +914,7 @@ async fn probe_and_announce(
     client: &Client,
     root: Option<&std::path::Path>,
     editor_kondo: &SharedEditorKondo,
-    kondo_state: &SharedKondoState,
+    warmer: &KondoWarmer,
 ) -> bool {
     // Serialize probes, for the same reason `ClasspathCliLock` serializes
     // stage-3 runs: back-to-back config changes each spawn a probe, and a
@@ -946,11 +950,12 @@ async fn probe_and_announce(
     };
 
     let engine_changed = {
-        let mut state = kondo_state.lock().unwrap();
+        let mut state = warmer.state.lock().unwrap();
         let next = KondoState {
             config: config.clone(),
             found,
             detail,
+            root: root.map(std::path::Path::to_path_buf),
         };
         // Compare the whole resolved state, not just "is clj-kondo active":
         // switching `:path` from one working binary to another, or picking up
@@ -959,24 +964,38 @@ async fn probe_and_announce(
         *state = next;
         changed
     };
+    // A re-probe starts with a clean bill of health: whatever failed was a
+    // pass of the previous engine, and the re-lint that follows an engine
+    // change reports afresh.
+    *warmer.health.lock().unwrap() = None;
 
     tracing::info!("{}", msg);
     client.log_message(MessageType::INFO, msg).await;
-    send_lint_status(client, kondo_state, false).await;
+    send_lint_status(client, warmer, false).await;
 
     engine_changed
 }
 
 /// Pushes the current lint engine to the client. `warming` is passed in rather
-/// than stored: it is a property of the moment, not of the probe.
-async fn send_lint_status(client: &Client, kondo_state: &SharedKondoState, warming: bool) {
+/// than stored: it is a property of the moment, not of the probe. `detail`
+/// is why clj-kondo has no say right now: the probe's reason when it found
+/// nothing, else the last failed pass, else nothing.
+async fn send_lint_status(client: &Client, warmer: &KondoWarmer, warming: bool) {
     let (version, detail) = {
-        let state = kondo_state.lock().unwrap();
+        let state = warmer.state.lock().unwrap();
         (
             state.found.as_ref().map(|p| p.version.clone()),
             state.detail.clone(),
         )
     };
+    let detail = detail.or_else(|| {
+        warmer
+            .health
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|f| f.message.clone())
+    });
     client
         .send_notification::<LintStatus>(LintStatusParams {
             engine: match version {
@@ -997,12 +1016,41 @@ type WarmedSets = Arc<std::sync::Mutex<std::collections::HashMap<String, Classpa
 
 type ClasspathEntries = std::collections::HashSet<std::path::PathBuf>;
 
-/// The clj-kondo cache warmer's state, bundled so it rides the already
-/// long-argumented classpath pipeline as a single parameter.
+/// The last failed clj-kondo pass, `None` while passes succeed.
+///
+/// Kept apart from [`KondoState`] on purpose: that one is compared to retire
+/// stale passes, and a failure must not retire the passes in flight beside
+/// it. `reason` is what `kondo::lint` returned and the de-duplication key:
+/// a second pass failing the same way is not news, so the warning goes out
+/// once per distinct reason, not once per keystroke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LintFailure {
+    reason: String,
+    /// The formatted line — file, reason, "native lints only" — logged once
+    /// and carried as `detail` on every lint status until the next success.
+    message: String,
+}
+
+type SharedLintHealth = Arc<std::sync::Mutex<Option<LintFailure>>>;
+
+/// The in-flight lint pass of each open document, so the next pass for that
+/// document can abort it. Every trigger goes through [`spawn_lint_pass`] and
+/// this one registry, so an edit supersedes an engine-change pass and the
+/// other way round; the abort drops the `kondo::lint` future, whose guard
+/// kills the clj-kondo it spawned, and no stale process sits on a
+/// `KONDO_LIMIT` permit until the timeout.
+type SharedLintTasks = Arc<dashmap::DashMap<Url, tokio::task::AbortHandle>>;
+
+/// The clj-kondo engine's shared state: the probe result every pass reads,
+/// the warmer's record of scanned classpaths, the health of the last pass,
+/// and the passes in flight. Bundled so it rides the already long-argumented
+/// classpath pipeline as a single parameter.
 #[derive(Clone, Default)]
 struct KondoWarmer {
     state: SharedKondoState,
     warmed: WarmedSets,
+    health: SharedLintHealth,
+    tasks: SharedLintTasks,
 }
 
 /// Serializes cache warms. Each one is a full dependency scan of a classpath;
@@ -1089,7 +1137,7 @@ async fn warm_kondo_caches(
             }),
         )
         .await;
-        send_lint_status(client, &warmer.state, true).await;
+        send_lint_status(client, warmer, true).await;
 
         let result = kondo::warm(
             &bin,
@@ -1105,7 +1153,7 @@ async fn warm_kondo_caches(
             WorkDoneProgress::End(WorkDoneProgressEnd::default()),
         )
         .await;
-        send_lint_status(client, &warmer.state, false).await;
+        send_lint_status(client, warmer, false).await;
 
         match result {
             // Only a run whose config still applies may be recorded as warmed;
@@ -1159,12 +1207,14 @@ fn project_entries(state_arc: &SharedState, rel_path: &str) -> ClasspathEntries 
 
 /// Re-lints and republishes every open document. Used when the lint engine
 /// changes under the user's feet (a settings toggle, a newly installed
-/// binary), which no edit would otherwise trigger.
-async fn relint_open_documents(
+/// binary), which no edit would otherwise trigger. The passes run
+/// concurrently and are not awaited: each goes through [`spawn_lint_pass`],
+/// so an edit that lands meanwhile supersedes the one for its document.
+fn relint_open_documents(
     client: &Client,
-    documents: &DocumentStore,
-    index: &Index,
-    kondo_state: &SharedKondoState,
+    documents: &Arc<DocumentStore>,
+    index: &Arc<Index>,
+    warmer: &KondoWarmer,
 ) {
     for uri in documents.open_uris() {
         let pass = LintPass {
@@ -1172,7 +1222,75 @@ async fn relint_open_documents(
             epoch: documents.lint_epoch(&uri),
             trigger: LintTrigger::EngineChange,
         };
-        lint_and_publish_doc(client, documents, index, kondo_state, uri, pass).await;
+        spawn_lint_pass(
+            client.clone(),
+            documents.clone(),
+            index.clone(),
+            warmer.clone(),
+            uri,
+            pass,
+            std::time::Duration::ZERO,
+        );
+    }
+}
+
+/// Starts one lint pass for `uri` after `delay`, superseding the pass in
+/// flight for that document: the previous task is aborted, which drops its
+/// `kondo::lint` future and kills the clj-kondo it spawned. The one way any
+/// trigger starts a pass — open, save, the debounced change, an engine
+/// change — so they all supersede each other through the same registry.
+///
+/// After the delay the pass re-checks that the document is still at the
+/// version and epoch it was triggered for: a burst of keystrokes collapses
+/// to the last one's pass, and a save meanwhile retires a change pass
+/// outright.
+fn spawn_lint_pass(
+    client: Client,
+    documents: Arc<DocumentStore>,
+    index: Arc<Index>,
+    warmer: KondoWarmer,
+    uri: Url,
+    pass: LintPass,
+    delay: std::time::Duration,
+) {
+    // Spawn, register and abort under the document's registry entry, as one
+    // step: tower-lsp runs handlers concurrently, so two triggers for one
+    // document can race here, and registering after the spawn would let
+    // the older one abort the newer one's pass — leaving the document with
+    // no diagnostics at all. The spawned task only gets *scheduled* here;
+    // it cannot reach the entry before the lock is released.
+    let tasks = warmer.tasks.clone();
+    let entry = tasks.entry(uri.clone());
+    let task = tokio::spawn(async move {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if documents.current_version(&uri) == Some(pass.version)
+            && documents.lint_epoch(&uri) == pass.epoch
+        {
+            lint_and_publish_doc(&client, &documents, &index, &warmer, uri.clone(), pass).await;
+        }
+        // Only this task's own entry: a newer pass may have replaced it
+        // between the publish and this line. An aborted task never reaches
+        // here, and its replacement overwrote the entry when it started.
+        warmer
+            .tasks
+            .remove_if(&uri, |_, handle| handle.id() == tokio::task::id());
+    });
+    match entry {
+        dashmap::mapref::entry::Entry::Occupied(mut previous) => {
+            previous.insert(task.abort_handle()).abort();
+        }
+        dashmap::mapref::entry::Entry::Vacant(slot) => {
+            slot.insert(task.abort_handle());
+        }
+    }
+}
+
+/// Forgets and aborts the pass in flight for a document that was closed.
+fn abort_lint_pass(warmer: &KondoWarmer, uri: &Url) {
+    if let Some((_, handle)) = warmer.tasks.remove(uri) {
+        handle.abort();
     }
 }
 
@@ -1216,7 +1334,7 @@ async fn lint_and_publish_doc(
     client: &Client,
     documents: &DocumentStore,
     index: &Index,
-    kondo_state: &SharedKondoState,
+    warmer: &KondoWarmer,
     uri: Url,
     pass: LintPass,
 ) {
@@ -1255,7 +1373,7 @@ async fn lint_and_publish_doc(
         })
     };
 
-    let engine = kondo_state.lock().unwrap().clone();
+    let engine = warmer.state.lock().unwrap().clone();
     let bin = engine
         .bin()
         .filter(|_| kondo::lints_file(&path))
@@ -1265,12 +1383,12 @@ async fn lint_and_publish_doc(
     // carrying the native set — never a native publish and then a kondo one.
     let over_live_max =
         trigger == LintTrigger::Change && engine.config.exceeds_live_max(text.len());
+    // `None` is "clj-kondo has no say in this pass" — not in use, or sitting
+    // out a keystroke — which `merge` reads as "keep the native set" and
+    // which is not a failure. `Some(Err)` is a run that was meant to happen
+    // and did not.
     let kondo_pass = async {
-        let Some(bin) = bin else {
-            // Not an error the user should see — just "clj-kondo has no say in
-            // this pass", which `merge` reads as "keep the native set".
-            return Err("clj-kondo not in use".to_string());
-        };
+        let bin = bin?;
         if over_live_max {
             tracing::debug!(
                 "clj-kondo skipped on change: {} is {} bytes, over live-max-kb {}",
@@ -1278,16 +1396,24 @@ async fn lint_and_publish_doc(
                 text.len(),
                 engine.config.live_max_kb
             );
-            return Err("clj-kondo skipped: buffer over live-max-kb".to_string());
+            return None;
         }
         let _permit = KONDO_LIMIT.acquire().await;
-        let result = kondo::lint(&bin, &text, &path, kondo::LINT_TIMEOUT).await;
+        let result = kondo::lint(
+            &bin,
+            &text,
+            &path,
+            engine.root.as_deref(),
+            kondo::LINT_TIMEOUT,
+        )
+        .await;
         if let Err(e) = &result {
-            // Debug, not warn: a missing or wedged clj-kondo would
-            // otherwise log once per keystroke.
+            // Debug on every failure; the warning below goes out once per
+            // distinct reason, so a wedged clj-kondo does not log per
+            // keystroke.
             tracing::debug!("clj-kondo lint of {} failed: {}", path.display(), e);
         }
-        result
+        Some(result)
     };
 
     let (native, kondo) = tokio::join!(native_pass, kondo_pass);
@@ -1305,10 +1431,22 @@ async fn lint_and_publish_doc(
     // finishes last is what decides how old this pass is.
     if documents.current_version(&uri) != Some(version)
         || documents.lint_epoch(&uri) != epoch
-        || *kondo_state.lock().unwrap() != engine
+        || *warmer.state.lock().unwrap() != engine
     {
         return;
     }
+
+    // The health transition, after the staleness check so a retired pass
+    // never reports, and before the publish so a client that reacts to the
+    // status sees the diagnostics it explains arrive after it.
+    match &kondo {
+        Some(Err(reason)) => {
+            report_lint_failure(client, warmer, &engine, &path, reason).await;
+        }
+        Some(Ok(_)) => report_lint_recovery(client, warmer).await,
+        None => {}
+    }
+    let kondo = kondo.unwrap_or_else(|| Err("clj-kondo not in use".to_string()));
 
     let native = match native {
         Ok(native) => native,
@@ -1323,6 +1461,52 @@ async fn lint_and_publish_doc(
     client
         .publish_diagnostics(uri, crate::diagnostics::merge(native, kondo), Some(version))
         .await;
+}
+
+/// Records a failed pass and, when its reason is new, says so once: a
+/// warning in the log and a lint status carrying the message as `detail`.
+/// The same reason again is silent, which is the rate limit — a wedged
+/// binary fails the same way on every keystroke.
+async fn report_lint_failure(
+    client: &Client,
+    warmer: &KondoWarmer,
+    engine: &KondoState,
+    path: &std::path::Path,
+    reason: &str,
+) {
+    let shown = engine
+        .root
+        .as_deref()
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path);
+    let message = format!(
+        "clj-kondo failed on {}: {reason} — native lints only until it succeeds",
+        shown.display()
+    );
+    {
+        let mut health = warmer.health.lock().unwrap();
+        if health.as_ref().is_some_and(|f| f.reason == reason) {
+            return;
+        }
+        *health = Some(LintFailure {
+            reason: reason.to_string(),
+            message: message.clone(),
+        });
+    }
+    tracing::warn!("{}", message);
+    client.log_message(MessageType::WARNING, message).await;
+    send_lint_status(client, warmer, false).await;
+}
+
+/// Clears a recorded failure after a pass that succeeded, and says so once.
+async fn report_lint_recovery(client: &Client, warmer: &KondoWarmer) {
+    if warmer.health.lock().unwrap().take().is_none() {
+        return;
+    }
+    let message = "clj-kondo recovered — linting: clj-kondo + native";
+    tracing::info!("{}", message);
+    client.log_message(MessageType::INFO, message).await;
+    send_lint_status(client, warmer, false).await;
 }
 
 pub struct Backend {
@@ -1811,10 +1995,10 @@ impl Backend {
         let generation = self.config_generation.clone();
         let progress = self.progress.clone();
         tokio::spawn(async move {
-            let engine_changed = reprobe
-                && probe_and_announce(&client, Some(&root), &editor_kondo, &warmer.state).await;
+            let engine_changed =
+                reprobe && probe_and_announce(&client, Some(&root), &editor_kondo, &warmer).await;
             if engine_changed || force_relint {
-                relint_open_documents(&client, &documents, &index, &warmer.state).await;
+                relint_open_documents(&client, &documents, &index, &warmer);
             }
             if engine_changed {
                 // Gaining clj-kondo mid-session must not require a re-index to
@@ -1836,17 +2020,18 @@ impl Backend {
         });
     }
 
-    /// Computes diagnostics from the live buffer and publishes them for `uri`.
-    async fn lint_and_publish(&self, uri: Url, pass: LintPass) {
-        lint_and_publish_doc(
-            &self.client,
-            &self.documents,
-            &self.index,
-            &self.kondo.state,
+    /// Starts a lint pass for `uri` through the shared registry; see
+    /// [`spawn_lint_pass`].
+    fn spawn_lint(&self, uri: Url, pass: LintPass, delay: std::time::Duration) {
+        spawn_lint_pass(
+            self.client.clone(),
+            self.documents.clone(),
+            self.index.clone(),
+            self.kondo.clone(),
             uri,
             pass,
-        )
-        .await;
+            delay,
+        );
     }
 }
 
@@ -2153,7 +2338,7 @@ impl LanguageServer for Backend {
         // missing binary fails in microseconds. Its lint status would then be
         // lost, so send the current one now; if the probe is still running,
         // its own send follows and supersedes this one.
-        send_lint_status(&self.client, &self.kondo.state, false).await;
+        send_lint_status(&self.client, &self.kondo, false).await;
 
         // Watch source files so git pulls / branch switches keep the index
         // fresh without editor saves. Clients without dynamic registration
@@ -2316,11 +2501,12 @@ impl LanguageServer for Backend {
             epoch: self.documents.lint_epoch(&uri),
             trigger: LintTrigger::Open,
         };
-        self.lint_and_publish(uri, pass).await;
+        self.spawn_lint(uri, pass, std::time::Duration::ZERO);
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
+        abort_lint_pass(&self.kondo, &uri);
         self.documents.close(&uri);
         // Clear diagnostics for the closed document.
         self.client.publish_diagnostics(uri, vec![], None).await;
@@ -2373,7 +2559,7 @@ impl LanguageServer for Backend {
             version: self.documents.current_version(&uri).unwrap_or(0),
             trigger: LintTrigger::Save,
         };
-        self.lint_and_publish(uri, pass).await;
+        self.spawn_lint(uri, pass, std::time::Duration::ZERO);
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -2667,24 +2853,16 @@ impl LanguageServer for Backend {
         // Debounced re-lint: only the latest edit (matching version and epoch)
         // survives the sleep, so bursts of keystrokes collapse to one
         // diagnostic pass, and a save in the meantime retires it outright.
-        let documents = self.documents.clone();
-        let client = self.client.clone();
-        let index = self.index.clone();
-        let kondo_state = self.kondo.state.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS)).await;
-            if documents.current_version(&uri) != Some(version)
-                || documents.lint_epoch(&uri) != epoch
-            {
-                return;
-            }
-            let pass = LintPass {
-                version,
-                epoch,
-                trigger: LintTrigger::Change,
-            };
-            lint_and_publish_doc(&client, &documents, &index, &kondo_state, uri, pass).await;
-        });
+        let pass = LintPass {
+            version,
+            epoch,
+            trigger: LintTrigger::Change,
+        };
+        self.spawn_lint(
+            uri,
+            pass,
+            std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS),
+        );
     }
 
     async fn goto_definition(

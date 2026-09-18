@@ -36,9 +36,25 @@ resolution) on `PATH` first, then in the usual install directories: mise shims
 (`~/.local/share/mise/shims`), Homebrew (`/opt/homebrew/bin`,
 `/usr/local/bin`, Linuxbrew), `~/.cargo/bin`, `~/.local/bin` and `~/bin`. That
 covers an editor started from the Dock or an app menu, whose `PATH` lacks what
-your shell adds. A mise shim picks the version the project's mise config pins,
-because clj-pulse runs it from the file's own directory. When clj-kondo is not
-found, the log line (and the extension's lint status) says where it looked.
+your shell adds. Every install found that way is tried in order until one
+answers `--version`, and a mise shim is resolved through `mise which
+clj-kondo` to the binary it stands for, so a `mise.toml` mise does not trust
+no longer hides a Homebrew install behind it. clj-kondo then runs from the
+workspace root, the same binary for every file. When no clj-kondo works, the
+log line (and the extension's lint status) names each one it tried and why.
+
+## When clj-kondo fails
+
+A lint pass whose clj-kondo run fails — a crash, unparseable output, a run
+that outlives the 10 s bound — publishes the native tier for that pass, as
+if clj-kondo were absent, and says so once: a warning in the server log
+(`clj-kondo failed on src/app.clj: … — native lints only until it succeeds`)
+and the same text as the `detail` of the lint status the extension receives.
+The message appears once per distinct reason, not once per keystroke, and
+`clj-kondo recovered` follows the next run that succeeds. Ten seconds is the
+bound for a wedged binary, not a budget for a normal run: a pass still
+running when you type again is cancelled, and the clj-kondo it started is
+killed with it, so a slow run never delays the next one.
 
 ## Cross-file linters need a `.clj-kondo` directory
 
