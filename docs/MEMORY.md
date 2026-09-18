@@ -126,71 +126,84 @@ only number that moved much, and only before its global cache was isolated
   (`jar:` for clj-pulse, `zipfile:` for clojure-lsp). A null answer is a retry,
   never a fast sample.
 
-## Compare against clj-kondo analysis (2026-09-17)
+## Compare against clj-kondo analysis (2026-09-18)
 
 `bb compare` on the clj-kondo corpus, clj-kondo v2026.08.04, same Linux
 container as the benchmark: 2409 var-definitions, 36396 var-usages, 9123
 locals and 76810 keywords in the analysis of `src parser resources inlined
-extract pod-test src-profile test test-regression`; 5253 probes after the
+extract pod-test src-profile test test-regression`; 5252 probes after the
 stride of 200 per bucket and request kind, 215 files visited, answered in
-30 s by a server that settled in 4 s. 9403 symbol and keyword tokens no
+40 s by a server that settled in 14 s. 9403 symbol and keyword tokens no
 oracle entry covered (unresolved usages, the `ns` head, unqualified keywords
 are counted there).
 
-| Bucket | Probes | Agree | Diverge | Known | Null |
-|---|---|---|---|---|---|
-| `keyword/alias` | 8 | 0 | 6 | 0 | 2 |
-| `keyword/keys` | 5 | 0 | 5 | 0 | 0 |
-| `keyword/qualified` | 276 | 86 | 145 | 0 | 45 |
-| `local/destructured` | 507 | 482 | 24 | 0 | 1 |
-| `local/plain` | 594 | 542 | 44 | 0 | 8 |
-| `var-def/declare` | 28 | 27 | 1 | 0 | 0 |
-| `var-def/def` | 400 | 380 | 20 | 0 | 0 |
-| `var-def/defmacro` | 58 | 46 | 12 | 0 | 0 |
-| `var-def/defmulti` | 6 | 3 | 3 | 0 | 0 |
-| `var-def/defn` | 372 | 298 | 73 | 0 | 1 |
-| `var-def/defn-` | 304 | 290 | 14 | 0 | 0 |
-| `var-def/defonce` | 14 | 14 | 0 | 0 | 0 |
-| `var-def/defprotocol` | 44 | 16 | 10 | 18 | 0 |
-| `var-def/defprotocol+` | 26 | 0 | 26 | 0 | 0 |
-| `var-def/defrecord` | 52 | 44 | 6 | 0 | 2 |
-| `var-def/deftest` | 346 | 344 | 2 | 0 | 0 |
-| `var-def/deftype` | 20 | 0 | 20 | 0 | 0 |
-| `var-def/import-vars` | 98 | 23 | 75 | 0 | 0 |
-| `var-def/programs` | 6 | 3 | 3 | 0 | 0 |
-| `var-usage/core` | 200 | 187 | 13 | 0 | 0 |
-| `var-usage/core/macro` | 196 | 175 | 16 | 0 | 5 |
-| `var-usage/library` | 167 | 4 | 120 | 0 | 43 |
-| `var-usage/library/aliased` | 188 | 182 | 1 | 0 | 5 |
-| `var-usage/library/macro` | 199 | 168 | 26 | 0 | 5 |
-| `var-usage/library/macro/aliased` | 12 | 6 | 0 | 0 | 6 |
-| `var-usage/library/macro/referred` | 169 | 169 | 0 | 0 | 0 |
-| `var-usage/library/referred` | 4 | 4 | 0 | 0 | 0 |
-| `var-usage/project` | 200 | 187 | 10 | 0 | 3 |
-| `var-usage/project/aliased` | 193 | 179 | 0 | 0 | 14 |
-| `var-usage/project/macro` | 192 | 188 | 3 | 0 | 1 |
-| `var-usage/project/macro/aliased` | 64 | 58 | 0 | 0 | 6 |
-| `var-usage/project/macro/referred` | 135 | 134 | 0 | 0 | 1 |
-| `var-usage/project/referred` | 170 | 165 | 0 | 0 | 5 |
-| **total** | 5253 | 4404 | 678 | 18 | 153 |
+The run is from the gap fix (discards and comments are gaps for the
+extractor, 2026-09-18); the three right-hand columns are the run before it,
+on `release 0.5.3`, the same day and machine. The first run of 2026-09-17
+had the same numbers except `var-usage/library/aliased` (183 agree here and
+in the baseline, 182 there — the dialect item, since fixed).
 
-`soft` (same lines, other columns) was 0. Every `known` row is the
-protocol-method entry of `KNOWN`. The `var-usage/library/aliased` row is not
-stable between runs: a rerun on 2026-09-18 (same binary logic) had 124 agree
-and 59 diverge, every one a `.clj` file landing in the ClojureScript jar's
-`clojure/string.cljs`-style twin — the dialect item below, where the last
-jar indexed wins and the jars are indexed concurrently. The first-run divergences group into
-fourteen classes, one issue file each under `docs/backlog/2026-09-17-*.md`
-(linked from the ROADMAP backlog): `#_` discards indexed
-(and `#_#_` shifting `let` pairs), keywords in binding values and quoted
-data missing from occurrences, locals under `binding`+`let`, `{:ns/keys}`
-renaming the local, `.cljs` core landing in `clojure/core.clj`, a `defmulti`
-missing from its own references after a `declare`, constructor calls not
-counted for `deftype`/`defrecord`, `:lint-as` to `defprotocol`/`declare`
-half-honored, `import-vars` re-exports, `:require-macros`, a `.clj`/`.cljs`
-namespace pair sharing an fqn, defs nested in a wrapping macro. The
-`var-usage/*/aliased` and `*/referred` rows (project and library) are the
-clean ones: 897 of 935 agree, and the misses are the classes above.
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `keyword/alias` | 8 | 8 | 0 | 0 | 0 | 0 | 6 | 2 |
+| `keyword/keys` | 5 | 5 | 0 | 0 | 0 | 0 | 5 | 0 |
+| `keyword/qualified` | 276 | 142 | 93 | 0 | 41 | 86 | 145 | 45 |
+| `local/destructured` | 507 | 507 | 0 | 0 | 0 | 482 | 24 | 1 |
+| `local/plain` | 594 | 585 | 3 | 0 | 6 | 542 | 44 | 8 |
+| `var-def/declare` | 28 | 27 | 1 | 0 | 0 | 27 | 1 | 0 |
+| `var-def/def` | 400 | 394 | 6 | 0 | 0 | 380 | 20 | 0 |
+| `var-def/defmacro` | 58 | 50 | 8 | 0 | 0 | 46 | 12 | 0 |
+| `var-def/defmulti` | 6 | 3 | 3 | 0 | 0 | 3 | 3 | 0 |
+| `var-def/defn` | 372 | 326 | 45 | 0 | 1 | 298 | 73 | 1 |
+| `var-def/defn-` | 304 | 304 | 0 | 0 | 0 | 290 | 14 | 0 |
+| `var-def/defonce` | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
+| `var-def/defprotocol` | 44 | 16 | 10 | 18 | 0 | 16 | 10 | 0 |
+| `var-def/defprotocol+` | 26 | 0 | 26 | 0 | 0 | 0 | 26 | 0 |
+| `var-def/defrecord` | 52 | 44 | 6 | 0 | 2 | 44 | 6 | 2 |
+| `var-def/deftest` | 346 | 344 | 2 | 0 | 0 | 344 | 2 | 0 |
+| `var-def/deftype` | 20 | 0 | 20 | 0 | 0 | 0 | 20 | 0 |
+| `var-def/import-vars` | 98 | 23 | 75 | 0 | 0 | 23 | 75 | 0 |
+| `var-def/programs` | 6 | 3 | 3 | 0 | 0 | 3 | 3 | 0 |
+| `var-usage/core` | 200 | 199 | 0 | 0 | 1 | 187 | 13 | 0 |
+| `var-usage/core/macro` | 195 | 193 | 0 | 0 | 2 | 175 | 16 | 5 |
+| `var-usage/library` | 167 | 5 | 118 | 0 | 44 | 4 | 120 | 43 |
+| `var-usage/library/aliased` | 188 | 183 | 0 | 0 | 5 | 183 | 0 | 5 |
+| `var-usage/library/macro` | 199 | 168 | 26 | 0 | 5 | 168 | 26 | 5 |
+| `var-usage/library/macro/aliased` | 12 | 6 | 0 | 0 | 6 | 6 | 0 | 6 |
+| `var-usage/library/macro/referred` | 169 | 169 | 0 | 0 | 0 | 169 | 0 | 0 |
+| `var-usage/library/referred` | 4 | 4 | 0 | 0 | 0 | 4 | 0 | 0 |
+| `var-usage/project` | 200 | 192 | 5 | 0 | 3 | 187 | 10 | 3 |
+| `var-usage/project/aliased` | 193 | 179 | 0 | 0 | 14 | 179 | 0 | 14 |
+| `var-usage/project/macro` | 192 | 191 | 0 | 0 | 1 | 188 | 3 | 1 |
+| `var-usage/project/macro/aliased` | 64 | 58 | 0 | 0 | 6 | 58 | 0 | 6 |
+| `var-usage/project/macro/referred` | 135 | 134 | 0 | 0 | 1 | 134 | 0 | 1 |
+| `var-usage/project/referred` | 170 | 165 | 0 | 0 | 5 | 165 | 0 | 5 |
+| **total** | 5252 | 4641 | 450 | 18 | 143 | 4405 | 677 | 153 |
+
+`soft` (same lines, other columns) was 0 in both runs. Every `known` row is
+the protocol-method entry of `KNOWN`. One fix, 677 → 450 divergences: a `;`
+comment or `#_` discard inside a binding vector, a destructuring map or a
+def form was a named child the positional walkers counted as a form, so
+every pair after it shifted — which is why the drop reaches
+`local/destructured` (24 → 0), `keyword/keys` and `keyword/alias` (5 and 6
+→ 0), `var-def/defn-` (14 → 0), `var-usage/core` and `core/macro` (13 and
+16 → 0), and a third of `keyword/qualified`, not only the four buckets the
+`#_` issue named. The three `null` entries that are new by site (a
+definition on a core macro head answering null) are the class the baseline
+had at other sites; the probe set shifted by one.
+
+The first-run divergences grouped into fourteen classes, one issue file
+each under `docs/backlog/2026-09-17-*.md` (linked from the ROADMAP
+backlog); the discard one is archived. The remaining classes: keywords in
+binding values and quoted data missing from occurrences, locals under
+`binding`+`let`, `{:ns/keys}` renaming the local, `.cljs` core landing in
+`clojure/core.clj`, a `defmulti` missing from its own references after a
+`declare`, constructor calls not counted for `deftype`/`defrecord`,
+`:lint-as` to `defprotocol`/`declare` half-honored, `import-vars`
+re-exports, `:require-macros`, a `.clj`/`.cljs` namespace pair sharing an
+fqn, defs nested in a wrapping macro. The `var-usage/*/aliased` and
+`*/referred` rows (project and library) are the clean ones: 898 of 935
+agree, and the misses are `null` answers.
 
 The number to watch on a re-run is `diverge + null` per bucket against this
 table; a class fixed in the server should empty its bucket's share, and a new

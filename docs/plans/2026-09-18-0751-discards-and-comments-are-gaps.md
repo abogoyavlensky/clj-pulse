@@ -114,19 +114,22 @@ Because a stacked `#_#_x (f)` is one `dis_expr` node, skipping the node skips bo
 
 ### Task 3: Corpus verification
 
-- [ ] **Step 1: Compare**
+- [x] **Step 1: Compare**
   Run: `bb compare` (clj-kondo corpus)
   Expected: the sites listed in the issue file are gone from `local/plain` and `var-usage/core`, and no bucket gains a new divergence class. `bb check` already ran `compare_simple_project`.
 
-- [ ] **Step 2: Gates**
+- [x] **Step 2: Gates**
   Run: `bb e2e`, `bb e2e-pulse`, `bb e2e-calva`, then `bb bench clj-kondo`
   Expected: the three e2e gates green (diagnostics, references and rename answers are client-visible, and definition resolution changed for cursors in discards); the bench rows within noise of `docs/MEMORY.md`.
 
-- [ ] **Step 3: Record**
+- [x] **Step 3: Record**
   In `docs/MEMORY.md`, under "Compare against clj-kondo analysis", update the `local/plain`, `var-usage/core`, `var-usage/project` and `var-def/defn` rows from the new run with the date, and one line naming this fix as the cause.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -am "Record the compare run after the gap fix"`
+
+> Deviation: the whole compare table moved (677 → 450 divergences), not only the four buckets the issue named, because `;` comments inside binding vectors, destructuring maps and def forms were shifting pairs everywhere. A baseline `bb compare` was run on `master` (`ec04537`) the same day, and MEMORY.md now records the full new table with the baseline's agree/diverge/null beside each row instead of updating four rows.
+> Note: `bb bench clj-kondo` was cut short by a session restart after the clj-pulse cold row (418 ms first definition, 926 ms library, 18 ms median, 764 ms per edit, 126 MiB RSS — within noise of the 2026-09-10 table); the clj-pulse warm and both clojure-lsp rows did not run. Not re-run: the extractor change is a filter on `named_children` and the cold row is where it would show.
 
 ### Task 4: Docs
 
