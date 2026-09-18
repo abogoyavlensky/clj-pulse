@@ -183,6 +183,150 @@ fn test_qualified_usages_skips_reader_discard() {
     assert_eq!(prefixes, vec!["real"], "discarded forms must be excluded");
 }
 
+// --- discards and comments are gaps ---
+//
+// `comment` and `dis_expr` are named children in tree-sitter-clojure (no
+// grammar extras), so unless the extractor skips them they count as forms:
+// a symbol inside a discard becomes an occurrence, and a comment inside a
+// binding vector shifts every pair after it.
+
+mod gaps {
+    use super::occurrences_of;
+    use clj_pulse::index::extractor::{
+        extract, extract_analysis_with, local_references_at, locals_in_scope_at,
+    };
+    use clj_pulse::index::ExtractConfig;
+    use std::path::Path;
+    use tower_lsp::lsp_types::Position;
+
+    fn analysis(src: &str) -> clj_pulse::index::extractor::Analysis {
+        extract_analysis_with(src, Path::new("x.clj"), &ExtractConfig::default()).unwrap()
+    }
+
+    /// Column of `needle` on `line` of `src`.
+    fn col(src: &str, line: usize, needle: &str) -> u32 {
+        src.lines().nth(line).unwrap().find(needle).unwrap() as u32
+    }
+
+    #[test]
+    fn test_discarded_forms_are_not_occurrences() {
+        let src =
+            "(ns x)\n(defn g [a] a)\n(defn h [a] a)\n(defn f [] #_unused/sym #_(g 1) (h 2))\n";
+        let a = analysis(src);
+        assert!(
+            occurrences_of(&a.occurrences, "x/g").is_empty(),
+            "discarded call: {:?}",
+            a.occurrences
+        );
+        assert_eq!(
+            occurrences_of(&a.occurrences, "x/h").len(),
+            1,
+            "occurrences: {:?}",
+            a.occurrences
+        );
+    }
+
+    /// Shared assertions for a `let` vector with a gap between two pairs.
+    fn assert_let_pairs_intact(src: &str) {
+        let a = analysis(src);
+        assert!(
+            occurrences_of(&a.occurrences, "x/f").is_empty(),
+            "gap contents are not occurrences: {:?}",
+            a.occurrences
+        );
+        let body = Position::new(5, col(src, 5, "(+ a b)") + 3);
+        let mut names: Vec<String> = locals_in_scope_at(src, body)
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a", "b"], "locals in the body");
+
+        let b_usage = Position::new(5, col(src, 5, "b)"));
+        let refs = local_references_at(src, b_usage, "b").expect("`b` is a local");
+        assert_eq!(refs.declaration.start, Position::new(4, col(src, 4, "b 2")));
+        assert_eq!(refs.usages.len(), 1, "one usage of b: {refs:?}");
+        assert!(
+            a.unused_bindings.is_empty(),
+            "every binding is used: {:?}",
+            a.unused_bindings
+        );
+    }
+
+    #[test]
+    fn test_stacked_discard_in_let_vector_does_not_shift_pairs() {
+        assert_let_pairs_intact(
+            "(ns x)\n(defn f [] nil)\n(let [a 1\n      #_#_x (f)\n      b 2]\n  (+ a b))\n",
+        );
+    }
+
+    #[test]
+    fn test_comment_in_let_vector_does_not_shift_pairs() {
+        assert_let_pairs_intact(
+            "(ns x)\n(defn f [] nil)\n(let [a 1\n      ;; note (f)\n      b 2]\n  (+ a b))\n",
+        );
+    }
+
+    #[test]
+    fn test_discarded_usage_does_not_count_for_the_local() {
+        let src = "(ns x)\n(let [a 1] #_a nil)\n";
+        let a = analysis(src);
+        let unused: Vec<&str> = a.unused_bindings.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(unused, vec!["a"], "a discarded usage is no usage");
+
+        let decl = Position::new(1, col(src, 1, "a 1"));
+        let refs = local_references_at(src, decl, "a").expect("`a` is a local");
+        assert!(
+            refs.usages.is_empty(),
+            "no usages outside the discard: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_gap_before_argv_does_not_shift_defn() {
+        let src = "(ns x)\n(defn f #_\"doc\" ;; c\n  [y] y)\n";
+        let (_, syms) = extract(src, Path::new("x.clj")).unwrap();
+        let f = syms.iter().find(|s| s.name == "f").expect("f extracted");
+        assert_eq!(f.params, vec!["[y]"]);
+        assert_eq!(f.doc, None, "a discarded string is no docstring");
+
+        let body = Position::new(2, col(src, 2, "y)"));
+        let names: Vec<String> = locals_in_scope_at(src, body)
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert_eq!(names, vec!["y"], "argv binds after the gaps");
+        assert!(analysis(src).unused_bindings.is_empty());
+    }
+
+    #[test]
+    fn test_discarded_top_level_def_is_not_a_symbol() {
+        let src = "(ns x)\n#_(defn gone [] 1)\n(defn kept [] 2)\n";
+        let (_, syms) = extract(src, Path::new("x.clj")).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["kept"]);
+        let a = analysis(src);
+        let names: Vec<&str> = a.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["kept"], "the analysis pass agrees");
+    }
+
+    #[test]
+    fn test_keys_directive_separated_by_a_gap_still_rejects_rename() {
+        for src in [
+            "(ns x)\n(defn f [{:keys #_old [a]}] a)\n",
+            "(ns x)\n(defn f [{:keys ;; c\n [a]}] a)\n",
+        ] {
+            let line: usize = if src.contains(";; c") { 2 } else { 1 };
+            let decl = Position::new(line as u32, col(src, line, "[a]") + 1);
+            let refs = local_references_at(src, decl, "a").expect("`a` is a local");
+            assert!(
+                refs.destructured_key,
+                "`a` reads the key `:a` through the directive: {src:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_handles_reader_conditionals() {
     let (_, syms) = extract(
@@ -2143,6 +2287,58 @@ h/f
         assert_eq!(declarations, vec![(0, 31, 32), (1, 32, 33)]);
         let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
         assert_eq!(usages, vec![(2, 1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_sites_include_discarded_usages() {
+        // An alias rename is textual: a `#_(h/one)` left on the old alias
+        // breaks the moment it is uncommented, so a discard is a site here
+        // even though the extractor records nothing inside it.
+        let src = "(ns x (:require [y.z :as h]))\n#_(h/one)\n(h/two)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("x.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "h", &occs);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(
+            usages,
+            vec![(1, 3, 4), (2, 1, 2)],
+            "usages: {:?}",
+            sites.usages
+        );
+    }
+
+    #[test]
+    fn test_alias_sites_skip_discarded_binding_entries() {
+        // Inside a discard the extractor records no occurrences, so the
+        // binding-entry exclusion has to come from a walk of the discard
+        // itself: `{:keys [h/x]}` in a binding position reads `:h/x` verbatim
+        // whether or not the form is commented out, while the same vector as
+        // data is a site. `#_#_` stacks and a discard nested in a discard are
+        // examined the same way.
+        let src = "\
+(ns x (:require [y.z :as h]))
+#_(let [{:keys [h/x]} {}] x)
+#_(def m {:keys [h/f]})
+#_#_(fn [{:keys [h/y]}] y) (fn [{::h/keys [z]}] z)
+#_(do #_(let [{:keys [h/w]} {}] w))
+(h/two)
+";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("x.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "h", &occs);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(
+            usages,
+            vec![
+                (2, 17, 18), // {:keys [h/f]} as data
+                (3, 35, 36), // ::h/keys directive, auto-resolved
+                (5, 1, 2),   // h/two
+            ],
+            "usages: {:?}",
+            sites.usages
+        );
     }
 
     #[test]

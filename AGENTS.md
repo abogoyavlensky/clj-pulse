@@ -290,6 +290,21 @@ there.
   template counts as a use for the lint (`mark_quoted_symbols_used`) and is a
   usage `local_references_at` returns from the argv, or a rename would leave
   it behind; a cursor on the quoted symbol itself still resolves nothing.
+- `comment` and `dis_expr` are named children in tree-sitter-clojure 0.1 (no
+  grammar extras), so `extractor::named_children` filters them (`is_gap`) and
+  every positional walk counts forms alone — a `#_#_x (f)` stack is one
+  `dis_expr` node; `walk_occurrences` also refuses a gap node handed to it
+  directly. Metadata nodes are not gaps. `collect_alias_usages` walks
+  `all_named_children` on purpose, so an alias rename rewrites a discarded
+  `h/x` too, and since the walker records nothing inside a discard,
+  `discarded_keyword_starts` walks each discard's forms with a scratch
+  context for the one thing `alias_sites_tree` needs from them — where a
+  `{:keys [h/x]}` binding entry starts, so it stays a literal key.
+  `is_destructured_key` steps back over gaps to find the `:keys` directive.
+  `code_action.rs` keeps its own unfiltered helper on purpose: clean-ns
+  preserves comments among specs, and `collect_bare` counts a symbol inside a
+  discard as a use so a require is kept rather than dropped. Any extractor
+  output change bumps `CACHE_FORMAT_VERSION`.
 - `NsMeta.as_aliases` never appears in `requires`: an `:as-alias` namespace is
   not loaded, so the alias resolves keywords and qualified names while a usage
   spelling the full namespace stays an unresolved namespace. `core_excludes`
