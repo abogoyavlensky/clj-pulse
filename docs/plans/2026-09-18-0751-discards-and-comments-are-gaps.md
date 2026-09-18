@@ -109,6 +109,7 @@ Because a stacked `#_#_x (f)` is one `dis_expr` node, skipping the node skips bo
 
 > Deviation: the `:keys`-gap test lives in `tests/test_extractor.rs` (asserting `LocalRefs.destructured_key`, the flag `rename_target` reads) rather than in `test_e2e.rs`; it exercises `is_destructured_key` directly without a server.
 > Note: `test_gap_before_argv_does_not_shift_defn` and `test_discarded_top_level_def_is_not_a_symbol` already passed before the fix (def-form parsing tolerated gaps); kept as regression guards.
+> Deviation (codex review, must-fix): with no occurrences recorded inside a discard, `alias_sites_tree` could no longer tell a discarded `{:keys [h/x]}` binding entry from data and would rewrite the literal key. Added `discarded_keyword_starts`: it runs the occurrence walker over each discard's forms with an empty ns context and a scratch scope, only to learn where keyword occurrences start. Regression test `test_alias_sites_skip_discarded_binding_entries`. Commit 63c2c3b.
 > Note: `bb check` initially failed on `test_e2e_kondo_cache_not_warmed_without_a_clj_kondo_dir` on `master` too — an empty, gitignored `tests/fixtures/kondo_project/.clj-kondo/` left by an earlier run; removed, not a code change.
 
 ### Task 3: Corpus verification
