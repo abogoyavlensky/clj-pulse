@@ -44,8 +44,10 @@ const POLL: Duration = Duration::from_millis(100);
 const LIVE_MAX_BYTES: u64 = 256 * 1024;
 /// How many third-party dependency sites the startup probe keeps: the row is
 /// carried by the first one that lands, so a namespace that turns out to be a
-/// git dependency or ClojureScript-only costs nothing but a poll.
-const LIBRARY_CANDIDATES: usize = 5;
+/// git dependency, ClojureScript-only, or a `potemkin/import-vars` re-export
+/// costs nothing but a poll. Ten, because metabase's smallest files lean on
+/// exactly those.
+const LIBRARY_CANDIDATES: usize = 10;
 
 #[test]
 #[ignore = "needs CLJ_PULSE_BENCH_ROOT pointing at a large Clojure checkout; run with `bb bench`"]
@@ -155,6 +157,22 @@ impl RunId {
             RunId::Median { .. } => "median".to_string(),
         }
     }
+}
+
+/// Only the probe discovery, printed: a quick check of what a corpus would
+/// be asked, without starting a server. `CLJ_PULSE_BENCH_ROOT=.tmp/bench/metabase
+/// cargo test --release --test test_bench bench_probes -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs CLJ_PULSE_BENCH_ROOT; prints the probes `bb bench` would use"]
+fn bench_probes() {
+    let Some(root) = std::env::var_os("CLJ_PULSE_BENCH_ROOT") else {
+        println!("CLJ_PULSE_BENCH_ROOT is unset — skipping.");
+        return;
+    };
+    let root = PathBuf::from(root)
+        .canonicalize()
+        .expect("CLJ_PULSE_BENCH_ROOT does not exist");
+    Probes::discover(&root).print(&root);
 }
 
 /// The servers under comparison. Neither is tuned: a comparison of two
@@ -1517,18 +1535,25 @@ fn third_party_sites_skip_clojure_and_project_namespaces() {
     let util = root.join("src").join("app").join("util.clj");
     std::fs::create_dir_all(util.parent().unwrap()).unwrap();
     std::fs::write(&util, "(ns app.util)\n(defn f [x] x)\n").unwrap();
-    let paths = vec![util.clone()];
-    let text = "(ns app.core\n  (:require [clojure.string :as str]\n            [app.util :as util]\n            [honey.sql :as sql]))\n\
-                (defn g [x] (str/join \",\" [(util/f x) (sql/format x) (sql/format-expr x)]))\n";
+    // A facade: it defines nothing itself, and is still the project's.
+    let facade = root.join("src").join("app").join("api.clj");
+    std::fs::write(
+        &facade,
+        "(ns app.api (:require [potemkin :as p]))\n(p/import-vars [app.util f])\n",
+    )
+    .unwrap();
+    let paths = vec![util.clone(), facade.clone()];
+    let text = "(ns app.core\n  (:require [clojure.string :as str]\n            [app.util :as util]\n            [app.api :as api]\n            [honey.sql :as sql]))\n\
+                (defn g [x] (str/join \",\" [(util/f x) (api/f x) (sql/format x) (sql/format-expr x)]))\n";
     let file = root.join("src").join("app").join("core.clj");
     let sites = third_party_sites(text, &file, root, &paths, 5);
     assert_eq!(sites.len(), 1, "one site per namespace");
     let site = &sites[0];
     assert_eq!(site.token, "sql/format");
     assert!(matches!(&site.expect, Expect::Archive(e) if e == "honey/sql"));
-    assert_eq!(site.line, 4);
+    assert_eq!(site.line, 5);
     // Inside `format`, past the `sql/` prefix.
-    let line = text.lines().nth(4).unwrap();
+    let line = text.lines().nth(5).unwrap();
     let col = line.find("sql/format").unwrap();
     assert!(site.character as usize > col + 4);
     assert!((site.character as usize) < col + "sql/format".len());
