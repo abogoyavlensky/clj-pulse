@@ -231,6 +231,12 @@ the release.
       still open: the README table carries the Linux box alone until the
       maintainer runs `bb bench` on the Mac and adds its row.
   Plan: [2026-09-10-1243-release-benchmark.md](plans/2026-09-10-1243-release-benchmark.md) — done
+- [x] **Bench around the startup timeline**: first navigation, all
+      dependencies navigable (a third-party probe asked after the library
+      stage), clj-kondo finished; cold beside warm; `CLJ_PULSE_BENCH_RUNS`
+      repeats with a median row; the README shows metabase alone. The macOS
+      column is still the maintainer's to add.
+  Plan: [2026-09-21-1213-bench-timeline.md](plans/2026-09-21-1213-bench-timeline.md) — done
 - [x] **Soak run** (`bb soak`): one long-lived server driven through rounds of
       realistic churn — buffer edits, saves, files changed, created, deleted
       and renamed on disk, and a branch-switch-shaped batch every fifth round —
