@@ -76,6 +76,8 @@ fn bench_large_project() {
     // cache and a warm one always inherits what the run before it left. Cold
     // runs once; warm repeats `runs` times and reports a median row after
     // them, since the startup numbers are the ones a single run leaves noisy.
+    // Only the first warm run samples latencies: the medians of 20 are stable
+    // run to run, and a repeat exists for the timeline and RSS alone.
     let mut rows = Vec::new();
     for server in [Server::CljPulse, Server::ClojureLsp] {
         let binary = match server {
@@ -94,6 +96,7 @@ fn bench_large_project() {
             &corpus,
             &probes,
             RunId::Nth(1),
+            true,
         );
         row.print(&probes, &root);
         row.print_json();
@@ -109,6 +112,7 @@ fn bench_large_project() {
                 &corpus,
                 &probes,
                 RunId::Nth(n),
+                n == 1,
             );
             row.print(&probes, &root);
             row.print_json();
@@ -262,6 +266,7 @@ fn clear_caches(root: &Path, server: Server) {
 // One run of one server
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     server: Server,
     temp: Temp,
@@ -270,6 +275,7 @@ fn run(
     corpus: &str,
     probes: &Probes,
     run: RunId,
+    sample: bool,
 ) -> Row {
     let mut row = Row::new(server, temp, corpus, run);
     let ceiling = server.ceiling();
@@ -351,6 +357,11 @@ fn run(
         Server::CljPulse => watch.warming_started.and(watch.warming_finished),
         Server::ClojureLsp => settle.at.map(|_| settle.last_activity),
     };
+
+    if !sample {
+        row.lint_engine = watch.lint_engine.clone();
+        return row;
+    }
 
     // didOpen on the largest file in the corpus, the worst realistic case for
     // per-edit work, once the server is settled.

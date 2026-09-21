@@ -279,6 +279,10 @@ Ratio column, CPU seconds, dropping clj-kondo from the bench.
 - The codex branch review had to be re-run without a prompt (`--base`
   rejects one on this codex version).
 
+8. Warm repeats after the first measure the timeline and RSS only; the
+   latency medians come from warm run 1 (the user asked for a shorter bench:
+   23 min at three repeats, of which the repeated sampling was ~5 min).
+
 **What the plan could have specified better:** the candidate predicate. "Has
 no file in the project" was written as `namespace_file` is `None`, which also
 matches a project facade namespace; the plan should have said "no file for

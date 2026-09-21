@@ -35,7 +35,8 @@ For editor verification, see [Verifying changes headlessly](#verifying-changes-h
 `.tmp/bench/`, downloads the pinned clojure-lsp release beside them, and runs
 each server cold once and warm `CLJ_PULSE_BENCH_RUNS` times (default 1) per
 corpus, printing a table and a `BENCH_JSON` line per run plus a median row
-when warm ran more than once. `bb bench metabase` or `bb bench clj-kondo`
+when warm ran more than once (repeats after the first measure startup and
+memory only, so a three-run record costs about two extra minutes). `bb bench metabase` or `bb bench clj-kondo`
 runs one; the recorded tables come from `CLJ_PULSE_BENCH_RUNS=3 bb bench`.
 See the [benchmark records](MEMORY.md#benchmark-against-clojure-lsp) for the
 full tables and [Performance](PERFORMANCE.md) for the public summary.

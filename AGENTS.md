@@ -46,7 +46,8 @@ there.
   first use, and the pinned clojure-lsp release is downloaded and checksum-
   verified beside them). Per server, in a fixed order: one cold run, then
   `CLJ_PULSE_BENCH_RUNS` warm runs (default 1; the recorded tables use 3),
-  followed by a median row when there is more than one. Every metric is
+  followed by a median row when there is more than one. Only the first warm
+  run samples latencies; a repeat measures the timeline and RSS alone. Every metric is
   behavioral, so it means the same thing for both servers. The startup
   timeline is three rows — time until a `textDocument/definition` on a
   project symbol *lands where it should*; the same into a third-party
