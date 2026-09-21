@@ -36,10 +36,12 @@ Cold and warm, both servers. Every published metric stays behavioral.
    > Deviation (plan review): the design first proposed gating on
    > `clojurePulse/librariesChanged`, but the server also sends that when the
    > project list is known, before any indexing (`src/server.rs:2150`), so
-   > the first one proves nothing. The stage lines are unambiguous. clojure-lsp has no gate: the probe is
-   polled from the start, and the row equals its first definition, which is
-   the design difference the table is meant to show. The stage-3
-   "full classpath indexed" time stays a detail line and JSON field.
+   > the first one proves nothing. The stage lines are unambiguous.
+
+   clojure-lsp has no gate: the probe is polled from the start, and the row
+   equals its first definition, which is the design difference the table is
+   meant to show. The stage-3 "full classpath indexed" time stays a detail
+   line and JSON field.
 3. **clj-kondo finished.** clj-pulse: the last `clojurePulse/lintStatus`
    with `warming: false` seen by settle time, provided a `warming: true` was
    seen at all (`send_lint_status` also fires `warming: false` on probe and
