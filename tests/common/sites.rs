@@ -108,12 +108,48 @@ pub fn project_sites(
     )
 }
 
-/// The first `alias/name` usage of `clojure.string` — a var from a JAR on the
-/// classpath, so the answer has to come out of a dependency archive.
-pub fn library_site(text: &str, file: &Path) -> Option<Site> {
-    usage_site(text, file, |ns, _| {
-        (ns == "clojure.string").then(|| Expect::Archive("clojure/string".to_string()))
-    })
+/// Up to `limit` `alias/name` usages of *third-party* namespaces, one per
+/// namespace: not `clojure.*` (clojure.jar is the first entry of every
+/// classpath and lands the moment it is read, which says nothing about the
+/// rest), and not a namespace this corpus has a file for. The answer has to
+/// come out of a dependency archive. A candidate set rather than one site,
+/// because a namespace can turn out to be a git dependency or ClojureScript
+/// only — a definition into it never lands, and another candidate has to
+/// carry the row.
+pub fn third_party_sites(
+    text: &str,
+    file: &Path,
+    root: &Path,
+    paths: &[PathBuf],
+    limit: usize,
+) -> Vec<Site> {
+    let mut seen = Vec::new();
+    let sites = usage_sites(
+        text,
+        file,
+        |ns, name| {
+            if ns.starts_with("clojure.") || namespace_file(ns, name, root, paths).is_some() {
+                return None;
+            }
+            Some(Expect::Archive(ns.replace('-', "_").replace('.', "/")))
+        },
+        usize::MAX,
+    );
+    let mut out = Vec::new();
+    for site in sites {
+        let Expect::Archive(entry) = &site.expect else {
+            continue;
+        };
+        if seen.contains(entry) {
+            continue;
+        }
+        seen.push(entry.clone());
+        out.push(site);
+        if out.len() == limit {
+            break;
+        }
+    }
+    out
 }
 
 /// Up to `limit` `alias/name` usages in `text` that `expect` accepts, in file

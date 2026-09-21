@@ -25,8 +25,8 @@ use common::sampling::{
     STAGE3_LINES,
 };
 use common::sites::{
-    answers, definition, is_source_ish, landing, library_site, project_site, source_files, Landing,
-    Site,
+    answers, definition, is_source_ish, landing, project_site, source_files, third_party_sites,
+    Expect, Landing, Site,
 };
 use common::LspClient;
 
@@ -768,7 +768,7 @@ impl Probes {
                 startup_project = project_site(&text, path, root, &paths);
             }
             if startup_library.is_none() {
-                startup_library = library_site(&text, path);
+                startup_library = third_party_sites(&text, path, root, &paths, 1).pop();
             }
         }
 
@@ -1198,4 +1198,35 @@ fn count(n: Option<u64>) -> String {
 fn mib(kib: Option<u64>) -> String {
     kib.map(|k| format!("{} MiB", k / 1024))
         .unwrap_or_else(|| "n/a".into())
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests of the harness's own rules, run by `bb check`
+// ---------------------------------------------------------------------------
+
+/// A third-party candidate is a usage of a namespace that is neither
+/// `clojure.*` nor the project's own — one per namespace, cursor in the name
+/// part.
+#[test]
+fn third_party_sites_skip_clojure_and_project_namespaces() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let util = root.join("src").join("app").join("util.clj");
+    std::fs::create_dir_all(util.parent().unwrap()).unwrap();
+    std::fs::write(&util, "(ns app.util)\n(defn f [x] x)\n").unwrap();
+    let paths = vec![util.clone()];
+    let text = "(ns app.core\n  (:require [clojure.string :as str]\n            [app.util :as util]\n            [honey.sql :as sql]))\n\
+                (defn g [x] (str/join \",\" [(util/f x) (sql/format x) (sql/format-expr x)]))\n";
+    let file = root.join("src").join("app").join("core.clj");
+    let sites = third_party_sites(text, &file, root, &paths, 5);
+    assert_eq!(sites.len(), 1, "one site per namespace");
+    let site = &sites[0];
+    assert_eq!(site.token, "sql/format");
+    assert!(matches!(&site.expect, Expect::Archive(e) if e == "honey/sql"));
+    assert_eq!(site.line, 4);
+    // Inside `format`, past the `sql/` prefix.
+    let line = text.lines().nth(4).unwrap();
+    let col = line.find("sql/format").unwrap();
+    assert!(site.character as usize > col + 4);
+    assert!((site.character as usize) < col + "sql/format".len());
 }
