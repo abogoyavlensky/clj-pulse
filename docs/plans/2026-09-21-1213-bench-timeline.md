@@ -230,3 +230,57 @@ Ratio column, CPU seconds, dropping clj-kondo from the bench.
 - [x] **Step 3: `bb check`**, then commit: `git commit -m "docs: record the bench run"`.
 
   > Deviation: the first full run left clj-pulse's metabase library row at n/a — every candidate was a project facade namespace (`potemkin/import-vars` re-exports, which `namespace_file` rejects because the file defines nothing) or a library re-export clj-pulse cannot follow. `third_party_sites` now excludes any namespace the project has a file for (`namespace_in_project`), the set is ten candidates, and an ignored `bench_probes` test prints the discovery without a server. Committed as `bench: third-party candidates skip every project namespace, ten of them`; the recorded run is the rerun after it.
+
+---
+
+## Completion summary
+
+**Status: complete.** Branch `bench-timeline`, recorded run in
+`.tmp/bench-20260921-recorded.log` (not committed).
+
+**Implemented**
+
+- `tests/common/sites.rs`: `third_party_sites` (one site per namespace,
+  `clojure.*` and every project namespace excluded via `namespace_in_project`,
+  facades included), `namespace_paths` shared with `namespace_file`;
+  `library_site` removed.
+- `tests/common/mod.rs`: `LspClient.received` — receipt time per stashed
+  message.
+- `tests/test_bench.rs`: three startup timeline metrics (first navigation,
+  all dependencies navigable behind the library stage gate, clj-kondo
+  finished from `lintStatus` warming transitions or clojure-lsp's last
+  publication before quiet), `StageWatch` processing each message once at
+  its receipt time, `Settle` with `last_activity`, ten library candidates,
+  `CLJ_PULSE_BENCH_RUNS` with a median row, `RunId` in the JSON, the
+  `bench_probes` ignored test, two unit tests run by `bb check`.
+- `bb.edn` passes `CLJ_PULSE_BENCH_RUNS` through.
+- Docs: PERFORMANCE.md, README (Performance section and the Highlights
+  bullet), MEMORY.md bench section, CLAUDE.md, DEV_SETUP.md, all filled from
+  the 2026-09-21 run.
+
+**Deviations (all recorded inline above)**
+
+1. Gate is the library stage line, not `librariesChanged` (fires before
+   indexing too).
+2. Receipt times on the client instead of observation times.
+3. Task 1 migrated its caller in the same commit.
+4. Poll waits through `quiet_for` so the gate line is received while nothing
+   is asked (codex, Task 2).
+5. Median row keeps a wrong-dialect warning any run raised (codex, Task 3).
+6. clojure-lsp's "clj-kondo finished" is its last publication, not settle
+   plus the quiet window (smoke run).
+7. Candidates exclude every project namespace, facade or not, and there are
+   ten (first full run: metabase's clj-pulse row was n/a).
+
+**Issues**
+
+- clojure-lsp's metabase cold start read 375 s against 293 s on 2026-09-10;
+  the box was shared during the run. Noted in MEMORY.
+- The codex branch review had to be re-run without a prompt (`--base`
+  rejects one on this codex version).
+
+**What the plan could have specified better:** the candidate predicate. "Has
+no file in the project" was written as `namespace_file` is `None`, which also
+matches a project facade namespace; the plan should have said "no file for
+that namespace at all", and named `import-vars` re-exports as a reason the
+set needs to be wide.
