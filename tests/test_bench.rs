@@ -42,6 +42,10 @@ const POLL: Duration = Duration::from_millis(100);
 /// `:kondo {:live-max-kb}`'s default, in bytes: above it clj-kondo sits out
 /// the keystroke path, so a file on each side of the line is measured.
 const LIVE_MAX_BYTES: u64 = 256 * 1024;
+/// How many third-party dependency sites the startup probe keeps: the row is
+/// carried by the first one that lands, so a namespace that turns out to be a
+/// git dependency or ClojureScript-only costs nothing but a poll.
+const LIBRARY_CANDIDATES: usize = 5;
 
 #[test]
 #[ignore = "needs CLJ_PULSE_BENCH_ROOT pointing at a large Clojure checkout; run with `bb bench`"]
@@ -208,17 +212,30 @@ fn run(
         client.did_open(&site.file);
     }
 
-    let (first, library, wrong_dialect) = poll_definitions(
+    // The library probe is gated for clj-pulse: it indexes the classpath in
+    // the background and a third-party namespace can land long before the
+    // last entry is read, so asking starts only once the server has said
+    // every entry is in. clojure-lsp answers nothing before its whole
+    // analysis is done, so there is nothing to gate on.
+    let gate = match server {
+        Server::CljPulse => Gate::LibraryStage,
+        Server::ClojureLsp => Gate::None,
+    };
+    let startup = poll_definitions(
         &mut client,
         probes.startup_project.as_ref(),
-        probes.startup_library.as_ref(),
+        &probes.startup_library,
+        gate,
         t0,
         t0 + ceiling,
         &mut watch,
     );
-    row.first_definition = first;
-    row.first_library_definition = library;
-    row.library_wrong_dialect = wrong_dialect;
+    row.first_definition = startup.first_definition;
+    row.libraries_navigable = startup.libraries_navigable;
+    row.library_site = startup
+        .library_site
+        .map(|i| probes.startup_library[i].token.clone());
+    row.library_wrong_dialect = startup.wrong_dialect;
 
     // Settled, not merely answering: clj-pulse's stage 3 re-resolves and
     // re-indexes long after stage 2 has answered a definition, and clojure-lsp
@@ -235,11 +252,19 @@ fn run(
     row.settle_note = note;
     row.rss_settled = rss_kib(pid);
 
-    // clj-pulse's own account of the same startup. Observed at poll
-    // granularity (100 ms), so it is a cross-check on the numbers above, not a
-    // number to quote on its own.
+    // clj-pulse's own account of the same startup: a cross-check on the
+    // numbers above, not a number to quote on its own.
     watch.observe(&client, t0);
     row.take_stages(&watch);
+
+    // When clj-kondo finished: for clj-pulse the end of its dependency-cache
+    // warm, which `clojurePulse/lintStatus` brackets with `warming`; for
+    // clojure-lsp the settle itself, since its startup *is* a clj-kondo
+    // analysis and nothing answers before it ends.
+    row.kondo_finished = match server {
+        Server::CljPulse => watch.warming_started.and(watch.warming_finished),
+        Server::ClojureLsp => settled,
+    };
 
     // didOpen on the largest file in the corpus, the worst realistic case for
     // per-edit work, once the server is settled.
@@ -319,48 +344,81 @@ impl SyncKind {
     }
 }
 
-/// Asks both startup probes for their definition until each answers correctly,
+/// Whether the library probe waits for the server to say every classpath
+/// entry is indexed before it is asked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// Ask once a library stage line has arrived (clj-pulse).
+    LibraryStage,
+    /// Ask from the start (clojure-lsp).
+    None,
+}
+
+/// What the startup probes established.
+struct Startup {
+    first_definition: Option<Duration>,
+    /// When a definition into a third-party dependency landed, after the gate.
+    libraries_navigable: Option<Duration>,
+    /// Index into the candidate set of the site that carried the row.
+    library_site: Option<usize>,
+    /// The library answer landed in the entry's other dialect.
+    wrong_dialect: bool,
+}
+
+/// Asks the startup probes for their definition until each answers correctly,
 /// and returns how long each took from `t0`. Interleaved, never in sequence:
 /// the library index finishes after the project one, but a probe that never
 /// resolves must not lend its whole wait to the other's number. `None` for a
 /// probe the ceiling passed first, or one this corpus has no site for. The
-/// third value is whether the library answer landed in a dialect the asking
-/// file does not load (`clojure/string.cljs` from a `.clj`): timed, since the
-/// lookup happened, but flagged on the row.
+/// library candidates are asked in order and the first to land carries the
+/// row; `wrong_dialect` says its answer landed in a dialect the asking file
+/// does not load (`foo/bar.cljs` from a `.clj`): timed, since the lookup
+/// happened, but flagged on the row.
 fn poll_definitions(
     client: &mut LspClient,
     project: Option<&Site>,
-    library: Option<&Site>,
+    library: &[Site],
+    gate: Gate,
     t0: Instant,
     deadline: Instant,
     watch: &mut StageWatch,
-) -> (Option<Duration>, Option<Duration>, bool) {
-    let mut answered: [Option<Duration>; 2] = [None, None];
-    let mut wrong_dialect = false;
-    let sites = [project, library];
+) -> Startup {
+    let mut startup = Startup {
+        first_definition: None,
+        libraries_navigable: None,
+        library_site: None,
+        wrong_dialect: false,
+    };
     loop {
-        for (i, site) in sites.iter().enumerate() {
-            let Some(site) = site else { continue };
-            if answered[i].is_some() {
-                continue;
-            }
-            match landing(&definition(client, site), &site.expect, &site.file) {
-                Landing::Landed => answered[i] = Some(t0.elapsed()),
-                Landing::WrongDialect => {
-                    answered[i] = Some(t0.elapsed());
-                    wrong_dialect = true;
-                }
-                Landing::Miss => {}
-            }
-        }
-        let pending = sites
-            .iter()
-            .enumerate()
-            .any(|(i, site)| site.is_some() && answered[i].is_none());
-        if !pending || Instant::now() >= deadline {
-            return (answered[0], answered[1], wrong_dialect);
-        }
         watch.observe(client, t0);
+        if let Some(site) = project {
+            if startup.first_definition.is_none()
+                && landing(&definition(client, site), &site.expect, &site.file) != Landing::Miss
+            {
+                startup.first_definition = Some(t0.elapsed());
+            }
+        }
+        let open = match gate {
+            Gate::LibraryStage => watch.library_stage_first.is_some(),
+            Gate::None => true,
+        };
+        if open && startup.libraries_navigable.is_none() {
+            for (i, site) in library.iter().enumerate() {
+                let landed = landing(&definition(client, site), &site.expect, &site.file);
+                if landed == Landing::Miss {
+                    continue;
+                }
+                startup.libraries_navigable = Some(t0.elapsed());
+                startup.library_site = Some(i);
+                startup.wrong_dialect = landed == Landing::WrongDialect;
+                break;
+            }
+        }
+        let project_pending = project.is_some() && startup.first_definition.is_none();
+        let library_pending = !library.is_empty() && startup.libraries_navigable.is_none();
+        if (!project_pending && !library_pending) || Instant::now() >= deadline {
+            return startup;
+        }
         std::thread::sleep(POLL);
     }
 }
@@ -607,6 +665,7 @@ fn tier_of(params: &Value) -> Tier {
 fn reset(client: &mut LspClient, watch: &mut StageWatch, t0: Instant) {
     watch.observe(client, t0);
     client.clear_notifications();
+    watch.observed = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -615,22 +674,39 @@ fn reset(client: &mut LspClient, watch: &mut StageWatch, t0: Instant) {
 
 #[derive(Default)]
 struct StageWatch {
+    /// How many stashed messages have been read: each is processed once, so a
+    /// time recorded here is the message's receipt time and a later scan
+    /// never re-stamps it. `reset` zeroes it with the stash.
+    observed: usize,
     /// Needle -> (the line, when it was first seen).
     seen: BTreeMap<&'static str, (String, Duration)>,
+    /// The earliest library stage line, stage 2 or 3, whichever came first:
+    /// the gate the library probe waits for.
+    library_stage_first: Option<Duration>,
     /// The engine of the last `clojurePulse/lintStatus` seen. Kept here rather
     /// than read off the stash at the end, which the sampling loops clear.
     lint_engine: Option<String>,
+    /// The first `clojurePulse/lintStatus` with `warming: true`, and the last
+    /// with `warming: false` after it — the clj-kondo dependency-cache warm's
+    /// start and end. A `warming: false` before any `true` is the probe or a
+    /// recovery reporting, not a warm ending.
+    warming_started: Option<Duration>,
+    warming_finished: Option<Duration>,
     /// Whether a `$/progress` has reported `end` — clojure-lsp's analysis
     /// progress, when it reports one.
     progress_end: bool,
 }
 
 impl StageWatch {
-    /// Records the stage lines among the messages stashed so far. Called
-    /// between polls, so a time here is accurate to [`POLL`], not better.
+    /// Records the stage lines and lint status among the messages stashed
+    /// since the last call, each at the time it was received.
     fn observe(&mut self, client: &LspClient, t0: Instant) {
-        let elapsed = t0.elapsed();
-        for msg in &client.notifications {
+        let from = self.observed.min(client.notifications.len());
+        for (msg, at) in client.notifications[from..]
+            .iter()
+            .zip(&client.received[from..])
+        {
+            let elapsed = at.saturating_duration_since(t0);
             if msg["method"] == "$/progress" && msg["params"]["value"]["kind"] == "end" {
                 self.progress_end = true;
                 continue;
@@ -638,6 +714,15 @@ impl StageWatch {
             if msg["method"] == "clojurePulse/lintStatus" {
                 if let Some(engine) = msg["params"]["engine"].as_str() {
                     self.lint_engine = Some(engine.to_string());
+                }
+                match msg["params"]["warming"].as_bool() {
+                    Some(true) => {
+                        self.warming_started.get_or_insert(elapsed);
+                    }
+                    Some(false) if self.warming_started.is_some() => {
+                        self.warming_finished = Some(elapsed);
+                    }
+                    _ => {}
                 }
                 continue;
             }
@@ -650,9 +735,13 @@ impl StageWatch {
             for needle in ["Indexed"].iter().chain(&STAGE2_LINES).chain(&STAGE3_LINES) {
                 if text.contains(needle) && !self.seen.contains_key(needle) {
                     self.seen.insert(needle, (text.to_string(), elapsed));
+                    if *needle != "Indexed" {
+                        self.library_stage_first.get_or_insert(elapsed);
+                    }
                 }
             }
         }
+        self.observed = client.notifications.len();
     }
 
     fn line(&self, needle: &str) -> Option<&(String, Duration)> {
@@ -711,8 +800,10 @@ struct Probes {
     small_bytes: Option<u64>,
     /// Definition into the project, from a small file open at startup.
     startup_project: Option<Site>,
-    /// Definition into a JAR (`clojure.string`), the same way.
-    startup_library: Option<Site>,
+    /// Definitions into third-party dependency archives, the same way: up to
+    /// [`LIBRARY_CANDIDATES`] of them, one per namespace, the first to land
+    /// carrying the row.
+    startup_library: Vec<Site>,
     /// Definition into the project from the largest file, for the latency
     /// median.
     edit_site: Option<Site>,
@@ -753,9 +844,9 @@ impl Probes {
         // file at that moment would measure the harness's own choice, not the
         // server.
         let mut startup_project = None;
-        let mut startup_library = None;
+        let mut startup_library: Vec<Site> = Vec::new();
         for (_, path) in files.iter().rev() {
-            if startup_project.is_some() && startup_library.is_some() {
+            if startup_project.is_some() && startup_library.len() >= LIBRARY_CANDIDATES {
                 break;
             }
             if !is_source_ish(path, root) {
@@ -767,8 +858,24 @@ impl Probes {
             if startup_project.is_none() {
                 startup_project = project_site(&text, path, root, &paths);
             }
-            if startup_library.is_none() {
-                startup_library = third_party_sites(&text, path, root, &paths, 1).pop();
+            if startup_library.len() < LIBRARY_CANDIDATES {
+                for site in third_party_sites(
+                    &text,
+                    path,
+                    root,
+                    &paths,
+                    LIBRARY_CANDIDATES - startup_library.len(),
+                ) {
+                    let Expect::Archive(entry) = &site.expect else {
+                        continue;
+                    };
+                    let dup = startup_library
+                        .iter()
+                        .any(|s| matches!(&s.expect, Expect::Archive(e) if e == entry));
+                    if !dup {
+                        startup_library.push(site);
+                    }
+                }
             }
         }
 
@@ -786,9 +893,10 @@ impl Probes {
     /// The files the startup probes need open, each once.
     fn startup_sites(&self) -> Vec<&Site> {
         let mut sites: Vec<&Site> = Vec::new();
-        for site in [&self.startup_project, &self.startup_library]
-            .into_iter()
-            .flatten()
+        for site in self
+            .startup_project
+            .iter()
+            .chain(self.startup_library.iter())
         {
             if !sites.iter().any(|s| s.file == site.file) {
                 sites.push(site);
@@ -831,8 +939,20 @@ impl Probes {
                 LIVE_MAX_BYTES / 1024
             ),
         }
-        site("first definition", &self.startup_project);
-        site("first library def", &self.startup_library);
+        site("first navigation", &self.startup_project);
+        if self.startup_library.is_empty() {
+            println!("  {:<22} n/a", "library candidates");
+        }
+        for (i, s) in self.startup_library.iter().enumerate() {
+            println!(
+                "  {:<22} {}:{} `{}` -> {}",
+                if i == 0 { "library candidates" } else { "" },
+                rel(&s.file),
+                s.line + 1,
+                s.token,
+                s.expect.describe()
+            );
+        }
         site("definition latency", &self.edit_site);
     }
 }
@@ -872,10 +992,19 @@ struct Row {
     temp: Temp,
     corpus: String,
     sync: SyncKind,
+    /// Which repeat of this configuration, 1-based.
+    run: usize,
     first_definition: Option<Duration>,
-    first_library_definition: Option<Duration>,
+    /// When a definition into a third-party dependency landed, asked only
+    /// once the server said every classpath entry was indexed.
+    libraries_navigable: Option<Duration>,
+    /// The candidate that carried it.
+    library_site: Option<String>,
     /// The library answer landed in the entry's other dialect.
     library_wrong_dialect: bool,
+    /// When clj-kondo finished: the dependency-cache warm for clj-pulse, the
+    /// settle for clojure-lsp.
+    kondo_finished: Option<Duration>,
     settled: Option<Duration>,
     settle_note: String,
     rss_settled: Option<u64>,
@@ -908,9 +1037,12 @@ impl Row {
             temp,
             corpus: corpus.to_string(),
             sync: SyncKind::Incremental,
+            run: 1,
             first_definition: None,
-            first_library_definition: None,
+            libraries_navigable: None,
+            library_site: None,
             library_wrong_dialect: false,
+            kondo_finished: None,
             settled: None,
             settle_note: String::new(),
             rss_settled: None,
@@ -986,9 +1118,10 @@ impl Row {
 
         println!();
         println!(
-            "{} ({}) on {}",
+            "{} ({}, run {}) on {}",
             self.server.label(),
             self.temp.label(),
+            self.run,
             self.corpus
         );
         println!("  root            {}", root.display());
@@ -1005,12 +1138,12 @@ impl Row {
         println!();
         row("metric", "value");
         println!("  {:-<34} {:-<34}", "", "");
-        row("time to first definition", &ms(self.first_definition));
+        row("time to first navigation", &ms(self.first_definition));
         row(
-            "time to first library definition",
+            "all dependencies navigable",
             &format!(
                 "{}{}",
-                ms(self.first_library_definition),
+                ms(self.libraries_navigable),
                 if self.library_wrong_dialect {
                     " (dialect: wrong)"
                 } else {
@@ -1018,6 +1151,13 @@ impl Row {
                 }
             ),
         );
+        row(
+            "  landed at",
+            self.library_site
+                .as_deref()
+                .unwrap_or("no candidate landed"),
+        );
+        row("clj-kondo finished", &ms(self.kondo_finished));
         row("time to settled", &ms(self.settled));
         row("  settled by", &self.settle_note);
         row("RSS settled", &mib(self.rss_settled));
@@ -1099,8 +1239,12 @@ impl Row {
                 "temperature": self.temp.label(),
                 "document_sync": self.sync.label(),
                 "corpus": self.corpus,
+                "run": self.run,
                 "first_definition_ms": ms(self.first_definition),
-                "first_library_definition_ms": ms(self.first_library_definition),
+                "libraries_navigable_ms": ms(self.libraries_navigable),
+                "library_site": self.library_site,
+                "library_wrong_dialect": self.library_wrong_dialect,
+                "kondo_finished_ms": ms(self.kondo_finished),
                 "settled_ms": ms(self.settled),
                 "settled_by": self.settle_note,
                 "rss_settled_kib": self.rss_settled,
@@ -1134,12 +1278,13 @@ fn summary(rows: &[Row], probes: &Probes) {
         "summary (fixed order: clj-pulse cold, clj-pulse warm, clojure-lsp cold, clojure-lsp warm)"
     );
     println!(
-        "  {:<12} {:<5} {:>9} {:>11} {:>9} {:>7} {:>7} {:>11} {:>11}",
+        "  {:<12} {:<5} {:>4} {:>9} {:>9} {:>10} {:>7} {:>7} {:>11} {:>11}",
         "server",
         "temp",
-        "1st def",
-        "1st lib def",
-        "settled",
+        "run",
+        "1st nav",
+        "all libs",
+        "kondo done",
         "RSS",
         "def",
         format!("edit {large}K"),
@@ -1149,12 +1294,13 @@ fn summary(rows: &[Row], probes: &Probes) {
     );
     for r in rows {
         println!(
-            "  {:<12} {:<5} {:>9} {:>11} {:>9} {:>7} {:>7} {:>11} {:>11}",
+            "  {:<12} {:<5} {:>4} {:>9} {:>9} {:>10} {:>7} {:>7} {:>11} {:>11}",
             r.server.label(),
             r.temp.label(),
+            r.run,
             ms(r.first_definition),
-            ms(r.first_library_definition),
-            ms(r.settled),
+            ms(r.libraries_navigable),
+            ms(r.kondo_finished),
             mib(r.rss_settled),
             ms(r.definition),
             ms(r.edit),
