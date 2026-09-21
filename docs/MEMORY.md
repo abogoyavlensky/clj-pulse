@@ -143,8 +143,9 @@ dependencies 531 / 522 / 525 ms. This corpus is stable run to run.
   what a user perceives, and a cache serving a stale entry would navigate
   confidently to the wrong place — masking the resolution bugs that list
   already tracks rather than fixing them.
-- **Cold and warm are per server.** Cold deletes `.clj-pulse/jar-cache` for
-  clj-pulse and `.lsp/.cache`, `.clj-kondo/.cache` *and* clojure-lsp's global
+- **Cold and warm are per server.** Cold deletes `.clj-pulse/jar-cache` and
+  `.clj-kondo/.cache` for clj-pulse, and `.lsp/.cache`, `.clj-kondo/.cache`
+  *and* clojure-lsp's global
   `$XDG_CACHE_HOME/clojure-lsp` for clojure-lsp — the last one holds ~150 MiB
   of JDK-source analysis and lives outside the project, so the bench points
   `XDG_CACHE_HOME` inside the corpus and clears it. Before that isolation, a
@@ -155,7 +156,10 @@ dependencies 531 / 522 / 525 ms. This corpus is stable run to run.
 - **Timeline times are receipt times.** The client stamps every server
   message as it pulls it off the channel, and the harness keeps receiving
   while it waits between polls, so a stage line or a `lintStatus` is timed
-  when it arrived, to within the 100 ms poll.
+  when it arrived, to within the 100 ms poll. clojure-lsp's "clj-kondo
+  finished" is the latest such time across the whole run, so a publication
+  that arrived while the startup probes were still polling is not lost to
+  the settle check that starts after them.
 - **The 452 KiB edit row is clj-pulse's native tier alone**: that file is above
   `:kondo {:live-max-kb 256}`, so clj-kondo sits out the keystroke path. The
   251 KiB row is the same measurement with clj-kondo in it, which is what the

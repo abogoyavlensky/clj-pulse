@@ -204,10 +204,15 @@ impl Server {
 
     /// What a cold run deletes. `.cpcache` is *not* here: resolving the
     /// classpath is preparation both servers share, done before anything is
-    /// timed.
+    /// timed. `.clj-kondo/.cache` is: both servers warm it, so a cold run of
+    /// either would otherwise inherit the other's — and "clj-kondo finished"
+    /// would time a warm against a cache the previous run left.
     fn caches(self, root: &Path) -> Vec<PathBuf> {
         match self {
-            Server::CljPulse => vec![root.join(".clj-pulse").join("jar-cache")],
+            Server::CljPulse => vec![
+                root.join(".clj-pulse").join("jar-cache"),
+                root.join(".clj-kondo").join(".cache"),
+            ],
             Server::ClojureLsp => vec![
                 root.join(".lsp").join(".cache"),
                 root.join(".clj-kondo").join(".cache"),
@@ -606,13 +611,15 @@ fn quiesce(
     methods: &[&str],
     note: String,
 ) -> Settle {
-    let mut last_activity = t0.elapsed();
+    let started = t0.elapsed();
     loop {
         reset(client, watch, t0);
         let quiet = quiet_for(client, methods, QUIET);
-        if !quiet {
-            last_activity = t0.elapsed();
-        }
+        // `reset` observed what the wait pulled in, so the watch holds every
+        // watched message's receipt time — including one that arrived while
+        // the startup probes were still polling, before this check began.
+        watch.observe(client, t0);
+        let last_activity = watch.last_activity(methods).unwrap_or(started);
         if quiet && !has_children(pid) {
             return Settle {
                 at: Some(t0.elapsed()),
@@ -635,9 +642,10 @@ struct Settle {
     /// When the server was settled, `None` if the ceiling passed first.
     at: Option<Duration>,
     note: String,
-    /// The last time one of the watched methods arrived, or the start of the
-    /// check when none did: the settle time minus the quiet window, which is
-    /// when the server's startup work actually ended.
+    /// The last time one of the watched methods arrived, at any point since
+    /// the server started, or the start of the check when none ever did: the
+    /// settle time minus the quiet window, which is when the server's startup
+    /// work actually ended.
     last_activity: Duration,
 }
 
@@ -804,9 +812,22 @@ struct StageWatch {
     /// Whether a `$/progress` has reported `end` — clojure-lsp's analysis
     /// progress, when it reports one.
     progress_end: bool,
+    /// The latest receipt time of each method seen, across resets: the settle
+    /// check reads its watched methods here, so a publication that arrived
+    /// while the startup probes were still polling keeps its real time.
+    last_by_method: BTreeMap<String, Duration>,
 }
 
 impl StageWatch {
+    /// The latest receipt time among `methods`, if any arrived.
+    fn last_activity(&self, methods: &[&str]) -> Option<Duration> {
+        methods
+            .iter()
+            .filter_map(|m| self.last_by_method.get(*m))
+            .max()
+            .copied()
+    }
+
     /// Records the stage lines and lint status among the messages stashed
     /// since the last call, each at the time it was received.
     fn observe(&mut self, client: &LspClient, t0: Instant) {
@@ -816,6 +837,9 @@ impl StageWatch {
             .zip(&client.received[from..])
         {
             let elapsed = at.saturating_duration_since(t0);
+            if let Some(method) = msg["method"].as_str() {
+                self.last_by_method.insert(method.to_string(), elapsed);
+            }
             if msg["method"] == "$/progress" && msg["params"]["value"]["kind"] == "end" {
                 self.progress_end = true;
                 continue;
