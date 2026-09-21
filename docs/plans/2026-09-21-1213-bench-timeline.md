@@ -164,25 +164,27 @@ Ratio column, CPU seconds, dropping clj-kondo from the bench.
 - Modify: `tests/test_bench.rs`
 - Modify: `bb.edn`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
   `#[test] fn median_row_takes_the_median_of_each_field`: three warm `Row`s with `first_definition` 300/100/200 ms, `rss_settled` Some(3)/None/Some(1), `definition_samples` 20 each; expect the median row to have 200 ms, RSS 3 (median of the two present, upper middle per `sampling::median`), run label `median`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
   Run: `cargo test --test test_bench median_row`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `enum RunId { Nth(usize), Median { runs: usize } }` on `Row` in place of `run: usize`. `fn median_row(rows: &[Row]) -> Row`: clones the first row's labels, then for every `Option<Duration>` field takes `sampling::median` over the present values, for `rss_settled` the median of the present `u64`s, for sample counts the minimum, for bools `all`. Main loop: read `CLJ_PULSE_BENCH_RUNS` (default 1, must parse as ≥ 1); per server run cold once, then warm N times; when N > 1 push the median row after the warm runs. `print_json` emits `"run": 1` or `"run": "median", "runs": N`. Summary prints the median row labelled `median`.
 
-- [ ] **Step 4: bb.edn**
+- [x] **Step 4: bb.edn**
   The `bench` task adds `"CLJ_PULSE_BENCH_RUNS"` to `:extra-env` when the env var is set (`(System/getenv "CLJ_PULSE_BENCH_RUNS")`); doc string mentions it.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
   Run: `cargo test --test test_bench` then `bb check`.
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "bench: repeat warm runs and report medians"`
+
+  > Deviation: the Task 2 codex review found that once the project probe had landed, nothing drained the channel and the gate line never reached the stash; fixed in `bench: keep receiving while the library gate is shut` (the poll waits through `quiet_for` with an empty method list).
 
 ### Task 4: Smoke the harness on clj-kondo
 
