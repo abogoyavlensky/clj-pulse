@@ -24,33 +24,30 @@ project:
 Cold is the first open of a fresh checkout, with the server's caches cleared;
 warm is the next open, with what the first run left behind. Warm numbers are
 the median of three runs, cold is one run. One Linux container (5 cores,
-11 GiB), <!-- filled by Task 6: date -->: clj-pulse <!-- version -->,
-clojure-lsp 2026.07.06-14.34.19, metabase at `42a8e9f7`, clj-kondo at
-`13a32d1c`.
+11 GiB, 2026-09-21): clj-pulse 0.5.4, clojure-lsp 2026.07.06-14.34.19,
+clj-kondo v2026.08.04, metabase at `42a8e9f7`, clj-kondo at `13a32d1c`.
 
 **metabase** (1 400+ files, 43 164 symbols):
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | — | — | — | — |
-| All dependencies navigable | — | — | — | — |
-| clj-kondo finished | — | — | — | — |
-| Memory once settled | — | — | — | — |
-| Definition (median of 20) | — | — | — | — |
-| Keystroke -> diagnostics, 251 KiB file | — | — | — | — |
+| First navigation | 3.4 s | 3.3 s | 375 s | 63 s |
+| All dependencies navigable | 5.9 s | 3.9 s | 375 s | 63 s |
+| clj-kondo finished | 48 s | 45 s | 375 s | 63 s |
+| Memory once settled | 368 MiB | 365 MiB | 2 432 MiB | 1 903 MiB |
+| Definition (median of 20) | 26 ms | 25 ms | 16 ms | 10 ms |
+| Keystroke -> diagnostics, 251 KiB file | 887 ms | 877 ms | 859 ms | 942 ms |
 
 **clj-kondo** (400 files, 2 252 symbols):
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | — | — | — | — |
-| All dependencies navigable | — | — | — | — |
-| clj-kondo finished | — | — | — | — |
-| Memory once settled | — | — | — | — |
-| Definition (median of 20) | — | — | — | — |
-| Keystroke -> diagnostics, 233 KiB file | — | — | — | — |
-
-<!-- filled by Task 6: the tables above -->
+| First navigation | 533 ms | 524 ms | 17.4 s | 2.5 s |
+| All dependencies navigable | 1.9 s | 525 ms | 17.4 s | 2.5 s |
+| clj-kondo finished | 12.6 s | 2.4 s | 17.4 s | 2.5 s |
+| Memory once settled | 129 MiB | 89 MiB | 317 MiB | 279 MiB |
+| Definition (median of 20) | 18 ms | 18 ms | 7 ms | 3 ms |
+| Keystroke -> diagnostics, 233 KiB file | 776 ms | 770 ms | 802 ms | 779 ms |
 
 What the tables do not say:
 

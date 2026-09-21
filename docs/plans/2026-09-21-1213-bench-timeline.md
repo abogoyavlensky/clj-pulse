@@ -220,11 +220,13 @@ Ratio column, CPU seconds, dropping clj-kondo from the bench.
 
 ### Task 6: Record the numbers
 
-- [ ] **Step 1: Run the full bench**
+- [x] **Step 1: Run the full bench**
   Run: `CLJ_PULSE_BENCH_RUNS=3 bb bench 2>&1 | tee .tmp/bench-$(date +%Y%m%d).log`
   Expected: both corpora complete; keep the `BENCH_JSON` lines.
 
-- [ ] **Step 2: Fill the tables**
+- [x] **Step 2: Fill the tables**
   From the median rows (warm) and the cold rows: PERFORMANCE.md, README, MEMORY (with date, machine, versions, commit, and the candidate site that landed). Remove every marker.
 
-- [ ] **Step 3: `bb check`**, then commit: `git commit -m "docs: record the bench run"`.
+- [x] **Step 3: `bb check`**, then commit: `git commit -m "docs: record the bench run"`.
+
+  > Deviation: the first full run left clj-pulse's metabase library row at n/a — every candidate was a project facade namespace (`potemkin/import-vars` re-exports, which `namespace_file` rejects because the file defines nothing) or a library re-export clj-pulse cannot follow. `third_party_sites` now excludes any namespace the project has a file for (`namespace_in_project`), the set is ten candidates, and an ignored `bench_probes` test prints the discovery without a server. Committed as `bench: third-party candidates skip every project namespace, ten of them`; the recorded run is the rerun after it.

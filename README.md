@@ -6,7 +6,8 @@ A fast-starting, low-memory Clojure language server.
 
 - **Fast startup, low memory.** Navigate your project while dependencies index
   in the background. On the recorded Metabase benchmark, the first project
-  definition was available in 3.1 seconds, with 353 MiB of memory once settled.
+  definition was available in 3.3 seconds and every dependency in 3.9, with
+  365 MiB of memory once settled.
   See [Performance](#performance) for the comparison and measurement details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
@@ -70,20 +71,18 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 ## Performance
 
 What a user waits for after opening Metabase (1,400+ files), recorded on one
-Linux container (5 cores, 11 GiB RAM), <!-- filled by Task 6: date -->:
-clj-pulse <!-- version --> and clojure-lsp 2026.07.06-14.34.19, both at their
-defaults, with clj-kondo installed. Cold is the first open of a fresh
+Linux container (5 cores, 11 GiB RAM), 2026-09-21: clj-pulse 0.5.4 and
+clojure-lsp 2026.07.06-14.34.19, both at their defaults, with clj-kondo
+installed. Cold is the first open of a fresh
 checkout; warm is the next open, using the caches the first one left.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | — | — | — | — |
-| All dependencies navigable | — | — | — | — |
-| clj-kondo finished | — | — | — | — |
-| Memory once settled | — | — | — | — |
-| Definition (median of 20) | — | — | — | — |
-
-<!-- filled by Task 6: the table above -->
+| First navigation | 3.4 s | 3.3 s | 375 s | 63 s |
+| All dependencies navigable | 5.9 s | 3.9 s | 375 s | 63 s |
+| clj-kondo finished | 48 s | 45 s | 375 s | 63 s |
+| Memory once settled | 368 MiB | 365 MiB | 2,432 MiB | 1,903 MiB |
+| Definition (median of 20) | 26 ms | 25 ms | 16 ms | 10 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while
