@@ -1360,6 +1360,9 @@ fn median_row(rows: &[Row]) -> Row {
     };
     let min = |pick: fn(&Row) -> usize| rows.iter().map(pick).min().unwrap_or(0);
     let all = |pick: fn(&Row) -> bool| rows.iter().all(pick);
+    // A warning flag survives if any run raised it: the median above may
+    // include that run's timing.
+    let any = |pick: fn(&Row) -> bool| rows.iter().any(pick);
     Row {
         server: first.server,
         temp: first.temp,
@@ -1369,7 +1372,7 @@ fn median_row(rows: &[Row]) -> Row {
         first_definition: med(|r| r.first_definition),
         libraries_navigable: med(|r| r.libraries_navigable),
         library_site: first.library_site.clone(),
-        library_wrong_dialect: all(|r| r.library_wrong_dialect),
+        library_wrong_dialect: any(|r| r.library_wrong_dialect),
         kondo_finished: med(|r| r.kondo_finished),
         settled: med(|r| r.settled),
         settle_note: first.settle_note.clone(),
@@ -1506,8 +1509,8 @@ fn third_party_sites_skip_clojure_and_project_namespaces() {
     assert!((site.character as usize) < col + "sql/format".len());
 }
 
-/// The median row takes each field's median over the runs that have it, and
-/// says how many runs it stands for.
+/// The median row takes each field's median over the runs that have it, keeps
+/// a warning any run raised, and says how many runs it stands for.
 #[test]
 fn median_row_takes_the_median_of_each_field() {
     let mut rows: Vec<Row> = [300u64, 100, 200]
@@ -1523,7 +1526,9 @@ fn median_row_takes_the_median_of_each_field() {
     rows[0].rss_settled = Some(3);
     rows[2].rss_settled = Some(1);
     rows[1].definition_samples = 18;
+    rows[1].library_wrong_dialect = true;
     let m = median_row(&rows);
+    assert!(m.library_wrong_dialect, "a warning any run raised survives");
     assert_eq!(m.run, RunId::Median { runs: 3 });
     assert_eq!(m.first_definition, Some(Duration::from_millis(200)));
     assert_eq!(m.rss_settled, Some(3), "upper middle of the two present");
