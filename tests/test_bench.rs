@@ -306,12 +306,12 @@ fn run(
     // Its own deadline, not what is left of the startup one: a probe that
     // never resolved must not also make the settle check report a failure.
     let deadline = Instant::now() + ceiling;
-    let (settled, note) = match server {
+    let settle = match server {
         Server::CljPulse => settle_clj_pulse(&mut client, pid, t0, deadline, &mut watch),
         Server::ClojureLsp => settle_clojure_lsp(&mut client, pid, t0, deadline, &mut watch),
     };
-    row.settled = settled;
-    row.settle_note = note;
+    row.settled = settle.at;
+    row.settle_note = settle.note.clone();
     row.rss_settled = rss_kib(pid);
 
     // clj-pulse's own account of the same startup: a cross-check on the
@@ -321,11 +321,12 @@ fn run(
 
     // When clj-kondo finished: for clj-pulse the end of its dependency-cache
     // warm, which `clojurePulse/lintStatus` brackets with `warming`; for
-    // clojure-lsp the settle itself, since its startup *is* a clj-kondo
-    // analysis and nothing answers before it ends.
+    // clojure-lsp the last publication before it went quiet, since its
+    // startup *is* a clj-kondo analysis that publishes across the project as
+    // it goes — the settle time itself would carry the quiet window.
     row.kondo_finished = match server {
         Server::CljPulse => watch.warming_started.and(watch.warming_finished),
-        Server::ClojureLsp => settled,
+        Server::ClojureLsp => settle.at.map(|_| settle.last_activity),
     };
 
     // didOpen on the largest file in the corpus, the worst realistic case for
@@ -499,7 +500,7 @@ fn settle_clj_pulse(
     t0: Instant,
     deadline: Instant,
     watch: &mut StageWatch,
-) -> (Option<Duration>, String) {
+) -> Settle {
     let terminal: Vec<&str> = STAGE2_LINES
         .iter()
         .chain(STAGE3_LINES.iter())
@@ -554,8 +555,8 @@ fn settle_clojure_lsp(
     t0: Instant,
     deadline: Instant,
     watch: &mut StageWatch,
-) -> (Option<Duration>, String) {
-    let (settled, note) = quiesce(
+) -> Settle {
+    let mut settle = quiesce(
         client,
         pid,
         t0,
@@ -572,7 +573,8 @@ fn settle_clojure_lsp(
         // window is the signal that has to carry the check.
         "; no analysis progress was reported"
     };
-    (settled, format!("{note}{progress}"))
+    settle.note.push_str(progress);
+    settle
 }
 
 /// The shared tail of both settle checks: wait until nothing in `methods` has
@@ -585,17 +587,40 @@ fn quiesce(
     watch: &mut StageWatch,
     methods: &[&str],
     note: String,
-) -> (Option<Duration>, String) {
+) -> Settle {
+    let mut last_activity = t0.elapsed();
     loop {
         reset(client, watch, t0);
         let quiet = quiet_for(client, methods, QUIET);
+        if !quiet {
+            last_activity = t0.elapsed();
+        }
         if quiet && !has_children(pid) {
-            return (Some(t0.elapsed()), note);
+            return Settle {
+                at: Some(t0.elapsed()),
+                note,
+                last_activity,
+            };
         }
         if Instant::now() >= deadline {
-            return (None, format!("{note}; never settled within the ceiling"));
+            return Settle {
+                at: None,
+                note: format!("{note}; never settled within the ceiling"),
+                last_activity,
+            };
         }
     }
+}
+
+/// What the settle check found.
+struct Settle {
+    /// When the server was settled, `None` if the ceiling passed first.
+    at: Option<Duration>,
+    note: String,
+    /// The last time one of the watched methods arrived, or the start of the
+    /// check when none did: the settle time minus the quiet window, which is
+    /// when the server's startup work actually ended.
+    last_activity: Duration,
 }
 
 /// One edit-to-diagnostics measurement: [`SAMPLES`] single-character inserts at

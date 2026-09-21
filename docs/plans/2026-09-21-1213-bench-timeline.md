@@ -188,31 +188,35 @@ Ratio column, CPU seconds, dropping clj-kondo from the bench.
 
 ### Task 4: Smoke the harness on clj-kondo
 
-- [ ] **Step 1: Run**
+- [x] **Step 1: Run**
   Run: `CLJ_PULSE_BENCH_RUNS=2 bb bench clj-kondo`
   Expected: rows for clj-pulse cold, warm 1, warm 2, clojure-lsp cold, warm 1, warm 2, plus two median rows. clj-pulse `all dependencies navigable` is Some and ≥ the librariesChanged time; `clj-kondo finished` is Some for both servers; the candidate that landed is named; no panic.
 
-- [ ] **Step 2: Fix anything the smoke run shows** and commit as `bench: smoke fixes`.
+- [x] **Step 2: Fix anything the smoke run shows** and commit as `bench: smoke fixes`.
+
+  > Smoke run (142 s): every row populated, `datalog/parse` carried the library row on both servers, medians printed. clojure-lsp's "clj-kondo finished" equalled its settle time, i.e. the last publication plus the 2 s quiet window; `quiesce` now returns the last activity time and that row uses it. Also folded in the Task 3 codex finding (wrong-dialect flag aggregates with `any`).
 
 ### Task 5: Docs structure
 
 **Files:**
 - Modify: `docs/PERFORMANCE.md`, `README.md`, `docs/MEMORY.md`, `CLAUDE.md`, `docs/DEV_SETUP.md`
 
-- [ ] **Step 1: PERFORMANCE.md**
+- [x] **Step 1: PERFORMANCE.md**
   Intro rewritten around the timeline; per-corpus tables with the four columns and six rows; "what the tables do not say" trimmed to: different work at startup, clojure-lsp's faster settled definition, the definition row is measured on the largest file, clj-kondo finished means the dependency cache warm for clj-pulse and settle for clojure-lsp, one box / N runs. Leave cell values as `—` with a `<!-- filled by Task 6 -->` marker.
 
-- [ ] **Step 2: README**
+- [x] **Step 2: README**
   Metabase only; rows first navigation, all dependencies navigable, clj-kondo finished, memory, definition median; cold and warm columns. Same marker.
 
-- [ ] **Step 3: MEMORY.md**
+- [x] **Step 3: MEMORY.md**
   Method section updated: the three metrics and their signals, the candidate set, `CLJ_PULSE_BENCH_RUNS`, medians. Tables keep settled and both edit rows. Same marker.
 
-- [ ] **Step 4: CLAUDE.md and DEV_SETUP.md**
+- [x] **Step 4: CLAUDE.md and DEV_SETUP.md**
   The `bb bench` paragraph describes the new rows, the run order with N warm runs, and `CLJ_PULSE_BENCH_RUNS`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "docs: bench tables around the startup timeline"`
+
+  > Note for Task 6: the README "Highlights" bullet also quotes the first-definition time and memory; update it from the same run.
 
 ### Task 6: Record the numbers
 

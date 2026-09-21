@@ -54,7 +54,8 @@ there.
   stands for every entry (clojure-lsp is asked from the start; a candidate
   set of up to five namespaces, the first to land carrying the row); and
   when clj-kondo finished, the `clojurePulse/lintStatus` `warming: false`
-  after a `warming: true` for clj-pulse, the settle for clojure-lsp — then
+  after a `warming: true` for clj-pulse, the last publication before it
+  went quiet for clojure-lsp — then
   RSS once the server is settled (no traffic for 2 s and no child process
   still working), and medians of 20 definitions and 20 keystrokes to
   `publishDiagnostics`. Message times are receipt times: `LspClient.received`

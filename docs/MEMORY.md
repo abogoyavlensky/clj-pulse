@@ -46,8 +46,10 @@ before a release and after index or extractor changes.
   (`potemkin/import-vars` on metabase) costs nothing but a poll.
 - **clj-kondo finished** — clj-pulse: the last `clojurePulse/lintStatus`
   with `warming: false` after one with `warming: true`, the end of the
-  dependency-cache warm. clojure-lsp: its settle time, since its startup
-  *is* a clj-kondo analysis. `n/a` when no warm ever started.
+  dependency-cache warm. clojure-lsp: the last `publishDiagnostics` or
+  `$/progress` before it went quiet, since its startup *is* a clj-kondo
+  analysis that publishes across the project as it goes (its settle time
+  would carry the 2 s quiet window). `n/a` when no warm ever started.
 - **Time to settled** — nothing logged (clj-pulse) or no
   `publishDiagnostics`/`$/progress` (clojure-lsp) for 2 s, *and* no child
   process still running. Not a published row any more: for clj-pulse it is
