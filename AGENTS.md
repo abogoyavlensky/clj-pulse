@@ -52,7 +52,7 @@ there.
   project symbol *lands where it should*; the same into a third-party
   dependency, asked only after clj-pulse's library stage line so the answer
   stands for every entry (clojure-lsp is asked from the start; a candidate
-  set of up to five namespaces, the first to land carrying the row); and
+  set of up to ten namespaces, the first to land carrying the row); and
   when clj-kondo finished, the `clojurePulse/lintStatus` `warming: false`
   after a `warming: true` for clj-pulse, the last publication before it
   went quiet for clojure-lsp — then
