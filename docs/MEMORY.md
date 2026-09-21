@@ -114,6 +114,53 @@ Edit target `src/clj_kondo/impl/analyzer.clj` (233 KiB — already under
 The three warm runs of clj-pulse: first navigation 523 / 533 / 530 ms, all
 dependencies 524 / 533 / 532 ms. This corpus is stable run to run.
 
+### macOS (2026-09-22)
+
+The same `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the maintainer's Apple Silicon
+Mac (aarch64), clj-pulse 0.5.4 at `bcc7115`, the same clojure-lsp, clj-kondo
+and corpus commits. The release publishes no `.sha256` for the macOS aarch64
+clojure-lsp archive, so the bench warned and skipped the checksum. Library
+probes that landed: as on Linux.
+
+metabase:
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| Time to first navigation | 1.9 s | 1.4 s | 384 s | 28 s |
+| All dependencies navigable | 2.9 s | 1.6 s | 384 s | 28 s |
+| clj-kondo finished | 22 s | 16 s | 384 s | 28 s |
+| Time to settled | 24 s | 18 s | 386 s | 31 s |
+| RSS settled | 432 MiB | 412 MiB | 2 738 MiB | 2 151 MiB |
+| Definition (median of 20) | 11 ms | 11 ms | 3 ms | 8 ms |
+| didChange → diagnostics, 452 KiB | 360 ms | 359 ms | 521 ms | 485 ms |
+| didChange → diagnostics, 251 KiB | 584 ms | 585 ms | 410 ms | 379 ms |
+
+Warm runs of clj-pulse: first navigation 1 350 / 1 346 / 1 381 ms, all
+dependencies 1 560 / 1 555 / 1 483 ms, clj-kondo finished 22.1 / 16.2 /
+16.3 s. clojure-lsp warm: 129 / 26.7 / 28.5 s to first navigation — the
+first warm run of *both* servers was the slow one, so something outside the
+servers was still busy then; the cold clojure-lsp row (384 s, above the
+Linux box's 336 s) is one run and may carry the same. Not investigated:
+clojure-lsp's own log would say whether it was analyzing the JDK sources.
+
+clj-kondo:
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| Time to first navigation | 787 ms | 212 ms | 19.4 s | 1.3 s |
+| All dependencies navigable | 1.2 s | 212 ms | 19.4 s | 1.3 s |
+| clj-kondo finished | 5.0 s | 940 ms | 19.4 s | 1.3 s |
+| Time to settled | 7.0 s | 3.0 s | 21.4 s | 3.3 s |
+| RSS settled | 95 MiB | 89 MiB | 275 MiB | 272 MiB |
+| Definition (median of 20) | 7 ms | 7 ms | 1 ms | 1 ms |
+| didChange → diagnostics, 233 KiB | 524 ms | 523 ms | 298 ms | 301 ms |
+
+Warm runs of clj-pulse: first navigation 209 / 212 / 214 ms, all
+dependencies 209 / 212 / 317 ms. The keystroke rows favour clojure-lsp on
+the Mac: its embedded clj-kondo answers in ~300 ms, and clj-pulse's
+per-keystroke clj-kondo process costs ~520 ms there — process start is the
+difference, since the 452 KiB row (built-in tier alone) is 360 ms.
+
 ### What the numbers mean, and what they do not
 
 - **The two servers do different work at startup.** clojure-lsp analyzes the

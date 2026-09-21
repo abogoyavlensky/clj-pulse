@@ -72,7 +72,49 @@ What the tables do not say:
   `:kondo {:live-max-kb 256}`, so clj-kondo runs on every keystroke for both
   servers. What happens above that threshold, where clj-pulse lints a
   keystroke with its built-in tier alone, is in the benchmark records.
-- One Linux container. macOS numbers are not in yet.
+- One Linux container per table above. The same run on the maintainer's
+  Apple Silicon Mac is below.
+
+## macOS
+
+The same `CLJ_PULSE_BENCH_RUNS=3 bb bench`, 2026-09-22, on an Apple Silicon
+Mac (aarch64), clj-pulse 0.5.4 and the same clojure-lsp, clj-kondo and corpus
+commits.
+
+**metabase**:
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| First navigation | 1.9 s | 1.4 s | 384 s | 28 s |
+| All dependencies navigable | 2.9 s | 1.6 s | 384 s | 28 s |
+| clj-kondo finished | 22 s | 16 s | 384 s | 28 s |
+| Memory once settled | 432 MiB | 412 MiB | 2 738 MiB | 2 151 MiB |
+| Definition (median of 20) | 11 ms | 11 ms | 3 ms | 8 ms |
+| Keystroke -> diagnostics, 251 KiB file | 584 ms | 585 ms | 410 ms | 379 ms |
+
+**clj-kondo**:
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| First navigation | 787 ms | 212 ms | 19.4 s | 1.3 s |
+| All dependencies navigable | 1.2 s | 212 ms | 19.4 s | 1.3 s |
+| clj-kondo finished | 5.0 s | 940 ms | 19.4 s | 1.3 s |
+| Memory once settled | 95 MiB | 89 MiB | 275 MiB | 272 MiB |
+| Definition (median of 20) | 7 ms | 7 ms | 1 ms | 1 ms |
+| Keystroke -> diagnostics, 233 KiB file | 524 ms | 523 ms | 298 ms | 301 ms |
+
+What differs from the Linux tables:
+
+- clojure-lsp's cold start on metabase was no faster on the Mac, and its
+  first warm run took 129 s before the next two settled at 27 s and 28 s;
+  clj-pulse's first warm run was also its slowest (clj-kondo finished 22 s,
+  then 16 s twice). The medians stand, the cold column is one run.
+- On the Mac the keystroke row favours clojure-lsp: its embedded clj-kondo
+  answers in about 300 ms, while clj-pulse starts a clj-kondo process per
+  keystroke. Above `:live-max-kb` clj-pulse's built-in tier answers in
+  360 ms; see the records.
+- Memory is read with `ps` on macOS and `/proc` on Linux, so the two are not
+  the same measure.
 
 The full method, the per-run rows, and the caveats in detail are in
 [benchmark records](MEMORY.md#benchmark-against-clojure-lsp). To reproduce:

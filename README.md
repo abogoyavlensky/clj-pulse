@@ -90,8 +90,11 @@ clojure-lsp analyzes everything before it answers. clojure-lsp answers a
 definition faster once settled in these benchmarks. These results describe the
 recorded project and machine; they are not a guarantee for every workspace.
 
-See [Performance](docs/PERFORMANCE.md) for the clj-kondo corpus, diagnostics
-latency, pinned project commits, and methodology. Reproduce with `bb bench`.
+On an Apple Silicon Mac the same run put clj-pulse's first navigation at
+1.4 seconds warm and every dependency at 1.6, against 28 seconds for
+clojure-lsp. See [Performance](docs/PERFORMANCE.md) for both machines, the
+clj-kondo corpus, diagnostics latency, pinned project commits, and
+methodology. Reproduce with `bb bench`.
 
 ## Support and status
 
