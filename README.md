@@ -69,25 +69,30 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 
 ## Performance
 
-Recorded warm runs on one Linux container (5 cores, 11 GiB RAM), 2026-09-10:
-clj-pulse 0.5.0 and clojure-lsp 2026.07.06-14.34.19, both at their defaults.
-Warm means a second start using the caches left by the first.
+What a user waits for after opening Metabase (1,400+ files), recorded on one
+Linux container (5 cores, 11 GiB RAM), <!-- filled by Task 6: date -->:
+clj-pulse <!-- version --> and clojure-lsp 2026.07.06-14.34.19, both at their
+defaults, with clj-kondo installed. Cold is the first open of a fresh
+checkout; warm is the next open, using the caches the first one left.
 
-| Project | Metric | clj-pulse | clojure-lsp |
-|---|---|---|---|
-| Metabase | Time to first project definition | 3.1 s | 60 s |
-| Metabase | Memory once settled | 353 MiB | 1,798 MiB |
-| clj-kondo | Time to first project definition | 520 ms | 2.4 s |
-| clj-kondo | Memory once settled | 90 MiB | 273 MiB |
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| First navigation | — | — | — | — |
+| All dependencies navigable | — | — | — | — |
+| clj-kondo finished | — | — | — | — |
+| Memory once settled | — | — | — | — |
+| Definition (median of 20) | — | — | — | — |
+
+<!-- filled by Task 6: the table above -->
 
 The servers do different work at startup: clj-pulse makes project navigation
-available while dependency indexing continues. clojure-lsp answers definitions
-faster once settled in these benchmarks. These results describe the recorded
-projects and machine; they are not a guarantee for every workspace.
+available first, then dependency navigation, and warms clj-kondo last, while
+clojure-lsp analyzes everything before it answers. clojure-lsp answers a
+definition faster once settled in these benchmarks. These results describe the
+recorded project and machine; they are not a guarantee for every workspace.
 
-See [Performance](docs/PERFORMANCE.md) for dependency navigation, request
-latency, diagnostics, pinned project commits, and methodology. Reproduce with
-`bb bench`.
+See [Performance](docs/PERFORMANCE.md) for the clj-kondo corpus, diagnostics
+latency, pinned project commits, and methodology. Reproduce with `bb bench`.
 
 ## Support and status
 

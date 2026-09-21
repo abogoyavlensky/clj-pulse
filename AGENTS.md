@@ -44,14 +44,24 @@ there.
   driven by the same client through the same requests, on two corpora pinned by
   commit (`bb bench` runs both; they are checked out under `.tmp/bench/` on
   first use, and the pinned clojure-lsp release is downloaded and checksum-
-  verified beside them). Four configurations per corpus, in a fixed order:
-  clj-pulse cold, clj-pulse warm, clojure-lsp cold, clojure-lsp warm. Every
-  metric is behavioral, so it means the same thing for both servers — time
-  until a `textDocument/definition` on a project symbol *lands where it should*,
-  the same into a JAR, RSS once the server is settled (no traffic for 2 s and no
-  child process still working), and medians of 20 definitions and 20 keystrokes
-  to `publishDiagnostics`. Each row also prints as one `BENCH_JSON` line, so a
-  later run can be diffed. Not a pass/fail gate; compare against the tables in
+  verified beside them). Per server, in a fixed order: one cold run, then
+  `CLJ_PULSE_BENCH_RUNS` warm runs (default 1; the recorded tables use 3),
+  followed by a median row when there is more than one. Every metric is
+  behavioral, so it means the same thing for both servers. The startup
+  timeline is three rows — time until a `textDocument/definition` on a
+  project symbol *lands where it should*; the same into a third-party
+  dependency, asked only after clj-pulse's library stage line so the answer
+  stands for every entry (clojure-lsp is asked from the start; a candidate
+  set of up to five namespaces, the first to land carrying the row); and
+  when clj-kondo finished, the `clojurePulse/lintStatus` `warming: false`
+  after a `warming: true` for clj-pulse, the settle for clojure-lsp — then
+  RSS once the server is settled (no traffic for 2 s and no child process
+  still working), and medians of 20 definitions and 20 keystrokes to
+  `publishDiagnostics`. Message times are receipt times: `LspClient.received`
+  stamps each stashed message, and the poll waits through `quiet_for` so the
+  channel is drained while nothing is asked. Each row also prints as one
+  `BENCH_JSON` line (`run` is the repeat index or `"median"`), so a later run
+  can be diffed. Not a pass/fail gate; compare against the tables in
   [docs/MEMORY.md](docs/MEMORY.md).
 
 - `bb soak [metabase|clj-kondo]` — one long-lived server driven through rounds

@@ -33,10 +33,12 @@ For editor verification, see [Verifying changes headlessly](#verifying-changes-h
 `bb bench` checks out [metabase](https://github.com/metabase/metabase) and
 [clj-kondo](https://github.com/clj-kondo/clj-kondo) at pinned commits under
 `.tmp/bench/`, downloads the pinned clojure-lsp release beside them, and runs
-four configurations per corpus - each server cold and warm - printing a table
-and a `BENCH_JSON` line per row. `bb bench metabase` or `bb bench clj-kondo`
-runs one. See the [benchmark records](MEMORY.md#benchmark-against-clojure-lsp)
-for the full tables and [Performance](PERFORMANCE.md) for the warm summary.
+each server cold once and warm `CLJ_PULSE_BENCH_RUNS` times (default 1) per
+corpus, printing a table and a `BENCH_JSON` line per run plus a median row
+when warm ran more than once. `bb bench metabase` or `bb bench clj-kondo`
+runs one; the recorded tables come from `CLJ_PULSE_BENCH_RUNS=3 bb bench`.
+See the [benchmark records](MEMORY.md#benchmark-against-clojure-lsp) for the
+full tables and [Performance](PERFORMANCE.md) for the public summary.
 
 `bb soak` drives one server through 20 rounds of churn on the same corpora -
 edits in open buffers, saves, files changed, created, deleted and renamed on
