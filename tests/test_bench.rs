@@ -419,7 +419,11 @@ fn poll_definitions(
         if (!project_pending && !library_pending) || Instant::now() >= deadline {
             return startup;
         }
-        std::thread::sleep(POLL);
+        // Wait out the poll *receiving*: with the project probe answered and
+        // the gate shut, no request is in flight to pull messages off the
+        // channel, and the stage line that opens the gate would sit there
+        // unread. An empty method list never cuts the window short.
+        quiet_for(client, &[], POLL);
     }
 }
 
