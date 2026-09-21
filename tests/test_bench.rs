@@ -68,15 +68,14 @@ fn bench_large_project() {
         println!("CLJ_PULSE_BENCH_CLOJURE_LSP is unset — measuring clj-pulse alone.");
     }
 
+    let runs = bench_runs();
+
     // Fixed order, so a cold run is always the one that follows a cleared
-    // cache and a warm one always inherits what the run before it left.
+    // cache and a warm one always inherits what the run before it left. Cold
+    // runs once; warm repeats `runs` times and reports a median row after
+    // them, since the startup numbers are the ones a single run leaves noisy.
     let mut rows = Vec::new();
-    for (server, temp) in [
-        (Server::CljPulse, Temp::Cold),
-        (Server::CljPulse, Temp::Warm),
-        (Server::ClojureLsp, Temp::Cold),
-        (Server::ClojureLsp, Temp::Warm),
-    ] {
+    for server in [Server::CljPulse, Server::ClojureLsp] {
         let binary = match server {
             Server::CljPulse => None,
             Server::ClojureLsp => match &clojure_lsp {
@@ -84,16 +83,78 @@ fn bench_large_project() {
                 None => continue,
             },
         };
-        if temp == Temp::Cold {
-            clear_caches(&root, server);
-        }
-        let row = run(server, temp, binary, &root, &corpus, &probes);
+        clear_caches(&root, server);
+        let row = run(
+            server,
+            Temp::Cold,
+            binary,
+            &root,
+            &corpus,
+            &probes,
+            RunId::Nth(1),
+        );
         row.print(&probes, &root);
         row.print_json();
         rows.push(row);
+
+        let mut warm = Vec::new();
+        for n in 1..=runs {
+            let row = run(
+                server,
+                Temp::Warm,
+                binary,
+                &root,
+                &corpus,
+                &probes,
+                RunId::Nth(n),
+            );
+            row.print(&probes, &root);
+            row.print_json();
+            warm.push(row);
+        }
+        if runs > 1 {
+            let row = median_row(&warm);
+            row.print_json();
+            warm.push(row);
+        }
+        rows.extend(warm);
     }
 
     summary(&rows, &probes);
+}
+
+/// `CLJ_PULSE_BENCH_RUNS`: how many times each warm configuration runs.
+/// Default 1, so a quick `bb bench clj-kondo` stays quick; the recorded tables
+/// use 3.
+fn bench_runs() -> usize {
+    match std::env::var("CLJ_PULSE_BENCH_RUNS") {
+        Ok(v) => v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .unwrap_or_else(|| {
+                panic!("CLJ_PULSE_BENCH_RUNS must be a positive integer, got {v:?}")
+            }),
+        Err(_) => 1,
+    }
+}
+
+/// Which run a row is: the n-th repeat of its configuration, or the median
+/// over all of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunId {
+    Nth(usize),
+    Median { runs: usize },
+}
+
+impl RunId {
+    fn label(self) -> String {
+        match self {
+            RunId::Nth(n) => n.to_string(),
+            RunId::Median { .. } => "median".to_string(),
+        }
+    }
 }
 
 /// The servers under comparison. Neither is tuned: a comparison of two
@@ -185,8 +246,9 @@ fn run(
     root: &Path,
     corpus: &str,
     probes: &Probes,
+    run: RunId,
 ) -> Row {
-    let mut row = Row::new(server, temp, corpus);
+    let mut row = Row::new(server, temp, corpus, run);
     let ceiling = server.ceiling();
 
     // Production settings, unlike every other test in the suite: stage-3
@@ -996,8 +1058,7 @@ struct Row {
     temp: Temp,
     corpus: String,
     sync: SyncKind,
-    /// Which repeat of this configuration, 1-based.
-    run: usize,
+    run: RunId,
     first_definition: Option<Duration>,
     /// When a definition into a third-party dependency landed, asked only
     /// once the server said every classpath entry was indexed.
@@ -1035,13 +1096,13 @@ struct Row {
 }
 
 impl Row {
-    fn new(server: Server, temp: Temp, corpus: &str) -> Self {
+    fn new(server: Server, temp: Temp, corpus: &str, run: RunId) -> Self {
         Self {
             server,
             temp,
             corpus: corpus.to_string(),
             sync: SyncKind::Incremental,
-            run: 1,
+            run,
             first_definition: None,
             libraries_navigable: None,
             library_site: None,
@@ -1125,7 +1186,7 @@ impl Row {
             "{} ({}, run {}) on {}",
             self.server.label(),
             self.temp.label(),
-            self.run,
+            self.run.label(),
             self.corpus
         );
         println!("  root            {}", root.display());
@@ -1243,7 +1304,14 @@ impl Row {
                 "temperature": self.temp.label(),
                 "document_sync": self.sync.label(),
                 "corpus": self.corpus,
-                "run": self.run,
+                "run": match self.run {
+                    RunId::Nth(n) => json!(n),
+                    RunId::Median { .. } => json!("median"),
+                },
+                "runs": match self.run {
+                    RunId::Nth(_) => Value::Null,
+                    RunId::Median { runs } => json!(runs),
+                },
                 "first_definition_ms": ms(self.first_definition),
                 "libraries_navigable_ms": ms(self.libraries_navigable),
                 "library_site": self.library_site,
@@ -1272,6 +1340,63 @@ impl Row {
     }
 }
 
+/// The median over repeats of one configuration: every timing and the RSS
+/// take the median of the runs that have a value, sample counts the minimum,
+/// and the flags hold only when every run set them. Labels and the server's
+/// own reported lines come from the first run.
+fn median_row(rows: &[Row]) -> Row {
+    let first = rows.first().expect("a median needs at least one run");
+    let med = |pick: fn(&Row) -> Option<Duration>| {
+        let mut values: Vec<Duration> = rows.iter().filter_map(pick).collect();
+        median(&mut values)
+    };
+    let med_u64 = |pick: fn(&Row) -> Option<u64>| {
+        let mut values: Vec<u64> = rows.iter().filter_map(pick).collect();
+        if values.is_empty() {
+            return None;
+        }
+        values.sort_unstable();
+        Some(values[values.len() / 2])
+    };
+    let min = |pick: fn(&Row) -> usize| rows.iter().map(pick).min().unwrap_or(0);
+    let all = |pick: fn(&Row) -> bool| rows.iter().all(pick);
+    Row {
+        server: first.server,
+        temp: first.temp,
+        corpus: first.corpus.clone(),
+        sync: first.sync,
+        run: RunId::Median { runs: rows.len() },
+        first_definition: med(|r| r.first_definition),
+        libraries_navigable: med(|r| r.libraries_navigable),
+        library_site: first.library_site.clone(),
+        library_wrong_dialect: all(|r| r.library_wrong_dialect),
+        kondo_finished: med(|r| r.kondo_finished),
+        settled: med(|r| r.settled),
+        settle_note: first.settle_note.clone(),
+        rss_settled: med_u64(|r| r.rss_settled),
+        project_index_observed: med(|r| r.project_index_observed),
+        project_index_reported: first.project_index_reported.clone(),
+        symbols: first.symbols,
+        namespaces: first.namespaces,
+        library_stage_observed: med(|r| r.library_stage_observed),
+        library_stage: first.library_stage.clone(),
+        first_diagnostics: med(|r| r.first_diagnostics),
+        open_tier: first.open_tier,
+        definition: med(|r| r.definition),
+        definition_samples: min(|r| r.definition_samples),
+        edit: med(|r| r.edit),
+        edit_samples: min(|r| r.edit_samples),
+        edit_kondo: all(|r| r.edit_kondo),
+        edit_versioned: all(|r| r.edit_versioned),
+        edit_file: first.edit_file.clone(),
+        small_edit: med(|r| r.small_edit),
+        small_edit_samples: min(|r| r.small_edit_samples),
+        small_edit_kondo: all(|r| r.small_edit_kondo),
+        small_edit_file: first.small_edit_file.clone(),
+        lint_engine: first.lint_engine.clone(),
+    }
+}
+
 /// One line per configuration, in the order they ran — the shape the README
 /// and `docs/MEMORY.md` tables are built from.
 fn summary(rows: &[Row], probes: &Probes) {
@@ -1282,7 +1407,7 @@ fn summary(rows: &[Row], probes: &Probes) {
         "summary (fixed order: clj-pulse cold, clj-pulse warm, clojure-lsp cold, clojure-lsp warm)"
     );
     println!(
-        "  {:<12} {:<5} {:>4} {:>9} {:>9} {:>10} {:>7} {:>7} {:>11} {:>11}",
+        "  {:<12} {:<5} {:>6} {:>9} {:>9} {:>10} {:>7} {:>7} {:>11} {:>11}",
         "server",
         "temp",
         "run",
@@ -1298,10 +1423,10 @@ fn summary(rows: &[Row], probes: &Probes) {
     );
     for r in rows {
         println!(
-            "  {:<12} {:<5} {:>4} {:>9} {:>9} {:>10} {:>7} {:>7} {:>11} {:>11}",
+            "  {:<12} {:<5} {:>6} {:>9} {:>9} {:>10} {:>7} {:>7} {:>11} {:>11}",
             r.server.label(),
             r.temp.label(),
-            r.run,
+            r.run.label(),
             ms(r.first_definition),
             ms(r.libraries_navigable),
             ms(r.kondo_finished),
@@ -1379,4 +1504,29 @@ fn third_party_sites_skip_clojure_and_project_namespaces() {
     let col = line.find("sql/format").unwrap();
     assert!(site.character as usize > col + 4);
     assert!((site.character as usize) < col + "sql/format".len());
+}
+
+/// The median row takes each field's median over the runs that have it, and
+/// says how many runs it stands for.
+#[test]
+fn median_row_takes_the_median_of_each_field() {
+    let mut rows: Vec<Row> = [300u64, 100, 200]
+        .iter()
+        .enumerate()
+        .map(|(i, ms)| {
+            let mut r = Row::new(Server::CljPulse, Temp::Warm, "unit", RunId::Nth(i + 1));
+            r.first_definition = Some(Duration::from_millis(*ms));
+            r.definition_samples = 20;
+            r
+        })
+        .collect();
+    rows[0].rss_settled = Some(3);
+    rows[2].rss_settled = Some(1);
+    rows[1].definition_samples = 18;
+    let m = median_row(&rows);
+    assert_eq!(m.run, RunId::Median { runs: 3 });
+    assert_eq!(m.first_definition, Some(Duration::from_millis(200)));
+    assert_eq!(m.rss_settled, Some(3), "upper middle of the two present");
+    assert_eq!(m.definition_samples, 18);
+    assert_eq!(m.libraries_navigable, None);
 }

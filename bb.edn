@@ -147,7 +147,7 @@
   e2e {:doc "End-to-end tests (spawns real binary, speaks LSP over stdio)"
        :task (shell "cargo test --test test_e2e")}
 
-  bench {:doc "Bench clj-pulse against clojure-lsp on pinned real Clojure repos: `bb bench metabase`, `bb bench clj-kondo`, or no argument for both (checked out under .tmp/bench on first run)"
+  bench {:doc "Bench clj-pulse against clojure-lsp on pinned real Clojure repos: `bb bench metabase`, `bb bench clj-kondo`, or no argument for both (checked out under .tmp/bench on first run). CLJ_PULSE_BENCH_RUNS=3 repeats each warm configuration and adds a median row"
          :task (let [lsp (try
                            (clojure-lsp!)
                            (catch Exception e
@@ -161,7 +161,9 @@
                      ;; --release: the debug build's numbers are not what users see.
                      (shell {:extra-env (cond-> {"CLJ_PULSE_BENCH_ROOT" (str dir)
                                                  "CLJ_PULSE_BENCH_CORPUS" name}
-                                          lsp (assoc "CLJ_PULSE_BENCH_CLOJURE_LSP" lsp))}
+                                          lsp (assoc "CLJ_PULSE_BENCH_CLOJURE_LSP" lsp)
+                                          (System/getenv "CLJ_PULSE_BENCH_RUNS")
+                                          (assoc "CLJ_PULSE_BENCH_RUNS" (System/getenv "CLJ_PULSE_BENCH_RUNS")))}
                             "cargo test --release --test test_bench -- --ignored --nocapture"))))}
 
   soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
