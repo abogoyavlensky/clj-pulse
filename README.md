@@ -6,8 +6,8 @@ A fast-starting, low-memory Clojure language server.
 
 - **Fast startup, low memory.** Navigate your project while dependencies index
   in the background. On the recorded Metabase benchmark, the first project
-  definition was available in 3.3 seconds and every dependency in 3.9, with
-  365 MiB of memory once settled.
+  definition was available in 3.5 seconds and every dependency in 4.2, with
+  363 MiB of memory once settled.
   See [Performance](#performance) for the comparison and measurement details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
@@ -78,11 +78,11 @@ checkout; warm is the next open, using the caches the first one left.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 3.4 s | 3.3 s | 375 s | 63 s |
-| All dependencies navigable | 5.9 s | 3.9 s | 375 s | 63 s |
-| clj-kondo finished | 48 s | 45 s | 375 s | 63 s |
-| Memory once settled | 368 MiB | 365 MiB | 2,432 MiB | 1,903 MiB |
-| Definition (median of 20) | 26 ms | 25 ms | 16 ms | 10 ms |
+| First navigation | 4.0 s | 3.5 s | 336 s | 56 s |
+| All dependencies navigable | 7.0 s | 4.2 s | 336 s | 56 s |
+| clj-kondo finished | 70 s | 47 s | 336 s | 56 s |
+| Memory once settled | 368 MiB | 363 MiB | 2,426 MiB | 1,800 MiB |
+| Definition (median of 20) | 32 ms | 24 ms | 13 ms | 7 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while

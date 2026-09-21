@@ -14,7 +14,7 @@ before a release and after index or extractor changes.
 - **Machine:** Linux x86-64 container, 5 cores, 11 GiB RAM (Intel Haswell).
   One box. Nothing here is a claim about a laptop, and the maintainer's macOS
   numbers are not in yet.
-- **clj-pulse:** 0.5.4 at `8a10ab4` (the bench-timeline branch), release
+- **clj-pulse:** 0.5.4 at `d1863f5` (the bench-timeline branch), release
   build, production settings (stage-3 classpath resolution on, clj-kondo
   v2026.08.04 on PATH)
 - **clojure-lsp:** 2026.07.06-14.34.19, native static Linux build, defaults —
@@ -22,11 +22,12 @@ before a release and after index or extractor changes.
 - **Corpora:** metabase at `42a8e9f7` (43 164 symbols in 2 976 namespaces),
   clj-kondo at `13a32d1c` (2 252 symbols in 225 namespaces)
 - **Runs:** `CLJ_PULSE_BENCH_RUNS=3`: cold once per server, warm three times,
-  the warm column being the median row. Per-run rows are in the `BENCH_JSON`
+  the warm column being the median row. Repeats after the first warm run
+  measure the timeline and RSS only; the latency medians are from warm run 1. Per-run rows are in the `BENCH_JSON`
   lines of the run log. The box was shared with other work during the run,
-  which is the likeliest reason clojure-lsp's metabase cold start read 375 s
-  here against 293 s on 2026-09-10; clj-pulse's rows repeat within a few
-  percent of that record.
+  which is the likeliest reason clojure-lsp's metabase cold start read 336 s
+  here against 293 s on 2026-09-10 (375 s in an earlier run the same day);
+  clj-pulse's rows repeat within a few percent of that record.
 - **Reproduce:** `CLJ_PULSE_BENCH_RUNS=3 bb bench metabase`, `… bb bench
   clj-kondo`, or `… bb bench` for both
 
@@ -78,18 +79,21 @@ that clj-pulse does not follow, and `t2/table-name` is one too.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| Time to first navigation | 3.4 s | 3.3 s | 375 s | 63 s |
-| All dependencies navigable | 5.9 s | 3.9 s | 375 s | 63 s |
-| clj-kondo finished | 48 s | 45 s | 375 s | 63 s |
-| Time to settled | 50 s | 47 s | 377 s | 65 s |
-| RSS settled | 368 MiB | 365 MiB | 2 432 MiB | 1 903 MiB |
-| Definition (median of 20) | 26 ms | 25 ms | 16 ms | 10 ms |
-| didChange → diagnostics, 452 KiB | 382 ms | 375 ms | 1 387 ms | 1 345 ms |
-| didChange → diagnostics, 251 KiB | 887 ms | 877 ms | 859 ms | 942 ms |
+| Time to first navigation | 4.0 s | 3.5 s | 336 s | 56 s |
+| All dependencies navigable | 7.0 s | 4.2 s | 336 s | 56 s |
+| clj-kondo finished | 70 s | 47 s | 336 s | 56 s |
+| Time to settled | 72 s | 49 s | 340 s | 58 s |
+| RSS settled | 368 MiB | 363 MiB | 2 426 MiB | 1 800 MiB |
+| Definition (median of 20) | 32 ms | 24 ms | 13 ms | 7 ms |
+| didChange → diagnostics, 452 KiB | 381 ms | 382 ms | 1 155 ms | 1 329 ms |
+| didChange → diagnostics, 251 KiB | 924 ms | 923 ms | 855 ms | 867 ms |
 
-The three warm runs of clj-pulse: first navigation 3 252 / 3 153 / 3 447 ms,
-all dependencies 3 861 / 3 766 / 4 064 ms, clj-kondo finished 45.5 / 45.9 /
-44.2 s. clojure-lsp warm: 62.7 / 63.4 / 64.3 s to first navigation.
+The three warm runs of clj-pulse: first navigation 3 270 / 3 874 / 3 463 ms,
+all dependencies 3 974 / 4 576 / 4 169 ms, clj-kondo finished 44.5 / 49.5 /
+46.7 s. clojure-lsp warm: 57.5 / 56.1 / 53.5 s to first navigation. The cold
+"clj-kondo finished" is the one row cold changes a lot for clj-pulse: 70 s
+against 47 s is clj-kondo analyzing 491 classpath entries into an empty
+`.clj-kondo/.cache`, which the warm runs then reuse.
 
 ### clj-kondo (medium)
 
@@ -99,16 +103,16 @@ Edit target `src/clj_kondo/impl/analyzer.clj` (233 KiB — already under
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| Time to first navigation | 533 ms | 524 ms | 17.4 s | 2.5 s |
-| All dependencies navigable | 1.9 s | 525 ms | 17.4 s | 2.5 s |
-| clj-kondo finished | 12.6 s | 2.4 s | 17.4 s | 2.5 s |
-| Time to settled | 14.6 s | 4.4 s | 19.4 s | 4.5 s |
-| RSS settled | 129 MiB | 89 MiB | 317 MiB | 279 MiB |
-| Definition (median of 20) | 18 ms | 18 ms | 7 ms | 3 ms |
-| didChange → diagnostics, 233 KiB | 776 ms | 770 ms | 802 ms | 779 ms |
+| Time to first navigation | 538 ms | 530 ms | 18.5 s | 2.9 s |
+| All dependencies navigable | 942 ms | 532 ms | 18.5 s | 2.9 s |
+| clj-kondo finished | 11.7 s | 2.3 s | 18.6 s | 2.9 s |
+| Time to settled | 13.7 s | 4.3 s | 20.6 s | 4.9 s |
+| RSS settled | 129 MiB | 88 MiB | 272 MiB | 276 MiB |
+| Definition (median of 20) | 17 ms | 18 ms | 5 ms | 8 ms |
+| didChange → diagnostics, 233 KiB | 771 ms | 755 ms | 911 ms | 909 ms |
 
-The three warm runs of clj-pulse: first navigation 530 / 521 / 524 ms, all
-dependencies 531 / 522 / 525 ms. This corpus is stable run to run.
+The three warm runs of clj-pulse: first navigation 523 / 533 / 530 ms, all
+dependencies 524 / 533 / 532 ms. This corpus is stable run to run.
 
 ### What the numbers mean, and what they do not
 

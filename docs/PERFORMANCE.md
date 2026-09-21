@@ -31,23 +31,23 @@ clj-kondo v2026.08.04, metabase at `42a8e9f7`, clj-kondo at `13a32d1c`.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 3.4 s | 3.3 s | 375 s | 63 s |
-| All dependencies navigable | 5.9 s | 3.9 s | 375 s | 63 s |
-| clj-kondo finished | 48 s | 45 s | 375 s | 63 s |
-| Memory once settled | 368 MiB | 365 MiB | 2 432 MiB | 1 903 MiB |
-| Definition (median of 20) | 26 ms | 25 ms | 16 ms | 10 ms |
-| Keystroke -> diagnostics, 251 KiB file | 887 ms | 877 ms | 859 ms | 942 ms |
+| First navigation | 4.0 s | 3.5 s | 336 s | 56 s |
+| All dependencies navigable | 7.0 s | 4.2 s | 336 s | 56 s |
+| clj-kondo finished | 70 s | 47 s | 336 s | 56 s |
+| Memory once settled | 368 MiB | 363 MiB | 2 426 MiB | 1 800 MiB |
+| Definition (median of 20) | 32 ms | 24 ms | 13 ms | 7 ms |
+| Keystroke -> diagnostics, 251 KiB file | 924 ms | 923 ms | 855 ms | 867 ms |
 
 **clj-kondo** (400 files, 2 252 symbols):
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 533 ms | 524 ms | 17.4 s | 2.5 s |
-| All dependencies navigable | 1.9 s | 525 ms | 17.4 s | 2.5 s |
-| clj-kondo finished | 12.6 s | 2.4 s | 17.4 s | 2.5 s |
-| Memory once settled | 129 MiB | 89 MiB | 317 MiB | 279 MiB |
-| Definition (median of 20) | 18 ms | 18 ms | 7 ms | 3 ms |
-| Keystroke -> diagnostics, 233 KiB file | 776 ms | 770 ms | 802 ms | 779 ms |
+| First navigation | 538 ms | 530 ms | 18.5 s | 2.9 s |
+| All dependencies navigable | 942 ms | 532 ms | 18.5 s | 2.9 s |
+| clj-kondo finished | 11.7 s | 2.3 s | 18.6 s | 2.9 s |
+| Memory once settled | 129 MiB | 88 MiB | 272 MiB | 276 MiB |
+| Definition (median of 20) | 17 ms | 18 ms | 5 ms | 8 ms |
+| Keystroke -> diagnostics, 233 KiB file | 771 ms | 755 ms | 911 ms | 909 ms |
 
 What the tables do not say:
 
