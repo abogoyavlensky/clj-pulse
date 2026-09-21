@@ -133,29 +133,29 @@ Ratio column, CPU seconds, dropping clj-kondo from the bench.
 **Files:**
 - Modify: `tests/test_bench.rs`
 
-- [ ] **Step 1: Probes**
+- [x] **Step 1: Probes**
   `startup_library: Vec<Site>`, filled from the smallest source-ish files with `third_party_sites(..., LIBRARY_CANDIDATES - collected)` until 5 distinct namespaces or files run out. `startup_sites()` opens each candidate's file once. `print` lists every candidate under `library candidates`.
 
-- [ ] **Step 2: StageWatch and receipt times**
+- [x] **Step 2: StageWatch and receipt times**
   `LspClient` gains `pub received: Vec<Instant>`, parallel to `notifications`, pushed in `stash` and cleared with it, so a message's time is when it was pulled off the channel, not when a later scan noticed it. `StageWatch` keeps an `observed` cursor and processes each stashed message once; `reset` zeroes the cursor after `clear_notifications`. Add `library_stage_first: Option<Duration>` (earliest stage line by receipt time), `warming_started`, `warming_finished` (each `lintStatus`: `warming == true` sets started if unset; `warming == false` after started sets finished to that message's receipt time, later messages overwriting).
 
   > Deviation (plan review): the plan first said "this observation", which would re-stamp the same message on every scan.
 
-- [ ] **Step 3: poll_definitions**
+- [x] **Step 3: poll_definitions**
   Replace the two-slot loop with: project site (as before) plus the candidate set, gated. Signature:
   `fn poll_definitions(client, project: Option<&Site>, library: &[Site], gate: Gate, t0, deadline, watch) -> Startup` where `enum Gate { LibraryStage, None }` and `struct Startup { first_definition, libraries_navigable, library_site: Option<usize>, wrong_dialect }`. Each iteration: ask the project site if unanswered; if gate is satisfied (`watch.library_stage_first.is_some()` or `Gate::None`) ask each unanswered candidate in order until one lands, stamp `libraries_navigable = t0.elapsed()`, record which. `watch.observe` runs every iteration. Stop when both answered, or the deadline passes.
 
-- [ ] **Step 4: Row**
+- [x] **Step 4: Row**
   Replace `first_library_definition` with `libraries_navigable: Option<Duration>`, `library_site: Option<String>` (the token), keep `library_wrong_dialect`. Add `kondo_finished: Option<Duration>` and `run: usize`. After settle: clj-pulse `kondo_finished = watch.warming_finished` (only if `warming_started` is some); clojure-lsp `kondo_finished = settled`. Print rows: `time to first navigation`, `all dependencies navigable` (with the token and dialect note), `clj-kondo finished`, keep `settled` under the detail lines. JSON: `libraries_navigable_ms`, `library_site`, `kondo_finished_ms`, `run`; remove `first_library_definition_ms`; keep every other field.
 
-- [ ] **Step 5: Summary**
+- [x] **Step 5: Summary**
   Columns: server, temp, run, `1st nav`, `all libs`, `kondo done`, `RSS`, `def`, `edit <large>K`, `edit <small>K`.
 
-- [ ] **Step 6: Verify it compiles and unit tests pass**
+- [x] **Step 6: Verify it compiles and unit tests pass**
   Run: `cargo test --test test_bench`
   Expected: the unit test passes, the bench is ignored.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
   `git commit -m "bench: first navigation, all dependencies navigable, clj-kondo finished"`
 
 ### Task 3: Repeat runs and medians
