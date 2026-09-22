@@ -234,8 +234,8 @@ the release.
 - [x] **Bench around the startup timeline**: first navigation, all
       dependencies navigable (a third-party probe asked after the library
       stage), clj-kondo finished; cold beside warm; `CLJ_PULSE_BENCH_RUNS`
-      repeats with a median row; the README shows metabase alone. The macOS
-      column is still the maintainer's to add.
+      repeats with a median row; the README shows metabase alone, from the
+      maintainer's M1 Pro, with the Linux run in PERFORMANCE.md.
   Plan: [2026-09-21-1213-bench-timeline.md](plans/2026-09-21-1213-bench-timeline.md) — done
 - [x] **Soak run** (`bb soak`): one long-lived server driven through rounds of
       realistic churn — buffer edits, saves, files changed, created, deleted
