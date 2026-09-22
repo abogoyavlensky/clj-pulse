@@ -54,11 +54,7 @@ Also available: [Neovim](docs/EDITORS.md#neovim), [Zed](docs/EDITORS.md#zed), an
 [manual downloads](docs/EDITORS.md#manual-download).
 
 For full diagnostics, [install clj-kondo](https://github.com/clj-kondo/clj-kondo/blob/master/doc/install.md).
-Create a `.clj-kondo` directory in each project to enable its cross-file cache:
-
-```sh
-mkdir -p .clj-kondo
-```
+Create a `.clj-kondo` directory in each project to enable its cross-file cache.
 
 See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 
