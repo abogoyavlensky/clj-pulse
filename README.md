@@ -76,8 +76,10 @@ next open, using the caches the first one left, as the median of three runs.
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while
-clojure-lsp analyzes everything before it answers. clojure-lsp answers a
-definition faster once settled in these benchmarks. These results describe the
+clojure-lsp analyzes everything before it answers. In clj-pulse, clj-kondo is
+optional and only adds lint warnings; navigation, completion and the built-in
+lints never wait for it. clojure-lsp answers a definition faster once settled
+in these benchmarks. These results describe the
 recorded project and machine; they are not a guarantee for every workspace.
 
 See [Performance](docs/PERFORMANCE.md) for the clj-kondo corpus,
