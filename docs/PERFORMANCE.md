@@ -77,9 +77,10 @@ What the tables do not say:
 
 ## macOS
 
-The same `CLJ_PULSE_BENCH_RUNS=3 bb bench`, 2026-09-22, on an Apple Silicon
-Mac (aarch64), clj-pulse 0.5.4 and the same clojure-lsp, clj-kondo and corpus
-commits.
+The same `CLJ_PULSE_BENCH_RUNS=3 bb bench`, 2026-09-22, on a 2021 MacBook
+Pro (Apple M1 Pro, 16 GB, macOS Tahoe 26.5.2), clj-pulse 0.5.4 and the same
+clojure-lsp, clj-kondo and corpus commits. This is the table the README
+shows.
 
 **metabase**:
 

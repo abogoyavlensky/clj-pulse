@@ -12,8 +12,7 @@ before a release and after index or extractor changes.
 
 - **Date:** 2026-09-21
 - **Machine:** Linux x86-64 container, 5 cores, 11 GiB RAM (Intel Haswell).
-  One box. Nothing here is a claim about a laptop, and the maintainer's macOS
-  numbers are not in yet.
+  The maintainer's Mac is recorded below.
 - **clj-pulse:** 0.5.4 at `d1863f5` (the bench-timeline branch), release
   build, production settings (stage-3 classpath resolution on, clj-kondo
   v2026.08.04 on PATH)
@@ -116,9 +115,10 @@ dependencies 524 / 533 / 532 ms. This corpus is stable run to run.
 
 ### macOS (2026-09-22)
 
-The same `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the maintainer's Apple Silicon
-Mac (aarch64), clj-pulse 0.5.4 at `bcc7115`, the same clojure-lsp, clj-kondo
-and corpus commits. The release publishes no `.sha256` for the macOS aarch64
+The same `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the maintainer's 2021 MacBook
+Pro (Apple M1 Pro, 16 GB RAM, macOS Tahoe 26.5.2), clj-pulse 0.5.4 at
+`bcc7115`, the same clojure-lsp, clj-kondo and corpus commits. The README
+table is this machine's metabase run. The release publishes no `.sha256` for the macOS aarch64
 clojure-lsp archive, so the bench warned and skipped the checksum. Library
 probes that landed: as on Linux.
 

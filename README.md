@@ -6,8 +6,8 @@ A fast-starting, low-memory Clojure language server.
 
 - **Fast startup, low memory.** Navigate your project while dependencies index
   in the background. On the recorded Metabase benchmark, the first project
-  definition was available in 3.5 seconds and every dependency in 4.2, with
-  363 MiB of memory once settled.
+  definition was available in 1.4 seconds and every dependency in 1.6, with
+  412 MiB of memory once settled.
   See [Performance](#performance) for the comparison and measurement details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
@@ -70,19 +70,19 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 
 ## Performance
 
-What a user waits for after opening Metabase (1,400+ files), recorded on one
-Linux container (5 cores, 11 GiB RAM), 2026-09-21: clj-pulse 0.5.4 and
+What a user waits for after opening Metabase (1,400+ files), recorded on a
+MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-09-22: clj-pulse 0.5.4 and
 clojure-lsp 2026.07.06-14.34.19, both at their defaults, with clj-kondo
-installed. Cold is the first open of a fresh
-checkout; warm is the next open, using the caches the first one left.
+installed. Cold is the first open of a fresh checkout; warm is the next
+open, using the caches the first one left, as the median of three runs.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 4.0 s | 3.5 s | 336 s | 56 s |
-| All dependencies navigable | 7.0 s | 4.2 s | 336 s | 56 s |
-| clj-kondo finished | 70 s | 47 s | 336 s | 56 s |
-| Memory once settled | 368 MiB | 363 MiB | 2,426 MiB | 1,800 MiB |
-| Definition (median of 20) | 32 ms | 24 ms | 13 ms | 7 ms |
+| First navigation | 1.9 s | 1.4 s | 384 s | 28 s |
+| All dependencies navigable | 2.9 s | 1.6 s | 384 s | 28 s |
+| clj-kondo finished | 22 s | 16 s | 384 s | 28 s |
+| Memory once settled | 432 MiB | 412 MiB | 2,738 MiB | 2,151 MiB |
+| Definition (median of 20) | 11 ms | 11 ms | 3 ms | 8 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while
@@ -90,11 +90,9 @@ clojure-lsp analyzes everything before it answers. clojure-lsp answers a
 definition faster once settled in these benchmarks. These results describe the
 recorded project and machine; they are not a guarantee for every workspace.
 
-On an Apple Silicon Mac the same run put clj-pulse's first navigation at
-1.4 seconds warm and every dependency at 1.6, against 28 seconds for
-clojure-lsp. See [Performance](docs/PERFORMANCE.md) for both machines, the
-clj-kondo corpus, diagnostics latency, pinned project commits, and
-methodology. Reproduce with `bb bench`.
+See [Performance](docs/PERFORMANCE.md) for the same run on a Linux
+container, the clj-kondo corpus, diagnostics latency, pinned project
+commits, and methodology. Reproduce with `bb bench`.
 
 ## Support and status
 
