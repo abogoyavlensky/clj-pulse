@@ -84,9 +84,9 @@ clojure-lsp analyzes everything before it answers. clojure-lsp answers a
 definition faster once settled in these benchmarks. These results describe the
 recorded project and machine; they are not a guarantee for every workspace.
 
-See [Performance](docs/PERFORMANCE.md) for the same run on a Linux
-container, the clj-kondo corpus, diagnostics latency, pinned project
-commits, and methodology. Reproduce with `bb bench`.
+See [Performance](docs/PERFORMANCE.md) for the clj-kondo corpus,
+diagnostics latency, pinned project commits, and methodology. Reproduce
+with `bb bench`.
 
 ## Support and status
 

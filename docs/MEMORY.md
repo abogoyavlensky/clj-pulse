@@ -12,7 +12,9 @@ before a release and after index or extractor changes.
 
 - **Date:** 2026-09-21
 - **Machine:** Linux x86-64 container, 5 cores, 11 GiB RAM (Intel Haswell).
-  The maintainer's Mac is recorded below.
+  This is the regression baseline: the box every unattended `bb bench` runs
+  on, so a run here compares against the tables here. The maintainer's Mac,
+  recorded below, is what the public tables show.
 - **clj-pulse:** 0.5.4 at `d1863f5` (the bench-timeline branch), release
   build, production settings (stage-3 classpath resolution on, clj-kondo
   v2026.08.04 on PATH)
@@ -117,8 +119,15 @@ dependencies 524 / 533 / 532 ms. This corpus is stable run to run.
 
 The same `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the maintainer's 2021 MacBook
 Pro (Apple M1 Pro, 16 GB RAM, macOS Tahoe 26.5.2), clj-pulse 0.5.4 at
-`bcc7115`, the same clojure-lsp, clj-kondo and corpus commits. The README
-table is this machine's metabase run. The release publishes no `.sha256` for the macOS aarch64
+`bcc7115`, the same clojure-lsp, clj-kondo and corpus commits. README and
+PERFORMANCE.md show this machine alone; the Linux tables above are the
+regression baseline. Between the two: clojure-lsp's cold metabase start is
+106 s here against 336 s on the container, its warm 28 s against 56 s, and
+clj-pulse's cold clj-kondo warm 25 s against 70 s; the keystroke row
+favours clojure-lsp here (its in-process clj-kondo ~300 ms against
+clj-pulse's per-keystroke process ~520 ms) and roughly ties on the
+container. Memory is `ps` RSS on macOS and `/proc` on Linux, not the same
+measure. The release publishes no `.sha256` for the macOS aarch64
 clojure-lsp archive, so the bench warned and skipped the checksum. Library
 probes that landed: as on Linux.
 
