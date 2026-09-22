@@ -23,11 +23,46 @@ project:
 
 Cold is the first open of a fresh checkout, with the server's caches cleared;
 warm is the next open, with what the first run left behind. Warm numbers are
-the median of three runs, cold is one run. One Linux container (5 cores,
-11 GiB, 2026-09-21): clj-pulse 0.5.4, clojure-lsp 2026.07.06-14.34.19,
-clj-kondo v2026.08.04, metabase at `42a8e9f7`, clj-kondo at `13a32d1c`.
+the median of three runs, cold is one run. Two machines, the same
+`CLJ_PULSE_BENCH_RUNS=3 bb bench`: clj-pulse 0.5.4, clojure-lsp
+2026.07.06-14.34.19, clj-kondo v2026.08.04, metabase at `42a8e9f7`,
+clj-kondo at `13a32d1c`.
+
+## macOS
+
+A 2021 MacBook Pro (Apple M1 Pro, 16 GB, macOS Tahoe 26.5.2), 2026-09-22.
+This is the table the README shows. The metabase cold columns are from a
+second, single-run `bb bench metabase` on a quiet machine: the first run's
+cold clojure-lsp start read 384 s and its first warm run 129 s, while the
+re-run gave 106 s and 28 s, so the first run had something else competing.
 
 **metabase** (1 400+ files, 43 164 symbols):
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| First navigation | 2.1 s | 1.4 s | 106 s | 28 s |
+| All dependencies navigable | 3.9 s | 1.6 s | 106 s | 28 s |
+| clj-kondo finished | 25 s | 16 s | 106 s | 28 s |
+| Memory once settled | 427 MiB | 412 MiB | 2 705 MiB | 2 151 MiB |
+| Definition (median of 20) | 11 ms | 11 ms | 6 ms | 8 ms |
+| Keystroke -> diagnostics, 251 KiB file | 570 ms | 585 ms | 418 ms | 379 ms |
+
+**clj-kondo** (400 files, 2 252 symbols):
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| First navigation | 787 ms | 212 ms | 19.4 s | 1.3 s |
+| All dependencies navigable | 1.2 s | 212 ms | 19.4 s | 1.3 s |
+| clj-kondo finished | 5.0 s | 940 ms | 19.4 s | 1.3 s |
+| Memory once settled | 95 MiB | 89 MiB | 275 MiB | 272 MiB |
+| Definition (median of 20) | 7 ms | 7 ms | 1 ms | 1 ms |
+| Keystroke -> diagnostics, 233 KiB file | 524 ms | 523 ms | 298 ms | 301 ms |
+
+## Linux
+
+One Linux container (5 cores, 11 GiB, Intel Haswell), 2026-09-21.
+
+**metabase**:
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
@@ -38,7 +73,7 @@ clj-kondo v2026.08.04, metabase at `42a8e9f7`, clj-kondo at `13a32d1c`.
 | Definition (median of 20) | 32 ms | 24 ms | 13 ms | 7 ms |
 | Keystroke -> diagnostics, 251 KiB file | 924 ms | 923 ms | 855 ms | 867 ms |
 
-**clj-kondo** (400 files, 2 252 symbols):
+**clj-kondo**:
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
@@ -72,46 +107,12 @@ What the tables do not say:
   `:kondo {:live-max-kb 256}`, so clj-kondo runs on every keystroke for both
   servers. What happens above that threshold, where clj-pulse lints a
   keystroke with its built-in tier alone, is in the benchmark records.
-- One Linux container per table above. The same run on the maintainer's
-  Apple Silicon Mac is below.
 
-## macOS
+What differs between the two machines:
 
-The same `CLJ_PULSE_BENCH_RUNS=3 bb bench`, 2026-09-22, on a 2021 MacBook
-Pro (Apple M1 Pro, 16 GB, macOS Tahoe 26.5.2), clj-pulse 0.5.4 and the same
-clojure-lsp, clj-kondo and corpus commits. This is the table the README
-shows. The metabase cold columns are from a second, single-run
-`bb bench metabase` on a quiet machine: the first run's cold clojure-lsp
-start read 384 s and its first warm run 129 s, while the re-run gave 106 s
-and 28 s, so the first run had something else competing.
-
-**metabase**:
-
-| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
-|---|---|---|---|---|
-| First navigation | 2.1 s | 1.4 s | 106 s | 28 s |
-| All dependencies navigable | 3.9 s | 1.6 s | 106 s | 28 s |
-| clj-kondo finished | 25 s | 16 s | 106 s | 28 s |
-| Memory once settled | 427 MiB | 412 MiB | 2 705 MiB | 2 151 MiB |
-| Definition (median of 20) | 11 ms | 11 ms | 6 ms | 8 ms |
-| Keystroke -> diagnostics, 251 KiB file | 570 ms | 585 ms | 418 ms | 379 ms |
-
-**clj-kondo**:
-
-| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
-|---|---|---|---|---|
-| First navigation | 787 ms | 212 ms | 19.4 s | 1.3 s |
-| All dependencies navigable | 1.2 s | 212 ms | 19.4 s | 1.3 s |
-| clj-kondo finished | 5.0 s | 940 ms | 19.4 s | 1.3 s |
-| Memory once settled | 95 MiB | 89 MiB | 275 MiB | 272 MiB |
-| Definition (median of 20) | 7 ms | 7 ms | 1 ms | 1 ms |
-| Keystroke -> diagnostics, 233 KiB file | 524 ms | 523 ms | 298 ms | 301 ms |
-
-What differs from the Linux tables:
-
-- clojure-lsp's cold metabase start is 106 s here against 336 s on the Linux
-  box; its warm start 28 s against 56 s. clj-pulse's cold clj-kondo warm is
-  25 s against 70 s.
+- clojure-lsp's cold metabase start is 106 s on the Mac against 336 s on the
+  Linux box; its warm start 28 s against 56 s. clj-pulse's cold clj-kondo
+  warm is 25 s against 70 s.
 - On the Mac the keystroke row favours clojure-lsp: its embedded clj-kondo
   answers in about 300 ms, while clj-pulse starts a clj-kondo process per
   keystroke. Above `:live-max-kb` clj-pulse's built-in tier answers in
