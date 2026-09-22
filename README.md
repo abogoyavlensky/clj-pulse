@@ -4,10 +4,7 @@ A fast-starting, low-memory Clojure language server.
 
 ## Highlights
 
-- **Fast startup, low memory.** Navigate your project while dependencies index
-  in the background. On the recorded Metabase benchmark, the first project
-  definition was available in 3.1 seconds, with 353 MiB of memory once settled.
-  See [Performance](#performance) for the comparison and measurement details.
+- **Fast startup.** Navigate your project right away. On Metabase on an M1 Pro, every dependency is navigable after 4 seconds cold and 1.6 warm. See [Performance](#performance) for details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
   qualified keywords across indexed source and config files.
@@ -18,7 +15,7 @@ A fast-starting, low-memory Clojure language server.
   Leiningen, or lgx within one workspace. Navigate across their sources and
   cached dependencies, with [classpath settings per project](docs/SETTINGS.md#projects-and-classpaths).
 
-Everyday tools include fuzzy completion with auto-require, hover and signature
+Everyday tools include: fuzzy completion with auto-require, hover and signature
 help, references, rename, keyword completion, symbol search, and namespace
 quickfixes. Built-in diagnostics work out of the box; optional clj-kondo adds
 its full linter set. See the [feature reference](docs/FEATURES.md).
@@ -37,17 +34,7 @@ Or with mise:
 mise use -g github:abogoyavlensky/clj-pulse
 ```
 
-For VS Code, install the [Clojure Pulse extension](https://github.com/abogoyavlensky/clojure-pulse-vscode#installation)
-and open your project folder. It finds `clj-pulse` on your `PATH`. To select a
-different binary, set:
-
-```json
-{
-  "clojurePulse.server.path": "/path/to/clj-pulse"
-}
-```
-
-If you use [Calva](https://calva.io/), set its language server path:
+For VS Code, if you use [Calva](https://calva.io/), set its language server path:
 
 ```json
 {
@@ -55,39 +42,49 @@ If you use [Calva](https://calva.io/), set its language server path:
 }
 ```
 
+Alternatively, install the [Clojure Pulse extension](https://github.com/abogoyavlensky/clojure-pulse-vscode#installation) and open your project folder. The extension includes `clj-pulse` binary. To select a different binary, set:
+ 
+```json
+{
+  "clojurePulse.server.path": "/path/to/clj-pulse"
+}
+```
+
 Also available: [Neovim](docs/EDITORS.md#neovim), [Zed](docs/EDITORS.md#zed), and
 [manual downloads](docs/EDITORS.md#manual-download).
 
 For full diagnostics, [install clj-kondo](https://github.com/clj-kondo/clj-kondo/blob/master/doc/install.md).
-Create a `.clj-kondo` directory in each project to enable its cross-file cache:
-
-```sh
-mkdir -p .clj-kondo
-```
+Create a `.clj-kondo` directory in each project to enable its cross-file cache.
 
 See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 
 ## Performance
 
-Recorded warm runs on one Linux container (5 cores, 11 GiB RAM), 2026-09-10:
-clj-pulse 0.5.0 and clojure-lsp 2026.07.06-14.34.19, both at their defaults.
-Warm means a second start using the caches left by the first.
+What a user waits for after opening Metabase (1,400+ files), recorded on a
+MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-09-22: clj-pulse 0.5.4 and
+clojure-lsp 2026.07.06-14.34.19, both at their defaults, with clj-kondo
+installed. Cold is the first open of a fresh checkout, one run; warm is the
+next open, using the caches the first one left, as the median of three runs.
 
-| Project | Metric | clj-pulse | clojure-lsp |
-|---|---|---|---|
-| Metabase | Time to first project definition | 3.1 s | 60 s |
-| Metabase | Memory once settled | 353 MiB | 1,798 MiB |
-| clj-kondo | Time to first project definition | 520 ms | 2.4 s |
-| clj-kondo | Memory once settled | 90 MiB | 273 MiB |
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| First navigation | 2.1 s | 1.4 s | 106 s | 28 s |
+| All dependencies navigable | 3.9 s | 1.6 s | 106 s | 28 s |
+| clj-kondo finished | 25 s | 16 s | 106 s | 28 s |
+| Memory once settled | 427 MiB | 412 MiB | 2,705 MiB | 2,151 MiB |
+| Definition (median of 20) | 11 ms | 11 ms | 6 ms | 8 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
-available while dependency indexing continues. clojure-lsp answers definitions
-faster once settled in these benchmarks. These results describe the recorded
-projects and machine; they are not a guarantee for every workspace.
+available first, then dependency navigation, and warms clj-kondo last, while
+clojure-lsp analyzes everything before it answers. In clj-pulse, clj-kondo is
+optional and only adds lint warnings; navigation, completion and the built-in
+lints never wait for it. clojure-lsp answers a definition faster once settled
+in these benchmarks. These results describe the
+recorded project and machine; they are not a guarantee for every workspace.
 
-See [Performance](docs/PERFORMANCE.md) for dependency navigation, request
-latency, diagnostics, pinned project commits, and methodology. Reproduce with
-`bb bench`.
+See [Performance](docs/PERFORMANCE.md) for the clj-kondo corpus,
+diagnostics latency, pinned project commits, and methodology. Reproduce
+with `bb bench`.
 
 ## Support and status
 

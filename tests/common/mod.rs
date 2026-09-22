@@ -45,6 +45,10 @@ pub struct LspClient {
     pub stdin: ChildStdin,
     pub incoming: Receiver<Value>,
     pub notifications: Vec<Value>,
+    /// When each stashed message was pulled off the channel, parallel to
+    /// `notifications`: the bench stamps its startup timeline from these, so
+    /// a message's time is when it arrived, not when a later scan noticed it.
+    pub received: Vec<Instant>,
     pub next_id: i64,
     /// How long a request may take before the harness gives up on it. The
     /// default suits the e2e fixtures; the bench raises it to its indexing
@@ -273,6 +277,7 @@ impl LspClient {
             stdin,
             incoming: rx,
             notifications: Vec::new(),
+            received: Vec::new(),
             next_id: 0,
             request_timeout: TIMEOUT,
         }
@@ -363,6 +368,7 @@ impl LspClient {
             self.send(json!({ "jsonrpc": "2.0", "id": id, "result": null }));
         }
         self.notifications.push(msg);
+        self.received.push(Instant::now());
     }
 
     /// Waits for the first notification with `method` whose `params` satisfy
@@ -831,6 +837,7 @@ impl LspClient {
             self.stash(msg);
         }
         self.notifications.clear();
+        self.received.clear();
     }
 
     /// Waits for a `textDocument/publishDiagnostics` whose uri ends with

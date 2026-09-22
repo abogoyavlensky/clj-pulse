@@ -108,12 +108,49 @@ pub fn project_sites(
     )
 }
 
-/// The first `alias/name` usage of `clojure.string` — a var from a JAR on the
-/// classpath, so the answer has to come out of a dependency archive.
-pub fn library_site(text: &str, file: &Path) -> Option<Site> {
-    usage_site(text, file, |ns, _| {
-        (ns == "clojure.string").then(|| Expect::Archive("clojure/string".to_string()))
-    })
+/// Up to `limit` `alias/name` usages of *third-party* namespaces, one per
+/// namespace: not `clojure.*` (clojure.jar is the first entry of every
+/// classpath and lands the moment it is read, which says nothing about the
+/// rest), and not a namespace this corpus has a file for, facade or not. The
+/// answer has to come out of a dependency archive. A candidate set rather
+/// than one site, because a namespace can turn out to be a git dependency,
+/// ClojureScript only, or a var re-exported through `potemkin/import-vars`
+/// that not every server follows — a definition into it never lands, and
+/// another candidate has to carry the row.
+pub fn third_party_sites(
+    text: &str,
+    file: &Path,
+    root: &Path,
+    paths: &[PathBuf],
+    limit: usize,
+) -> Vec<Site> {
+    let mut seen = Vec::new();
+    let sites = usage_sites(
+        text,
+        file,
+        |ns, _name| {
+            if ns.starts_with("clojure.") || namespace_in_project(ns, root, paths) {
+                return None;
+            }
+            Some(Expect::Archive(ns.replace('-', "_").replace('.', "/")))
+        },
+        usize::MAX,
+    );
+    let mut out = Vec::new();
+    for site in sites {
+        let Expect::Archive(entry) = &site.expect else {
+            continue;
+        };
+        if seen.contains(entry) {
+            continue;
+        }
+        seen.push(entry.clone());
+        out.push(site);
+        if out.len() == limit {
+            break;
+        }
+    }
+    out
 }
 
 /// Up to `limit` `alias/name` usages in `text` that `expect` accepts, in file
@@ -192,24 +229,38 @@ pub fn is_symbol_start(alias: &str) -> bool {
 /// wherever the original is, or nowhere, and either way not in the file the
 /// require names.
 pub fn namespace_file(ns: &str, name: &str, root: &Path, paths: &[PathBuf]) -> Option<PathBuf> {
-    let rel = ns.replace('-', "_").replace('.', "/");
-    paths
-        .iter()
-        .find(|p| {
-            let Ok(from_root) = p.strip_prefix(root) else {
-                return false;
-            };
-            let mut components = from_root.components();
-            // The source root itself (`src`, `test`); `is_source_ish` has
-            // already established that it is one.
-            components.next();
-            let under_root = components.as_path().to_string_lossy().to_string();
-            if under_root != format!("{rel}.clj") && under_root != format!("{rel}.cljc") {
-                return false;
-            }
-            std::fs::read_to_string(p).is_ok_and(|text| defines(&text, name))
-        })
+    namespace_paths(ns, root, paths)
+        .find(|p| std::fs::read_to_string(p).is_ok_and(|text| defines(&text, name)))
         .cloned()
+}
+
+/// Whether this corpus holds a file for `ns` at all, facade or not. The
+/// third-party probe asks this rather than [`namespace_file`]: a project
+/// namespace that re-exports through `potemkin/import-vars` defines nothing
+/// itself, but it is still the project's, and a definition into it can only
+/// ever land in a project file, never in a dependency archive.
+pub fn namespace_in_project(ns: &str, root: &Path, paths: &[PathBuf]) -> bool {
+    namespace_paths(ns, root, paths).next().is_some()
+}
+
+/// Every path in `paths` whose location under its source root spells `ns`.
+fn namespace_paths<'a>(
+    ns: &str,
+    root: &'a Path,
+    paths: &'a [PathBuf],
+) -> impl Iterator<Item = &'a PathBuf> + 'a {
+    let rel = ns.replace('-', "_").replace('.', "/");
+    paths.iter().filter(move |p| {
+        let Ok(from_root) = p.strip_prefix(root) else {
+            return false;
+        };
+        let mut components = from_root.components();
+        // The source root itself (`src`, `test`); `is_source_ish` has
+        // already established that it is one.
+        components.next();
+        let under_root = components.as_path().to_string_lossy().to_string();
+        under_root == format!("{rel}.clj") || under_root == format!("{rel}.cljc")
+    })
 }
 
 /// Whether `text` holds a top-level `(def… name …)` form — the cheap test for
