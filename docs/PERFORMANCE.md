@@ -80,18 +80,21 @@ What the tables do not say:
 The same `CLJ_PULSE_BENCH_RUNS=3 bb bench`, 2026-09-22, on a 2021 MacBook
 Pro (Apple M1 Pro, 16 GB, macOS Tahoe 26.5.2), clj-pulse 0.5.4 and the same
 clojure-lsp, clj-kondo and corpus commits. This is the table the README
-shows.
+shows. The metabase cold columns are from a second, single-run
+`bb bench metabase` on a quiet machine: the first run's cold clojure-lsp
+start read 384 s and its first warm run 129 s, while the re-run gave 106 s
+and 28 s, so the first run had something else competing.
 
 **metabase**:
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 1.9 s | 1.4 s | 384 s | 28 s |
-| All dependencies navigable | 2.9 s | 1.6 s | 384 s | 28 s |
-| clj-kondo finished | 22 s | 16 s | 384 s | 28 s |
-| Memory once settled | 432 MiB | 412 MiB | 2 738 MiB | 2 151 MiB |
-| Definition (median of 20) | 11 ms | 11 ms | 3 ms | 8 ms |
-| Keystroke -> diagnostics, 251 KiB file | 584 ms | 585 ms | 410 ms | 379 ms |
+| First navigation | 2.1 s | 1.4 s | 106 s | 28 s |
+| All dependencies navigable | 3.9 s | 1.6 s | 106 s | 28 s |
+| clj-kondo finished | 25 s | 16 s | 106 s | 28 s |
+| Memory once settled | 427 MiB | 412 MiB | 2 705 MiB | 2 151 MiB |
+| Definition (median of 20) | 11 ms | 11 ms | 6 ms | 8 ms |
+| Keystroke -> diagnostics, 251 KiB file | 570 ms | 585 ms | 418 ms | 379 ms |
 
 **clj-kondo**:
 
@@ -106,10 +109,9 @@ shows.
 
 What differs from the Linux tables:
 
-- clojure-lsp's cold start on metabase was no faster on the Mac, and its
-  first warm run took 129 s before the next two settled at 27 s and 28 s;
-  clj-pulse's first warm run was also its slowest (clj-kondo finished 22 s,
-  then 16 s twice). The medians stand, the cold column is one run.
+- clojure-lsp's cold metabase start is 106 s here against 336 s on the Linux
+  box; its warm start 28 s against 56 s. clj-pulse's cold clj-kondo warm is
+  25 s against 70 s.
 - On the Mac the keystroke row favours clojure-lsp: its embedded clj-kondo
   answers in about 300 ms, while clj-pulse starts a clj-kondo process per
   keystroke. Above `:live-max-kb` clj-pulse's built-in tier answers in

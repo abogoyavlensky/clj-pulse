@@ -139,9 +139,24 @@ Warm runs of clj-pulse: first navigation 1 350 / 1 346 / 1 381 ms, all
 dependencies 1 560 / 1 555 / 1 483 ms, clj-kondo finished 22.1 / 16.2 /
 16.3 s. clojure-lsp warm: 129 / 26.7 / 28.5 s to first navigation — the
 first warm run of *both* servers was the slow one, so something outside the
-servers was still busy then; the cold clojure-lsp row (384 s, above the
-Linux box's 336 s) is one run and may carry the same. Not investigated:
-clojure-lsp's own log would say whether it was analyzing the JDK sources.
+servers was still busy then, and the cold clojure-lsp row above carries the
+same. A second `bb bench metabase` (one run each, quiet machine) the same
+day:
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| Time to first navigation | 2.1 s | 1.5 s | 106 s | 27.6 s |
+| All dependencies navigable | 3.9 s | 1.7 s | 106 s | 27.6 s |
+| clj-kondo finished | 25 s | 17 s | 106 s | 27.6 s |
+| RSS settled | 427 MiB | 425 MiB | 2 705 MiB | 1 691 MiB |
+| Definition (median of 20) | 11 ms | 11 ms | 6 ms | 3 ms |
+| didChange → diagnostics, 452 KiB | 378 ms | 376 ms | 513 ms | 566 ms |
+| didChange → diagnostics, 251 KiB | 570 ms | 572 ms | 418 ms | 369 ms |
+
+The warm rows agree with the medians of the first run; the cold ones are
+the published macOS cold columns (README and PERFORMANCE.md), the first
+run's 384 s being the busy machine. clojure-lsp cold on this Mac is thus
+106 s against the Linux box's 336 s.
 
 clj-kondo:
 
