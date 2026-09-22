@@ -4,12 +4,7 @@ A fast-starting, low-memory Clojure language server.
 
 ## Highlights
 
-- **Fast startup, low memory.** Navigate your project right away: under half
-  a second to open clj-kondo (400 files), two seconds to open Metabase
-  (1,400+). On Metabase on an M1 Pro, every dependency is navigable after
-  4 seconds cold and 1.6 warm, at 412 MiB once settled; clojure-lsp on the
-  same machine answers its first definition after 106 seconds cold and 28
-  warm. See [Performance](#performance) for how this is measured.
+- **Fast startup.** Navigate your project right away. On Metabase on an M1 Pro, every dependency is navigable after 4 seconds cold and 1.6 warm. See [Performance](#performance) for details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
   qualified keywords across indexed source and config files.
@@ -20,7 +15,7 @@ A fast-starting, low-memory Clojure language server.
   Leiningen, or lgx within one workspace. Navigate across their sources and
   cached dependencies, with [classpath settings per project](docs/SETTINGS.md#projects-and-classpaths).
 
-Everyday tools include fuzzy completion with auto-require, hover and signature
+Everyday tools include: fuzzy completion with auto-require, hover and signature
 help, references, rename, keyword completion, symbol search, and namespace
 quickfixes. Built-in diagnostics work out of the box; optional clj-kondo adds
 its full linter set. See the [feature reference](docs/FEATURES.md).
@@ -39,21 +34,19 @@ Or with mise:
 mise use -g github:abogoyavlensky/clj-pulse
 ```
 
-For VS Code, install the [Clojure Pulse extension](https://github.com/abogoyavlensky/clojure-pulse-vscode#installation)
-and open your project folder. It finds `clj-pulse` on your `PATH`. To select a
-different binary, set:
-
-```json
-{
-  "clojurePulse.server.path": "/path/to/clj-pulse"
-}
-```
-
-If you use [Calva](https://calva.io/), set its language server path:
+For VS Code, if you use [Calva](https://calva.io/), set its language server path:
 
 ```json
 {
   "calva.clojureLspPath": "/path/to/clj-pulse"
+}
+```
+
+Alternatively, install the [Clojure Pulse extension](https://github.com/abogoyavlensky/clojure-pulse-vscode#installation) and open your project folder. The extension includes `clj-pulse` binary. To select a different binary, set:
+ 
+```json
+{
+  "clojurePulse.server.path": "/path/to/clj-pulse"
 }
 ```
 
