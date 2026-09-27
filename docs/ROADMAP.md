@@ -300,6 +300,17 @@ the release.
       (Backlog, 2026-09-17). `bb compare` on clj-kondo went from 677 to 450
       divergences on this fix alone.
       Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — done
+- [ ] **ClojureScript: `cljs.core`, `:require-macros`, twin namespaces.** A
+      `.cljs` file resolved its core names into `clojure/core.clj`
+      (`var-usage/library` on clj-kondo: 5 agree, 118 diverge, 44 null), a
+      macro brought in through `:require-macros` answered one site of four, and
+      a namespace split across a `.clj` and a `.cljs` file shared one index slot,
+      so saving one half dropped the other until a rescan. Issues:
+      [`.cljs` core resolves into `clojure/core.clj`](backlog/2026-09-17-cljs-core-resolves-into-clojure-core.md),
+      [macros referred through `:require-macros`](backlog/2026-09-17-macros-referred-through-require-macros.md),
+      [one namespace in a `.clj` and a `.cljs` file](backlog/2026-09-17-clj-and-cljs-twins-share-one-fqn.md)
+      (Backlog, 2026-09-17).
+      Plan: [2026-09-27-2031-clojurescript-core-macros-and-twins.md](plans/2026-09-27-2031-clojurescript-core-macros-and-twins.md) — in progress
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -378,13 +389,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   - [Keywords in binding values and quoted data are not occurrences](backlog/2026-09-17-keywords-in-binding-values-and-quoted-data.md).
   - [Locals inside `(binding […] (let […] …))` resolve wrong](backlog/2026-09-17-locals-under-binding-and-let.md).
   - [`{:ns/keys [a]}` with an explicit namespace renames the local](backlog/2026-09-17-ns-keys-with-explicit-namespace-renames-the-local.md).
-  - [`.cljs` core resolves into `clojure/core.clj`](backlog/2026-09-17-cljs-core-resolves-into-clojure-core.md) — twin of the 2026-09-10 dialect item.
   - [A `defmulti` is missing from its own references](backlog/2026-09-17-defmulti-missing-from-its-own-references.md).
   - [Constructor calls are not references of a `deftype`/`defrecord`](backlog/2026-09-17-constructor-calls-are-not-references.md).
   - [`:lint-as` to `defprotocol` and `declare` is only half honored](backlog/2026-09-17-lint-as-defprotocol-and-declare-half-honored.md).
   - [`import-vars` re-exports are not definitions](backlog/2026-09-17-import-vars-re-exports-are-not-definitions.md).
-  - [Macros referred from `.cljs` through `:require-macros`](backlog/2026-09-17-macros-referred-through-require-macros.md).
-  - [One namespace in a `.clj` and a `.cljs` file shares one fqn](backlog/2026-09-17-clj-and-cljs-twins-share-one-fqn.md).
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
   - [A qualified `{:keys [c/x]}` entry resolves as the keyword it reads](backlog/2026-09-17-qualified-keys-entry-resolves-as-the-keyword.md) — in `KNOWN`.
   - [`one-of` in a `for` `:let` resolves to its own line](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md).
