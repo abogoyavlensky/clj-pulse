@@ -230,17 +230,20 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
 **Files:**
 - Modify: `tests/common/oracle.rs`, `tests/test_compare.rs`
 
-- [ ] **Step 1: Oracle**
+- [x] **Step 1: Oracle**
   The `NO_SOURCE_DEFINITION` skip applies when `u.to` is `clojure.core` *or* `cljs.core`; adjust the doc comment. Extend the existing unit test near `core_usage_expects_a_library_definition_in_the_asking_dialect` with a `.cljs` file whose `if` usage produces no probe.
 
-- [ ] **Step 2: `extra_files` and the `KNOWN` entry**
+- [x] **Step 2: `extra_files` and the `KNOWN` entry**
   `judge_sites` fills `Verdict::Diverge.extra_files` with the files of `got.per_line` keys absent from `expected.per_line`; the other `Diverge` constructors pass an empty set. The `KNOWN` entry per the Design (bucket prefix `var-def/`, `.cljs` probe file, `missing == 0`, every extra file the probe file's `.clj` twin by parent and stem), dated reason, after the protocol-method entry. Unit-test the matcher: the `reader_types` pair matches; an extra site in an unrelated `.clj` file, or in the twin with `missing > 0`, does not.
 
-- [ ] **Step 3: Run the fixture pipeline and the compare gate**
+- [x] **Step 3: Run the fixture pipeline and the compare gate**
   Run: `cargo test --test test_compare` (the simple_project pipeline runs inside `bb check`; here it runs alone), then `bb compare clj-kondo > .tmp/compare-after.log 2>&1`.
   Expected: `compare_simple_project` green. In the after log: `var-usage/library` and `var-usage/library/macro` with 0 diverge and 0 null (probe counts lower than the baseline's 167 / 199 by the special forms), `var-def/defmacro` 0 diverge, the `reader_types` sites under `known`. Diff the `COMPARE_JSON` lines against `.tmp/compare-baseline.log` and record both tables for Task 8.
+  > Result (`.tmp/compare-after.log`): `var-usage/library` 5/118/44 → 163 agree, 0 diverge, 2 null; `var-usage/library/macro` 168/26/5 → 196/0/0; `var-usage/project/macro` and `…/macro/referred` lose their `log-source` null; `var-def/defmacro` 8 → 6 diverge (`log-source` fixed; the other 6 are pre-existing — `make-printable!`, `with-newline-fn`, `get-in` — so the plan's "8 → 0" overcounted); `var-def/defn` 45 → 43 diverge + 2 known (the twin template); `var-def/defprotocol`'s `reader_types` sites were already `known` under the protocol-method entry, which matches first. Total 5253/4640/450/18/145 → 5248/4830/302/20/96. Probe counts barely moved: those buckets are stride-sampled from larger raw sets, so dropping the special forms changes which probes are kept, not how many.
+  > Deviation: the first after-run left 9 `var-usage/library` nulls — `cljs.core`-only names (`not-native`, `IMeta`, `ISequential`, `-nth`) fell through, since a bare name reaches core only via the static `clojure.core` list. `resolve_symbol` now asks `cljs.core` in the index for a `Cljs` file after that list (so shared names keep their curated hover); separate commit with `cljs_core_only_names_resolve_in_a_cljs_file`. The two nulls left are `cljs.core.ExceptionInfo` (a dotted JS-style type reference) and a pre-existing `.clj` `clojure.pprint/pprint`.
+  > The oracle unit test for a `.cljs` special form writes its own `src/cljs_forms.cljs` into the fixture copy (`cljs_core_special_form_is_not_a_probe`): `simple_project` has no `.cljs` file.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -am "Compare gate: cljs.core special forms and the macro-twin template"`
 
 ### Task 7: Gates

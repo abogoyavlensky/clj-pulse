@@ -119,11 +119,14 @@ fn ask(session: &mut Session, probe: &Probe) -> Answer {
 enum Verdict {
     Agree,
     /// `missing` is how many expected sites the answer lacks; zero means the
-    /// answer holds everything the oracle knows and more.
+    /// answer holds everything the oracle knows and more. `extra_files` holds
+    /// the files of the lines only the answer has, so an allowlist entry reads
+    /// structure rather than the `got` string; empty for a single-site answer.
     Diverge {
         expected: String,
         got: String,
         missing: usize,
+        extra_files: BTreeSet<PathBuf>,
     },
     /// An empty or `null` answer where the oracle has one: a wrong answer,
     /// reported in its own column so "resolved wrong" and "did not resolve"
@@ -247,6 +250,12 @@ fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
             expected: brief_set(&theirs, &mine),
             got: brief_set(&mine, &theirs),
             missing: missing_sites(expected, got),
+            extra_files: got
+                .per_line
+                .keys()
+                .filter(|key| !expected.per_line.contains_key(*key))
+                .map(|(file, _)| file.clone())
+                .collect(),
         };
     }
     if expected.exact != got.exact {
@@ -278,6 +287,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
             } else {
                 Verdict::Diverge {
                     missing: 1,
+                    extra_files: BTreeSet::new(),
                     expected,
                     got: match uri_path(first) {
                         Some(p) => format!(
@@ -304,6 +314,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                         expected,
                         got: format!("wrong dialect: {}", uris.join(", ")),
                         missing: 1,
+                        extra_files: BTreeSet::new(),
                     }
                 }
                 Landing::Miss => {}
@@ -326,6 +337,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                     expected,
                     got: uris.join(", "),
                     missing: 1,
+                    extra_files: BTreeSet::new(),
                 }
             }
         }
@@ -339,12 +351,14 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
             expected: format!("{:?}", site_keys(sites, root)),
             got: "refused".into(),
             missing: sites.exact.len(),
+            extra_files: BTreeSet::new(),
         },
         (Expectation::RenameRefused, Answer::Refused) => Verdict::Agree,
         (Expectation::RenameRefused, Answer::Edit(edit)) => Verdict::Diverge {
             expected: "refused".into(),
             got: format!("edit of {:?}", site_keys(&edit_sites(edit), root)),
             missing: 0,
+            extra_files: BTreeSet::new(),
         },
         (_, Answer::Error(err)) => Verdict::Null {
             expected: format!("an answer, not {}", brief(&json!(err))),
@@ -398,6 +412,21 @@ static KNOWN: &[Known] = &[
         matches: |_, verdict| matches!(verdict, Verdict::Diverge { missing: 0, .. }),
         reason: "protocol method implementations are sites in clj-pulse; kondo lists callers only",
     },
+    // A `.cljs` var used in the syntax-quoted template of the macro its `.clj`
+    // twin defines (`reader_types.clj` emitting a call to a
+    // `reader_types.cljs` fn): the macro expands to a call of that var, so
+    // renaming it without the template breaks the macro. Kondo resolves
+    // nothing inside the template. Only extra sites, only in the twin.
+    Known {
+        bucket_prefix: "var-def/",
+        matches: |probe, verdict| {
+            probe.file.extension().is_some_and(|e| e == "cljs")
+                && matches!(verdict, Verdict::Diverge { missing: 0, extra_files, .. }
+                    if !extra_files.is_empty()
+                        && extra_files.iter().all(|f| is_clj_twin(&probe.file, f)))
+        },
+        reason: "a `.cljs` var used in the syntax-quoted template of its `.clj` macro twin is a site in clj-pulse; kondo resolves nothing inside that template (2026-09-27)",
+    },
     // `references::local_refs_at` never claims a qualified symbol ("locals
     // are never qualified"), so a cursor on the binding resolves the keyword
     // it reads — one occurrence — where kondo sees the local `x` and its
@@ -408,6 +437,14 @@ static KNOWN: &[Known] = &[
         reason: "a qualified `:keys` entry (`{:keys [c/x]}`) resolves as the keyword it reads, not the local it binds (2026-09-17)",
     },
 ];
+
+/// Whether `other` is the `.clj` twin of the `.cljs` file `cljs`: the same
+/// directory and file stem, so the same namespace.
+fn is_clj_twin(cljs: &Path, other: &Path) -> bool {
+    other.extension().is_some_and(|e| e == "clj")
+        && other.parent() == cljs.parent()
+        && other.file_stem() == cljs.file_stem()
+}
 
 fn known_reason(probe: &Probe, verdict: &Verdict) -> Option<&'static str> {
     KNOWN
@@ -687,6 +724,32 @@ mod oracle_tests {
             Expectation::LibraryDefinition { ns, dialect } => {
                 assert_eq!(ns, "clojure.core");
                 assert_eq!(*dialect, Dialect::Clj);
+            }
+            other => panic!("expected LibraryDefinition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cljs_core_special_form_is_not_a_probe() {
+        let Some(tmp) = with_kondo("cljs_core_special_form_is_not_a_probe") else {
+            return;
+        };
+        std::fs::write(
+            tmp.path().join("src/cljs_forms.cljs"),
+            "(ns cljs-forms)\n(if true (not false) 2)\n",
+        )
+        .unwrap();
+        let analysis = oracle::run(tmp.path(), &["src"], "").expect("clj-kondo runs");
+        let probes = oracle::probes(&analysis);
+        // `if` is a special form kondo files under `cljs.core`: no source.
+        assert!(at(&probes, "src/cljs_forms.cljs", 1, 1).is_empty());
+        // `not` is a `cljs.core` fn, asked of the ClojureScript copy.
+        let found = at(&probes, "src/cljs_forms.cljs", 1, 10);
+        assert_eq!(found.len(), 1, "{found:?}");
+        match &found[0].expect {
+            Expectation::LibraryDefinition { ns, dialect } => {
+                assert_eq!(ns, "cljs.core");
+                assert_eq!(*dialect, Dialect::Cljs);
             }
             other => panic!("expected LibraryDefinition, got {other:?}"),
         }
@@ -1168,6 +1231,58 @@ mod judge_tests {
             capped.iter().any(|p| p.line > 400),
             "spread over the whole range"
         );
+    }
+
+    #[test]
+    fn extra_sites_in_the_clj_twin_of_a_cljs_definition_are_known() {
+        let root = Path::new("/corpus");
+        let cljs = "/corpus/src/r/reader_types.cljs";
+        let clj = "/corpus/src/r/reader_types.clj";
+        let expected = Sites::from_exact(
+            [
+                (PathBuf::from(cljs), 3, 2),
+                (PathBuf::from("/corpus/src/r/reader.cljs"), 9, 4),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut p = probe(Expectation::References(expected));
+        p.file = PathBuf::from(cljs);
+        let at_ = |file: &str, line: u32| json!({ "uri": format!("file://{file}"), "range": { "start": { "line": line, "character": 2 }, "end": { "line": line, "character": 3 } } });
+        let judged = |extra: Vec<Value>, keep_caller: bool| {
+            let mut answer = vec![at_(cljs, 3)];
+            if keep_caller {
+                answer.push(at_("/corpus/src/r/reader.cljs", 9));
+            }
+            answer.extend(extra);
+            judge(
+                &p,
+                &Answer::Result(Value::Array(answer)),
+                root,
+                &[PathBuf::from("/corpus/src")],
+            )
+        };
+
+        // The template site in the `.clj` twin, and nothing missing: known.
+        let verdict = judged(vec![at_(clj, 6)], true);
+        assert!(
+            matches!(&verdict, Verdict::Diverge { missing: 0, extra_files, .. }
+                if extra_files.iter().eq([&PathBuf::from(clj)])),
+            "{verdict:?}"
+        );
+        assert!(known_reason(&p, &verdict).is_some());
+
+        // An extra site in an unrelated `.clj` file is not.
+        let verdict = judged(vec![at_("/corpus/src/r/other.clj", 6)], true);
+        assert!(known_reason(&p, &verdict).is_none(), "{verdict:?}");
+
+        // Nor is the twin's site when a caller is missing.
+        let verdict = judged(vec![at_(clj, 6)], false);
+        assert!(
+            matches!(verdict, Verdict::Diverge { missing: 1, .. }),
+            "{verdict:?}"
+        );
+        assert!(known_reason(&p, &verdict).is_none());
     }
 
     #[test]

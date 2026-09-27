@@ -24,10 +24,10 @@ pub const PINNED_KONDO: &str = "2026.08.04";
 /// kondo's `to` for a usage it could not resolve.
 const UNKNOWN_NS: &str = "clj-kondo/unknown-namespace";
 
-/// Names kondo attributes to `clojure.core` that no source form defines: the
-/// special forms, and the vars `RT.java` creates that `core.clj` only
-/// documents through `add-doc-and-meta`. A definition on one is a question
-/// with no answer.
+/// Names kondo attributes to `clojure.core` (or, in a `.cljs` file, to
+/// `cljs.core`) that no source form defines: the special forms, and the vars
+/// `RT.java` creates that `core.clj` only documents through
+/// `add-doc-and-meta`. A definition on one is a question with no answer.
 const NO_SOURCE_DEFINITION: &[&str] = &[
     "*file*",
     "*command-line-args*",
@@ -648,7 +648,8 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             continue;
         };
         if u.to == UNKNOWN_NS
-            || (u.to == "clojure.core" && NO_SOURCE_DEFINITION.contains(&u.name.as_str()))
+            || (matches!(u.to.as_str(), "clojure.core" | "cljs.core")
+                && NO_SOURCE_DEFINITION.contains(&u.name.as_str()))
         {
             continue;
         }
