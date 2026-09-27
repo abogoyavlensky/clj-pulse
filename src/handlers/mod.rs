@@ -15,7 +15,7 @@ pub mod selection;
 pub mod signature;
 pub mod symbols;
 
-use crate::index::{CoreSymbol, DefKind, Dialect, Index, Symbol};
+use crate::index::{core_ns, CoreSymbol, DefKind, Dialect, Index, Symbol};
 
 #[derive(Debug, Clone)]
 pub enum ResolvedSymbol {
@@ -174,6 +174,15 @@ pub fn resolve_symbol(
         if !excluded {
             if let Some(core) = index.core_symbols.iter().find(|c| c.name == word) {
                 return Some(ResolvedSymbol::Core(core.clone()));
+            }
+            // A `.cljs` file's core is `cljs.core`, which defines far more than
+            // the static list names: its protocols (`IMeta`), their methods
+            // (`-nth`), `not-native`, … Asked after the static list, so a name
+            // both cores share keeps its curated hover.
+            if dialect == Dialect::Cljs {
+                if let Some(sym) = lookup_in_ns(core_ns(dialect), word) {
+                    return Some(ResolvedSymbol::Project(sym));
+                }
             }
         }
     }
@@ -576,6 +585,45 @@ mod tests {
                 other => panic!("{dialect:?}: u/helper did not resolve: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn cljs_core_only_names_resolve_in_a_cljs_file() {
+        // `cljs.core` indexed from the ClojureScript JAR: `not-native` is not in
+        // the static clojure.core list, `map` is.
+        let mut index = index_with(vec![]);
+        index.core_symbols = vec![core_entry("map")];
+        let file = "/m2/cljs.jar!/cljs/core.cljs";
+        let lib = |name: &str| {
+            let mut s = sym(name, "cljs.core", DefKind::Def);
+            s.file = PathBuf::from(file);
+            s.source = SymbolSource::Jar(PathBuf::from("/m2/cljs.jar"));
+            s
+        };
+        let meta = NsMeta {
+            name: "cljs.core".to_string(),
+            file: PathBuf::from(file),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: vec![],
+            imports: HashMap::new(),
+            refer_all: vec![],
+            as_aliases: vec![],
+            core_excludes: vec![],
+        };
+        index.insert_lib_file(meta, vec![lib("not-native"), lib("map")]);
+
+        match resolve_symbol(&index, "not-native", "my.ns", Dialect::Cljs) {
+            Some(ResolvedSymbol::Project(s)) => assert_eq!(s.fqn, "cljs.core/not-native"),
+            other => panic!("not-native did not resolve: {other:?}"),
+        }
+        // A `.clj` file has no `cljs.core`.
+        assert!(resolve_symbol(&index, "not-native", "my.ns", Dialect::Clj).is_none());
+        // A shared name keeps the static entry.
+        assert!(matches!(
+            resolve_symbol(&index, "map", "my.ns", Dialect::Cljs),
+            Some(ResolvedSymbol::Core(_))
+        ));
     }
 
     #[test]
