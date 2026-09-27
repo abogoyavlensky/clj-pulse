@@ -18,9 +18,9 @@ then the editor features users notice as missing. Guiding decisions:
   to JavaScript) for Format Document and indent-on-Enter. A native,
   cljfmt-compatible formatter in the server is wanted eventually for Neovim and
   Zed, but it is not a priority.
-- **ClojureScript is best effort.** `.cljs` files are indexed and `js/` is
-  known, but `:require-macros` and shadow-cljs classpaths are not; fix cheap
-  things, don't build a cljs stack.
+- **ClojureScript is best effort.** `.cljs` files are indexed with
+  `cljs.core` as their core, `js/` is known and `:require-macros` is read, but
+  shadow-cljs classpaths are not; fix cheap things, don't build a cljs stack.
 - **Protect the differentiators:** instant startup, no JVM on the hot path,
   Integrant and let-go/lgx support. No item may regress them.
 
@@ -72,7 +72,10 @@ to the binary behind them, and a lint pass that fails is reported once on
 `lintStatus` and in the log instead of silently publishing the native set.
 Discards and comments are gaps for the extractor: nothing inside a `#_` form
 is indexed, and a `;` comment or discard inside a binding vector, a
-destructuring map or a def form no longer shifts what follows it.
+destructuring map or a def form no longer shifts what follows it. A `.cljs`
+file resolves its core to `cljs.core` and reads `:require-macros`, and a
+namespace split over `.clj` and `.cljs` is indexed as two dialect slots, each
+file navigating to its own half.
 
 Not shipped: `foldingRange`, formatting, semantic tokens, code lens,
 implementation provider, `executeCommand` refactors, `willRenameFiles`.
@@ -300,17 +303,18 @@ the release.
       (Backlog, 2026-09-17). `bb compare` on clj-kondo went from 677 to 450
       divergences on this fix alone.
       Plan: [2026-09-18-0751-discards-and-comments-are-gaps.md](plans/2026-09-18-0751-discards-and-comments-are-gaps.md) — done
-- [ ] **ClojureScript: `cljs.core`, `:require-macros`, twin namespaces.** A
+- [x] **ClojureScript: `cljs.core`, `:require-macros`, twin namespaces.** A
       `.cljs` file resolved its core names into `clojure/core.clj`
       (`var-usage/library` on clj-kondo: 5 agree, 118 diverge, 44 null), a
       macro brought in through `:require-macros` answered one site of four, and
       a namespace split across a `.clj` and a `.cljs` file shared one index slot,
       so saving one half dropped the other until a rescan. Issues:
-      [`.cljs` core resolves into `clojure/core.clj`](backlog/2026-09-17-cljs-core-resolves-into-clojure-core.md),
-      [macros referred through `:require-macros`](backlog/2026-09-17-macros-referred-through-require-macros.md),
-      [one namespace in a `.clj` and a `.cljs` file](backlog/2026-09-17-clj-and-cljs-twins-share-one-fqn.md)
-      (Backlog, 2026-09-17).
-      Plan: [2026-09-27-2031-clojurescript-core-macros-and-twins.md](plans/2026-09-27-2031-clojurescript-core-macros-and-twins.md) — in progress
+      [`.cljs` core resolves into `clojure/core.clj`](archive/2026-09-17-cljs-core-resolves-into-clojure-core.md),
+      [macros referred through `:require-macros`](archive/2026-09-17-macros-referred-through-require-macros.md),
+      [one namespace in a `.clj` and a `.cljs` file](archive/2026-09-17-clj-and-cljs-twins-share-one-fqn.md)
+      (Backlog, 2026-09-17). `var-usage/library` on clj-kondo went to 163
+      agree, 0 diverge, 2 null.
+      Plan: [2026-09-27-2031-clojurescript-core-macros-and-twins.md](plans/2026-09-27-2031-clojurescript-core-macros-and-twins.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -409,9 +413,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   cljfmt-formatted sources, idempotent, honors `.cljfmt.edn`. A `cljfmt`
   native-binary bridge (same pattern as clj-kondo) is the cheaper interim if
   demand appears first.
-- **ClojureScript**. `:require-macros` / `:refer-macros` parsing,
-  `goog.*` prefixes, shadow-cljs classpath (`shadow-cljs.edn` `:dependencies`
-  need Maven resolution, the same problem as Leiningen transitive deps).
+- **ClojureScript**. `goog.*` prefixes, dotted type references
+  (`cljs.core.ExceptionInfo`), shadow-cljs classpath (`shadow-cljs.edn`
+  `:dependencies` need Maven resolution, the same problem as Leiningen
+  transitive deps).
 - **Zed** — Zed formats and highlights via LSP and tree-sitter; the formatter
   above is what it needs most.
 - **Semantic tokens**. Calva and Zed highlight without them; lowest of the

@@ -1,5 +1,7 @@
 # ClojureScript Core, `:require-macros` and Twin Namespaces Implementation Plan
 
+**Status:** completed 2026-09-27 on branch `clojurescript-core-macros-twins`.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A `.cljs` file resolves its core to `cljs.core`, reads macros brought in through `:require-macros` / `:refer-macros`, and a namespace split across a `.clj` and a `.cljs` file keeps both halves indexed and navigable — closing the three ClojureScript Backlog items of 2026-09-17.
@@ -241,6 +243,7 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
   Expected: `compare_simple_project` green. In the after log: `var-usage/library` and `var-usage/library/macro` with 0 diverge and 0 null (probe counts lower than the baseline's 167 / 199 by the special forms), `var-def/defmacro` 0 diverge, the `reader_types` sites under `known`. Diff the `COMPARE_JSON` lines against `.tmp/compare-baseline.log` and record both tables for Task 8.
   > Result (`.tmp/compare-after.log`): `var-usage/library` 5/118/44 → 163 agree, 0 diverge, 2 null; `var-usage/library/macro` 168/26/5 → 196/0/0; `var-usage/project/macro` and `…/macro/referred` lose their `log-source` null; `var-def/defmacro` 8 → 6 diverge (`log-source` fixed; the other 6 are pre-existing — `make-printable!`, `with-newline-fn`, `get-in` — so the plan's "8 → 0" overcounted); `var-def/defn` 45 → 43 diverge + 2 known (the twin template); `var-def/defprotocol`'s `reader_types` sites were already `known` under the protocol-method entry, which matches first. Total 5253/4640/450/18/145 → 5248/4830/302/20/96. Probe counts barely moved: those buckets are stride-sampled from larger raw sets, so dropping the special forms changes which probes are kept, not how many.
   > Deviation: the first after-run left 9 `var-usage/library` nulls — `cljs.core`-only names (`not-native`, `IMeta`, `ISequential`, `-nth`) fell through, since a bare name reaches core only via the static `clojure.core` list. `resolve_symbol` now asks `cljs.core` in the index for a `Cljs` file after that list (so shared names keep their curated hover); separate commit with `cljs_core_only_names_resolve_in_a_cljs_file`. The two nulls left are `cljs.core.ExceptionInfo` (a dotted JS-style type reference) and a pre-existing `.clj` `clojure.pprint/pprint`.
+  > Codex (Task 6, must fix, both): `cljs.core` defines its own `*print-meta*`, `*command-line-args*`, … with `def`, so the exclusion is split — `SPECIAL_FORMS` for either core, `JVM_RUNTIME_VARS` for `clojure.core` alone; and `extra_files` counts every line the answer holds more often than the oracle, not only lines it lacks, so a doubled site beside a twin site is not allowlisted. Final run: total 5249 probes, 4831 agree, 302 diverge, 20 known, 96 null; `var-usage/library` 166/164/0/0/2.
   > The oracle unit test for a `.cljs` special form writes its own `src/cljs_forms.cljs` into the fixture copy (`cljs_core_special_form_is_not_a_probe`): `simple_project` has no `.cljs` file.
 
 - [x] **Step 4: Commit**
@@ -248,35 +251,56 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
 
 ### Task 7: Gates
 
-- [ ] **Step 1: Behavior and editor gates**
+- [x] **Step 1: Behavior and editor gates**
   Run: `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva`.
   Expected: all green. Definition targets change for `.cljs` files, which is client-visible.
+  > All four green on `9030c14` (logs `.tmp/cljs-gate-{check,e2e,pulse,calva}.log`).
 
-- [ ] **Step 2: Index gates**
+- [x] **Step 2: Index gates**
   Run: `bb soak` (clj-kondo default; the corpus's `inlined/` tree holds the `reader_types` twin pair and the soak's checkpoint restore exercises removal and re-insertion), then `bb bench clj-kondo`.
   Expected: soak passes (no divergence, no `panicked at`, RSS under 1.5x); bench rows within noise of `docs/MEMORY.md`. Record the seed and the `BENCH_JSON` lines for the PR description.
+  > Soak passed: seed 17037296197882302182, 20 rounds, 0 divergences, RSS 102.2 → 112.0 MiB (1.10x) (`.tmp/cljs-gate-soak.log`). Bench (one run, `.tmp/cljs-gate-bench.log`): clj-pulse cold first navigation 532 ms, all dependencies 935 ms, kondo finished 11.8 s, settled 13.8 s, RSS 136 MiB, definition 18 ms, edit 750 ms; warm 434 / 535 ms / 2.2 s / 4.2 s / 92 MiB / 18 ms / 760 ms. Timings match the memo's table; settled RSS is 4–7 MiB above it (129 / 88 MiB) — the project `FileRecord` copies of `NsMeta` are the new state, though a single run cannot separate that from noise.
 
 ### Task 8: Docs and closing the items
 
 **Files:**
 - Modify: `docs/ROADMAP.md`, `AGENTS.md`, `docs/FEATURES.md`, `README.md`, `docs/MEMORY.md`, `docs/backlog/`
 
-- [ ] **Step 1: ROADMAP**
+- [x] **Step 1: ROADMAP**
   Tick the Milestone 5 item, Plan line `— done`, one clause in "Where we stand" (a `.cljs` file resolves its core to `cljs.core` and reads `:require-macros`; a namespace split over `.clj` and `.cljs` is indexed as two dialect slots). Update the "ClojureScript is best effort" Direction bullet (drop `:require-macros` from the not-supported list) and the Best-effort ClojureScript bullet likewise.
 
-- [ ] **Step 2: Backlog files**
+- [x] **Step 2: Backlog files**
   Move the three issue files to `docs/archive/` (`git mv`), set each `Status` to `done (2026-09-27)` with a one-line resolution, and point the Milestone 5 item's links at `archive/`. Use the `/backlog` skill's close flow if it applies.
 
-- [ ] **Step 3: AGENTS.md**
+- [x] **Step 3: AGENTS.md**
   Rewrite the "Library symbols and namespace metadata are keyed once per fqn" invariant: both slots now hold project entries too (the rank order, file-owned removal through `file_symbols`, shadow promotion on removal, `lookup_all` for references and rename, who reads with a dialect). Add one bullet for `cljs.core` (`core_ns`, `.cljc` stays `clojure.core`, the `Core` arm's floor) and one for `:require-macros` / `:refer-macros` (what is read, what the lints and clean-ns still skip). Note the cache bump in the existing `format_version` bullet is not needed (it already says to bump).
+  > The field is `files` (the plan says `file_symbols` here); ROADMAP's Best-effort ClojureScript bullet now lists dotted type references (`cljs.core.ExceptionInfo`) in place of `:require-macros`.
 
-- [ ] **Step 4: FEATURES.md and README**
+- [x] **Step 4: FEATURES.md and README**
   FEATURES "File types": a `.cljs` file's core is `cljs.core`, `:require-macros` / `:refer-macros` bring in macros, and a namespace split across `.clj` and `.cljs` navigates to the copy of the asking dialect while references and rename cover both. README line 96–97: drop `:require-macros` from the unsupported list (shadow-cljs stays).
 
-- [ ] **Step 5: MEMORY.md**
+- [x] **Step 5: MEMORY.md**
   Add a dated compare section (or a new column pair on the 2026-09-18 table, whichever the memo's own rule prefers) with the Task 6 after-table and the one-paragraph reading: which buckets emptied, that the `reader_types` sites are `known`, the probe-count drop from the special forms.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
   Run: `bb check`
   Expected: green.
   `git commit -am "Document ClojureScript core, require-macros and twin namespaces"`
+
+## Completion summary
+
+**Implemented.** A `.cljs` file resolves its core to `cljs.core` (`index::core_ns`) in the extractor, the definition `Core` arm (with a `clojure.core` floor) and — for names the static list lacks — `resolve_symbol`. `:require-macros`, `:refer-macros` and `:include-macros` are read, with de-duplicated `requires`; `CACHE_FORMAT_VERSION` is 19. The index keeps project and library entries in one rank order across a primary and a ClojureScript shadow slot, removes by file through project `FileRecord`s, refills an emptied metadata slot from the namespace's other files (`ns_files`) and merges per file (`file_entries`). Definition, hover, signature help, ClojureDocs, completion (including its lazy `resolve`), the alias fallbacks and the outline read with the asking file's dialect; references and rename cover both halves. The compare gate skips special forms under either core (runtime vars under `clojure.core` only) and allowlists extra sites in a `.cljs` definition's `.clj` twin. `bb compare clj-kondo`: 450 → 302 diverge, 145 → 96 null; `var-usage/library` 5/118/44 → 164/0/2. All gates green: `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva`, `bb soak` (1.10x RSS), `bb bench clj-kondo` (timings unchanged, settled RSS +4–7 MiB on one run).
+
+**Issues.** `test_e2e_did_change_configuration_toggles_stage3` failed once under parallel load during Task 3 and passed on four reruns — a flake, unrelated. Codex hit its usage limit once (the Task 5 fixup review was folded into the `d03c712..HEAD` review). Two `var-usage/library` nulls remain: `cljs.core.ExceptionInfo` (a dotted type reference, now on the ROADMAP best-effort line) and a pre-existing `.clj` `clojure.pprint/pprint`.
+
+**Deviations, in one place.**
+- `core_ns` is `pub`; the locals walker accepts `cljs.core/let`; the `are` test's `.cljs` case expects `cljs.core/=` (Task 2).
+- Every `requires` push is de-duplicated through `record_require`; the 19 cache bump also covers Task 2's `cljs.core` `:rename` refers, which codex flagged on the Task 2 commit (Task 3).
+- `files` records project files only; library removal walks `ns_symbols`; `ns_files` makes the metadata refill O(1); `slot_rank(project, path)`; `FileEntry::Source.meta` boxed; `insert_file` removes an already-indexed file first (Task 4).
+- The twin e2e syncs its save on a witness def via `workspace/symbol`; `complete_symbols` and `resolve_var` take a `Dialect`; collision warnings compare per dialect slot; completion items of a `.cljs` symbol carry `"cljs": true` so `resolve` reads that half (codex, Task 5).
+- `resolve_symbol` asks `cljs.core` in the index for a `.cljs` bare name after the static list — found by the first compare run, separate commit (Task 6).
+- The oracle exclusion is split into `SPECIAL_FORMS` and `JVM_RUNTIME_VARS`; `extra_files` counts per-line excess (codex, Task 6).
+- The expected compare movement was partly off: `var-def/defmacro` went 8 → 6, not 0 (six are other classes), and probe counts did not drop (stride sampling).
+
+**What the plan could have specified better:** its expected compare numbers should have come from the divergence list per bucket rather than the bucket totals — `defmacro` "8 → 0" and "probe counts drop by the special forms" were both readable off the baseline log as wrong — and the `.cljs` core design should have asked which `cljs.core` names the static `clojure.core` list lacks, which is where the last nine nulls came from.
+

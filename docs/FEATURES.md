@@ -83,9 +83,14 @@ Clojure & project support:
 - **File types:** `.clj`, `.cljs`, `.cljc`, `.lg`. When a dependency ships a
   namespace as both `.clj` and `.cljs`, navigation and hover from a `.clj` or
   `.cljc` file open the Clojure copy and from a `.cljs` file the ClojureScript
-  one, whatever order the classpath lists the JARs.
+  one, whatever order the classpath lists the JARs. A `.cljs` file's core is
+  `cljs.core`, so `not` or `when` there opens the ClojureScript JAR. A
+  project namespace split across a `.clj` and a `.cljs` file keeps both
+  halves: each file navigates to, hovers and completes from its own half,
+  while references and rename cover both.
 - **ns forms:** `:as`, `:as-alias`, `:refer` (including `:refer :all` and
   `(:use ns)`), `:rename`, `:refer-clojure :exclude` / `:rename`, `:import`,
+  ClojureScript's `:require-macros`, `:refer-macros` and `:include-macros`,
   reader conditionals, and legacy prefix lists `(clojure [set :as s] string)`.
   `declare` is indexed too, so a name that is only declared still navigates.
 - **Project types:** `deps.edn` (resolved from the `.cpcache` classpath),

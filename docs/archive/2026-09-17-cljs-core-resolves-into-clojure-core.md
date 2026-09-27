@@ -2,7 +2,7 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `var-usage/library`, `var-usage/library/macro`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
+- **Status:** done (2026-09-27, plan `docs/plans/2026-09-27-2031-clojurescript-core-macros-and-twins.md`): A `.cljs` file resolves bare and `clojure.core/`-qualified core names to `cljs.core`, and the definition fallback asks `cljs.core` for names the static list lacks; `var-usage/library` went from 5/118/44 to 163 agree, 0 diverge, 2 null; archived. Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom
