@@ -24,28 +24,10 @@ pub const PINNED_KONDO: &str = "2026.08.04";
 /// kondo's `to` for a usage it could not resolve.
 const UNKNOWN_NS: &str = "clj-kondo/unknown-namespace";
 
-/// Names kondo attributes to `clojure.core` (or, in a `.cljs` file, to
-/// `cljs.core`) that no source form defines: the special forms, and the vars
-/// `RT.java` creates that `core.clj` only documents through
-/// `add-doc-and-meta`. A definition on one is a question with no answer.
-const NO_SOURCE_DEFINITION: &[&str] = &[
-    "*file*",
-    "*command-line-args*",
-    "*warn-on-reflection*",
-    "*compile-path*",
-    "*compile-files*",
-    "*unchecked-math*",
-    "*compiler-options*",
-    "*ns*",
-    "*in*",
-    "*out*",
-    "*err*",
-    "*flush-on-newline*",
-    "*print-meta*",
-    "*print-dup*",
-    "*print-readably*",
-    "*read-eval*",
-    "*clojure-version*",
+/// Names kondo attributes to `clojure.core` or `cljs.core` that no source
+/// form defines: the special forms. A definition on one is a question with no
+/// answer.
+const SPECIAL_FORMS: &[&str] = &[
     "def",
     "if",
     "do",
@@ -70,6 +52,30 @@ const NO_SOURCE_DEFINITION: &[&str] = &[
     "reify*",
     "import*",
     "&",
+];
+
+/// The vars `RT.java` creates that `core.clj` only documents through
+/// `add-doc-and-meta`: no source form in `clojure.core`. `cljs.core` defines
+/// its own `*print-meta*`, `*command-line-args*` and friends with `def`, so
+/// these are probes there.
+const JVM_RUNTIME_VARS: &[&str] = &[
+    "*file*",
+    "*command-line-args*",
+    "*warn-on-reflection*",
+    "*compile-path*",
+    "*compile-files*",
+    "*unchecked-math*",
+    "*compiler-options*",
+    "*ns*",
+    "*in*",
+    "*out*",
+    "*err*",
+    "*flush-on-newline*",
+    "*print-meta*",
+    "*print-dup*",
+    "*print-readably*",
+    "*read-eval*",
+    "*clojure-version*",
 ];
 
 // ---------------------------------------------------------------------------
@@ -649,7 +655,8 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         };
         if u.to == UNKNOWN_NS
             || (matches!(u.to.as_str(), "clojure.core" | "cljs.core")
-                && NO_SOURCE_DEFINITION.contains(&u.name.as_str()))
+                && SPECIAL_FORMS.contains(&u.name.as_str()))
+            || (u.to == "clojure.core" && JVM_RUNTIME_VARS.contains(&u.name.as_str()))
         {
             continue;
         }

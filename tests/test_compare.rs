@@ -120,8 +120,9 @@ enum Verdict {
     Agree,
     /// `missing` is how many expected sites the answer lacks; zero means the
     /// answer holds everything the oracle knows and more. `extra_files` holds
-    /// the files of the lines only the answer has, so an allowlist entry reads
-    /// structure rather than the `got` string; empty for a single-site answer.
+    /// the files of the lines the answer counts more often than the oracle, so
+    /// an allowlist entry reads structure rather than the `got` string; empty
+    /// for a single-site answer.
     Diverge {
         expected: String,
         got: String,
@@ -250,11 +251,13 @@ fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
             expected: brief_set(&theirs, &mine),
             got: brief_set(&mine, &theirs),
             missing: missing_sites(expected, got),
+            // Every line the answer counts more often than the oracle, a
+            // line the oracle lacks being one it counts zero times.
             extra_files: got
                 .per_line
-                .keys()
-                .filter(|key| !expected.per_line.contains_key(*key))
-                .map(|(file, _)| file.clone())
+                .iter()
+                .filter(|(key, n)| **n > expected.per_line.get(*key).copied().unwrap_or(0))
+                .map(|((file, _), _)| file.clone())
                 .collect(),
         };
     }
@@ -1275,6 +1278,17 @@ mod judge_tests {
         // An extra site in an unrelated `.clj` file is not.
         let verdict = judged(vec![at_("/corpus/src/r/other.clj", 6)], true);
         assert!(known_reason(&p, &verdict).is_none(), "{verdict:?}");
+
+        // Nor is a second site on a line the oracle counts once, beside it.
+        let mut doubled = at_("/corpus/src/r/reader.cljs", 9);
+        doubled["range"]["start"]["character"] = json!(20);
+        let verdict = judged(vec![at_(clj, 6), doubled], true);
+        assert!(
+            matches!(&verdict, Verdict::Diverge { missing: 0, extra_files, .. }
+                if extra_files.len() == 2),
+            "{verdict:?}"
+        );
+        assert!(known_reason(&p, &verdict).is_none());
 
         // Nor is the twin's site when a caller is missing.
         let verdict = judged(vec![at_(clj, 6)], false);
