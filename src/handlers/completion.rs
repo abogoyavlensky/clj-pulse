@@ -796,10 +796,15 @@ fn symbol_to_completion(sym: &crate::index::Symbol, alias: Option<&str>) -> Comp
         label,
         detail: Some(format!("{} ({})", sym.ns, params_display(&sym.params))),
         kind: Some(defkind_to_completion_kind(&sym.kind)),
-        data: sym
-            .doc
-            .as_ref()
-            .map(|_| json!({ "src": "symbol", "fqn": sym.fqn })),
+        data: sym.doc.as_ref().map(|_| {
+            let mut data = json!({ "src": "symbol", "fqn": sym.fqn });
+            // The ClojureScript copy of a name both halves of a namespace
+            // define: `resolve` must read this copy's doc, not the primary's.
+            if Dialect::of_path(&sym.file) == Dialect::Cljs {
+                data["cljs"] = json!(true);
+            }
+            data
+        }),
         ..Default::default()
     }
 }
@@ -886,7 +891,13 @@ pub fn resolve(index: &Index, item: CompletionItem) -> CompletionItem {
 fn documentation_for(index: &Index, data: &serde_json::Value) -> Option<Documentation> {
     let name = || data.get("name")?.as_str();
     match data.get("src")?.as_str()? {
-        "symbol" => symbol_documentation(&index.lookup(data.get("fqn")?.as_str()?)?),
+        "symbol" => {
+            let dialect = match data.get("cljs").and_then(|v| v.as_bool()) {
+                Some(true) => Dialect::Cljs,
+                _ => Dialect::Clj,
+            };
+            symbol_documentation(&index.lookup_for(data.get("fqn")?.as_str()?, dialect)?)
+        }
         // A let-go native borrows its doc from the clojure.core table, the same
         // table the `core` source reads.
         "core" | "native" => {

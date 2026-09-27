@@ -84,7 +84,7 @@ use clj_pulse::index::CoreSymbol;
 use clj_pulse::index::{DefKind, NsMeta, Symbol, SymbolSource};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Range};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, Range};
 
 /// A namespace with no requires beyond what the caller fills in.
 fn ns_meta(name: &str) -> NsMeta {
@@ -392,6 +392,36 @@ fn test_items_carry_data_not_documentation() {
         item.data,
         Some(serde_json::json!({ "src": "symbol", "fqn": "simple.core/add" }))
     );
+}
+
+#[test]
+fn test_twin_completion_resolves_the_documentation_of_the_offered_half() {
+    // `app.shared/platform` in both halves of a namespace, each documented.
+    let index = Index::new();
+    for (file, doc) in [
+        ("app/shared.clj", "Clojure"),
+        ("app/shared.cljs", "ClojureScript"),
+    ] {
+        let mut meta = ns_meta("app.shared");
+        meta.file = PathBuf::from(file);
+        let mut sym = macro_sym("platform", "app.shared");
+        sym.kind = DefKind::Defn;
+        sym.doc = Some(doc.to_string());
+        sym.file = PathBuf::from(file);
+        sym.source = SymbolSource::Project;
+        index.insert_file(meta, vec![sym], vec![]);
+    }
+    for (dialect, doc) in [(Dialect::Clj, "Clojure"), (Dialect::Cljs, "ClojureScript")] {
+        let item = item_named(
+            &complete_symbols(&index, "platform", "app.shared", dialect, None),
+            "platform",
+        );
+        let documentation = match resolve(&index, item).documentation {
+            Some(Documentation::MarkupContent(m)) => m.value,
+            other => panic!("{dialect:?}: no documentation: {other:?}"),
+        };
+        assert_eq!(documentation, doc, "{dialect:?}");
+    }
 }
 
 #[test]
