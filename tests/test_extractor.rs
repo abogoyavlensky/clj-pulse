@@ -1083,6 +1083,64 @@ fn test_is_integrant_edn_detection() {
     assert!(!is_integrant_edn(Path::new("data.edn"), "{:a 1 :b 2}"));
 }
 
+const REQUIRE_MACROS_NS: &str = "(ns x (:require-macros [a.macros :as m :refer [defthing]]) (:require [a.macros :refer [helper]]))";
+
+#[test]
+fn require_macros_binds_aliases_and_refers() {
+    let (meta, _) = extract(REQUIRE_MACROS_NS, Path::new("x.cljs")).unwrap();
+    assert_eq!(meta.aliases.get("m").map(String::as_str), Some("a.macros"));
+    assert_eq!(
+        meta.refers.get("defthing").map(String::as_str),
+        Some("a.macros/defthing")
+    );
+    assert_eq!(
+        meta.refers.get("helper").map(String::as_str),
+        Some("a.macros/helper")
+    );
+    // Named by both clauses, required once.
+    assert_eq!(
+        meta.requires.iter().filter(|r| *r == "a.macros").count(),
+        1,
+        "requires: {:?}",
+        meta.requires
+    );
+}
+
+#[test]
+fn refer_macros_and_include_macros_in_a_require_spec() {
+    let (meta, _) = extract(
+        "(ns x (:require [a.macros :refer-macros [defthing] :include-macros true]))",
+        Path::new("x.cljs"),
+    )
+    .unwrap();
+    assert_eq!(
+        meta.refers.get("defthing").map(String::as_str),
+        Some("a.macros/defthing")
+    );
+    assert_eq!(meta.requires, vec!["a.macros".to_string()]);
+}
+
+#[test]
+fn require_macros_usage_is_an_occurrence() {
+    let src = format!("{REQUIRE_MACROS_NS}\n(defthing foo 1)\n(m/other 2)");
+    let (_, _, occs) = extract_full(&src, Path::new("x.cljs")).unwrap();
+    // The refer entry in the clause and the usage.
+    let lines: Vec<u32> = occurrences_of(&occs, "a.macros/defthing")
+        .iter()
+        .map(|o| o.name_range.start.line)
+        .collect();
+    assert_eq!(lines, vec![0, 1], "{occs:?}");
+    assert_eq!(occurrences_of(&occs, "a.macros/other").len(), 1, "{occs:?}");
+    // A `:refer-macros` entry inside a `:require` libspec is one too.
+    let src = "(ns x (:require [a.macros :refer-macros [defthing]]))\n(defthing foo 1)";
+    let (_, _, occs) = extract_full(src, Path::new("x.cljs")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "a.macros/defthing").len(),
+        2,
+        "{occs:?}"
+    );
+}
+
 #[test]
 fn test_ns_refer_all_and_use_recorded() {
     let (meta, _) = extract(
@@ -2319,6 +2377,20 @@ h/f
             sites.declarations.iter().all(|d| !sites.usages.contains(d)),
             "declaration listed as a usage"
         );
+    }
+
+    #[test]
+    fn require_macros_alias_is_a_rename_site() {
+        let src = "(ns x (:require-macros [a.macros :as m]))\n(m/defthing foo 1)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("x.cljs"), &ExtractConfig::default())
+                .unwrap();
+        let sites = alias_sites_tree(&tree, src, "m", &occs);
+        let declarations: Vec<(u32, u32, u32)> = sites.declarations.iter().map(triple).collect();
+        assert_eq!(declarations, vec![(0, 37, 38)], "{:?}", sites.declarations);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(usages, vec![(1, 1, 2)], "{:?}", sites.usages);
     }
 
     #[test]

@@ -137,25 +137,26 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
 - Modify: `src/index/extractor.rs`, `src/index/jar_cache.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   In `tests/test_extractor.rs`, next to `test_ns_refer_all_and_use_recorded`:
   - `require_macros_binds_aliases_and_refers`: `(ns x (:require-macros [a.macros :as m :refer [defthing]]) (:require [a.macros :refer [helper]]))` at `x.cljs`; `aliases["m"] == "a.macros"`, `refers["defthing"] == "a.macros/defthing"`, `refers["helper"]` present, `requires` contains `a.macros` exactly once.
   - `refer_macros_and_include_macros_in_a_require_spec`: `(ns x (:require [a.macros :refer-macros [defthing] :include-macros true]))` → `refers["defthing"]`, `requires == ["a.macros"]`.
   - `require_macros_usage_is_an_occurrence`: the first ns form followed by `(defthing foo 1)\n(m/other 2)`; occurrences hold `a.macros/defthing` twice (the refer entry in the clause and the usage) and `a.macros/other`.
   - `require_macros_alias_is_a_rename_site`: whatever the existing alias-site test uses (`alias_sites_tree`), with the alias bound by `:require-macros` — the declaration site is found.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --test test_extractor macros -- --nocapture`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `extract_ns`: `":require-macros"` arm identical to `":require"`. `parse_libspec_items`: `:refer-macros` vector → refers; `:include-macros` + next item skipped; the final `requires.push` guarded by `!contains`. `collect_refer_occurrences`: accept `:require-macros` clauses and `:refer-macros` keys. `collect_alias_declarations`: add `":require-macros"` to the clause match. Bump `CACHE_FORMAT_VERSION` to 19 and its test if it pins the number.
+  > Deviation: every `requires` push goes through one de-duplicating `record_require` (bare symbols and prefix-list entries too, not only `parse_libspec_items`); every consumer of `requires` is an `any` check. The 19 bump also carries Task 2's `cljs.core` `:rename` refers — codex flagged the missing bump on the Task 2 commit.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --test test_extractor && cargo test --lib`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Read :require-macros, :refer-macros and :include-macros"`
 
 ### Task 4: Index — ranks for project files, file-owned removal

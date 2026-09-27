@@ -656,7 +656,10 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                 continue;
             }
             match node_text(kw, source) {
-                ":require" => {
+                // `(:require-macros …)` is ClojureScript's clause for the
+                // macro half of a namespace: its libspecs bind aliases and
+                // refers exactly like `:require`'s.
+                ":require" | ":require-macros" => {
                     for require_spec in &inner[1..] {
                         process_require_spec(*require_spec, source, ns_meta);
                     }
@@ -711,7 +714,7 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
                 _ => {}
             }
         }
-        "sym_lit" => ns_meta.requires.push(sym_text(spec, source).to_string()),
+        "sym_lit" => record_require(ns_meta, sym_text(spec, source).to_string()),
         // Legacy prefix list `(clojure [set :as s] string)`: each entry is a
         // libspec whose namespace is the prefix joined by a dot. The prefix
         // itself binds nothing, so `set/union` stays unresolved — only
@@ -733,9 +736,7 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
             for item in &items[1..] {
                 match item.kind() {
                     "sym_lit" => {
-                        ns_meta
-                            .requires
-                            .push(format!("{}.{}", prefix, sym_text(*item, source)))
+                        record_require(ns_meta, format!("{}.{}", prefix, sym_text(*item, source)))
                     }
                     "vec_lit" => {
                         let sub = named_children(*item);
@@ -815,6 +816,15 @@ fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Records `ns` as required. De-duplicated: ClojureScript names a namespace in
+/// both `:require` and `:require-macros` when it has a runtime and a macro
+/// half, and a repeat would surface twice in every consumer of `requires`.
+fn record_require(ns_meta: &mut NsMeta, ns: String) {
+    if !ns_meta.requires.contains(&ns) {
+        ns_meta.requires.push(ns);
     }
 }
 
@@ -981,7 +991,11 @@ fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &
                     i += 2;
                     continue;
                 }
-                ":refer" if i + 1 < items.len() && items[i + 1].kind() == "vec_lit" => {
+                // `:refer-macros` is ClojureScript's refer of the namespace's
+                // macro half, written inside an ordinary `:require` libspec.
+                ":refer" | ":refer-macros"
+                    if i + 1 < items.len() && items[i + 1].kind() == "vec_lit" =>
+                {
                     let refer_vec = named_children(items[i + 1]);
                     for refer_node in refer_vec {
                         if refer_node.kind() == "sym_lit" {
@@ -990,6 +1004,12 @@ fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &
                             ns_meta.refers.insert(refer_name, fqn);
                         }
                     }
+                    i += 2;
+                    continue;
+                }
+                // `:include-macros true` loads the macro half of a namespace
+                // the spec already requires; it binds nothing.
+                ":include-macros" if i + 1 < items.len() => {
                     i += 2;
                     continue;
                 }
@@ -1006,7 +1026,7 @@ fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &
     }
 
     if !as_alias_only {
-        ns_meta.requires.push(ns_name);
+        record_require(ns_meta, ns_name);
     }
 }
 
@@ -1618,8 +1638,8 @@ fn is_ns_form(list: Node, source: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Pushes every `:as` / `:as-alias` value symbol in the `:require` and `:use`
-/// clauses of `ns_form`.
+/// Pushes every `:as` / `:as-alias` value symbol in the `:require`,
+/// `:require-macros` and `:use` clauses of `ns_form`.
 fn collect_alias_declarations<'a>(ns_form: Node<'a>, source: &str, out: &mut Vec<Node<'a>>) {
     for clause in named_children(ns_form).into_iter().skip(2) {
         if clause.kind() != "list_lit" {
@@ -1629,7 +1649,11 @@ fn collect_alias_declarations<'a>(ns_form: Node<'a>, source: &str, out: &mut Vec
         let is_libspec_clause = inner
             .first()
             .map(|kw| {
-                kw.kind() == "kwd_lit" && matches!(node_text(*kw, source), ":require" | ":use")
+                kw.kind() == "kwd_lit"
+                    && matches!(
+                        node_text(*kw, source),
+                        ":require" | ":require-macros" | ":use"
+                    )
             })
             .unwrap_or(false);
         if !is_libspec_clause {
@@ -2792,7 +2816,8 @@ fn destructuring_key_ns(directive: Node, ctx: &OccurrenceCtx) -> Option<String> 
 }
 
 /// `(:require [some.ns :refer [a b]])` — refer entries are occurrences of
-/// `some.ns/a` etc., so rename can fix require clauses.
+/// `some.ns/a` etc., so rename can fix require clauses. A `:require-macros`
+/// clause and a `:refer-macros` key refer the same way.
 fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
     for child in children.iter().skip(2) {
         if child.kind() != "list_lit" {
@@ -2801,7 +2826,10 @@ fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut V
         let inner = named_children(*child);
         let is_require = inner
             .first()
-            .map(|kw| kw.kind() == "kwd_lit" && node_text(*kw, ctx.source) == ":require")
+            .map(|kw| {
+                kw.kind() == "kwd_lit"
+                    && matches!(node_text(*kw, ctx.source), ":require" | ":require-macros")
+            })
             .unwrap_or(false);
         if !is_require {
             continue;
@@ -2817,8 +2845,8 @@ fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut V
             let ns_name = sym_text(*ns_name, ctx.source).to_string();
             let mut i = 1;
             while i < items.len() {
-                let is_refer =
-                    items[i].kind() == "kwd_lit" && node_text(items[i], ctx.source) == ":refer";
+                let is_refer = items[i].kind() == "kwd_lit"
+                    && matches!(node_text(items[i], ctx.source), ":refer" | ":refer-macros");
                 if is_refer {
                     if let Some(refer_vec) = items.get(i + 1).filter(|n| n.kind() == "vec_lit") {
                         for sym in named_children(*refer_vec) {
