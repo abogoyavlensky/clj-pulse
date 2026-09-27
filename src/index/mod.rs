@@ -209,35 +209,84 @@ pub fn core_ns(dialect: Dialect) -> &'static str {
     }
 }
 
-/// Rank of a library file when two files define the same fqn: lower wins.
+/// Rank of a file's entry when two files define the same fqn or namespace:
+/// lower wins. Every project file outranks every library file; within each,
 /// `.clj` is the copy a Clojure reader wants, `.cljc` serves both dialects,
 /// `.cljs` is the ClojureScript copy `Index::cljs_symbols` keeps aside.
-/// Anything else (`.lg`, a `.clj`-less entry) ranks with `.cljc`.
-fn lib_rank(path: &Path) -> u8 {
-    match path.extension().and_then(|e| e.to_str()) {
+/// Anything else (`.lg`, a `.clj`-less entry) ranks with `.cljc`. Project
+/// `.clj` 0, other 1, `.cljs` 2; library `.clj` 3, other 4, `.cljs` 5.
+fn slot_rank(project: bool, path: &Path) -> u8 {
+    let dialect_rank = match path.extension().and_then(|e| e.to_str()) {
         Some("clj") => 0,
-        Some("cljs") => CLJS_RANK,
+        Some("cljs") => 2,
         _ => 1,
+    };
+    if project {
+        dialect_rank
+    } else {
+        3 + dialect_rank
     }
 }
 
-/// The `lib_rank` of a `.cljs` file, the one rank whose loser is kept aside.
-const CLJS_RANK: u8 = 2;
+/// Whether `rank` is a `.cljs` file's, the one rank whose loser is kept aside.
+fn is_cljs_rank(rank: u8) -> bool {
+    rank % 3 == 2
+}
+
+fn symbol_rank(sym: &Symbol) -> u8 {
+    slot_rank(is_project(sym), &sym.file)
+}
+
+/// What one project source file contributed to the index, whatever the
+/// primary and shadow slots made of it: its own namespace metadata and the
+/// fqns it defines. Two same-dialect files of one namespace (two projects both
+/// defining `user`) keep one metadata slot between them, so the loser's lives
+/// here alone.
+#[derive(Debug, Clone)]
+pub struct FileRecord {
+    pub meta: NsMeta,
+    pub fqns: Vec<String>,
+}
+
+/// One indexed project file as [`Index::file_entries`] hands it back: enough
+/// to re-insert it into another index.
+#[derive(Debug, Clone)]
+pub enum FileEntry {
+    Source {
+        /// Boxed: `NsMeta` dwarfs the `Edn` variant.
+        meta: Box<NsMeta>,
+        symbols: Vec<Symbol>,
+        occurrences: Vec<Occurrence>,
+    },
+    Edn {
+        file: PathBuf,
+        occurrences: Vec<Occurrence>,
+    },
+}
 
 pub struct Index {
     pub symbols: DashMap<String, Symbol>,
     pub namespaces: DashMap<String, NsMeta>,
     pub ns_symbols: DashMap<String, Vec<String>>,
-    /// The ClojureScript copy of a library symbol that a Clojure copy displaced
-    /// from `symbols` (or that arrived after one). Read only through
-    /// [`Index::lookup_for`] / [`Index::prefer_dialect`] with `Dialect::Cljs`;
-    /// library entries alone, so `clear_libs` empties it and `remove_file`
-    /// never touches it.
+    /// The ClojureScript copy of a symbol that a Clojure copy displaced from
+    /// `symbols` (or that arrived after one) — a library's, or a project
+    /// namespace's `.cljs` half. Read only through [`Index::lookup_for`] /
+    /// [`Index::prefer_dialect`] with `Dialect::Cljs` and [`Index::lookup_all`].
+    /// Every key here is also a key of `symbols`: removing the primary entry
+    /// promotes this one.
     cljs_symbols: DashMap<String, Symbol>,
-    /// The ClojureScript copy of a library namespace's metadata that a Clojure
-    /// copy displaced from `namespaces`; the twin of `cljs_symbols`, read only
+    /// The ClojureScript copy of a namespace's metadata that a Clojure copy
+    /// displaced from `namespaces`; the twin of `cljs_symbols`, read only
     /// through [`Index::ns_meta_for`].
     cljs_namespaces: DashMap<String, NsMeta>,
+    /// What each project source file contributed (see [`FileRecord`]):
+    /// removal is by file, so saving one half of a namespace never touches
+    /// the other half's entries.
+    files: DashMap<PathBuf, FileRecord>,
+    /// The project files of each namespace, the keys of `files` grouped by
+    /// their record's namespace: what refills a namespace's metadata slot when
+    /// the file holding it is removed.
+    ns_files: DashMap<String, Vec<PathBuf>>,
     pub file_to_ns: DashMap<PathBuf, String>,
     /// Resolved symbol usages per project file (libraries excluded).
     pub occurrences: DashMap<PathBuf, Vec<Occurrence>>,
@@ -268,18 +317,20 @@ pub struct Index {
     extract_config: RwLock<ExtractConfig>,
 }
 
-/// The dialect rule of [`Index::insert_lib_file`] for one primary/shadow map
-/// pair. `old_rank` ranks the entry already in the primary slot, or answers
-/// `None` when that entry is project-owned and must stay. Incoming rank at or
-/// below the old one takes the slot; a `.cljs` copy (rank 2) that loses or is
-/// displaced by a Clojure one lands in `shadow`; a losing `.cljc` is dropped.
+/// The dialect rule of [`Index::insert_file`] and [`Index::insert_lib_file`]
+/// for one primary/shadow map pair. `rank_of` ranks an entry already in a
+/// slot (see [`slot_rank`]). Incoming rank at or below the old one takes the
+/// primary slot; a `.cljs` copy that loses to, or is displaced by, a
+/// non-`.cljs` one lands in `shadow`, unless the shadow already holds a
+/// lower rank (a library `.cljs` never evicts a project one); any other loser
+/// is dropped.
 fn rank_insert<V>(
     primary: &DashMap<String, V>,
     shadow: &DashMap<String, V>,
     key: String,
     value: V,
     rank: u8,
-    old_rank: impl Fn(&V) -> Option<u8>,
+    rank_of: impl Fn(&V) -> u8,
 ) {
     use dashmap::mapref::entry::Entry;
 
@@ -288,17 +339,68 @@ fn rank_insert<V>(
             e.insert(value);
         }
         Entry::Occupied(mut e) => {
-            let Some(old) = old_rank(e.get()) else {
-                return;
-            };
+            let old = rank_of(e.get());
             if rank <= old {
                 let displaced = e.insert(value);
-                if old == CLJS_RANK && rank < CLJS_RANK {
-                    shadow.insert(key, displaced);
+                if is_cljs_rank(old) && !is_cljs_rank(rank) {
+                    shadow_insert(shadow, key, displaced, old, &rank_of);
                 }
-            } else if rank == CLJS_RANK {
-                shadow.insert(key, value);
+            } else if is_cljs_rank(rank) {
+                shadow_insert(shadow, key, value, rank, &rank_of);
             }
+        }
+    }
+}
+
+/// Puts a `.cljs` entry of `rank` in the shadow slot when that is vacant or
+/// holds a rank not lower than its own.
+fn shadow_insert<V>(
+    shadow: &DashMap<String, V>,
+    key: String,
+    value: V,
+    rank: u8,
+    rank_of: &impl Fn(&V) -> u8,
+) {
+    use dashmap::mapref::entry::Entry;
+
+    match shadow.entry(key) {
+        Entry::Vacant(e) => {
+            e.insert(value);
+        }
+        Entry::Occupied(mut e) => {
+            if rank <= rank_of(e.get()) {
+                e.insert(value);
+            }
+        }
+    }
+}
+
+/// Removes `path`'s entry for `key` from a primary/shadow map pair. A primary
+/// entry of `path` is replaced by the shadow one when there is one, so the
+/// `.cljs` half of a namespace answers for every asker once its Clojure half
+/// is gone (as a `.cljs`-only library already does); otherwise a shadow entry
+/// of `path` is dropped. Entries of other files are untouched. The primary
+/// entry lock is taken first, as in [`rank_insert`].
+fn remove_slot<V>(
+    primary: &DashMap<String, V>,
+    shadow: &DashMap<String, V>,
+    key: &str,
+    path: &Path,
+    file_of: impl Fn(&V) -> &Path,
+) {
+    use dashmap::mapref::entry::Entry;
+
+    match primary.entry(key.to_string()) {
+        Entry::Occupied(mut e) if file_of(e.get()) == path => match shadow.remove(key) {
+            Some((_, promoted)) => {
+                e.insert(promoted);
+            }
+            None => {
+                e.remove();
+            }
+        },
+        _ => {
+            shadow.remove_if(key, |_, v| file_of(v) == path);
         }
     }
 }
@@ -315,6 +417,8 @@ impl Default for Index {
             ns_symbols: DashMap::new(),
             cljs_symbols: DashMap::new(),
             cljs_namespaces: DashMap::new(),
+            files: DashMap::new(),
+            ns_files: DashMap::new(),
             file_to_ns: DashMap::new(),
             occurrences: DashMap::new(),
             keyword_counts: DashMap::new(),
@@ -344,30 +448,49 @@ impl Index {
     }
 
     /// [`Index::lookup`], but a `.cljs` requester gets the ClojureScript copy
-    /// when one exists. The primary map is read first: a project symbol there
-    /// always wins, because `insert_file` overwrites the primary slot without
-    /// touching the shadow, so a project definition inserted after both
-    /// library copies would otherwise lose to the shadow. A library that ships
-    /// only `.clj` still resolves for a `.cljs` file through the primary.
+    /// when one exists — unless the primary copy is a project symbol and the
+    /// ClojureScript one a library's: project code wins in either dialect. A
+    /// namespace that ships only `.clj` still resolves for a `.cljs` file
+    /// through the primary.
     pub fn lookup_for(&self, fqn: &str, dialect: Dialect) -> Option<Symbol> {
         let primary = self.lookup(fqn);
-        if dialect == Dialect::Clj || primary.as_ref().map(is_project) == Some(true) {
+        if dialect == Dialect::Clj {
             return primary;
         }
-        self.cljs_symbols.get(fqn).map(|r| r.clone()).or(primary)
+        let Some(shadow) = self.cljs_symbols.get(fqn).map(|r| r.clone()) else {
+            return primary;
+        };
+        match primary {
+            Some(p) if is_project(&p) && !is_project(&shadow) => Some(p),
+            _ => Some(shadow),
+        }
     }
 
-    /// Swaps an already-resolved library symbol for its ClojureScript copy when
-    /// `dialect` is `Cljs` and one exists; project symbols and `Clj` pass
-    /// through untouched.
+    /// Swaps an already-resolved symbol for its ClojureScript copy when
+    /// `dialect` is `Cljs` and one exists, by the rule of
+    /// [`Index::lookup_for`]; `Clj` passes through untouched.
     pub fn prefer_dialect(&self, sym: Symbol, dialect: Dialect) -> Symbol {
-        if dialect == Dialect::Clj || is_project(&sym) {
+        if dialect == Dialect::Clj {
             return sym;
         }
-        self.cljs_symbols
-            .get(&sym.fqn)
-            .map(|r| r.clone())
-            .unwrap_or(sym)
+        match self.cljs_symbols.get(&sym.fqn) {
+            Some(shadow) if !is_project(&sym) || is_project(&shadow) => shadow.clone(),
+            _ => sym,
+        }
+    }
+
+    /// Every definition of `fqn`, in both dialects: the primary copy, then the
+    /// ClojureScript one when it lives in another file. References and rename
+    /// read this, since a namespace split across `.clj` and `.cljs` is one
+    /// logical var defined twice.
+    pub fn lookup_all(&self, fqn: &str) -> Vec<Symbol> {
+        let mut out: Vec<Symbol> = self.lookup(fqn).into_iter().collect();
+        if let Some(shadow) = self.cljs_symbols.get(fqn) {
+            if out.iter().all(|p| p.file != shadow.file) {
+                out.push(shadow.clone());
+            }
+        }
+        out
     }
 
     /// The JDK source index, once background discovery has installed it.
@@ -409,17 +532,26 @@ impl Index {
 
     /// [`Index::ns_meta`], with the rule of [`Index::lookup_for`]: a `.cljs`
     /// requester gets the ClojureScript copy unless the primary entry is a
-    /// project namespace (one whose file has an occurrences entry).
+    /// project namespace (one whose file has an occurrences entry) and the
+    /// ClojureScript one is not.
     pub fn ns_meta_for(&self, ns: &str, dialect: Dialect) -> Option<NsMeta> {
         let primary = self.ns_meta(ns);
-        let primary_is_project = primary
-            .as_ref()
-            .map(|meta| self.is_project_path(&meta.file))
-            .unwrap_or(false);
-        if dialect == Dialect::Clj || primary_is_project {
+        if dialect == Dialect::Clj {
             return primary;
         }
-        self.cljs_namespaces.get(ns).map(|r| r.clone()).or(primary)
+        let Some(shadow) = self.cljs_namespaces.get(ns).map(|r| r.clone()) else {
+            return primary;
+        };
+        match primary {
+            Some(p) if self.is_project_path(&p.file) && !self.is_project_path(&shadow.file) => {
+                Some(p)
+            }
+            _ => Some(shadow),
+        }
+    }
+
+    fn meta_rank(&self, meta: &NsMeta) -> u8 {
+        slot_rank(self.is_project_path(&meta.file), &meta.file)
     }
 
     /// Records that let-go's built-in `core` namespace has been indexed, so the
@@ -457,34 +589,199 @@ impl Index {
         (!g.is_empty()).then(|| g.binary_search_by(|n| n.as_str().cmp(name)).is_ok())
     }
 
+    /// Removes what `path` contributed, and nothing another file did: its
+    /// entry in each symbol slot (a displaced `.cljs` copy moving up into the
+    /// primary), its namespace metadata by the same rule, its occurrences. The
+    /// namespace keeps its `ns_symbols` list, trimmed to the fqns still
+    /// defined, for as long as another file of it remains; when its metadata
+    /// slot empties, another project file of the namespace refills it from
+    /// its [`FileRecord`].
     pub fn remove_file(&self, path: &Path) {
         if let Some((_, occs)) = self.occurrences.remove(path) {
             self.sub_keyword_counts(&occs);
         }
-        if let Some((_, ns_name)) = self.file_to_ns.remove(path) {
-            if let Some((_, fqns)) = self.ns_symbols.remove(&ns_name) {
-                for fqn in fqns {
-                    self.symbols.remove(&fqn);
-                }
+        let record = self.files.remove(path).map(|(_, r)| r);
+        if let Some(r) = &record {
+            self.ns_files.remove_if_mut(&r.meta.name, |_, paths| {
+                paths.retain(|p| p != path);
+                paths.is_empty()
+            });
+        }
+        let Some((_, ns_name)) = self.file_to_ns.remove(path) else {
+            return;
+        };
+        if ns_name == EDN_NS_SENTINEL {
+            return;
+        }
+        // A library file has no record (see `insert_lib_file`); its fqns are
+        // among its namespace's.
+        let fqns = match record {
+            Some(r) => r.fqns,
+            None => self
+                .ns_symbols
+                .get(&ns_name)
+                .map(|r| r.clone())
+                .unwrap_or_default(),
+        };
+        for fqn in &fqns {
+            remove_slot(&self.symbols, &self.cljs_symbols, fqn, path, |s| {
+                s.file.as_path()
+            });
+        }
+        remove_slot(
+            &self.namespaces,
+            &self.cljs_namespaces,
+            &ns_name,
+            path,
+            |m| m.file.as_path(),
+        );
+        if !self.namespaces.contains_key(&ns_name) {
+            self.refill_namespace(&ns_name);
+        }
+
+        use dashmap::mapref::entry::Entry;
+        if let Entry::Occupied(mut e) = self.ns_symbols.entry(ns_name.clone()) {
+            e.get_mut().retain(|fqn| self.symbols.contains_key(fqn));
+            if e.get().is_empty() && !self.namespaces.contains_key(&ns_name) {
+                e.remove();
             }
-            self.namespaces.remove(&ns_name);
         }
     }
 
+    /// Re-inserts the metadata of every remaining project file of `ns` from
+    /// its record, after the file holding the slot was removed.
+    fn refill_namespace(&self, ns: &str) {
+        let paths = self.ns_files.get(ns).map(|r| r.clone()).unwrap_or_default();
+        let metas: Vec<NsMeta> = paths
+            .iter()
+            .filter_map(|p| self.files.get(p).map(|r| r.meta.clone()))
+            .collect();
+        for meta in metas {
+            let rank = self.meta_rank(&meta);
+            rank_insert(
+                &self.namespaces,
+                &self.cljs_namespaces,
+                ns.to_string(),
+                meta,
+                rank,
+                |old| self.meta_rank(old),
+            );
+        }
+    }
+
+    /// Adds `fqns` to `ns`'s list, de-duplicated: the files of one namespace
+    /// share it, so completion's current-namespace pool sees every half.
+    fn extend_ns_symbols(&self, ns: &str, fqns: &[String]) {
+        let mut list = self.ns_symbols.entry(ns.to_string()).or_default();
+        for fqn in fqns {
+            if !list.contains(fqn) {
+                list.push(fqn.clone());
+            }
+        }
+    }
+
+    /// Inserts a project source file. Every symbol and the namespace entry go
+    /// through the rank rule of [`rank_insert`], so a namespace split across
+    /// `.clj` and `.cljs` keeps both halves: the Clojure copy in the primary
+    /// slot, the ClojureScript one in the shadow. A file already indexed is
+    /// removed first.
     pub fn insert_file(&self, meta: NsMeta, symbols: Vec<Symbol>, occurrences: Vec<Occurrence>) {
         let ns_name = meta.name.clone();
         let file = meta.file.clone();
-
-        let mut fqns = Vec::with_capacity(symbols.len());
-        for sym in symbols {
-            fqns.push(sym.fqn.clone());
-            self.symbols.insert(sym.fqn.clone(), sym);
+        if self.files.contains_key(&file) {
+            self.remove_file(&file);
         }
 
-        self.ns_symbols.insert(ns_name.clone(), fqns);
+        // First, so the file is a project path when its namespace is ranked.
         self.replace_occurrences(file.clone(), occurrences);
-        self.file_to_ns.insert(file, ns_name.clone());
-        self.namespaces.insert(ns_name, meta);
+
+        let mut fqns: Vec<String> = Vec::with_capacity(symbols.len());
+        for sym in symbols {
+            if !fqns.contains(&sym.fqn) {
+                fqns.push(sym.fqn.clone());
+            }
+            let rank = symbol_rank(&sym);
+            rank_insert(
+                &self.symbols,
+                &self.cljs_symbols,
+                sym.fqn.clone(),
+                sym,
+                rank,
+                symbol_rank,
+            );
+        }
+
+        self.extend_ns_symbols(&ns_name, &fqns);
+        self.file_to_ns.insert(file.clone(), ns_name.clone());
+        self.files.insert(
+            file.clone(),
+            FileRecord {
+                meta: meta.clone(),
+                fqns,
+            },
+        );
+        self.ns_files
+            .entry(ns_name.clone())
+            .or_default()
+            .push(file.clone());
+        let rank = slot_rank(true, &file);
+        rank_insert(
+            &self.namespaces,
+            &self.cljs_namespaces,
+            ns_name,
+            meta,
+            rank,
+            |old| self.meta_rank(old),
+        );
+    }
+
+    /// Every project file in the index, as the entries that re-insert it: a
+    /// source file's own metadata and the symbols it still holds a slot for,
+    /// and each EDN config's occurrences. A same-dialect loser's shared fqn has
+    /// no slot and is not reconstructed.
+    pub fn file_entries(&self) -> Vec<FileEntry> {
+        let mut out = Vec::with_capacity(self.files.len());
+        for record in self.files.iter() {
+            let file = record.key();
+            let symbols = record
+                .fqns
+                .iter()
+                .filter_map(|fqn| {
+                    self.symbols
+                        .get(fqn)
+                        .filter(|s| &s.file == file)
+                        .map(|s| s.clone())
+                        .or_else(|| {
+                            self.cljs_symbols
+                                .get(fqn)
+                                .filter(|s| &s.file == file)
+                                .map(|s| s.clone())
+                        })
+                })
+                .collect();
+            out.push(FileEntry::Source {
+                meta: Box::new(record.meta.clone()),
+                symbols,
+                occurrences: self
+                    .occurrences
+                    .get(file)
+                    .map(|o| o.clone())
+                    .unwrap_or_default(),
+            });
+        }
+        for entry in self.file_to_ns.iter() {
+            if entry.value() == EDN_NS_SENTINEL {
+                out.push(FileEntry::Edn {
+                    file: entry.key().clone(),
+                    occurrences: self
+                        .occurrences
+                        .get(entry.key())
+                        .map(|o| o.clone())
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        out
     }
 
     /// Inserts an EDN config file's keyword occurrences. EDN files contribute
@@ -580,37 +877,25 @@ impl Index {
             self.remove_file(&path);
         }
 
-        // Re-scanned namespaces: drop their previous symbols before inserting
-        // the new set, so a def removed since the last scan (a file present in
-        // both scans but with fewer symbols — e.g. after a `:lint-as` change)
-        // does not linger. Whole stale files are already handled above.
-        for entry in new_index.ns_symbols.iter() {
-            let old_fqns = self.ns_symbols.get(entry.key()).map(|r| r.clone());
-            if let Some(old_fqns) = old_fqns {
-                for fqn in &old_fqns {
-                    self.symbols.remove(fqn);
+        // Each re-scanned file replaces its previous self, so a def removed
+        // since the last scan (a file present in both scans but with fewer
+        // symbols — e.g. after a `:lint-as` change) does not linger, and the
+        // other half of a twin namespace is never touched.
+        for entry in new_index.file_entries() {
+            match entry {
+                FileEntry::Source {
+                    meta,
+                    symbols,
+                    occurrences,
+                } => {
+                    self.remove_file(&meta.file);
+                    self.insert_file(*meta, symbols, occurrences);
+                }
+                FileEntry::Edn { file, occurrences } => {
+                    self.remove_file(&file);
+                    self.insert_edn_file(file, occurrences);
                 }
             }
-        }
-
-        for entry in new_index.symbols.iter() {
-            self.symbols
-                .insert(entry.key().clone(), entry.value().clone());
-        }
-        for entry in new_index.namespaces.iter() {
-            self.namespaces
-                .insert(entry.key().clone(), entry.value().clone());
-        }
-        for entry in new_index.ns_symbols.iter() {
-            self.ns_symbols
-                .insert(entry.key().clone(), entry.value().clone());
-        }
-        for entry in new_index.file_to_ns.iter() {
-            self.file_to_ns
-                .insert(entry.key().clone(), entry.value().clone());
-        }
-        for entry in new_index.occurrences.iter() {
-            self.replace_occurrences(entry.key().clone(), entry.value().clone());
         }
     }
 
@@ -631,8 +916,10 @@ impl Index {
 
         self.symbols
             .retain(|_, sym| sym.source == SymbolSource::Project);
-        self.cljs_symbols.clear();
-        self.cljs_namespaces.clear();
+        self.cljs_symbols
+            .retain(|_, sym| sym.source == SymbolSource::Project);
+        self.cljs_namespaces
+            .retain(|_, meta| self.occurrences.contains_key(&meta.file));
         self.ns_symbols.retain(|ns, fqns| {
             if fqns.iter().any(|fqn| self.symbols.contains_key(fqn)) {
                 return true;
@@ -659,12 +946,13 @@ impl Index {
     /// must win regardless of which task finishes last.
     ///
     /// Between library files the primary slot is Clojure-preferred whatever
-    /// the classpath order: `.clj` over `.cljc` over `.cljs` (see `lib_rank`),
+    /// the classpath order: `.clj` over `.cljc` over `.cljs` (see `slot_rank`),
     /// last writer among equals. A `.cljs` copy that loses to a Clojure one —
     /// displaced or arriving later — goes to `cljs_symbols` /
     /// `cljs_namespaces`, so a `.cljs` requester can still reach it; a `.cljc`
-    /// that loses is dropped. `ns_symbols` stays last-writer: it only feeds
-    /// completion name lists, and every name in it resolves through `symbols`.
+    /// that loses is dropped. `ns_symbols` is the union of the namespace's
+    /// files. A library file gets no [`FileRecord`]: libraries leave through
+    /// `clear_libs`, and a record would copy every library `NsMeta`.
     pub fn insert_lib_file(&self, meta: NsMeta, symbols: Vec<Symbol>) {
         // Project files always have an occurrences entry; jar virtual paths
         // and dir-lib files never do.
@@ -677,17 +965,22 @@ impl Index {
             return;
         }
 
-        let rank = lib_rank(&meta.file);
+        let rank = slot_rank(false, &meta.file);
         let mut fqns = Vec::with_capacity(symbols.len());
         for sym in symbols {
             fqns.push(sym.fqn.clone());
             let fqn = sym.fqn.clone();
-            rank_insert(&self.symbols, &self.cljs_symbols, fqn, sym, rank, |old| {
-                (!is_project(old)).then(|| lib_rank(&old.file))
-            });
+            rank_insert(
+                &self.symbols,
+                &self.cljs_symbols,
+                fqn,
+                sym,
+                rank,
+                symbol_rank,
+            );
         }
 
-        self.ns_symbols.insert(meta.name.clone(), fqns);
+        self.extend_ns_symbols(&meta.name, &fqns);
         self.file_to_ns.insert(meta.file.clone(), meta.name.clone());
         let ns_name = meta.name.clone();
         rank_insert(
@@ -696,7 +989,7 @@ impl Index {
             ns_name,
             meta,
             rank,
-            |old| Some(lib_rank(&old.file)),
+            |old| self.meta_rank(old),
         );
     }
 }
@@ -954,6 +1247,313 @@ mod tests {
         index.clear_libs();
         assert!(index.lookup_for(TRIM, Dialect::Cljs).is_none());
         assert!(index.ns_meta_for(STRING_NS, Dialect::Cljs).is_none());
+    }
+
+    /// A project `Symbol` named `fqn`, defined in `file`.
+    fn project_symbol(fqn: &str, file: &str) -> Symbol {
+        let mut sym = lib_symbol(fqn, file);
+        sym.source = SymbolSource::Project;
+        sym
+    }
+
+    fn project_meta(ns: &str, file: &str) -> NsMeta {
+        ns_meta_in(ns, file)
+    }
+
+    /// One occurrence, so the file is a project path whatever it defines.
+    fn some_occurrence() -> Vec<Occurrence> {
+        vec![Occurrence {
+            fqn: "clojure.core/inc".to_string(),
+            name_range: Range::default(),
+        }]
+    }
+
+    /// Inserts project `file` of namespace `ns` defining `names`.
+    fn insert_project(index: &Index, ns: &str, file: &str, names: &[&str]) {
+        let symbols = names
+            .iter()
+            .map(|n| project_symbol(&format!("{ns}/{n}"), file))
+            .collect();
+        index.insert_file(project_meta(ns, file), symbols, some_occurrence());
+    }
+
+    const TWIN_CLJ: &str = "/p/src/a/b.clj";
+    const TWIN_CLJS: &str = "/p/src/a/b.cljs";
+
+    fn insert_twin_clj(index: &Index) {
+        insert_project(index, "a.b", TWIN_CLJ, &["foo", "clj-only"]);
+    }
+
+    fn insert_twin_cljs(index: &Index) {
+        insert_project(index, "a.b", TWIN_CLJS, &["foo", "cljs-only"]);
+    }
+
+    fn sorted_ns_symbols(index: &Index, ns: &str) -> Vec<String> {
+        let mut fqns = index.ns_symbols.get(ns).expect("ns symbols").clone();
+        fqns.sort();
+        fqns
+    }
+
+    #[test]
+    fn project_twins_keep_both_definitions() {
+        let forward = Index::new();
+        insert_twin_clj(&forward);
+        insert_twin_cljs(&forward);
+        let reverse = Index::new();
+        insert_twin_cljs(&reverse);
+        insert_twin_clj(&reverse);
+        for index in [forward, reverse] {
+            assert_eq!(file_of(index.lookup("a.b/foo")), TWIN_CLJ);
+            assert_eq!(
+                file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+                TWIN_CLJS
+            );
+            assert_eq!(
+                file_of(index.lookup_for("a.b/cljs-only", Dialect::Clj)),
+                TWIN_CLJS
+            );
+            let files: Vec<PathBuf> = index
+                .lookup_all("a.b/foo")
+                .into_iter()
+                .map(|s| s.file)
+                .collect();
+            assert_eq!(
+                files,
+                vec![PathBuf::from(TWIN_CLJ), PathBuf::from(TWIN_CLJS)]
+            );
+            assert_eq!(ns_file_of(index.ns_meta("a.b")), TWIN_CLJ);
+            assert_eq!(
+                ns_file_of(index.ns_meta_for("a.b", Dialect::Cljs)),
+                TWIN_CLJS
+            );
+            assert_eq!(
+                sorted_ns_symbols(&index, "a.b"),
+                vec!["a.b/clj-only", "a.b/cljs-only", "a.b/foo"]
+            );
+        }
+    }
+
+    #[test]
+    fn removing_one_twin_keeps_the_other() {
+        let index = Index::new();
+        insert_twin_clj(&index);
+        insert_twin_cljs(&index);
+
+        index.remove_file(Path::new(TWIN_CLJ));
+        assert_eq!(file_of(index.lookup("a.b/foo")), TWIN_CLJS, "promoted");
+        assert!(index.lookup("a.b/clj-only").is_none());
+        assert_eq!(ns_file_of(index.ns_meta("a.b")), TWIN_CLJS);
+        assert_eq!(
+            sorted_ns_symbols(&index, "a.b"),
+            vec!["a.b/cljs-only", "a.b/foo"]
+        );
+
+        insert_twin_clj(&index);
+        assert_eq!(file_of(index.lookup("a.b/foo")), TWIN_CLJ);
+        assert_eq!(
+            file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+        assert_eq!(
+            ns_file_of(index.ns_meta_for("a.b", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+
+        index.remove_file(Path::new(TWIN_CLJS));
+        assert_eq!(
+            file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+            TWIN_CLJ
+        );
+        assert!(index.lookup_for("a.b/cljs-only", Dialect::Cljs).is_none());
+        assert_eq!(
+            ns_file_of(index.ns_meta_for("a.b", Dialect::Cljs)),
+            TWIN_CLJ
+        );
+        assert_eq!(
+            sorted_ns_symbols(&index, "a.b"),
+            vec!["a.b/clj-only", "a.b/foo"]
+        );
+
+        // The last file of the namespace takes the namespace with it.
+        index.remove_file(Path::new(TWIN_CLJ));
+        assert!(index.ns_meta("a.b").is_none());
+        assert!(index.ns_symbols.get("a.b").is_none());
+    }
+
+    #[test]
+    fn project_cljs_twin_beats_a_library_in_both_slots() {
+        const LIB_CLJ: &str = "/m2/lib.jar!/a/b.clj";
+        const LIB_CLJS: &str = "/m2/lib.jar!/a/b.cljs";
+        let index = Index::new();
+        index.insert_lib_file(
+            ns_meta_in("a.b", LIB_CLJ),
+            vec![lib_symbol("a.b/foo", LIB_CLJ)],
+        );
+        index.insert_lib_file(
+            ns_meta_in("a.b", LIB_CLJS),
+            vec![lib_symbol("a.b/foo", LIB_CLJS)],
+        );
+
+        insert_project(&index, "a.b", TWIN_CLJS, &["foo"]);
+        assert_eq!(file_of(index.lookup("a.b/foo")), TWIN_CLJS);
+        assert_eq!(
+            file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+        assert_eq!(ns_file_of(index.ns_meta("a.b")), TWIN_CLJS);
+        assert_eq!(
+            ns_file_of(index.ns_meta_for("a.b", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+
+        insert_project(&index, "a.b", TWIN_CLJ, &["foo"]);
+        assert_eq!(file_of(index.lookup("a.b/foo")), TWIN_CLJ);
+        assert_eq!(
+            file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+
+        // A library `.cljs` inserted last reaches neither slot.
+        index.insert_lib_file(
+            ns_meta_in("a.b", LIB_CLJS),
+            vec![lib_symbol("a.b/foo", LIB_CLJS)],
+        );
+        assert_eq!(file_of(index.lookup("a.b/foo")), TWIN_CLJ);
+        assert_eq!(
+            file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+        assert_eq!(
+            ns_file_of(index.ns_meta_for("a.b", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+    }
+
+    #[test]
+    fn merge_project_from_replaces_each_file_and_keeps_twins() {
+        let index = Index::new();
+        insert_twin_clj(&index);
+        insert_twin_cljs(&index);
+
+        let new_index = Index::new();
+        insert_project(&new_index, "a.b", TWIN_CLJ, &["foo"]);
+        insert_twin_cljs(&new_index);
+        index.merge_project_from(new_index, &std::collections::HashSet::new());
+
+        assert!(index.lookup("a.b/clj-only").is_none(), "dropped def");
+        assert_eq!(
+            file_of(index.lookup_for("a.b/cljs-only", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+        assert_eq!(file_of(index.lookup("a.b/foo")), TWIN_CLJ);
+        assert_eq!(
+            file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+        assert!(index.occurrences.contains_key(Path::new(TWIN_CLJ)));
+        assert!(index.occurrences.contains_key(Path::new(TWIN_CLJS)));
+        assert_eq!(
+            sorted_ns_symbols(&index, "a.b"),
+            vec!["a.b/cljs-only", "a.b/foo"]
+        );
+    }
+
+    #[test]
+    fn clear_libs_keeps_project_entries_in_the_shadow() {
+        const LIB_CLJS: &str = "/m2/lib.jar!/a/b.cljs";
+        let index = Index::new();
+        index.insert_lib_file(
+            ns_meta_in("a.b", LIB_CLJS),
+            vec![
+                lib_symbol("a.b/foo", LIB_CLJS),
+                lib_symbol("a.b/lib-only", LIB_CLJS),
+            ],
+        );
+        insert_twin_clj(&index);
+        insert_twin_cljs(&index);
+        assert!(index.lookup("a.b/lib-only").is_some());
+
+        index.clear_libs();
+        assert_eq!(
+            file_of(index.lookup_for("a.b/foo", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+        assert_eq!(
+            ns_file_of(index.ns_meta_for("a.b", Dialect::Cljs)),
+            TWIN_CLJS
+        );
+        assert!(index.lookup_for("a.b/lib-only", Dialect::Cljs).is_none());
+    }
+
+    #[test]
+    fn file_entries_round_trip() {
+        let index = Index::new();
+        insert_twin_clj(&index);
+        insert_twin_cljs(&index);
+        let edn = PathBuf::from("/p/resources/config.edn");
+        let edn_occs = vec![Occurrence {
+            fqn: ":a.b/db".to_string(),
+            name_range: Range::default(),
+        }];
+        index.insert_edn_file(edn.clone(), edn_occs.clone());
+
+        let mut sources = Vec::new();
+        let mut edns = Vec::new();
+        for entry in index.file_entries() {
+            match entry {
+                FileEntry::Source {
+                    meta,
+                    symbols,
+                    occurrences,
+                } => sources.push((meta, symbols, occurrences)),
+                FileEntry::Edn { file, occurrences } => edns.push((file, occurrences)),
+            }
+        }
+        sources.sort_by(|a, b| a.0.file.cmp(&b.0.file));
+        assert_eq!(sources.len(), 2);
+        for ((meta, symbols, occurrences), (file, names)) in sources.iter().zip([
+            (TWIN_CLJ, ["foo", "clj-only"]),
+            (TWIN_CLJS, ["foo", "cljs-only"]),
+        ]) {
+            assert_eq!(**meta, project_meta("a.b", file));
+            let expected: Vec<Symbol> = names
+                .iter()
+                .map(|n| project_symbol(&format!("a.b/{n}"), file))
+                .collect();
+            assert_eq!(*symbols, expected);
+            assert_eq!(*occurrences, some_occurrence());
+        }
+        assert_eq!(edns, vec![(edn, edn_occs)]);
+    }
+
+    #[test]
+    fn same_dialect_collision_keeps_the_losers_record() {
+        const A: &str = "/p/a/dev/user.clj";
+        const B: &str = "/p/b/dev/user.clj";
+        let index = Index::new();
+        // `b` first: `a`, inserted last, takes both shared slots.
+        insert_project(&index, "user", B, &["shared", "b-only"]);
+        insert_project(&index, "user", A, &["shared"]);
+        assert_eq!(file_of(index.lookup("user/shared")), A);
+        assert_eq!(ns_file_of(index.ns_meta("user")), A);
+
+        let entries = index.file_entries();
+        let loser = entries
+            .iter()
+            .find_map(|e| match e {
+                FileEntry::Source { meta, symbols, .. } if meta.file == Path::new(B) => {
+                    Some((meta, symbols))
+                }
+                _ => None,
+            })
+            .expect("the loser's entry");
+        assert_eq!(**loser.0, project_meta("user", B));
+        let names: Vec<&str> = loser.1.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["b-only"]);
+
+        index.remove_file(Path::new(A));
+        assert_eq!(file_of(index.lookup("user/b-only")), B);
+        assert_eq!(ns_file_of(index.ns_meta("user")), B);
     }
 
     #[test]

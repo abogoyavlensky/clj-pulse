@@ -165,7 +165,7 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
 - Modify: `src/index/mod.rs`
 - Test: `src/index/mod.rs` (`mod tests`)
 
-- [ ] **Step 1: Write the failing unit tests**
+- [x] **Step 1: Write the failing unit tests**
   Add a `project_symbol(fqn, file)` helper beside `lib_symbol`, and a `project_meta(ns, file)`. Insert project files through `insert_file` with a non-empty occurrences vector (so `is_project_path` holds). Tests:
   - `project_twins_keep_both_definitions`: `insert_file` `a/b.clj` defining `a.b/foo` and `a.b/clj-only`, then `a/b.cljs` defining `a.b/foo` and `a.b/cljs-only`, and the reverse order in a second index. In both: `lookup("a.b/foo")` is the `.clj` copy, `lookup_for("a.b/foo", Cljs)` the `.cljs` copy, `lookup_for("a.b/cljs-only", Clj)` resolves (no twin, primary), `lookup_all("a.b/foo")` has two files, `ns_meta("a.b")` is the `.clj` file and `ns_meta_for("a.b", Cljs)` the `.cljs` one, `ns_symbols["a.b"]` holds all three fqns.
   - `removing_one_twin_keeps_the_other`: after both inserted, `remove_file(a/b.clj)`: `lookup("a.b/foo")` is now the `.cljs` copy (promoted), `lookup("a.b/clj-only")` is `None`, `ns_meta("a.b")` is the `.cljs` file, `ns_symbols["a.b"]` has two fqns. Re-insert `a/b.clj`: the `.clj` copy is primary again and `lookup_for(Cljs)` the `.cljs` one. Then `remove_file(a/b.cljs)`: `lookup_for("a.b/foo", Cljs)` is the `.clj` copy, `cljs-only` is gone.
@@ -176,18 +176,19 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
   - `same_dialect_collision_keeps_the_losers_record`: `a/user.clj` (project A) and `b/user.clj` (project B) both define `user/shared`, and `b/user.clj` alone defines `user/b-only`; `file_entries()` yields both files, the loser's entry with its own `NsMeta` and `b-only`; after `remove_file(a/user.clj)`, `user/b-only` still resolves and `ns_meta("user")` is `b/user.clj`'s.
   Keep every existing test in the module; `project_inserted_after_both_library_copies_still_wins` still holds under the new rule (primary project, shadow library → primary).
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --lib index::tests`
   Expected: compile errors for `lookup_all` / `file_entries`; then assertion failures.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   Per the Design: `slot_rank` replaces `lib_rank` (keep `CLJS_RANK`-style helpers as `is_cljs_rank(r)`: `r % 3 == 2`), the amended `rank_insert`, `files` / `FileRecord`, `lookup_all`, `FileEntry` / `file_entries`, and the rewritten `remove_file`, `insert_file`, `insert_lib_file`, `merge_project_from`, `clear_libs`, `lookup_for`, `prefer_dialect`, `ns_meta_for`. Update the doc comments on the two shadow maps: they hold project entries too now. `Symbol` and `NsMeta` do not change.
+  > Deviation: `files` holds project files only; a library record would copy every library `NsMeta` (RSS) and no reader needs it, so removing a library file (a watched or saved dir-lib file) walks `ns_symbols[ns]` for entries whose `file` is the path, and `clear_libs` has no records to drop. A small `ns_files` (namespace → project paths) lets `remove_file` refill an emptied metadata slot from the remaining files' records in O(1) — scanning `files` there made a re-merge quadratic; the `ns_symbols` entry is dropped once the list is empty and the namespace has no metadata left. `slot_rank` takes `(project: bool, path)`. `FileEntry::Source.meta` is boxed (clippy `large_enum_variant`). `insert_file` removes a file already indexed before inserting it.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --lib && cargo test --test test_index`
   Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Index a namespace split across .clj and .cljs as two dialect slots with file-owned removal"`
 
 ### Task 5: Handlers ask with their dialect; references and rename cover both twins
