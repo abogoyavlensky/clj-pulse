@@ -198,7 +198,7 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
 - Modify: `tests/test_definition.rs`, `tests/test_hover.rs`, `tests/test_jar_definition.rs` (call sites: pass `Dialect::Clj`)
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing e2e test**
+- [x] **Step 1: Write the failing e2e test**
   Helper `twin_namespace_project()`: `setup_project()` plus `src/app/shared.clj` = `(ns app.shared)\n\n(defmacro with-thing [& body] `(do ~@body))\n\n(defn platform [] :clj)\n`, `src/app/shared.cljs` = `(ns app.shared (:require-macros [app.shared :refer [with-thing]]))\n\n(defn platform [] :cljs)\n\n(defn only-cljs [] (with-thing (platform)))\n`, `src/app/use_clj.clj` = `(ns app.use-clj (:require [app.shared :as sh]))\n(sh/platform)\n`, `src/app/use_cljs.cljs` = `(ns app.use-cljs (:require [app.shared :as sh]))\n(sh/platform)\n(sh/only-cljs)\n`.
   `test_e2e_twin_namespaces`: `initialize`, `wait_for_log("Indexed")`; before opening anything, `textDocument/documentSymbol` on `shared.cljs` (closed, so the index fallback answers) lists `platform` and `only-cljs`, and on `shared.clj` lists `with-thing` and `platform`. Then open all four.
   1. definition on `platform` in `use_cljs.cljs` → `shared.cljs` line 2; in `use_clj.clj` → `shared.clj` line 4.
@@ -207,19 +207,21 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
   4. rename `platform` → `plat` from `use_cljs.cljs`: the edit set touches four files, both definitions included.
   5. `did_save` of `shared.clj` (write the same text, send `textDocument/didSave`), `wait_for_log("re-indexed")`; definition on `only-cljs` from `use_cljs.cljs` still lands in `shared.cljs`, and hover on `sh/only-cljs` still answers.
   6. `server.log` contains no `last one wins` line for `app.shared`.
+  > Deviation: step 5 appends a `saved-witness` def before the save and polls `workspace/symbol` for it — `re-indexed` is an `info` line, never sent to the client, so `wait_for_log` cannot see it.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
   Run: `cargo test --test test_e2e twin_namespaces -- --nocapture`
   Expected: FAIL (step 1 or 3 first, depending on scan order).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `resolve_symbol(index, word, current_ns, dialect)` with `ns_meta_for` and a private `lookup_in_ns_for`; the five in-crate callers and the unit tests in `src/handlers/mod.rs` (`Dialect::Clj`). `definition.rs`: drop the `prefer_dialect` on the `Project` arm (resolver already prefers) — keep it on the `Core` arm's `lookup_in_ns` result. `hover.rs`: remove `prefer_dialect`, keep the `dialect` parameter. `references.rs`: `resolve_fqn_at` alias fallback via `ns_meta_for` (dialect from `path`); `references` pushes every `lookup_all` declaration; `rename_target` resolves the source-check symbol with `lookup_for(fqn, dialect)`; `rename`'s `Global` arm builds one declaration edit per project symbol in `lookup_all(&fqn)`. `definition.rs` `namespace_location`: alias table from `ns_meta_for(current_ns, dialect)`. `completion.rs`: `ns_meta_for` for `current_ns` and `lookup_for` where the current-ns and alias pools read `index.symbols.get`. `symbols.rs`: the closed-file fallback maps each fqn through `lookup_all` and keeps the symbols whose `file` is the document. `scanner.rs` and `server.rs::warn_ns_collisions`: warn only when `Dialect::of_path` agrees for both files.
+  > Deviation: `complete_symbols` and `clojuredocs::resolve_var` take the `Dialect` as a parameter (their tests pass `Dialect::Clj`); the refer and alias pools also resolve by dialect, swapping only matched items through `prefer_dialect` so the keystroke path clones nothing extra. `warn_ns_collisions` compares each dialect slot (`ns_meta_for` on both indexes); the scanner compares against `ns_meta_for(name, dialect of the new file)`. Codex's Task 4 finding (metadata consumers still read the `.clj` half's `NsMeta`) is this task; `resolve_symbol_reads_the_asking_halfs_ns_form` covers it.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
   Run: `cargo test --test test_e2e -- twin_namespaces prefers_the_ --nocapture && bb check`
   Expected: PASS, `bb check` green (run `bb fmt` first if it flags formatting).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -am "Navigate, reference and rename a twin namespace by the asking file's dialect"`
 
 ### Task 6: Compare gate — oracle and allowlist

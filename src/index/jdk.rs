@@ -590,11 +590,16 @@ public class Greeter {
 
         // `Thread/sl` on an auto-`java.lang` class (no `:import`) must offer the
         // static `sleep`, labelled `Thread/sleep`.
-        let labels: Vec<String> =
-            crate::handlers::completion::complete_symbols(&index, "Thread/sl", "app.x", None)
-                .into_iter()
-                .map(|i| i.label)
-                .collect();
+        let labels: Vec<String> = crate::handlers::completion::complete_symbols(
+            &index,
+            "Thread/sl",
+            "app.x",
+            crate::index::Dialect::Clj,
+            None,
+        )
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
         assert!(
             labels.contains(&"Thread/sleep".to_string()),
             "expected Thread/sleep, got {labels:?}"

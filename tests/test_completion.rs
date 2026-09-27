@@ -2,7 +2,7 @@ use std::path::Path;
 
 use clj_pulse::handlers::completion::{complete_symbols, resolve};
 use clj_pulse::index::scanner;
-use clj_pulse::index::Index;
+use clj_pulse::index::{Dialect, Index};
 
 fn build_test_index() -> Index {
     let root = Path::new("tests/fixtures/simple_project");
@@ -16,7 +16,7 @@ fn build_test_index() -> Index {
 #[test]
 fn test_completes_symbols_in_current_ns() {
     let index = build_test_index();
-    let completions = complete_symbols(&index, "add", "simple.core", None);
+    let completions = complete_symbols(&index, "add", "simple.core", Dialect::Clj, None);
     assert!(completions.iter().any(|c| c.label == "add"));
     assert!(!completions.iter().any(|c| c.label == "add-and-double"));
 }
@@ -24,14 +24,14 @@ fn test_completes_symbols_in_current_ns() {
 #[test]
 fn test_completes_with_alias_prefix() {
     let index = build_test_index();
-    let completions = complete_symbols(&index, "core/ad", "simple.utils", None);
+    let completions = complete_symbols(&index, "core/ad", "simple.utils", Dialect::Clj, None);
     assert!(completions.iter().any(|c| c.label == "core/add"));
 }
 
 #[test]
 fn test_completes_clojure_core_builtins() {
     let index = Index::new_with_core();
-    let completions = complete_symbols(&index, "map", "any.ns", None);
+    let completions = complete_symbols(&index, "map", "any.ns", Dialect::Clj, None);
     assert!(completions.iter().any(|c| c.label == "map"));
     assert!(completions.iter().any(|c| c.label == "mapv"));
     assert!(completions.iter().any(|c| c.label == "map-indexed"));
@@ -42,7 +42,7 @@ fn test_completion_item_has_doc_and_detail() {
     // The item carries its signature up front and its docstring only after
     // `completionItem/resolve`.
     let index = build_test_index();
-    let completions = complete_symbols(&index, "add", "simple.core", None);
+    let completions = complete_symbols(&index, "add", "simple.core", Dialect::Clj, None);
     let item = completions.iter().find(|c| c.label == "add").unwrap();
     assert!(item.detail.is_some());
     assert!(resolve(&index, item.clone()).documentation.is_some());
@@ -51,7 +51,7 @@ fn test_completion_item_has_doc_and_detail() {
 #[test]
 fn test_empty_prefix_returns_all_visible_symbols() {
     let index = build_test_index();
-    let completions = complete_symbols(&index, "", "simple.core", None);
+    let completions = complete_symbols(&index, "", "simple.core", Dialect::Clj, None);
     assert!(completions.len() >= 3);
 }
 
@@ -59,7 +59,7 @@ fn test_empty_prefix_returns_all_visible_symbols() {
 fn test_completes_alias_names() {
     let index = build_test_index();
     // simple.utils requires [simple.core :as core]
-    let completions = complete_symbols(&index, "co", "simple.utils", None);
+    let completions = complete_symbols(&index, "co", "simple.utils", Dialect::Clj, None);
     let alias = completions.iter().find(|c| c.label == "core").unwrap();
     assert_eq!(alias.detail.as_deref(), Some("alias for simple.core"));
 }
@@ -68,7 +68,7 @@ fn test_completes_alias_names() {
 fn test_completes_namespace_names() {
     let index = build_test_index();
     // typing inside (:require [simple. …]) completes known namespaces
-    let completions = complete_symbols(&index, "simple.", "simple.utils", None);
+    let completions = complete_symbols(&index, "simple.", "simple.utils", Dialect::Clj, None);
     assert!(completions.iter().any(|c| c.label == "simple.core"));
     assert!(completions.iter().any(|c| c.label == "simple.utils"));
 }
@@ -76,7 +76,7 @@ fn test_completes_namespace_names() {
 #[test]
 fn test_empty_prefix_excludes_namespace_dump() {
     let index = build_test_index();
-    let completions = complete_symbols(&index, "", "simple.utils", None);
+    let completions = complete_symbols(&index, "", "simple.utils", Dialect::Clj, None);
     assert!(!completions.iter().any(|c| c.label == "simple.core"));
 }
 
@@ -127,7 +127,7 @@ fn test_completes_referred_name_before_library_is_indexed() {
         .insert("deftest".to_string(), "clojure.test/deftest".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "deft", "a.t", None);
+    let items = complete_symbols(&index, "deft", "a.t", Dialect::Clj, None);
     let item = items
         .iter()
         .find(|i| i.label == "deftest")
@@ -150,7 +150,7 @@ fn test_completes_refer_all_namespace_symbols() {
     meta.refer_all.push("clojure.test".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "deft", "a.t", None);
+    let items = complete_symbols(&index, "deft", "a.t", Dialect::Clj, None);
     let names = labels(&items);
     assert!(names.contains(&"deftest".to_string()), "{:?}", names);
     assert!(names.contains(&"deftest-".to_string()), "{:?}", names);
@@ -173,7 +173,7 @@ fn test_refer_all_does_not_duplicate_explicit_refers() {
     meta.refer_all.push("clojure.test".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let names = labels(&complete_symbols(&index, "deft", "a.t", None));
+    let names = labels(&complete_symbols(&index, "deft", "a.t", Dialect::Clj, None));
     assert_eq!(
         names.iter().filter(|l| *l == "deftest").count(),
         1,
@@ -211,7 +211,7 @@ fn test_core_exclude_hides_core_symbol() {
         vec![],
     );
 
-    let items = complete_symbols(&index, "upd", "a.x", None);
+    let items = complete_symbols(&index, "upd", "a.x", Dialect::Clj, None);
     assert!(
         !items.iter().any(|i| i.label == "update"
             && i.detail
@@ -249,7 +249,7 @@ fn test_fuzzy_substring_match() {
     // `dd` matches `add` in the middle: a tier-2 (substring) hit from the
     // current-namespace pool (1).
     let index = build_test_index();
-    let items = complete_symbols(&index, "dd", "simple.core", None);
+    let items = complete_symbols(&index, "dd", "simple.core", Dialect::Clj, None);
     let add = items
         .iter()
         .find(|i| i.label == "add")
@@ -268,7 +268,7 @@ fn test_fuzzy_subsequence_ranks_below_prefix() {
         vec![],
     );
 
-    let items = complete_symbols(&index, "add", "a.x", None);
+    let items = complete_symbols(&index, "add", "a.x", Dialect::Clj, None);
     let sort_text = |label: &str| -> String {
         items
             .iter()
@@ -293,7 +293,7 @@ fn test_fuzzy_single_char_prefix_is_prefix_only() {
     // One character is too little to fuzzy-match on: `d` stays a prefix search,
     // so `add` (a substring hit) is not offered.
     let index = build_test_index();
-    let items = complete_symbols(&index, "d", "simple.core", None);
+    let items = complete_symbols(&index, "d", "simple.core", Dialect::Clj, None);
     assert!(
         !items.iter().any(|i| i.label == "add"),
         "single-char prefix fuzzy-matched: {:?}",
@@ -311,7 +311,7 @@ fn test_fuzzy_namespace_pool_is_capped() {
     }
     index.insert_file(ns_meta("a.x"), vec![], vec![]);
 
-    let items = complete_symbols(&index, "widget", "a.x", None);
+    let items = complete_symbols(&index, "widget", "a.x", Dialect::Clj, None);
     let namespaces = items
         .iter()
         .filter(|i| i.detail.as_deref() == Some("namespace"))
@@ -332,7 +332,7 @@ fn test_fuzzy_namespace_pool_skips_subsequence() {
     index.insert_file(ns_meta("clojure.string"), vec![], vec![]);
     index.insert_file(ns_meta("a.x"), vec![], vec![]);
 
-    let names = labels(&complete_symbols(&index, "str", "a.x", None));
+    let names = labels(&complete_symbols(&index, "str", "a.x", Dialect::Clj, None));
     assert!(
         names.contains(&"clojure.string".to_string()),
         "substring namespace missing: {:?}",
@@ -379,7 +379,10 @@ fn letgo_index() -> Index {
 #[test]
 fn test_items_carry_data_not_documentation() {
     let index = build_test_index();
-    let item = item_named(&complete_symbols(&index, "add", "simple.core", None), "add");
+    let item = item_named(
+        &complete_symbols(&index, "add", "simple.core", Dialect::Clj, None),
+        "add",
+    );
     assert!(
         item.documentation.is_none(),
         "documentation sent up front: {:?}",
@@ -394,7 +397,10 @@ fn test_items_carry_data_not_documentation() {
 #[test]
 fn test_resolve_fills_symbol_documentation() {
     let index = build_test_index();
-    let item = item_named(&complete_symbols(&index, "add", "simple.core", None), "add");
+    let item = item_named(
+        &complete_symbols(&index, "add", "simple.core", Dialect::Clj, None),
+        "add",
+    );
     assert!(
         doc_value(&resolve(&index, item)).contains("Adds two numbers"),
         "docstring missing after resolve"
@@ -404,7 +410,10 @@ fn test_resolve_fills_symbol_documentation() {
 #[test]
 fn test_resolve_fills_core_documentation() {
     let index = Index::new_with_core();
-    let item = item_named(&complete_symbols(&index, "map", "any.ns", None), "map");
+    let item = item_named(
+        &complete_symbols(&index, "map", "any.ns", Dialect::Clj, None),
+        "map",
+    );
     assert!(item.documentation.is_none());
     assert!(!doc_value(&resolve(&index, item)).is_empty());
 }
@@ -412,7 +421,10 @@ fn test_resolve_fills_core_documentation() {
 #[test]
 fn test_resolve_fills_special_form_documentation() {
     let index = Index::new_with_core();
-    let item = item_named(&complete_symbols(&index, "if", "any.ns", None), "if");
+    let item = item_named(
+        &complete_symbols(&index, "if", "any.ns", Dialect::Clj, None),
+        "if",
+    );
     assert!(item.documentation.is_none());
     assert!(
         doc_value(&resolve(&index, item)).contains("Evaluates"),
@@ -423,7 +435,10 @@ fn test_resolve_fills_special_form_documentation() {
 #[test]
 fn test_resolve_fills_letgo_native_documentation() {
     let index = letgo_index();
-    let item = item_named(&complete_symbols(&index, "count", "app", None), "count");
+    let item = item_named(
+        &complete_symbols(&index, "count", "app", Dialect::Clj, None),
+        "count",
+    );
     assert!(item.documentation.is_none());
     assert!(doc_value(&resolve(&index, item)).contains("number of items"));
 }
@@ -433,7 +448,7 @@ fn test_resolve_passes_unknown_item_through() {
     // A namespace item has nothing to resolve, so it comes back untouched.
     let index = build_test_index();
     let item = item_named(
-        &complete_symbols(&index, "simple.", "simple.utils", None),
+        &complete_symbols(&index, "simple.", "simple.utils", Dialect::Clj, None),
         "simple.core",
     );
     assert_eq!(item.data, None);
@@ -443,7 +458,10 @@ fn test_resolve_passes_unknown_item_through() {
 #[test]
 fn test_resolve_ignores_malformed_data() {
     let index = build_test_index();
-    let base = item_named(&complete_symbols(&index, "add", "simple.core", None), "add");
+    let base = item_named(
+        &complete_symbols(&index, "add", "simple.core", Dialect::Clj, None),
+        "add",
+    );
     for data in [
         serde_json::json!("simple.core/add"),
         serde_json::json!({ "fqn": "simple.core/add" }),
@@ -624,7 +642,13 @@ fn test_auto_require_qualified_unknown_alias() {
     // to nothing today, so offer the var and the require that would make it
     // resolve.
     let index = auto_require_index();
-    let items = complete_symbols(&index, "str/jo", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "str/jo",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     let item = item_named(&items, "str/join");
     assert_eq!(
         item.detail.as_deref(),
@@ -647,7 +671,13 @@ fn test_auto_require_bare_prefix_project_ns() {
         vec![],
     );
 
-    let items = complete_symbols(&index, "slug", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "slug",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     let item = item_named(&items, "util/slugify");
     assert_eq!(item.detail.as_deref(), Some("requires [app.util :as util]"));
     assert!(
@@ -668,7 +698,13 @@ fn test_no_auto_require_when_already_required() {
     meta.requires.push("clojure.string".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "str/jo", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "str/jo",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     let item = item_named(&items, "str/join");
     assert!(
         item.additional_text_edits.is_none(),
@@ -677,7 +713,13 @@ fn test_no_auto_require_when_already_required() {
     );
 
     // The same through a bare prefix.
-    let items = complete_symbols(&index, "joi", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "joi",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     assert!(
         !labels(&items).contains(&"str/join".to_string()),
         "already required: {:?}",
@@ -697,7 +739,13 @@ fn test_no_auto_require_on_alias_collision() {
     meta.requires.push("other.lib".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "joi", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "joi",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     assert!(
         !labels(&items).contains(&"str/join".to_string()),
         "alias `str` is taken: {:?}",
@@ -721,7 +769,13 @@ fn test_auto_require_sorts_after_in_scope() {
     meta.requires.push("clojure.string".to_string());
     index.insert_file(meta, vec![defn_sym("joiner", "app.core")], vec![]);
 
-    let items = complete_symbols(&index, "join", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "join",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     let in_scope = item_named(&items, "joiner").sort_text.unwrap();
     let auto = item_named(&items, "util/join").sort_text.unwrap();
     assert!(
@@ -739,7 +793,13 @@ fn test_auto_require_pool_capped() {
         let ns = format!("app.mod{}", i);
         index.insert_file(ns_meta(&ns), vec![defn_sym("widget", &ns)], vec![]);
     }
-    let items = complete_symbols(&index, "widg", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "widg",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     let auto: Vec<String> = items
         .iter()
         .filter(|i| i.sort_text.as_deref().is_some_and(|s| s.starts_with("9-")))
@@ -758,7 +818,7 @@ fn test_auto_require_without_source_still_offers_the_item() {
     // No buffer to edit (the bare unit-test call): the item is still offered,
     // just without its require edit.
     let index = auto_require_index();
-    let items = complete_symbols(&index, "str/jo", "app.core", None);
+    let items = complete_symbols(&index, "str/jo", "app.core", Dialect::Clj, None);
     let item = item_named(&items, "str/join");
     assert!(item.additional_text_edits.is_none());
 }
@@ -772,7 +832,13 @@ fn test_auto_require_item_resolves_documentation() {
     sym.doc = Some("Slugs a string.".to_string());
     index.insert_file(ns_meta("app.util"), vec![sym], vec![]);
 
-    let items = complete_symbols(&index, "slug", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "slug",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     let item = item_named(&items, "util/slugify");
     assert!(item.documentation.is_none(), "docs travel lazily");
     let resolved = resolve(&index, item);
@@ -797,7 +863,13 @@ fn test_no_auto_require_for_integrant_keys() {
     key.fqn = ":app.system/database".to_string();
     index.insert_file(ns_meta("app.system"), vec![key], vec![]);
 
-    let items = complete_symbols(&index, "datab", "app.core", Some(&auto_require_snapshot()));
+    let items = complete_symbols(
+        &index,
+        "datab",
+        "app.core",
+        Dialect::Clj,
+        Some(&auto_require_snapshot()),
+    );
     assert!(
         !labels(&items).contains(&"system/database".to_string()),
         "an Integrant key is not a requireable var: {:?}",
@@ -824,7 +896,7 @@ fn test_integrant_key_not_offered_as_var() {
     // The defining namespace's own pool: `db` is a key, so typing `d` here
     // must not propose it as a name to call.
     let index = integrant_index();
-    let items = complete_symbols(&index, "d", "readx.db", None);
+    let items = complete_symbols(&index, "d", "readx.db", Dialect::Clj, None);
     assert!(
         !labels(&items).contains(&"db".to_string()),
         "an Integrant key is not a var: {:?}",
@@ -841,7 +913,7 @@ fn test_integrant_key_not_offered_through_alias() {
         .insert("db".to_string(), "readx.db".to_string());
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "db/d", "readx.app", None);
+    let items = complete_symbols(&index, "db/d", "readx.app", Dialect::Clj, None);
     assert!(
         !labels(&items).contains(&"db/db".to_string()),
         "an Integrant key is not a var through an alias: {:?}",
@@ -857,7 +929,7 @@ fn test_integrant_key_not_offered_through_refer_all() {
     meta.refer_all = vec!["readx.db".to_string()];
     index.insert_file(meta, vec![], vec![]);
 
-    let items = complete_symbols(&index, "d", "readx.all", None);
+    let items = complete_symbols(&index, "d", "readx.all", Dialect::Clj, None);
     assert!(
         !labels(&items).contains(&"db".to_string()),
         "an Integrant key is not a var through `:refer :all`: {:?}",

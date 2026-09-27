@@ -37,9 +37,12 @@ pub fn document_symbols(
                 index
                     .file_ns(&path)
                     .and_then(|ns| index.ns_symbols.get(&ns).map(|fqns| fqns.clone()))
+                    // Every definition of each fqn, so a name the `.clj` and
+                    // `.cljs` halves of a namespace share is found in the half
+                    // whose outline this is, whichever slot holds it.
                     .map(|fqns| {
                         fqns.iter()
-                            .filter_map(|fqn| index.lookup(fqn))
+                            .flat_map(|fqn| index.lookup_all(fqn))
                             .filter(|s| s.file == path)
                             .collect()
                     })

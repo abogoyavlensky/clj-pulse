@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 use super::extractor;
 use super::jar_cache;
-use super::{ExtractConfig, Index, NsMeta, Symbol};
+use super::{Dialect, ExtractConfig, Index, NsMeta, Symbol};
 
 /// A source root to scan: `path` is walked with gitignore ancestry stopping at
 /// `project_dir` — a configured project may itself live under a dir the
@@ -58,9 +58,11 @@ pub fn build_index_scoped(roots: &[ScanRoot], cfg: &ExtractConfig) -> Result<Ind
 
     for (meta, symbols, occurrences) in results {
         // Cross-project namespace collisions (two projects both defining ns
-        // `user` in their dev dirs): last one wins, but say so.
-        if let Some(existing) = index.namespaces.get(&meta.name) {
-            if existing.file != meta.file {
+        // `user` in their dev dirs): last one wins, but say so. A `.clj` and a
+        // `.cljs` file of one namespace are its two halves, not a collision.
+        let dialect = Dialect::of_path(&meta.file);
+        if let Some(existing) = index.ns_meta_for(&meta.name, dialect) {
+            if existing.file != meta.file && Dialect::of_path(&existing.file) == dialect {
                 tracing::warn!(
                     "namespace {} defined in both {} and {}; last one wins",
                     meta.name,

@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use super::{resolve_symbol, ResolvedSymbol};
 use crate::clojuredocs::{ClojureDocs, Entry};
-use crate::index::Index;
+use crate::index::{Dialect, Index};
 
 /// The `clojurePulse/clojureDocs` response: the var the request resolved to
 /// (`None` when nothing was under the cursor) and its entry, if any.
@@ -54,9 +54,14 @@ impl From<&Entry> for DocsEntry {
     }
 }
 
-/// The `ns/name` to look up for `word` as seen from `current_ns`, or `None`
-/// when the word cannot name a var at all.
-pub fn resolve_var(index: &Index, word: &str, current_ns: &str) -> Option<String> {
+/// The `ns/name` to look up for `word` as seen from `current_ns` in a file of
+/// `dialect`, or `None` when the word cannot name a var at all.
+pub fn resolve_var(
+    index: &Index,
+    word: &str,
+    current_ns: &str,
+    dialect: Dialect,
+) -> Option<String> {
     // `#'map` and `'map` name the same var as `map`.
     let word = word
         .strip_prefix("#'")
@@ -66,7 +71,7 @@ pub fn resolve_var(index: &Index, word: &str, current_ns: &str) -> Option<String
         return None;
     }
 
-    if let Some(resolved) = resolve_symbol(index, word, current_ns) {
+    if let Some(resolved) = resolve_symbol(index, word, current_ns, dialect) {
         return Some(match resolved {
             ResolvedSymbol::Project(sym) => sym.fqn,
             ResolvedSymbol::Core(core) | ResolvedSymbol::LetgoNative(core) => {
@@ -77,7 +82,7 @@ pub fn resolve_var(index: &Index, word: &str, current_ns: &str) -> Option<String
         });
     }
 
-    let meta = index.ns_meta(current_ns);
+    let meta = index.ns_meta_for(current_ns, dialect);
     match word.split_once('/') {
         // `str/join` with the alias known, or a literal `clojure.set/union`.
         Some((alias, name)) if !alias.is_empty() && !name.is_empty() => {
@@ -138,7 +143,7 @@ mod tests {
     fn core_symbol_resolves_to_clojure_core() {
         let index = fixture_index();
         assert_eq!(
-            resolve_var(&index, "map", "simple.core").as_deref(),
+            resolve_var(&index, "map", "simple.core", Dialect::Clj).as_deref(),
             Some("clojure.core/map")
         );
     }
@@ -147,7 +152,7 @@ mod tests {
     fn project_symbol_resolves_to_its_fqn() {
         let index = fixture_index();
         assert_eq!(
-            resolve_var(&index, "add", "simple.core").as_deref(),
+            resolve_var(&index, "add", "simple.core", Dialect::Clj).as_deref(),
             Some("simple.core/add")
         );
     }
@@ -156,7 +161,7 @@ mod tests {
     fn special_form_resolves_to_clojure_core() {
         let index = fixture_index();
         assert_eq!(
-            resolve_var(&index, "if", "simple.core").as_deref(),
+            resolve_var(&index, "if", "simple.core", Dialect::Clj).as_deref(),
             Some("clojure.core/if")
         );
     }
@@ -165,7 +170,7 @@ mod tests {
     fn alias_expands_without_an_indexed_namespace() {
         let index = aliased_index();
         assert_eq!(
-            resolve_var(&index, "str/join", "demo").as_deref(),
+            resolve_var(&index, "str/join", "demo", Dialect::Clj).as_deref(),
             Some("clojure.string/join")
         );
     }
@@ -180,7 +185,7 @@ mod tests {
         .unwrap();
         index.insert_file(meta, symbols, vec![]);
         assert_eq!(
-            resolve_var(&index, "join", "demo").as_deref(),
+            resolve_var(&index, "join", "demo", Dialect::Clj).as_deref(),
             Some("clojure.string/join")
         );
     }
@@ -189,7 +194,7 @@ mod tests {
     fn unknown_qualifier_is_taken_literally() {
         let index = aliased_index();
         assert_eq!(
-            resolve_var(&index, "clojure.set/union", "demo").as_deref(),
+            resolve_var(&index, "clojure.set/union", "demo", Dialect::Clj).as_deref(),
             Some("clojure.set/union")
         );
     }
@@ -198,11 +203,11 @@ mod tests {
     fn var_quote_and_quote_are_stripped() {
         let index = fixture_index();
         assert_eq!(
-            resolve_var(&index, "#'map", "simple.core").as_deref(),
+            resolve_var(&index, "#'map", "simple.core", Dialect::Clj).as_deref(),
             Some("clojure.core/map")
         );
         assert_eq!(
-            resolve_var(&index, "'map", "simple.core").as_deref(),
+            resolve_var(&index, "'map", "simple.core", Dialect::Clj).as_deref(),
             Some("clojure.core/map")
         );
     }
@@ -211,7 +216,7 @@ mod tests {
     fn unknown_bare_word_falls_back_to_clojure_core() {
         let index = fixture_index();
         assert_eq!(
-            resolve_var(&index, "frobnicate", "simple.core").as_deref(),
+            resolve_var(&index, "frobnicate", "simple.core", Dialect::Clj).as_deref(),
             Some("clojure.core/frobnicate")
         );
     }
@@ -220,12 +225,15 @@ mod tests {
     fn division_and_malformed_words() {
         let index = fixture_index();
         assert_eq!(
-            resolve_var(&index, "/", "simple.core").as_deref(),
+            resolve_var(&index, "/", "simple.core", Dialect::Clj).as_deref(),
             Some("clojure.core//")
         );
-        assert_eq!(resolve_var(&index, "foo/", "simple.core"), None);
-        assert_eq!(resolve_var(&index, "", "simple.core"), None);
-        assert_eq!(resolve_var(&index, "#'", "simple.core"), None);
+        assert_eq!(
+            resolve_var(&index, "foo/", "simple.core", Dialect::Clj),
+            None
+        );
+        assert_eq!(resolve_var(&index, "", "simple.core", Dialect::Clj), None);
+        assert_eq!(resolve_var(&index, "#'", "simple.core", Dialect::Clj), None);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clj_pulse::handlers::{resolve_symbol, ResolvedSymbol};
-use clj_pulse::index::{Index, SymbolSource};
+use clj_pulse::index::{Dialect, Index, SymbolSource};
 use tower_lsp::lsp_types::Url;
 
 fn make_jar(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
@@ -32,7 +32,7 @@ fn test_goto_definition_jar_returns_jar_uri() {
         index.insert_file(meta, syms, vec![]);
     }
 
-    let result = resolve_symbol(&index, "mylib.core/hello", "user");
+    let result = resolve_symbol(&index, "mylib.core/hello", "user", Dialect::Clj);
     let sym = match result {
         Some(ResolvedSymbol::Project(s)) => s,
         other => panic!("expected Project symbol, got {:?}", other),

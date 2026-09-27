@@ -41,18 +41,19 @@ pub fn handle(
     }))
 }
 
-/// Hover markdown for `word` as seen from `current_ns`. A library symbol is
-/// swapped for its ClojureScript copy when `dialect` is `Cljs` and one exists,
-/// so a `.cljs` buffer reads the docstring of the copy it would navigate to.
+/// Hover markdown for `word` as seen from `current_ns`. The resolver answers
+/// with the ClojureScript copy of a symbol when `dialect` is `Cljs` and one
+/// exists, so a `.cljs` buffer reads the docstring of the copy it would
+/// navigate to.
 pub fn resolve_and_format(
     index: &Index,
     word: &str,
     current_ns: &str,
     dialect: Dialect,
 ) -> Option<String> {
-    if let Some(resolved) = resolve_symbol(index, word, current_ns) {
+    if let Some(resolved) = resolve_symbol(index, word, current_ns, dialect) {
         return Some(match resolved {
-            ResolvedSymbol::Project(sym) => format_for_symbol(&index.prefer_dialect(sym, dialect)),
+            ResolvedSymbol::Project(sym) => format_for_symbol(&sym),
             ResolvedSymbol::Core(core) => format_for_core(&core),
             ResolvedSymbol::SpecialForm(sf) => format_for_special_form(sf),
             ResolvedSymbol::LetgoNative(core) => format_for_letgo_native(&core),

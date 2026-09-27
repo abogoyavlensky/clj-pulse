@@ -2,7 +2,7 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::Index;
+use crate::index::{Dialect, Index};
 
 use super::{resolve_symbol, ResolvedSymbol};
 
@@ -31,8 +31,9 @@ pub fn handle(
         None => return Ok(None),
     };
     let current_ns = index.file_ns(&path).unwrap_or_default();
+    let dialect = Dialect::of_path(&path);
 
-    let (name, arities, doc) = match resolve_symbol(index, &fn_word, &current_ns) {
+    let (name, arities, doc) = match resolve_symbol(index, &fn_word, &current_ns, dialect) {
         Some(ResolvedSymbol::Project(sym)) => (sym.name.clone(), sym.params.clone(), sym.doc),
         Some(ResolvedSymbol::Core(core)) => {
             let doc = if core.doc.is_empty() {
