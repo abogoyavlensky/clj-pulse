@@ -70,7 +70,10 @@ pub fn resolve_symbol(index: &Index, word: &str, current_ns: &str) -> Option<Res
                 // (`:refer-clojure :rename {map cmap}`) has no indexed var
                 // unless the clojure JAR is on the classpath — fall back to
                 // the curated core entry so hover still describes it.
-                if let Some(core_name) = fqn.strip_prefix("clojure.core/") {
+                let core_name = fqn
+                    .strip_prefix("clojure.core/")
+                    .or_else(|| fqn.strip_prefix("cljs.core/"));
+                if let Some(core_name) = core_name {
                     if let Some(core) = index.core_symbols.iter().find(|c| c.name == core_name) {
                         return Some(ResolvedSymbol::Core(core.clone()));
                     }

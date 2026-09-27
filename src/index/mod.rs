@@ -199,6 +199,16 @@ impl Dialect {
     }
 }
 
+/// The namespace a bare core name belongs to in a file of `dialect`:
+/// `cljs.core` in ClojureScript, `clojure.core` everywhere else (`.cljc`
+/// included, since it asks as Clojure).
+pub fn core_ns(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Cljs => "cljs.core",
+        Dialect::Clj => "clojure.core",
+    }
+}
+
 /// Rank of a library file when two files define the same fqn: lower wins.
 /// `.clj` is the copy a Clojure reader wants, `.cljc` serves both dialects,
 /// `.cljs` is the ClojureScript copy `Index::cljs_symbols` keeps aside.

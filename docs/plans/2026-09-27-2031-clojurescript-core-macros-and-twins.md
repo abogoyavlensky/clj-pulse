@@ -86,10 +86,10 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Move the three Backlog lines into Milestone 5**
+- [x] **Step 1: Move the three Backlog lines into Milestone 5**
   Delete the three 2026-09-17 Backlog bullets (`.cljs` core, `:require-macros`, twins) and add one unticked item directly above **Release** in Milestone 5: **ClojureScript: `cljs.core`, `:require-macros`, twin namespaces.** Two or three sentences from the Design's ground-truth paragraph (what each item was, the `var-usage/library` numbers), the three backlog links, and `Plan: [2026-09-27-2031-clojurescript-core-macros-and-twins.md](plans/2026-09-27-2031-clojurescript-core-macros-and-twins.md) — in progress`.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git add docs && git commit -m "Plan ClojureScript core, require-macros and twin namespaces"`
 
 ### Task 2: `cljs.core` occurrences and definitions
@@ -98,35 +98,37 @@ Against the table in `docs/MEMORY.md` (2026-09-18): `var-usage/library` and `var
 - Modify: `src/index/mod.rs` (`core_ns`), `src/index/extractor.rs`, `src/handlers/mod.rs`, `src/handlers/definition.rs`
 - Test: `tests/test_extractor.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing extractor tests**
+- [x] **Step 1: Write the failing extractor tests**
   In `tests/test_extractor.rs`, next to `test_occurrence_refer_usage_and_vector_entry`:
   - `cljs_core_names_resolve_to_cljs_core`: extract `(ns x)\n(not (when true 1))\n` at path `x.cljs`; occurrences hold `cljs.core/not` and `cljs.core/when` and no `clojure.core/…`. The same source at `x.clj` and at `x.cljc` yields `clojure.core/not`.
   - `cljs_qualified_clojure_core_is_cljs_core`: `(ns x (:require [clojure.core :as cc]))\n(cc/inc 1)\n(clojure.core/dec 1)\n` at `x.cljs` → `cljs.core/inc` and `cljs.core/dec`.
   - `cljs_refer_clojure_rename_refers_cljs_core`: `(ns x (:refer-clojure :rename {map cmap}))` at `x.cljs` → `refers["cmap"] == "cljs.core/map"`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
   Run: `cargo test --test test_extractor cljs_ -- --nocapture`
   Expected: the three new tests FAIL on the `clojure.core` fqns.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   `src/index/mod.rs`: `pub fn core_ns(dialect: Dialect) -> &'static str` beside `Dialect`.
   `src/index/extractor.rs`: `dialect` on `OccurrenceCtx` (set where the ctx is built from `ns_meta.file`); `record_occurrence` bare-core branch and the qualified branch's `clojure.core` → `cljs.core` rewrite for `Cljs`; `head_is_core_form` accepts either core ns; `parse_refer_clojure` uses `core_ns(Dialect::of_path(&ns_meta.file))`.
   `src/handlers/mod.rs`: the renamed-core fallback in `resolve_symbol` strips `clojure.core/` or `cljs.core/`.
   `src/handlers/definition.rs`, `Core` arm: `core_ns(dialect)` first, `clojure.core` as the `Cljs` floor.
+  > Deviation: `core_ns` is `pub` (the definition handler and extractor are other modules). The locals walker's `(clojure.core/let …)` check accepts `cljs.core` too, to stay in step with `head_is_core_form`. `test_are_binds_template_locals_in_every_require_style` expected `clojure.core/=` in its `.cljs` case; it now expects `cljs.core/=`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
   Run: `cargo test --test test_extractor && cargo test --lib`
   Expected: PASS.
 
-- [ ] **Step 5: Write the failing e2e test**
+- [x] **Step 5: Write the failing e2e test**
   In `tests/test_e2e.rs`, extend `clojure_and_clojurescript_jars_project` (or add a sibling `core_jars_project`) so `clojure-x.jar` also carries `clojure/core.clj` with `(ns clojure.core)\n(defn not [x] x)\n(defmacro when [t & b] nil)\n` and `clojurescript-x.jar` carries `cljs/core.cljs` with `(ns cljs.core)\n(defn not [x] x)\n` and `cljs/core.cljc` with `(ns cljs.core)\n(core/defmacro when [t & b] nil)\n`. Consumers: `src/uses_core.clj` and `src/uses_core.cljs`, each `(ns uses-core)\n(not (when true 1))\n`.
   `test_e2e_cljs_core_navigates_into_the_clojurescript_jar`, both classpath orders: `initialize`, `wait_for_log("library indexing complete")`, open the `.cljs` consumer; definition on `not` ends with `!/cljs/core.cljs`, on `when` with `!/cljs/core.cljc`; open the `.clj` consumer; both end with `!/clojure/core.clj`.
 
-- [ ] **Step 6: Run, verify fail then pass**
+- [x] **Step 6: Run, verify fail then pass**
   Run: `cargo test --test test_e2e cljs_core -- --nocapture`
   Expected: FAIL before the Step 3 change is in place for the `Core` arm, PASS after. (If Step 3 is already complete, it passes at once; note that in the plan.)
+  > Passed at once (Step 3 was in); with `src/` stashed it fails on `.cljs` `not` → `clojure/core.clj`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
   `git commit -am "Resolve the core of a .cljs file to cljs.core"`
 
 ### Task 3: `:require-macros`, `:refer-macros`, `:include-macros`

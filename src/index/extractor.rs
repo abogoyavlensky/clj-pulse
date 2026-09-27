@@ -8,7 +8,7 @@ use tree_sitter::{Node, Parser};
 use tree_sitter_clojure::LANGUAGE;
 use tree_sitter_language::LanguageFn;
 
-use super::{DefKind, ExtractConfig, NsMeta, Occurrence, Symbol};
+use super::{core_ns, DefKind, Dialect, ExtractConfig, NsMeta, Occurrence, Symbol};
 
 static LANGUAGE_REF: OnceLock<tree_sitter::Language> = OnceLock::new();
 
@@ -237,6 +237,7 @@ fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<
     let ctx = OccurrenceCtx {
         source,
         ns_meta,
+        dialect: Dialect::of_path(&ns_meta.file),
         def_names: HashSet::new(),
         lint_as: NO_LINT_AS.get_or_init(HashMap::new),
     };
@@ -402,6 +403,7 @@ pub fn extract_analysis_tree(
     let ctx = OccurrenceCtx {
         source,
         ns_meta: &ns_meta,
+        dialect: Dialect::of_path(file),
         def_names,
         lint_as: &cfg.lint_as,
     };
@@ -848,7 +850,8 @@ fn parse_refer_clojure(items: &[Node], source: &str, ns_meta: &mut NsMeta) {
             }
             ":rename" if items[i + 1].kind() == "map_lit" => {
                 for (from, to) in rename_pairs(items[i + 1], source) {
-                    ns_meta.refers.insert(to, format!("clojure.core/{}", from));
+                    let core = core_ns(Dialect::of_path(&ns_meta.file));
+                    ns_meta.refers.insert(to, format!("{}/{}", core, from));
                     // Renaming a core name unmaps the original: after
                     // `:rename {map cmap}`, bare `map` is not core's `map`.
                     if !ns_meta.core_excludes.contains(&from) {
@@ -1724,6 +1727,7 @@ fn discarded_keyword_starts(node: Node, source: &str, out: &mut HashSet<(u32, u3
         let ctx = OccurrenceCtx {
             source,
             ns_meta: &ns_meta,
+            dialect: Dialect::Clj,
             def_names: HashSet::new(),
             lint_as: &lint_as,
         };
@@ -1956,6 +1960,10 @@ impl Scope {
 struct OccurrenceCtx<'a> {
     source: &'a str,
     ns_meta: &'a NsMeta,
+    /// The dialect of the file being walked: a bare core name belongs to
+    /// [`core_ns`] of it, and ClojureScript reads `clojure.core/x` as
+    /// `cljs.core/x`.
+    dialect: Dialect,
     def_names: HashSet<&'a str>,
     /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
     /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
@@ -2019,8 +2027,9 @@ fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mu
 }
 
 /// Whether a `sym_lit` list head names a core/special form: unqualified, or
-/// qualified to `clojure.core` (directly or via an `:as` alias). Keeps
-/// `clojure.core/let` binding locals while excluding `s/def` and friends.
+/// qualified to `clojure.core` or `cljs.core` (directly or via an `:as`
+/// alias). Keeps `clojure.core/let` binding locals while excluding `s/def` and
+/// friends.
 fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
     match head.child_by_field_name("namespace") {
         None => true,
@@ -2032,7 +2041,7 @@ fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
                 .get(alias)
                 .map(String::as_str)
                 .unwrap_or(alias);
-            resolved == "clojure.core"
+            matches!(resolved, "clojure.core" | "cljs.core")
         }
     }
 }
@@ -2073,7 +2082,7 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     }
 
     // A head names a core/special form only when it is unqualified or qualified
-    // to `clojure.core`. Matching on the name part alone would misread a
+    // to `clojure.core` (or `cljs.core`). Matching on the name part alone would misread a
     // qualified call like `s/def` as core `def` (skipping the keyword in its
     // "name" slot); requiring clojure.core still handles a `clojure.core/let`
     // (or an alias to it) as a real binding form. Other qualified heads fall
@@ -2853,8 +2862,14 @@ fn record_occurrence(
             .ns_meta
             .aliases
             .get(alias)
-            .cloned()
-            .unwrap_or_else(|| alias.to_string());
+            .map(String::as_str)
+            .unwrap_or(alias);
+        // ClojureScript aliases `clojure.core` to `cljs.core`.
+        let ns = if ns == "clojure.core" {
+            core_ns(ctx.dialect)
+        } else {
+            ns
+        };
         out.push(Occurrence {
             fqn: format!("{}/{}", ns, name),
             name_range,
@@ -2880,7 +2895,7 @@ fn record_occurrence(
     } else if ctx.def_names.contains(name) {
         in_ns(name)
     } else if core_names().contains(name) && !ctx.ns_meta.core_excludes.iter().any(|e| e == name) {
-        format!("clojure.core/{}", name)
+        format!("{}/{}", core_ns(ctx.dialect), name)
     } else {
         in_ns(name)
     };
@@ -3112,15 +3127,16 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                 return;
             }
             // A head is a binding form when it is unqualified or explicitly
-            // qualified to `clojure.core` (`(clojure.core/let …)`), matching the
-            // occurrence walker's `head_is_core_form`. A qualified `s/def` etc.
-            // falls through to generic descent. (An `:as` alias of clojure.core
-            // is not resolved here — the primitive has no ns metadata — so
-            // `cc/let` is not treated as a binding form; that form is rare.)
+            // qualified to `clojure.core` or `cljs.core` (`(clojure.core/let
+            // …)`), matching the occurrence walker's `head_is_core_form`. A
+            // qualified `s/def` etc. falls through to generic descent. (An
+            // `:as` alias of clojure.core is not resolved here — the primitive
+            // has no ns metadata — so `cc/let` is not treated as a binding
+            // form; that form is rare.)
             let core_form = head.kind() == "sym_lit"
                 && match head.child_by_field_name("namespace") {
                     None => true,
-                    Some(ns) => node_text(ns, source) == "clojure.core",
+                    Some(ns) => matches!(node_text(ns, source), "clojure.core" | "cljs.core"),
                 };
             if !core_form {
                 // A qualified defining head (`mu/defn`) binds like the form its

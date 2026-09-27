@@ -205,6 +205,99 @@ fn test_e2e_definition_from_cljs_prefers_the_clojurescript_jar_copy() {
     }
 }
 
+/// A project whose classpath holds a Clojure JAR (`clojure/core.clj`) and a
+/// ClojureScript JAR (`cljs/core.cljs` with the fns, `cljs/core.cljc` with the
+/// macros, as the real one ships them), in the order `cljs_first` says, with a
+/// `.clj` and a `.cljs` consumer of `not` and `when` under `src/`.
+fn core_jars_project(cljs_first: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let write_jar = |name: &str, entries: &[(&str, &[u8])]| {
+        let jar_path = root.join(name);
+        let jar_file = std::fs::File::create(&jar_path).unwrap();
+        let mut zip = zip::ZipWriter::new(jar_file);
+        let opts = zip::write::SimpleFileOptions::default();
+        for (entry, source) in entries {
+            zip.start_file(*entry, opts).unwrap();
+            zip.write_all(source).unwrap();
+        }
+        zip.finish().unwrap();
+        jar_path
+    };
+    let clj_jar = write_jar(
+        "clojure-x.jar",
+        &[(
+            "clojure/core.clj",
+            b"(ns clojure.core)\n(defn not [x] x)\n(defmacro when [t & b] nil)\n",
+        )],
+    );
+    let cljs_jar = write_jar(
+        "clojurescript-x.jar",
+        &[
+            ("cljs/core.cljs", b"(ns cljs.core)\n(defn not [x] x)\n"),
+            (
+                "cljs/core.cljc",
+                b"(ns cljs.core)\n(core/defmacro when [t & b] nil)\n",
+            ),
+        ],
+    );
+    let jars = if cljs_first {
+        [cljs_jar, clj_jar]
+    } else {
+        [clj_jar, cljs_jar]
+    };
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(
+        cpcache.join("1.cp"),
+        std::env::join_paths(jars).unwrap().as_encoded_bytes(),
+    )
+    .unwrap();
+
+    for ext in ["clj", "cljs"] {
+        std::fs::write(
+            root.join(format!("src/uses_core.{ext}")),
+            "(ns uses-core)\n(not (when true 1))\n",
+        )
+        .unwrap();
+    }
+
+    (project, root)
+}
+
+#[test]
+fn test_e2e_cljs_core_navigates_into_the_clojurescript_jar() {
+    // A `.cljs` file's core is `cljs.core`: `not` lands in `cljs/core.cljs`,
+    // the `when` macro in `cljs/core.cljc`. A `.clj` file keeps landing in
+    // `clojure/core.clj`, whatever order the classpath lists the JARs.
+    for cljs_first in [true, false] {
+        let (_project, root) = core_jars_project(cljs_first);
+
+        let mut client = LspClient::start(&root);
+        client.initialize(&root);
+        client.wait_for_log("library indexing complete");
+
+        for (ext, not_entry, when_entry) in [
+            ("cljs", "!/cljs/core.cljs", "!/cljs/core.cljc"),
+            ("clj", "!/clojure/core.clj", "!/clojure/core.clj"),
+        ] {
+            let consumer = root.join(format!("src/uses_core.{ext}"));
+            client.did_open(&consumer);
+            for (word, entry) in [("not", not_entry), ("when", when_entry)] {
+                let (line, ch) = position_of(&consumer, word);
+                let loc = client.goto_definition(&consumer, line, ch);
+                let uri = loc["uri"].as_str().unwrap_or_default();
+                assert!(
+                    uri.starts_with("jar:file://") && uri.ends_with(entry),
+                    "cljs_first={cljs_first} .{ext} `{word}`: expected {entry}, got {loc}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn test_e2e_letgo_navigation_into_lgx_deps() {
     let project = setup_named("letgo_project");
