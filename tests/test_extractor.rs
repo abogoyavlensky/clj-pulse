@@ -2384,8 +2384,7 @@ h/f
         let src = "(ns x (:require-macros [a.macros :as m]))\n(m/defthing foo 1)\n";
         let tree = parse_tree(src).unwrap();
         let (_, _, occs) =
-            extract_full_tree(&tree, src, Path::new("x.cljs"), &ExtractConfig::default())
-                .unwrap();
+            extract_full_tree(&tree, src, Path::new("x.cljs"), &ExtractConfig::default()).unwrap();
         let sites = alias_sites_tree(&tree, src, "m", &occs);
         let declarations: Vec<(u32, u32, u32)> = sites.declarations.iter().map(triple).collect();
         assert_eq!(declarations, vec![(0, 37, 38)], "{:?}", sites.declarations);
