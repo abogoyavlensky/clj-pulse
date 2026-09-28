@@ -352,25 +352,27 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
 **Files:**
 - Modify: `docs/MEMORY.md`
 
-- [ ] **Step 1: Run the gates**
+- [x] **Step 1: Run the gates**
   Run: `bb check`, then `bb e2e`, then `bb compare clj-kondo`
   Expected: `bb check` and `bb e2e` green; compare exits 0 with
   `keyword/qualified` diverge and null both well below 93 and 41, the
   leftover divergences being `.edn` sites and the one `(comment …)` site;
   `local/destructured` and `keyword/keys` unchanged at 0 diverge. Paste
   the `COMPARE_JSON` rows.
-- [ ] **Step 2: Record the run** in `docs/MEMORY.md` under the compare
+- [x] **Step 2: Record the run** in `docs/MEMORY.md` under the compare
   section: a dated paragraph with the rows that moved and what remains
   (`.edn` files, the `(comment …)` site the oracle's `:skip-comments`
   drops).
-- [ ] **Step 3: Run `bb bench clj-kondo`** and compare the timeline and
+- [x] **Step 3: Run `bb bench clj-kondo`** and compare the timeline and
   keystroke rows against the recorded tables; a visible regression is a
   finding to report, not to absorb.
-- [ ] **Step 4: Run `bb e2e-pulse` and `bb e2e-calva`** (client-visible
+- [x] **Step 4: Run `bb e2e-pulse` and `bb e2e-calva`** (client-visible
   references/highlight change; definition change).
   Expected: both green.
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "docs: record the compare run after quoted keyword sites"`
+
+> Deviation: the `(comment …)` class is two sites (`types.clj:1094`–`1095`, `:nilable/associative` and `:nilable/set`), which count as 22 divergences because both keywords are probed from many sites; the `.edn` class is 20 (2 of them null). `keyword/qualified` went 142/93/41 to 234/40/2; nothing else moved against a same-day master run. Bench within noise; `bb e2e-pulse` and `bb e2e-calva` green.
 
 ### Task 7: Docs and close-out
 

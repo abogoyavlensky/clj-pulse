@@ -367,6 +367,35 @@ syntax-quoted template of the `.clj` twin's macro — a real use, which kondo
 does not resolve. The twin pair's index damage (saving one half dropped the
 other) never showed in `bb compare`; the e2e suite covers it.
 
+### After quoted keyword sites and qualified `:keys` locals (2026-09-28)
+
+Same corpus, kondo and container; the "before" columns are a run of the
+same day on master (`06b2bc5`), identical to the 2026-09-27 run. One row
+moved:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `keyword/qualified` | 276 | 234 | 40 | 0 | 2 | 142 | 93 | 41 |
+| **total** | 5249 | 4923 | 249 | 20 | 57 | 4831 | 302 | 96 |
+
+Keywords under a quote (`'{:deps …}`, `'[:nilable/set …]`, `''([…])`, the
+ns attr-map) are occurrences now. The 42 answers left are two classes. 20
+are keywords in non-Integrant `.edn` files under source paths
+(`config.types.edn`, `test-regression/**/findings.edn`), which kondo lints
+and the index skips; the 2 nulls are cursors in `config.types.edn` itself
+(ROADMAP backlog, 2026-09-28). The other 22 are one extra site each on our
+side: `:nilable/associative` and `:nilable/set` in the `(comment …)` form
+at `types.clj:1094`–`1095`, which the oracle's `:skip-comments true`
+drops. Both keywords are probed from many sites, so two lines make 22
+divergences; they stay unlisted in `KNOWN`, since a matcher on
+`missing: 0` would hide every superset answer in `keyword/`.
+`local/destructured` stays at 507 of 507 without its `KNOWN` entry for a
+qualified `{:keys [c/x]}` entry, which never matched a clj-kondo probe;
+`compare_simple_project` covers it at `alias_sites.clj:10`.
+`var-usage/core/macro` reads 196/191/0/5 on both sides, against the
+2026-09-18 table's 195/193/0/2: two `deftype`/`defrecord` heads and a
+`proxy-super` joined the null set before this change, on master already.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,
