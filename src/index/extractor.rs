@@ -2036,9 +2036,10 @@ fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mu
         // user wrote is not the keyword the program sees.
         "ns_map_lit" => walk_ns_map(node, ctx, scope, out),
         "list_lit" => walk_list(node, ctx, scope, out),
-        // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
-        // macros do reference real vars, so walk those.
-        "quoting_lit" => {}
+        // 'foo quotes data: its keywords are still keywords, its symbols are
+        // not var usages. Syntax-quoted forms in macros do reference real
+        // vars, so those take the ordinary walk.
+        "quoting_lit" => walk_quoted_data(node, ctx, out),
         // A gap handed over directly (`named_children` never yields one)
         // records nothing: the reader drops what a discard or comment holds.
         "comment" | "dis_expr" => {}
@@ -2119,8 +2120,21 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     };
 
     match head_text {
-        Some("ns") => collect_refer_occurrences(&children, ctx, out),
-        Some("quote") => {}
+        Some("ns") => {
+            collect_refer_occurrences(&children, ctx, out);
+            // The attr-map (`(ns x {:clj-kondo/config '{…}})`) is read, never
+            // evaluated: its keywords count, its symbols do not.
+            for child in children.iter().skip(2) {
+                if child.kind() != "list_lit" {
+                    walk_quoted_data(*child, ctx, out);
+                }
+            }
+        }
+        Some("quote") => {
+            for child in &children[1..] {
+                walk_quoted_data(*child, ctx, out);
+            }
+        }
         Some("letfn") => {
             record_occurrence(*head, ctx, scope, out);
             walk_letfn_form(&children, ctx, scope, out);
@@ -2931,9 +2945,28 @@ fn record_occurrence(
     out.push(Occurrence { fqn, name_range });
 }
 
-/// Records a keyword usage. The range spans the whole keyword token so
-/// navigation resolves from a click anywhere on `:ns/name` / `::name`
-/// (keyword rename is unsupported in v1, so a name-only range buys nothing).
+/// Walks quoted data (`'{…}`, `(quote …)`, nested quotes included). The
+/// reader resolves `::k` and `::alias/k` before the quote sees them, so every
+/// keyword is an occurrence under the usual rule and a namespaced map still
+/// qualifies its keys; a symbol is data, never a usage, and records nothing.
+fn walk_quoted_data(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
+    match node.kind() {
+        "kwd_lit" => record_keyword_occurrence(node, ctx, out),
+        "ns_map_lit" => walk_ns_map_entries(node, ctx, out, &mut |entry, out| {
+            walk_quoted_data(entry, ctx, out)
+        }),
+        "comment" | "dis_expr" => {}
+        _ => {
+            for child in named_children(node) {
+                walk_quoted_data(child, ctx, out);
+            }
+        }
+    }
+}
+
+/// Records a keyword usage — in code and in quoted data alike. The range spans
+/// the whole keyword token so navigation resolves from a click anywhere on
+/// `:ns/name` / `::name`; a keyword rename edits the name the token ends with.
 fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
     if let Some(fqn) = keyword_occurrence_fqn(node, ctx.ns_meta, ctx.source) {
         out.push(Occurrence {
@@ -2955,12 +2988,25 @@ fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occu
 /// keywords stay unqualified, which under-reports the keys but never invents a
 /// namespace for a value.
 fn walk_ns_map(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
+    walk_ns_map_entries(node, ctx, out, &mut |entry, out| {
+        walk_occurrences(entry, ctx, scope, out)
+    });
+}
+
+/// The key/value pairing of [`walk_ns_map`], shared with quoted data: keyword
+/// keys are recorded qualified, every other entry goes to `walk`.
+fn walk_ns_map_entries(
+    node: Node,
+    ctx: &OccurrenceCtx,
+    out: &mut Vec<Occurrence>,
+    walk: &mut dyn FnMut(Node, &mut Vec<Occurrence>),
+) {
     let map_ns = ns_map_prefix(node, ctx);
     let mut cursor = node.walk();
     let entries: Vec<Node> = node.children_by_field_name("value", &mut cursor).collect();
     if entries.iter().any(|n| n.kind() == "splicing_read_cond_lit") {
         for entry in entries {
-            walk_occurrences(entry, ctx, scope, out);
+            walk(entry, out);
         }
         return;
     }
@@ -2969,11 +3015,11 @@ fn walk_ns_map(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec
             Some(key) if key.kind() == "kwd_lit" => {
                 record_ns_map_key(*key, map_ns.as_deref(), ctx, out)
             }
-            Some(key) => walk_occurrences(*key, ctx, scope, out),
+            Some(key) => walk(*key, out),
             None => {}
         }
         if let Some(value) = pair.get(1) {
-            walk_occurrences(*value, ctx, scope, out);
+            walk(*value, out);
         }
     }
 }

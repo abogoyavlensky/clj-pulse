@@ -486,6 +486,94 @@ fn test_occurrence_qualified_alias_name_only_range() {
     );
 }
 
+/// The single-line range of the `nth` (0-based) `token` in `src`, as keyword
+/// occurrences range the whole token.
+fn token_range(src: &str, token: &str, nth: usize) -> (u32, u32, u32) {
+    let at = src.match_indices(token).nth(nth).unwrap().0;
+    let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let line = src[..at].matches('\n').count() as u32;
+    let col = src[line_start..at].encode_utf16().count() as u32;
+    (line, col, col + token.encode_utf16().count() as u32)
+}
+
+fn assert_quoted_keyword(src: &str, fqn: &str, token: &str) {
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    let found = occurrences_of(&occs, fqn);
+    assert_eq!(found.len(), 1, "{fqn} in {src:?}: {occs:?}");
+    let (line, start, end) = token_range(src, token, 0);
+    let r = found[0].name_range;
+    assert_eq!(
+        (r.start.line, r.start.character, r.end.line, r.end.character),
+        (line, start, line, end),
+        "{fqn} range"
+    );
+}
+
+#[test]
+fn test_quoted_map_records_keywords() {
+    assert_quoted_keyword(
+        "(ns my.app)\n(def deps '{:mvn/version \"1\"})",
+        ":mvn/version",
+        ":mvn/version",
+    );
+}
+
+#[test]
+fn test_quoted_quote_form_records_keywords() {
+    let src = "(ns my.app)\n(def v (quote [:a/b :c]))";
+    assert_quoted_keyword(src, ":a/b", ":a/b");
+    assert_quoted_keyword(src, ":c", ":c");
+}
+
+#[test]
+fn test_quoted_nested_quote_records_keywords() {
+    assert_quoted_keyword(
+        "(ns my.app)\n(def v ''([{:keys [:foo/bar]}]))",
+        ":foo/bar",
+        ":foo/bar",
+    );
+}
+
+#[test]
+fn test_quoted_ns_map_qualifies_keys() {
+    let src = "(ns my.app)\n(def a '#::{:id 1})\n(def b '#:user{:name 2})";
+    assert_quoted_keyword(src, ":my.app/id", ":id");
+    assert_quoted_keyword(src, ":user/name", ":name");
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert!(occurrences_of(&occs, ":id").is_empty(), "{occs:?}");
+}
+
+#[test]
+fn test_quoted_auto_resolved_alias_keyword() {
+    assert_quoted_keyword(
+        "(ns my.app\n  (:require [other.lib :as alias]))\n(def k '::alias/k)",
+        ":other.lib/k",
+        "::alias/k",
+    );
+}
+
+#[test]
+fn test_quoted_symbols_stay_non_usages() {
+    use clj_pulse::index::extractor::qualified_usages;
+    let src = "(ns my.app\n  (:require [other.lib :as lib]))\n\
+               (def a 'foo/bar)\n(def b '(lib/f x))\n(def c (quote (lib/f :k)))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert!(occurrences_of(&occs, "other.lib/f").is_empty(), "{occs:?}");
+    assert!(occurrences_of(&occs, "foo/bar").is_empty(), "{occs:?}");
+    assert_eq!(occurrences_of(&occs, ":k").len(), 1, "{occs:?}");
+    assert!(!qualified_usages(src).iter().any(|u| u.prefix == "foo"));
+}
+
+#[test]
+fn test_quoted_ns_attr_map_records_keywords() {
+    let src = "(ns my.app\n  {:clj-kondo/config '{:linters {:x/y 1}}}\n  (:require [clojure.string :as str]))";
+    assert_quoted_keyword(src, ":clj-kondo/config", ":clj-kondo/config");
+    assert_quoted_keyword(src, ":x/y", ":x/y");
+    // The require clause's own keywords stay out, as before.
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert!(occurrences_of(&occs, ":require").is_empty(), "{occs:?}");
+}
+
 #[test]
 fn test_occurrence_bare_symbol_resolves_to_current_ns() {
     let src = "(ns my.app)\n(defn helper [x] x)\n(defn caller [y] (helper y))";
