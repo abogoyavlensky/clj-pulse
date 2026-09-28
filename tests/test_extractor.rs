@@ -496,7 +496,7 @@ fn token_range(src: &str, token: &str, nth: usize) -> (u32, u32, u32) {
     (line, col, col + token.encode_utf16().count() as u32)
 }
 
-fn assert_quoted_keyword(src: &str, fqn: &str, token: &str) {
+fn assert_single_keyword(src: &str, fqn: &str, token: &str) {
     let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
     let found = occurrences_of(&occs, fqn);
     assert_eq!(found.len(), 1, "{fqn} in {src:?}: {occs:?}");
@@ -511,7 +511,7 @@ fn assert_quoted_keyword(src: &str, fqn: &str, token: &str) {
 
 #[test]
 fn test_quoted_map_records_keywords() {
-    assert_quoted_keyword(
+    assert_single_keyword(
         "(ns my.app)\n(def deps '{:mvn/version \"1\"})",
         ":mvn/version",
         ":mvn/version",
@@ -521,13 +521,13 @@ fn test_quoted_map_records_keywords() {
 #[test]
 fn test_quoted_quote_form_records_keywords() {
     let src = "(ns my.app)\n(def v (quote [:a/b :c]))";
-    assert_quoted_keyword(src, ":a/b", ":a/b");
-    assert_quoted_keyword(src, ":c", ":c");
+    assert_single_keyword(src, ":a/b", ":a/b");
+    assert_single_keyword(src, ":c", ":c");
 }
 
 #[test]
 fn test_quoted_nested_quote_records_keywords() {
-    assert_quoted_keyword(
+    assert_single_keyword(
         "(ns my.app)\n(def v ''([{:keys [:foo/bar]}]))",
         ":foo/bar",
         ":foo/bar",
@@ -537,15 +537,15 @@ fn test_quoted_nested_quote_records_keywords() {
 #[test]
 fn test_quoted_ns_map_qualifies_keys() {
     let src = "(ns my.app)\n(def a '#::{:id 1})\n(def b '#:user{:name 2})";
-    assert_quoted_keyword(src, ":my.app/id", ":id");
-    assert_quoted_keyword(src, ":user/name", ":name");
+    assert_single_keyword(src, ":my.app/id", ":id");
+    assert_single_keyword(src, ":user/name", ":name");
     let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
     assert!(occurrences_of(&occs, ":id").is_empty(), "{occs:?}");
 }
 
 #[test]
 fn test_quoted_auto_resolved_alias_keyword() {
-    assert_quoted_keyword(
+    assert_single_keyword(
         "(ns my.app\n  (:require [other.lib :as alias]))\n(def k '::alias/k)",
         ":other.lib/k",
         "::alias/k",
@@ -567,11 +567,20 @@ fn test_quoted_symbols_stay_non_usages() {
 #[test]
 fn test_quoted_ns_attr_map_records_keywords() {
     let src = "(ns my.app\n  {:clj-kondo/config '{:linters {:x/y 1}}}\n  (:require [clojure.string :as str]))";
-    assert_quoted_keyword(src, ":clj-kondo/config", ":clj-kondo/config");
-    assert_quoted_keyword(src, ":x/y", ":x/y");
+    assert_single_keyword(src, ":clj-kondo/config", ":clj-kondo/config");
+    assert_single_keyword(src, ":x/y", ":x/y");
     // The require clause's own keywords stay out, as before.
     let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
     assert!(occurrences_of(&occs, ":require").is_empty(), "{occs:?}");
+}
+
+#[test]
+fn test_keyword_occurrences_in_binding_values_after_a_comment() {
+    // A comment inside a binding vector once re-paired the bindings after it,
+    // so a keyword in a value position was read as a binding and dropped.
+    let src = "(ns my.app)\n(defn f [m]\n  (let [a 1\n        ;; note\n        b (:my.ns/k m)\n        c (if-let [x (some-> m ::k)] x)]\n    [a b c]))";
+    assert_single_keyword(src, ":my.ns/k", ":my.ns/k");
+    assert_single_keyword(src, ":my.app/k", "::k");
 }
 
 #[test]

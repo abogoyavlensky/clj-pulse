@@ -7737,6 +7737,66 @@ fn test_e2e_qualified_keys_entry_is_a_local() {
 }
 
 #[test]
+fn test_e2e_rename_refuses_literal_namespace_keys_entry() {
+    // `{:simple.core/keys [x]}` reads `:simple.core/x` and binds `x`: the
+    // entry is a destructured local, refused by rename like `{::c/keys [x]}`,
+    // and a site of the keyword it reads. A comment used to re-pair a binding
+    // vector so this entry resolved as a plain usage (fixed by the gaps work).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/ns_keys.clj");
+    let probe_text = "(ns simple.ns-keys)\n(defn f [{:simple.core/keys [x]}]\n  x)\n";
+    std::fs::write(&probe, probe_text).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&probe);
+
+    let (line, start) = start_of(probe_text, "[x]");
+    let entry = start + 1;
+    let msg = client.prepare_rename_error(&probe, line, entry);
+    assert!(msg.contains("destructured binding 'x'"), "{msg}");
+    client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", probe.display()) },
+            "position": { "line": line, "character": entry },
+            "newName": "y"
+        }),
+    );
+
+    let refs = client.references(&probe, line, entry, true);
+    let mut sites: Vec<(u64, u64)> = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["range"]["start"]["line"].as_u64().unwrap(),
+                l["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    sites.sort();
+    assert_eq!(sites, vec![(line as u64, entry as u64), (2, 2)], "{refs}");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (k_line, k_col) = start_of(&text, ":simple.core/x");
+    let keyword_refs = client.references(&keywords, k_line, k_col + 3, true);
+    assert!(
+        keyword_refs.as_array().unwrap().iter().any(|l| l["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/src/ns_keys.clj")
+            && l["range"]["start"]["line"] == line),
+        "{keyword_refs}"
+    );
+}
+
+#[test]
 fn test_e2e_rename_alias_refuses_existing_alias() {
     // Renaming `h` to `cfg` would merge two aliases and make every `cfg/…`
     // mean a different namespace; a `/` in the new name is no symbol at all.

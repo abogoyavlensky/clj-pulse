@@ -331,20 +331,20 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
 **Files:**
 - Test: `tests/test_e2e.rs`, `tests/test_extractor.rs`
 
-- [ ] **Step 1: e2e** `test_e2e_rename_refuses_literal_namespace_keys_entry`:
+- [x] **Step 1: e2e** `test_e2e_rename_refuses_literal_namespace_keys_entry`:
   probe file `(ns simple.ns-keys)\n(defn f [{:simple.core/keys [x]}]\n  x)`;
   `prepare_rename_error` at the entry's `x` contains
   `destructured binding 'x'`; rename there errors; references at the entry
   answer entry plus usage; references on `:simple.core/x` in `keywords.clj`
   include the entry line.
-- [ ] **Step 2: extractor** `test_keyword_occurrences_in_binding_values_after_a_comment`:
+- [x] **Step 2: extractor** `test_keyword_occurrences_in_binding_values_after_a_comment`:
   `(ns my.app)\n(defn f [m]\n  (let [a 1\n        ;; note\n        b (:my.ns/k m)\n        c (if-let [x (some-> m ::k)] x)]\n    [a b c]))`
   records `:my.ns/k` and `:my.app/k` at the value ranges.
-- [ ] **Step 3: Run**
+- [x] **Step 3: Run**
   Run: `cargo test --test test_e2e literal_namespace_keys` and
   `cargo test --test test_extractor binding_values`
   Expected: PASS without code changes (they pin the gaps fix).
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "tests: pin :ns/keys rename refusal and binding-value keywords"`
 
 ### Task 6: Full gates and the compare record
