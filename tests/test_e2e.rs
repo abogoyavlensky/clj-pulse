@@ -4892,8 +4892,18 @@ fn test_e2e_did_change_configuration_toggles_stage3() {
         "(ns stub.util)\n\n(defn stubbed [x] x)\n",
     )
     .unwrap();
+    // Each run of the stub leaves a line in `runs`, so a second run is caught.
+    let runs = libdir.path().join("runs");
     let stub = root.join("stub-classpath.sh");
-    std::fs::write(&stub, format!("echo '{}'\n", lib_src.display())).unwrap();
+    std::fs::write(
+        &stub,
+        format!(
+            "echo run >> '{}'\necho '{}'\n",
+            runs.display(),
+            lib_src.display()
+        ),
+    )
+    .unwrap();
     let cmd = format!("sh {}", stub.display());
 
     let mut client = LspClient::start_with_classpath_cli(&root);
@@ -4970,6 +4980,15 @@ fn test_e2e_did_change_configuration_toggles_stage3() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // The enabling push arrives right after `initialized`. Startup's library
+    // task must not run apps/a's command a second time behind it; the disable
+    // has applied by now, so a run queued ahead of it has finished.
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap().lines().count(),
+        1,
+        "the classpath command ran more than once"
+    );
 }
 
 /// The monorepo headline: goto-definition from `apps/a` into `libs/common`

@@ -184,6 +184,11 @@ there.
   are serialized (`ClasspathCliLock`) and compare against that project's
   last-indexed entry set — never re-read `.cpcache` to detect change,
   `-Spath` just wrote it. Any stage-3 failure degrades to the stage-2 result.
+  Whole config applications serialize on `ConfigApplyLock`, and startup takes
+  it in `initialize`, before spawning anything, and holds it through its
+  stage 2 and stage 3: a `didChangeConfiguration` pushed right after
+  `initialized` then diffs against the startup project list instead of
+  having startup re-run its command from a stale one.
 - The library index is rebuilt per project, per kind (`rebuild_libs`), never
   as one flat scan — a flat `index_classpath_libs` over the union would skip
   in-workspace lgx `:local/root` dirs and lose let-go core. Disabling a

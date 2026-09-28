@@ -132,8 +132,10 @@ async fn send_progress(client: &Client, token: &Option<NumberOrString>, value: W
 /// Serializes whole config-application tasks (`didChangeConfiguration`,
 /// watched-file reruns, the startup library task). Without it two
 /// back-to-back config notifications interleave their refresh/rescan/stage
-/// work and the slower, staler task can apply last. Always acquired *before*
-/// [`ClasspathCliLock`] (stage 3 runs inside an application task).
+/// work and the slower, staler task can apply last. Startup takes it in
+/// `initialize`, before spawning anything, so it is always the first
+/// application. Always acquired *before* [`ClasspathCliLock`] (stage 3 runs
+/// inside an application task).
 type ConfigApplyLock = Arc<tokio::sync::Mutex<()>>;
 
 /// Stage-1 scan over the union of every project's source paths, merged into
@@ -2132,7 +2134,15 @@ impl LanguageServer for Backend {
                 let state_arc = self.project_state.clone();
                 let generation = self.config_generation.clone();
                 let cli_lock = self.classpath_cli_lock.clone();
-                let apply_lock = self.config_apply_lock.clone();
+                // Taken here, before anything is spawned, and held until the
+                // library task below has run stage 2 and stage 3: startup is
+                // the first config application. A `didChangeConfiguration`
+                // the editor pushes right after `initialized` waits for it and
+                // diffs against the startup project list. Taken inside the
+                // spawned task instead, the push could win the lock, run
+                // stage 3 itself, and then have startup redo stage 2 from its
+                // stale list and run the same command again.
+                let startup_guard = self.config_apply_lock.clone().lock_owned().await;
                 let progress = self.progress.clone();
                 let warmer = self.kondo.clone();
                 tokio::spawn(async move {
@@ -2182,15 +2192,14 @@ impl LanguageServer for Backend {
                         let state_arc = state_arc.clone();
                         let generation = generation.clone();
                         let cli_lock = cli_lock.clone();
-                        let apply_lock = apply_lock.clone();
                         let progress = progress.clone();
                         let warmer = warmer.clone();
                         let root = root_path.clone();
                         let resolved = resolved.clone();
                         tokio::spawn(async move {
                             // Serialize with config-application tasks (see
-                            // `ConfigApplyLock`).
-                            let _serial = apply_lock.lock().await;
+                            // `ConfigApplyLock`); held since `initialize`.
+                            let _serial = startup_guard;
                             let stage2_ok = run_stage2_all(&root, &resolved, &state_arc, &index);
                             if stage2_ok {
                                 let msg = format!(
