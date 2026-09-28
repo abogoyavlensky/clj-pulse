@@ -315,6 +315,18 @@ the release.
       (Backlog, 2026-09-17). `var-usage/library` on clj-kondo went to 163
       agree, 0 diverge, 2 null.
       Plan: [2026-09-27-2031-clojurescript-core-macros-and-twins.md](plans/2026-09-27-2031-clojurescript-core-macros-and-twins.md) — done
+- [ ] **Keyword occurrences in quoted data; qualified `:keys` entries as locals.**
+      A keyword under a quote (`'{:deps …}`, `(quote […])`, the ns attr-map)
+      is not an occurrence, so references miss it and a keyword rename leaves
+      quoted config on the old key; a `{:keys [c/x]}` entry resolves as the
+      keyword `:c/x` instead of the local `x` it binds. Keywords in binding
+      values and `{:ns/keys [a]}` renaming the local were already resolved by
+      the gaps fix and only get regression tests. Issues:
+      [keywords in binding values and quoted data](backlog/2026-09-17-keywords-in-binding-values-and-quoted-data.md),
+      [`{:ns/keys [a]}` renames the local](backlog/2026-09-17-ns-keys-with-explicit-namespace-renames-the-local.md),
+      [a qualified `{:keys [c/x]}` entry resolves as the keyword](backlog/2026-09-17-qualified-keys-entry-resolves-as-the-keyword.md)
+      (Backlog, 2026-09-17).
+      Plan: [2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md](plans/2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md) — in progress
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
