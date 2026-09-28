@@ -7274,6 +7274,59 @@ fn test_e2e_rename_refuses_qualified_keys_destructuring() {
 }
 
 #[test]
+fn test_e2e_keyword_sites_in_quoted_data() {
+    // A quote stops evaluation, not the reader: `'{:simple.core/thing 1}`
+    // holds the keyword `::c/thing` reads. References must list it, and a rename
+    // must rewrite it, or quoted config keeps reading the old key.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/quoted_cfg.clj");
+    let probe_text = "(ns simple.quoted-cfg)\n\n(def cfg '{:simple.core/thing 1})\n";
+    std::fs::write(&probe, probe_text).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, "::c/thing");
+
+    let refs = client.references(&keywords, line, col + 5, true);
+    let (probe_line, probe_col) = start_of(probe_text, ":simple.core/thing");
+    assert!(
+        refs.as_array().unwrap().iter().any(|l| l["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/src/quoted_cfg.clj")
+            && l["range"]["start"] == json!({ "line": probe_line, "character": probe_col })),
+        "quoted site missing from references: {}",
+        refs
+    );
+
+    let result = client.rename(&keywords, line, col + 5, "flag");
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/quoted_cfg.clj"))
+        .unwrap_or_else(|| panic!("quoted site not edited: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        apply_edits(probe_text, &edits),
+        "(ns simple.quoted-cfg)\n\n(def cfg '{:simple.core/flag 1})\n"
+    );
+
+    // Definition from the quoted keyword answers without an error.
+    client.did_open(&probe);
+    client.goto_definition(&probe, probe_line, probe_col + 5);
+}
+
+#[test]
 fn test_e2e_rename_keyword_sees_unsaved_definition() {
     // A dispatch keyword is a *symbol*, not an occurrence, so it needs its own
     // collection pass — and one typed but never saved has no indexed symbol at

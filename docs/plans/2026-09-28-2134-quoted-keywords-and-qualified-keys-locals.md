@@ -209,12 +209,12 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Add the item** under Milestone 5, before **Release**, as
-  `- [ ] **Keyword occurrences in quoted data; qualified `:keys` entries as locals.**`
+- [x] **Step 1: Add the item** under Milestone 5, before **Release**, as
+  `- [x] **Keyword occurrences in quoted data; qualified `:keys` entries as locals.**`
   with two sentences on the four issues (the two the gaps fix already
   resolved named as such), the four `backlog/` links, and
   `Plan: [2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md](plans/…) — in progress`.
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -m "roadmap: start quoted keywords and qualified :keys locals"`
 
 ### Task 2: Extractor walks quoted data for keywords
@@ -224,7 +224,7 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
 - Modify: `src/index/jar_cache.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write the failing tests** next to
+- [x] **Step 1: Write the failing tests** next to
   `test_occurrence_qualified_alias_name_only_range`, using `extract_full`
   and `occurrences_of`:
   - `'{:mvn/version "1"}` in a `(def deps …)` records `:mvn/version` at the
@@ -239,20 +239,20 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
     absent, and `qualified_usages` still excludes `foo/bar`);
   - `(ns my.app {:clj-kondo/config '{:linters {:x/y 1}}})` records
     `:clj-kondo/config` and `:x/y`.
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
   Run: `cargo test --test test_extractor quoted`
   Expected: FAIL on the missing occurrences.
-- [ ] **Step 3: Implement `walk_quoted_data`** as designed; wire it into
+- [x] **Step 3: Implement `walk_quoted_data`** as designed; wire it into
   `walk_occurrences` (`quoting_lit`), `walk_list` (`Some("quote")` walks
   `children[1..]`; `Some("ns")` also walks every non-`list_lit` child after
   the name). Update the comments that say quoted data is skipped
   (`walk_occurrences`, the module doc near line 36, `record_keyword_occurrence`).
-- [ ] **Step 4: Bump `CACHE_FORMAT_VERSION`** to 20.
-- [ ] **Step 5: Run the extractor tests**
+- [x] **Step 4: Bump `CACHE_FORMAT_VERSION`** to 20.
+- [x] **Step 5: Run the extractor tests**
   Run: `cargo test --test test_extractor`
   Expected: PASS, including `test_qualified_usages_collects_and_skips_quotes`
   and `test_are_quoted_template_argument_counts_as_used`.
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "extractor: record keyword occurrences inside quoted data"`
 
 ### Task 3: Quoted keywords reach references and rename end to end
@@ -260,18 +260,20 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
 **Files:**
 - Test: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the e2e test** `test_e2e_keyword_sites_in_quoted_data`:
+- [x] **Step 1: Write the e2e test** `test_e2e_keyword_sites_in_quoted_data`:
   write a probe file into the copied fixture (as
   `test_e2e_rename_refuses_qualified_keys_destructuring` does) holding
   `(def cfg '{:simple.keywords/local 1})`; open `src/keywords.clj`;
   references on `::local` include the probe's quoted site; rename `::local` to `flag` returns an edit for
   the probe file whose text becomes `:simple.keywords/flag`; definition
   from inside the quoted keyword does not error.
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
   Run: `cargo test --test test_e2e keyword_sites_in_quoted_data`
   Expected: PASS.
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "e2e: keyword references and rename reach quoted data"`
+
+> Deviation: the probe uses `::c/thing` (`:simple.core/thing`) instead of `::local` — the fixture's `kw_destructure.clj` reads `::local` through `{::kw/keys [local]}`, so its rename is refused by design.
 
 ### Task 4: A qualified `:keys` entry resolves as the local
 
