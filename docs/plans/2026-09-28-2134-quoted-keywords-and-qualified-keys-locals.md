@@ -283,7 +283,7 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
 - Modify: `src/handlers/definition.rs`
 - Test: `tests/test_e2e.rs`, `tests/test_compare.rs`
 
-- [ ] **Step 1: Write the failing e2e test** `test_e2e_qualified_keys_entry_is_a_local`
+- [x] **Step 1: Write the failing e2e test** `test_e2e_qualified_keys_entry_is_a_local`
   on `src/alias_sites.clj` line `(defn g [{:keys [c/x]}] x)`:
   - references at the `x` of `c/x` answer the entry's name range and the
     usage — the same set as references at the usage;
@@ -297,15 +297,15 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
   - in a probe file, `(defn h [x] {:keys [c/x]})`: references at the data
     entry's `x` do not answer the param `x` (they fall through to the
     keyword `:c/x`), and definition there does not land on the param.
-- [ ] **Step 2: Remove the `local/destructured` entry** from `KNOWN` in
+- [x] **Step 2: Remove the `local/destructured` entry** from `KNOWN` in
   `tests/test_compare.rs`, so `compare_simple_project` fails with the
   divergence.
-- [ ] **Step 3: Run both to see them fail**
+- [x] **Step 3: Run both to see them fail**
   Run: `cargo test --test test_e2e qualified_keys_entry_is_a_local` and
   `cargo test --test test_compare compare_simple_project`
   Expected: FAIL (the second skips when the host has no clj-kondo; this
   host has one).
-- [ ] **Step 4: Implement** `destructured_entry_name_at_tree` in the
+- [x] **Step 4: Implement** `destructured_entry_name_at_tree` in the
   extractor with a unit test beside `local_refs_flags_keys_destructured`
   (cursor on the name part → `Some(("x", range))`; on the namespace part,
   on a qualified symbol in a call, or on a `{:keys [x]}` unqualified entry
@@ -315,13 +315,16 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
   `definition::local_definition`. Update the "locals are never qualified"
   comments in `resolve_fqn_at`, `local_refs_at`, `local_definition` and
   `rename_target`.
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
   Run: `cargo test --test test_e2e qualified_keys` and
   `cargo test --test test_compare compare_simple_project` and
   `cargo test --lib extractor`
   Expected: PASS.
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "references: a qualified :keys entry resolves as the local it binds"`
+
+> Deviation: `local_name_at` returns `Option<(String, Option<Range>)>` — the entry's name range rides along so `local_definition` can make the declaration-equals-entry check without a second tree query.
+> Deviation: the namespace half of `{:keys [c/x]}` resolves to the keyword `:c/x`, not `:simple.core/x` — destructuring reads the entry's namespace verbatim, so the test pins references there to the entry token alone.
 
 ### Task 5: Regression tests for the two entries the gaps fix closed
 

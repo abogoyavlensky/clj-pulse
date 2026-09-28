@@ -430,15 +430,6 @@ static KNOWN: &[Known] = &[
         },
         reason: "a `.cljs` var used in the syntax-quoted template of its `.clj` macro twin is a site in clj-pulse; kondo resolves nothing inside that template (2026-09-27)",
     },
-    // `references::local_refs_at` never claims a qualified symbol ("locals
-    // are never qualified"), so a cursor on the binding resolves the keyword
-    // it reads — one occurrence — where kondo sees the local `x` and its
-    // usages. From a usage of `x` the two agree. ROADMAP backlog, 2026-09-17.
-    Known {
-        bucket_prefix: "local/destructured",
-        matches: |probe, _| probe.token.contains('/'),
-        reason: "a qualified `:keys` entry (`{:keys [c/x]}`) resolves as the keyword it reads, not the local it binds (2026-09-17)",
-    },
 ];
 
 /// Whether `other` is the `.clj` twin of the `.cljs` file `cljs`: the same

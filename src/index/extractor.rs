@@ -3686,16 +3686,30 @@ pub fn local_references_at_tree(
 
     // The cursor must sit on a real (non-quoted) occurrence of `name`. Quoted
     // data (`'x`) is skipped by `collect_name_occurrences`, so a cursor there
-    // references no local even though the name is lexically in scope.
-    if !occurrences.iter().any(|r| lsp_range_contains(*r, pos)) {
-        return None;
-    }
+    // references no local even though the name is lexically in scope. The one
+    // qualified token that binds a local is a `{:keys [c/x]}` entry, admitted
+    // by its name part.
+    let entry = if occurrences.iter().any(|r| lsp_range_contains(*r, pos)) {
+        None
+    } else {
+        let (entry_name, range) = destructured_entry_name_at_tree(tree, source, pos)?;
+        if entry_name != name {
+            return None;
+        }
+        Some(range)
+    };
 
     let declaration = locals_at_node(root, source, pos)
         .into_iter()
         .rev()
         .find(|b| b.name == name)?
         .name_range;
+    // The entry's shape alone does not make it a binding: `{:keys [c/x]}` as
+    // data in the body of `(fn [x] …)` reads the var `c/x`, and the `x` in
+    // scope there is the param. Only the entry's own binding counts.
+    if entry.is_some_and(|range| range != declaration) {
+        return None;
+    }
 
     let mut usages = Vec::new();
     // An `are` argv is substituted into the template syntactically, quoted
@@ -3726,6 +3740,30 @@ pub fn local_references_at_tree(
         usages,
         destructured_key: is_destructured_key(root, source, declaration),
     })
+}
+
+/// The local a qualified `:keys`/`:strs`/`:syms` destructuring entry binds,
+/// when `pos` is inside the entry's name part: `{:keys [c/x]}` binds `x`
+/// (read from `:c/x`). Returns the name and the name part's range, which is
+/// the binding's `name_range`. `None` on the namespace half (the keyword),
+/// on any other qualified symbol, and on an unqualified entry, which is an
+/// ordinary occurrence of its name. The test is shape alone, so a caller must
+/// still check that the binding it resolves to is the entry itself.
+pub fn destructured_entry_name_at_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    pos: Position,
+) -> Option<(String, Range)> {
+    let root = tree.root_node();
+    let sym = node_path_at(root, source, pos)
+        .into_iter()
+        .next()
+        .filter(|n| n.kind() == "sym_lit")?;
+    sym.child_by_field_name("namespace")?;
+    let name = sym.child_by_field_name("name")?;
+    let range = node_to_lsp_range(name, source);
+    (lsp_range_contains(range, pos) && is_destructured_key(root, source, range))
+        .then(|| (node_text(name, source).to_string(), range))
 }
 
 /// The template expression of the `are` form whose argv holds the binding
@@ -4301,6 +4339,25 @@ mod tests {
         let refs = local_references_at(src, pos_of(src, "(inc a)", 0, 5), "a").expect("local");
         assert!(refs.destructured_key, "{{:keys [a]}} binding: {:?}", refs);
         assert_eq!(refs.usages.len(), 1, "one body usage: {:?}", refs.usages);
+    }
+
+    #[test]
+    fn destructured_entry_name_is_the_name_part_of_a_qualified_entry() {
+        let src = "(ns x)\n(defn f [{:keys [c/x] :as m}] (c/g m) x)\n(defn h [{:keys [y]}] y)";
+        let tree = parse(src);
+        let at = |needle: &str, offset: usize| {
+            destructured_entry_name_at_tree(&tree, src, pos_of(src, needle, 0, offset))
+        };
+        let (name, range) = at("[c/x]", 3).expect("name part of the entry");
+        assert_eq!(name, "x");
+        let expected = Range {
+            start: pos_of(src, "[c/x]", 0, 3),
+            end: pos_of(src, "[c/x]", 0, 4),
+        };
+        assert_eq!(range, expected);
+        assert_eq!(at("[c/x]", 1), None, "namespace half");
+        assert_eq!(at("(c/g", 3), None, "a qualified call");
+        assert_eq!(at("[y]", 1), None, "an unqualified entry");
     }
 
     #[test]

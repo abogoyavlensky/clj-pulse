@@ -91,23 +91,43 @@ fn local_references(
     Some(locations)
 }
 
+/// The local a cursor names: an unqualified word as is, a qualified one by its
+/// name part only when the cursor is inside the name part of a `:keys`
+/// destructuring entry (`{:keys [c/x]}` binds `x`) — the one qualified token
+/// that binds a local. The entry's name range comes along (`None` for an
+/// unqualified word): the same shape written as data binds nothing, so a
+/// caller must check that the binding it resolves to is that entry. `None` on
+/// a keyword, and on any other qualified word.
+pub(crate) fn local_name_at(
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+) -> Option<(String, Option<Range>)> {
+    if documents.is_keyword_at(uri, pos) {
+        return None;
+    }
+    let word = documents.word_at(uri, pos)?;
+    if !word.contains('/') {
+        return Some((word, None));
+    }
+    let snapshot = documents.snapshot(uri)?;
+    let (name, range) =
+        extractor::destructured_entry_name_at_tree(&snapshot.tree, &snapshot.text, pos)?;
+    Some((name, Some(range)))
+}
+
 /// The local under the cursor, as `(word, refs)`. `None` when the cursor is on
-/// a keyword, a qualified word (locals are never qualified), or a word that
-/// resolves to no local — the callers then fall back to the fqn path. Shared by
-/// find-references, rename and document highlight so they all agree on what
-/// counts as a local.
+/// a keyword, a qualified word other than a `:keys` entry's name part (see
+/// [`local_name_at`]), or a word that resolves to no local — the callers then
+/// fall back to the fqn path. Shared by find-references, rename and document
+/// highlight so they all agree on what counts as a local.
 pub(crate) fn local_refs_at(
     documents: &DocumentStore,
     uri: &Url,
     pos: Position,
 ) -> Option<(String, extractor::LocalRefs)> {
-    if documents.is_keyword_at(uri, pos) {
-        return None;
-    }
-    let word = documents.word_at(uri, pos)?;
-    if word.contains('/') {
-        return None;
-    }
+    // `local_references_at_tree` makes the entry check itself.
+    let (word, _) = local_name_at(documents, uri, pos)?;
     let snapshot = documents.snapshot(uri)?;
     let refs = extractor::local_references_at_tree(&snapshot.tree, &snapshot.text, pos, &word)?;
     Some((word, refs))
@@ -728,8 +748,10 @@ fn is_valid_symbol_name(name: &str) -> bool {
 ///    never occurrences, so a `(defn f [add] add)` param cannot leak the
 ///    global `add` in here (references and rename also resolve locals
 ///    structurally, before ever calling this).
-/// 3. Qualified words only (locals are never qualified): resolve through
-///    the alias — covers a cursor on the alias half of `lib/name`.
+/// 3. Qualified words only: resolve through the alias — covers a cursor on
+///    the alias half of `lib/name`. (The one qualified token naming a local,
+///    a `{:keys [c/x]}` entry's name part, is claimed by `local_refs_at`
+///    before this runs.)
 pub fn resolve_fqn_at(
     index: &Index,
     documents: &DocumentStore,
