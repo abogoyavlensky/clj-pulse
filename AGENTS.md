@@ -382,6 +382,10 @@ there.
   EDN configs as well as in Clojure sources. A namespaced `:keys` destructuring
   entry (`{::keys [id]}`, `{:keys [user/id]}`) is an occurrence of the key it
   reads; `:syms` and `:strs` read symbols and strings, so they are not.
+  Quoted data (`'…`, `(quote …)`, nested quotes) and the ns form's attr-map
+  are walked by `walk_quoted_data`: every keyword there is an occurrence —
+  the reader resolved `::k` before the quote saw it — while a symbol records
+  nothing, so `'foo/bar` stays out of var usages and `qualified_usages`.
   Definition ignores the unqualified fqns — there is nothing to navigate to —
   while references and keyword completion use them. `Index::keyword_counts`
   aggregates them and is maintained at every mutation of `occurrences`
@@ -413,7 +417,12 @@ there.
   a longer prefix needs. Items ship without `documentation`; `data` records
   which source to read and `completion::resolve` renders the doc on demand.
 - `rename` and `prepareRename` share `references::rename_target`, so every
-  rejection carries the same message from both. Only the checks that need the
+  rejection carries the same message from both. Locals are never qualified,
+  with one exception: `references::local_name_at` (used by `local_refs_at` and
+  `definition::local_definition`) takes the name half of a `{:keys [c/x]}`
+  entry as the local `x` it binds, provided the binding it resolves to is
+  that entry — the same map as data reads the var `c/x`. The `c` half stays
+  the keyword `:c/x`, read verbatim. Only the checks that need the
   new name (validity, local capture, the colon a keyword's new name must not
   carry) live in `rename`.
 - A keyword rename edits the name its token *ends* with, never the token:

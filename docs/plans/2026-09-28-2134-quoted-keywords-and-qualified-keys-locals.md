@@ -1,5 +1,7 @@
 # Quoted Keywords and Qualified `:keys` Locals Implementation Plan
 
+**Status:** completed 2026-09-28.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close four `bb compare` backlog entries: keywords inside quoted data become occurrences, a qualified `{:keys [c/x]}` entry resolves as the local it binds, and the two entries the gaps fix already resolved get regression tests and are archived.
@@ -380,25 +382,60 @@ runs on every file), `bb e2e-pulse` (client-visible change), `bb e2e-calva`
 - Modify: `docs/FEATURES.md`, `CLAUDE.md`, `docs/ROADMAP.md`
 - Move: the three `docs/backlog/2026-09-17-*.md` files (keywords-in-binding-values-and-quoted-data, ns-keys-with-explicit-namespace-renames-the-local, qualified-keys-entry-resolves-as-the-keyword) to `docs/archive/`
 
-- [ ] **Step 1: FEATURES.md** — Find references / keyword navigation:
+- [x] **Step 1: FEATURES.md** — Find references / keyword navigation:
   keyword sites include quoted data (`'{…}`, `(quote …)`) and the ns
   attr-map; Rename: a `{:keys [c/x]}` entry is the local `x` (refused like
   any destructured binding), the namespace half is the keyword.
-- [ ] **Step 2: CLAUDE.md invariants** — the "Keyword occurrences carry
+- [x] **Step 2: CLAUDE.md invariants** — the "Keyword occurrences carry
   both notations" bullet gains the quoted-data rule (keywords recorded,
   symbols not, `walk_quoted_data`); the rename/highlight bullets note that
   `local_refs_at` accepts a qualified `:keys` entry by its name part
   (`local_name_at`) as the one exception to "locals are never qualified".
-- [ ] **Step 3: ROADMAP** — tick the item, `Plan: … — done`, links
+- [x] **Step 3: ROADMAP** — tick the item, `Plan: … — done`, links
   rewritten to `archive/`; add the Backlog line for keywords in
   non-Integrant `.edn` files under source paths (dated 2026-09-28); delete
   the four Backlog lines. Move the three issue files with `git mv`, adding
   a `**Status:** done (2026-09-28, …)` line to each.
-- [ ] **Step 4: README** — check the features paragraph; it names
+- [x] **Step 4: README** — check the features paragraph; it names
   references and rename without detail, so it most likely needs nothing.
   The working rules ask for README and CLAUDE.md in the closing change,
   so say so in the commit message if it stayed untouched.
-- [ ] **Step 5: `bb check`** once more for the docs-only change (fmt of
+- [x] **Step 5: `bb check`** once more for the docs-only change (fmt of
   nothing, but it is the rule).
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   `git commit -m "docs: quoted keyword sites and qualified :keys locals; archive four compare issues"`
+
+## Completion summary
+
+Keywords under a quote (`'…`, `(quote …)`, nested quotes, the ns attr-map)
+are occurrences now (`walk_quoted_data`, sharing `walk_ns_map_entries` with
+`walk_ns_map`; cache format 20). References, highlight, definition and a
+keyword rename reach them; quoted symbols stay non-usages. The name half of
+a qualified `{:keys [c/x]}` entry resolves as the local it binds
+(`extractor::destructured_entry_name_at_tree`, `references::local_name_at`),
+only where the entry is the binding; the `KNOWN` entry is gone and
+`compare_simple_project` holds at zero. The two entries the gaps change had
+already fixed got regression tests. `bb compare clj-kondo`:
+`keyword/qualified` 142/93/41 to 234/40/2, nothing else moved; the rest is
+non-Integrant `.edn` (new Backlog line) and two `(comment …)` sites. `bb
+check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva` green; bench within noise.
+
+Deviations:
+- Task 3: the probe keyword is `::c/thing`, since the fixture destructures
+  `::local` (`kw_destructure.clj`) and its rename is refused by design.
+- Task 4: `local_name_at` returns `Option<(String, Option<Range>)>`, the
+  entry range riding along for `local_definition`'s check.
+- Task 4: the namespace half of `{:keys [c/x]}` is the keyword `:c/x`
+  (destructuring reads the namespace verbatim), not `:simple.core/x`.
+- Task 6: the `(comment …)` class is two sites, 22 divergences; the `.edn`
+  class is 20.
+- README unchanged: it names references and rename without detail.
+
+Known wrinkle, not addressed: the destructuring refusal suggests
+`{new-name :x}` for a qualified entry (`{:keys [c/x]}`, `{::c/keys [x]}`),
+where the key is really `:c/x`; the message predates this plan.
+
+What the plan could have specified better: check fixture keywords against
+existing destructuring before pinning a rename probe, and state what a
+`{:keys [c/x]}` entry's namespace half reads (`:c/x`, verbatim) instead of
+assuming the alias resolves.
