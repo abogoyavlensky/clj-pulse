@@ -205,6 +205,293 @@ fn test_e2e_definition_from_cljs_prefers_the_clojurescript_jar_copy() {
     }
 }
 
+/// A project whose classpath holds a Clojure JAR (`clojure/core.clj`) and a
+/// ClojureScript JAR (`cljs/core.cljs` with the fns, `cljs/core.cljc` with the
+/// macros, as the real one ships them), in the order `cljs_first` says, with a
+/// `.clj` and a `.cljs` consumer of `not` and `when` under `src/`.
+fn core_jars_project(cljs_first: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let write_jar = |name: &str, entries: &[(&str, &[u8])]| {
+        let jar_path = root.join(name);
+        let jar_file = std::fs::File::create(&jar_path).unwrap();
+        let mut zip = zip::ZipWriter::new(jar_file);
+        let opts = zip::write::SimpleFileOptions::default();
+        for (entry, source) in entries {
+            zip.start_file(*entry, opts).unwrap();
+            zip.write_all(source).unwrap();
+        }
+        zip.finish().unwrap();
+        jar_path
+    };
+    let clj_jar = write_jar(
+        "clojure-x.jar",
+        &[(
+            "clojure/core.clj",
+            b"(ns clojure.core)\n(defn not [x] x)\n(defmacro when [t & b] nil)\n",
+        )],
+    );
+    let cljs_jar = write_jar(
+        "clojurescript-x.jar",
+        &[
+            ("cljs/core.cljs", b"(ns cljs.core)\n(defn not [x] x)\n"),
+            (
+                "cljs/core.cljc",
+                b"(ns cljs.core)\n(core/defmacro when [t & b] nil)\n",
+            ),
+        ],
+    );
+    let jars = if cljs_first {
+        [cljs_jar, clj_jar]
+    } else {
+        [clj_jar, cljs_jar]
+    };
+
+    let cpcache = root.join(".cpcache");
+    std::fs::create_dir_all(&cpcache).unwrap();
+    std::fs::write(
+        cpcache.join("1.cp"),
+        std::env::join_paths(jars).unwrap().as_encoded_bytes(),
+    )
+    .unwrap();
+
+    for ext in ["clj", "cljs"] {
+        std::fs::write(
+            root.join(format!("src/uses_core.{ext}")),
+            "(ns uses-core)\n(not (when true 1))\n",
+        )
+        .unwrap();
+    }
+
+    (project, root)
+}
+
+#[test]
+fn test_e2e_cljs_core_navigates_into_the_clojurescript_jar() {
+    // A `.cljs` file's core is `cljs.core`: `not` lands in `cljs/core.cljs`,
+    // the `when` macro in `cljs/core.cljc`. A `.clj` file keeps landing in
+    // `clojure/core.clj`, whatever order the classpath lists the JARs.
+    for cljs_first in [true, false] {
+        let (_project, root) = core_jars_project(cljs_first);
+
+        let mut client = LspClient::start(&root);
+        client.initialize(&root);
+        client.wait_for_log("library indexing complete");
+
+        for (ext, not_entry, when_entry) in [
+            ("cljs", "!/cljs/core.cljs", "!/cljs/core.cljc"),
+            ("clj", "!/clojure/core.clj", "!/clojure/core.clj"),
+        ] {
+            let consumer = root.join(format!("src/uses_core.{ext}"));
+            client.did_open(&consumer);
+            for (word, entry) in [("not", not_entry), ("when", when_entry)] {
+                let (line, ch) = position_of(&consumer, word);
+                let loc = client.goto_definition(&consumer, line, ch);
+                let uri = loc["uri"].as_str().unwrap_or_default();
+                assert!(
+                    uri.starts_with("jar:file://") && uri.ends_with(entry),
+                    "cljs_first={cljs_first} .{ext} `{word}`: expected {entry}, got {loc}"
+                );
+            }
+        }
+    }
+}
+
+/// A project with one namespace split across `src/app/shared.clj` (a macro and
+/// the Clojure `platform`) and `src/app/shared.cljs` (the ClojureScript
+/// `platform`, a `.cljs`-only fn, and the macro through `:require-macros`),
+/// plus a `.clj` and a `.cljs` consumer of both.
+fn twin_namespace_project() -> (tempfile::TempDir, std::path::PathBuf) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let app = root.join("src/app");
+    std::fs::create_dir_all(&app).unwrap();
+    for (name, text) in [
+        (
+            "shared.clj",
+            "(ns app.shared)\n\n(defmacro with-thing [& body] `(do ~@body))\n\n(defn platform [] :clj)\n",
+        ),
+        (
+            "shared.cljs",
+            "(ns app.shared (:require-macros [app.shared :refer [with-thing]]))\n\n(defn platform [] :cljs)\n\n(defn only-cljs [] (with-thing (platform)))\n",
+        ),
+        (
+            "use_clj.clj",
+            "(ns app.use-clj (:require [app.shared :as sh]))\n(sh/platform)\n",
+        ),
+        (
+            "use_cljs.cljs",
+            "(ns app.use-cljs (:require [app.shared :as sh]))\n(sh/platform)\n(sh/only-cljs)\n",
+        ),
+    ] {
+        std::fs::write(app.join(name), text).unwrap();
+    }
+    (project, root)
+}
+
+/// The (line, character) of `needle` on `line` of `path`, one character in.
+fn position_on_line(path: &Path, line: u32, needle: &str) -> (u32, u32) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let col = text
+        .lines()
+        .nth(line as usize)
+        .and_then(|l| l.find(needle))
+        .unwrap_or_else(|| panic!("{needle:?} not on line {line} of {}", path.display()));
+    (line, col as u32 + 1)
+}
+
+/// `(file name, start line)` of every location in a `Location[]` answer.
+fn file_lines(locations: &Value) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = locations
+        .as_array()
+        .unwrap_or_else(|| panic!("expected locations, got {locations}"))
+        .iter()
+        .map(|loc| {
+            let uri = loc["uri"].as_str().unwrap();
+            (
+                uri.rsplit('/').next().unwrap().to_string(),
+                loc["range"]["start"]["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn test_e2e_twin_namespaces() {
+    let (_project, root) = twin_namespace_project();
+    let shared_clj = root.join("src/app/shared.clj");
+    let shared_cljs = root.join("src/app/shared.cljs");
+    let use_clj = root.join("src/app/use_clj.clj");
+    let use_cljs = root.join("src/app/use_cljs.cljs");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    // Closed files: the outline comes from the index, each half its own.
+    for (file, expected) in [
+        (&shared_cljs, vec!["only-cljs", "platform"]),
+        (&shared_clj, vec!["platform", "with-thing"]),
+    ] {
+        let outline = client.document_symbols(file);
+        let mut names: Vec<&str> = outline
+            .as_array()
+            .unwrap_or_else(|| panic!("no outline for {}: {outline}", file.display()))
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, expected, "{}", file.display());
+    }
+
+    for file in [&shared_clj, &shared_cljs, &use_clj, &use_cljs] {
+        client.did_open(file);
+    }
+
+    // 1. Each dialect navigates to its own half.
+    let definition_at = |client: &mut LspClient, file: &Path, (line, ch): (u32, u32)| {
+        let loc = client.goto_definition(file, line, ch);
+        let uri = loc["uri"].as_str().unwrap_or_default().to_string();
+        (
+            uri.rsplit('/').next().unwrap_or_default().to_string(),
+            loc["range"]["start"]["line"].as_u64().unwrap_or(u64::MAX),
+        )
+    };
+    let platform_cljs = position_on_line(&use_cljs, 1, "platform");
+    assert_eq!(
+        definition_at(&mut client, &use_cljs, platform_cljs),
+        ("shared.cljs".to_string(), 2)
+    );
+    let platform_clj = position_on_line(&use_clj, 1, "platform");
+    assert_eq!(
+        definition_at(&mut client, &use_clj, platform_clj),
+        ("shared.clj".to_string(), 4)
+    );
+
+    // 2. A macro referred through `:require-macros` lands in the `.clj` half.
+    let with_thing = position_on_line(&shared_cljs, 4, "with-thing");
+    assert_eq!(
+        definition_at(&mut client, &shared_cljs, with_thing),
+        ("shared.clj".to_string(), 2)
+    );
+
+    // 3. References cover both definitions and every usage.
+    let refs = client.references(&use_cljs, platform_cljs.0, platform_cljs.1, true);
+    let found = file_lines(&refs);
+    for site in [
+        ("shared.clj", 4),
+        ("shared.cljs", 2),
+        ("shared.cljs", 4),
+        ("use_clj.clj", 1),
+        ("use_cljs.cljs", 1),
+    ] {
+        assert!(
+            found.contains(&(site.0.to_string(), site.1)),
+            "missing {site:?} in {found:?}"
+        );
+    }
+
+    // 4. Rename edits both definitions and every usage.
+    let edit = client.rename(&use_cljs, platform_cljs.0, platform_cljs.1, "plat");
+    let changes = edit["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no changes: {edit}"));
+    let mut files: Vec<&str> = changes
+        .keys()
+        .map(|uri| uri.rsplit('/').next().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        vec!["shared.clj", "shared.cljs", "use_clj.clj", "use_cljs.cljs"]
+    );
+    let shared_cljs_uri = format!("file://{}", shared_cljs.display());
+    assert_eq!(
+        changes[&shared_cljs_uri].as_array().unwrap().len(),
+        2,
+        "the .cljs definition and its usage: {edit}"
+    );
+
+    // 5. Saving one half leaves the other indexed. A witness def added before
+    //    the save tells when the re-index has landed.
+    let text = std::fs::read_to_string(&shared_clj).unwrap();
+    std::fs::write(&shared_clj, format!("{text}\n(defn saved-witness [] 1)\n")).unwrap();
+    client.did_save(&shared_clj);
+    let deadline = Instant::now() + TIMEOUT;
+    while client
+        .workspace_symbols("saved-witness")
+        .as_array()
+        .map(Vec::len)
+        != Some(1)
+    {
+        assert!(Instant::now() < deadline, "the save never re-indexed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let only_cljs = position_on_line(&use_cljs, 2, "only-cljs");
+    assert_eq!(
+        definition_at(&mut client, &use_cljs, only_cljs),
+        ("shared.cljs".to_string(), 4)
+    );
+    let hover = client.hover(&use_cljs, only_cljs.0, only_cljs.1);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|md| md.contains("only-cljs")),
+        "hover on sh/only-cljs after the save: {hover}"
+    );
+
+    // 6. A `.clj`/`.cljs` pair is a design, not a collision.
+    let log = LspClient::server_log(&root);
+    assert!(
+        !log.lines()
+            .any(|l| l.contains("last one wins") && l.contains("app.shared")),
+        "{log}"
+    );
+}
+
 #[test]
 fn test_e2e_letgo_navigation_into_lgx_deps() {
     let project = setup_named("letgo_project");
@@ -4605,8 +4892,18 @@ fn test_e2e_did_change_configuration_toggles_stage3() {
         "(ns stub.util)\n\n(defn stubbed [x] x)\n",
     )
     .unwrap();
+    // Each run of the stub leaves a line in `runs`, so a second run is caught.
+    let runs = libdir.path().join("runs");
     let stub = root.join("stub-classpath.sh");
-    std::fs::write(&stub, format!("echo '{}'\n", lib_src.display())).unwrap();
+    std::fs::write(
+        &stub,
+        format!(
+            "echo run >> '{}'\necho '{}'\n",
+            runs.display(),
+            lib_src.display()
+        ),
+    )
+    .unwrap();
     let cmd = format!("sh {}", stub.display());
 
     let mut client = LspClient::start_with_classpath_cli(&root);
@@ -4683,6 +4980,15 @@ fn test_e2e_did_change_configuration_toggles_stage3() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // The enabling push arrives right after `initialized`. Startup's library
+    // task must not run apps/a's command a second time behind it; the disable
+    // has applied by now, so a run queued ahead of it has finished.
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap().lines().count(),
+        1,
+        "the classpath command ran more than once"
+    );
 }
 
 /// The monorepo headline: goto-definition from `apps/a` into `libs/common`

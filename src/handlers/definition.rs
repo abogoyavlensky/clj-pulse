@@ -3,7 +3,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
-use crate::index::{extractor, Dialect, Index};
+use crate::index::{core_ns, extractor, Dialect, Index};
 use crate::uri;
 
 use super::{resolve_symbol, ResolvedSymbol};
@@ -75,9 +75,8 @@ pub fn handle(
     };
     tracing::info!("goto_definition: word={}", word);
 
-    match resolve_symbol(index, &word, &current_ns) {
+    match resolve_symbol(index, &word, &current_ns, dialect) {
         Some(ResolvedSymbol::Project(sym)) => {
-            let sym = index.prefer_dialect(sym, dialect);
             let location = location_for(&sym.file, sym.name_range)?;
             Ok(Some(GotoDefinitionResponse::Scalar(location)))
         }
@@ -88,9 +87,18 @@ pub fn handle(
             if on_alias_declaration(documents, &uri, pos.line, &word) {
                 return namespace_location(index, &current_ns, &word, dialect);
             }
-            // Built-ins live in the clojure JAR like any other library
-            // symbol; the static core list is only a doc shortcut.
-            if let Some(sym) = index.lookup_in_ns("clojure.core", &core.name) {
+            // Built-ins live in the clojure JAR (the ClojureScript one for a
+            // `.cljs` file) like any other library symbol; the static core
+            // list is only a doc shortcut. A `.cljs` file falls back to the
+            // Clojure copy when no ClojureScript JAR is indexed.
+            let sym = index
+                .lookup_in_ns(core_ns(dialect), &core.name)
+                .or_else(|| {
+                    (dialect == Dialect::Cljs)
+                        .then(|| index.lookup_in_ns("clojure.core", &core.name))
+                        .flatten()
+                });
+            if let Some(sym) = sym {
                 let sym = index.prefer_dialect(sym, dialect);
                 let location = location_for(&sym.file, sym.name_range)?;
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
@@ -201,10 +209,9 @@ fn on_alias_declaration(documents: &DocumentStore, uri: &Url, line: u32, word: &
 }
 
 /// Location at the top of the file defining `word`, where `word` is either a
-/// require alias of `current_ns` or a namespace name itself. The alias table
-/// is read from the primary `NsMeta` of `current_ns` (an open buffer's own ns
-/// form is what `resolve_fqn_at` reads); only the *target* namespace's file is
-/// chosen by `dialect`.
+/// require alias of `current_ns` or a namespace name itself. Both the alias
+/// table (the asking half of a namespace split across `.clj` and `.cljs`) and
+/// the *target* namespace's file are chosen by `dialect`.
 fn namespace_location(
     index: &Index,
     current_ns: &str,
@@ -212,7 +219,7 @@ fn namespace_location(
     dialect: Dialect,
 ) -> Result<Option<GotoDefinitionResponse>> {
     let target_ns = index
-        .ns_meta(current_ns)
+        .ns_meta_for(current_ns, dialect)
         .and_then(|m| m.aliases.get(word).cloned())
         .or_else(|| index.ns_meta(word).map(|_| word.to_string()));
 

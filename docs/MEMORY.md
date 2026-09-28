@@ -320,14 +320,13 @@ had at other sites; the probe set shifted by one.
 
 The first-run divergences grouped into fourteen classes, one issue file
 each under `docs/backlog/2026-09-17-*.md` (linked from the ROADMAP
-backlog); the discard one is archived. The remaining classes: keywords in
-binding values and quoted data missing from occurrences, locals under
-`binding`+`let`, `{:ns/keys}` renaming the local, `.cljs` core landing in
-`clojure/core.clj`, a `defmulti` missing from its own references after a
+backlog); the discard one and the three ClojureScript ones (below) are
+archived. The remaining classes: keywords in binding values and quoted data
+missing from occurrences, locals under `binding`+`let`, `{:ns/keys}`
+renaming the local, a `defmulti` missing from its own references after a
 `declare`, constructor calls not counted for `deftype`/`defrecord`,
 `:lint-as` to `defprotocol`/`declare` half-honored, `import-vars`
-re-exports, `:require-macros`, a `.clj`/`.cljs` namespace pair sharing an
-fqn, defs nested in a wrapping macro. The `var-usage/*/aliased` and
+re-exports, defs nested in a wrapping macro. The `var-usage/*/aliased` and
 `*/referred` rows (project and library) are the clean ones: 898 of 935
 agree, and the misses are `null` answers.
 
@@ -335,6 +334,38 @@ The number to watch on a re-run is `diverge + null` per bucket against this
 table; a class fixed in the server should empty its bucket's share, and a new
 divergence in a bucket that was clean is a regression the e2e suite did not
 see.
+
+### After ClojureScript core, `:require-macros` and twins (2026-09-27)
+
+Same corpus, kondo and container; the "before" columns are a run of the
+same day on `746f667` (5253 probes, 4640 agree, 450 diverge, 18 known, 145
+null — within a probe or two of the table above). Only the rows that moved:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `var-def/defmacro` | 58 | 52 | 6 | 0 | 0 | 50 | 8 | 0 |
+| `var-def/defn` | 372 | 326 | 43 | 2 | 1 | 326 | 45 | 1 |
+| `var-usage/library` | 166 | 164 | 0 | 0 | 2 | 5 | 118 | 44 |
+| `var-usage/library/macro` | 196 | 196 | 0 | 0 | 0 | 168 | 26 | 5 |
+| `var-usage/project/macro` | 192 | 192 | 0 | 0 | 0 | 191 | 0 | 1 |
+| `var-usage/project/macro/referred` | 135 | 135 | 0 | 0 | 0 | 134 | 0 | 1 |
+| **total** | 5249 | 4831 | 302 | 20 | 96 | 4640 | 450 | 145 |
+
+Every `.cljs` core name used to land in `clojure/core.clj`; it now lands in
+the ClojureScript JAR's `cljs/core.cljs` (fns, protocols, `not-native`) or
+`cljs/core.cljc` (macros), which empties both `var-usage/library` rows but
+two nulls: `cljs.core.ExceptionInfo`, a dotted type reference, and a `.clj`
+`clojure.pprint/pprint` that was null before. Special forms kondo files
+under `cljs.core` (`if`, `recur`, `def`, …) are no longer probes; the probe
+counts barely move because those rows are stride-sampled from larger raw
+sets. `log-source`, a macro referred through `:require-macros`, now answers
+its four sites, which is the `defmacro` drop and the two `project/macro`
+nulls; the six `defmacro` divergences left are other classes
+(`make-printable!`, `with-newline-fn`, `get-in`). The two new `known` are
+`source-logging-reader?` from `reader_types.cljs`, whose extra site is the
+syntax-quoted template of the `.clj` twin's macro — a real use, which kondo
+does not resolve. The twin pair's index damage (saving one half dropped the
+other) never showed in `bb compare`; the e2e suite covers it.
 
 ## Soak: memory over a long session (2026-09-11)
 

@@ -8,7 +8,7 @@ use serde_json::json;
 use super::builtins;
 use super::matching::match_score;
 use crate::document::{DocumentStore, KeywordContext, Snapshot};
-use crate::index::{extractor, CoreSymbol, DefKind, Index, NsMeta, Symbol};
+use crate::index::{extractor, CoreSymbol, DefKind, Dialect, Index, NsMeta, Symbol};
 
 pub fn handle(
     index: &Index,
@@ -26,12 +26,13 @@ pub fn handle(
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
     let current_ns = index.file_ns(&path).unwrap_or_default();
+    let dialect = Dialect::of_path(&path);
 
     // A keyword is being typed: `:`/`::` is not an identifier character, so the
     // `word_at` prefix would silently drop the notation and offer vars. Keyword
     // completion answers on its own, with keywords only.
     if let Some(ctx) = documents.keyword_at(&uri, pos) {
-        let ns_meta = index.ns_meta(&current_ns);
+        let ns_meta = index.ns_meta_for(&current_ns, dialect);
         let items = complete_keywords(index, &ctx, &current_ns, ns_meta.as_ref());
         if items.is_empty() {
             return Ok(None);
@@ -45,7 +46,7 @@ pub fn handle(
     // The live buffer and its tree, for the locals walk and for the require
     // edit an auto-require item carries.
     let snapshot = documents.snapshot(&uri);
-    let mut items = complete_symbols(index, &prefix, &current_ns, snapshot.as_ref());
+    let mut items = complete_symbols(index, &prefix, &current_ns, dialect, snapshot.as_ref());
 
     // Locals (let/fn/loop/… bound names) in scope at the cursor. They shadow
     // globals, so offer them ahead of the index symbols. Qualified prefixes
@@ -310,17 +311,20 @@ fn is_var_symbol(sym: &Symbol) -> bool {
     !sym.fqn.starts_with(':')
 }
 
-/// Completion candidates for `prefix` in `current_ns`. `snapshot` is the live
+/// Completion candidates for `prefix` in `current_ns`, asked from a file of
+/// `dialect`: a namespace split across `.clj` and `.cljs` completes with the
+/// aliases, refers and definitions of the asking half. `snapshot` is the live
 /// buffer, needed only to build the `:require` edit an auto-require item
 /// carries; without it those items are still offered, without their edit.
 pub fn complete_symbols(
     index: &Index,
     prefix: &str,
     current_ns: &str,
+    dialect: Dialect,
     snapshot: Option<&Snapshot>,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
-    let ns_meta = index.ns_meta(current_ns);
+    let ns_meta = index.ns_meta_for(current_ns, dialect);
 
     if let Some((alias, name_prefix)) = prefix.split_once('/') {
         // Qualified completion: alias/prefix
@@ -334,6 +338,7 @@ pub fn complete_symbols(
                             continue;
                         }
                         if let Some(tier) = matched(&sym.name, name_prefix, Pool::CurrentNs) {
+                            let sym = index.prefer_dialect(sym.clone(), dialect);
                             push(
                                 &mut items,
                                 symbol_to_completion(&sym, Some(alias)),
@@ -395,6 +400,7 @@ pub fn complete_symbols(
                         continue;
                     }
                     if let Some(tier) = matched(&sym.name, prefix, Pool::CurrentNs) {
+                        let sym = index.prefer_dialect(sym.clone(), dialect);
                         push(
                             &mut items,
                             symbol_to_completion(&sym, None),
@@ -414,7 +420,7 @@ pub fn complete_symbols(
                 let Some(tier) = matched(refer_name, prefix, Pool::Referred) else {
                     continue;
                 };
-                let item = match index.symbols.get(fqn) {
+                let item = match index.lookup_for(fqn, dialect) {
                     Some(sym) => symbol_to_completion(&sym, None),
                     None => referred_completion(refer_name, fqn),
                 };
@@ -790,10 +796,15 @@ fn symbol_to_completion(sym: &crate::index::Symbol, alias: Option<&str>) -> Comp
         label,
         detail: Some(format!("{} ({})", sym.ns, params_display(&sym.params))),
         kind: Some(defkind_to_completion_kind(&sym.kind)),
-        data: sym
-            .doc
-            .as_ref()
-            .map(|_| json!({ "src": "symbol", "fqn": sym.fqn })),
+        data: sym.doc.as_ref().map(|_| {
+            let mut data = json!({ "src": "symbol", "fqn": sym.fqn });
+            // The ClojureScript copy of a name both halves of a namespace
+            // define: `resolve` must read this copy's doc, not the primary's.
+            if Dialect::of_path(&sym.file) == Dialect::Cljs {
+                data["cljs"] = json!(true);
+            }
+            data
+        }),
         ..Default::default()
     }
 }
@@ -880,7 +891,13 @@ pub fn resolve(index: &Index, item: CompletionItem) -> CompletionItem {
 fn documentation_for(index: &Index, data: &serde_json::Value) -> Option<Documentation> {
     let name = || data.get("name")?.as_str();
     match data.get("src")?.as_str()? {
-        "symbol" => symbol_documentation(&index.lookup(data.get("fqn")?.as_str()?)?),
+        "symbol" => {
+            let dialect = match data.get("cljs").and_then(|v| v.as_bool()) {
+                Some(true) => Dialect::Cljs,
+                _ => Dialect::Clj,
+            };
+            symbol_documentation(&index.lookup_for(data.get("fqn")?.as_str()?, dialect)?)
+        }
         // A let-go native borrows its doc from the clojure.core table, the same
         // table the `core` source reads.
         "core" | "native" => {
@@ -969,7 +986,7 @@ mod tests {
     }
 
     fn labels(index: &Index, prefix: &str) -> Vec<String> {
-        complete_symbols(index, prefix, "app", None)
+        complete_symbols(index, prefix, "app", Dialect::Clj, None)
             .into_iter()
             .map(|i| i.label)
             .collect()
@@ -979,7 +996,7 @@ mod tests {
     fn completes_java_static_members_and_class_names() {
         let (index, _zip) = crate::handlers::java::test_fixture();
         let java_labels = |prefix: &str| -> Vec<String> {
-            complete_symbols(&index, prefix, "app.core", None)
+            complete_symbols(&index, prefix, "app.core", Dialect::Clj, None)
                 .into_iter()
                 .map(|i| i.label)
                 .collect()
@@ -1039,7 +1056,7 @@ mod tests {
     #[test]
     fn letgo_native_completion_is_labelled() {
         let index = letgo_index();
-        let item = complete_symbols(&index, "count", "app", None)
+        let item = complete_symbols(&index, "count", "app", Dialect::Clj, None)
             .into_iter()
             .find(|i| i.label == "count")
             .expect("count offered");

@@ -184,6 +184,11 @@ there.
   are serialized (`ClasspathCliLock`) and compare against that project's
   last-indexed entry set — never re-read `.cpcache` to detect change,
   `-Spath` just wrote it. Any stage-3 failure degrades to the stage-2 result.
+  Whole config applications serialize on `ConfigApplyLock`, and startup takes
+  it in `initialize`, before spawning anything, and holds it through its
+  stage 2 and stage 3: a `didChangeConfiguration` pushed right after
+  `initialized` then diffs against the startup project list instead of
+  having startup re-run its command from a stale one.
 - The library index is rebuilt per project, per kind (`rebuild_libs`), never
   as one flat scan — a flat `index_classpath_libs` over the union would skip
   in-workspace lgx `:local/root` dirs and lose let-go core. Disabling a
@@ -255,15 +260,50 @@ there.
 - Classpath libraries come in two shapes: JARs (`SymbolSource::Jar`, navigated
   via `jar:` URIs) and source directories — git deps in `~/.gitlibs`,
   `:local/root` deps (`SymbolSource::Dir`, navigated via plain `file:` URIs).
-- Library symbols and namespace metadata are keyed once per fqn,
-  Clojure-preferred: `.clj` over `.cljc` over `.cljs`, whatever the insertion
-  order (`lib_rank` in `insert_lib_file`), last writer among equals. The
-  ClojureScript copy a Clojure one displaces lives in `Index::cljs_symbols` /
-  `cljs_namespaces`, and only `lookup_for` / `ns_meta_for` / `prefer_dialect`
-  with `Dialect::Cljs` read it — definition and hover do; every other handler
-  stays on the primary maps. A project symbol in the primary slot always wins,
-  shadow or not. `Dialect::of_path` decides by extension, `.cljs` alone being
+- Symbols and namespace metadata live in two dialect slots per fqn, project
+  and library entries alike: the primary maps (`symbols`, `namespaces`) and
+  the ClojureScript shadow (`cljs_symbols`, `cljs_namespaces`). `slot_rank`
+  orders every entry — project `.clj` 0, other 1, `.cljs` 2, library `.clj`
+  3, other 4, `.cljs` 5 — and `rank_insert` gives the primary to the lowest,
+  last writer among equals; a `.cljs` entry that loses to, or is displaced
+  by, a non-`.cljs` one goes to the shadow unless the shadow holds a lower
+  rank. So project beats library in both slots, and a namespace split
+  across `.clj` and `.cljs` keeps both halves. Every shadow key is a primary
+  key. Removal is by file (`remove_file`): each project file's
+  `FileRecord` (its own `NsMeta` and fqns, in `Index::files`) says what to
+  drop, a removed primary entry is replaced by its shadow copy, an emptied
+  metadata slot is refilled from the namespace's other records (`ns_files`),
+  and `ns_symbols` is the union of the namespace's files — library files
+  have no record and are removed through it. `merge_project_from` replaces
+  each re-scanned file (`file_entries`), never a whole namespace. Reads:
+  `lookup_for` / `ns_meta_for` / `prefer_dialect` with `Dialect::Cljs` take
+  the shadow unless the primary is a project entry and the shadow a
+  library's; `lookup_all` lists both halves. The asking file's dialect
+  reaches `resolve_symbol` (definition, hover, signature help, ClojureDocs),
+  completion (its data carries `cljs` so `resolve` reads the same half),
+  `resolve_fqn_at`'s alias fallback and `namespace_location`; references
+  list every `lookup_all` definition and rename edits every project one,
+  while occurrences stay merged across dialects — the halves are one var.
+  The "last one wins" collision warnings fire only for two files of one
+  dialect. `Dialect::of_path` decides by extension, `.cljs` alone being
   ClojureScript, a `jar:` virtual path judged by its entry name.
+- A `.cljs` file's core is `cljs.core` (`index::core_ns`): the occurrence
+  walker records a bare core name, and a `clojure.core/x` usage, under it,
+  `head_is_core_form` and the locals walker accept either core, and a
+  `:refer-clojure :rename` refers into it. `.cljc` asks as Clojure and stays
+  on `clojure.core`. The definition `Core` arm looks in `core_ns(dialect)`
+  first and falls back to `clojure.core` for a `.cljs` file when no
+  ClojureScript JAR is indexed; `resolve_symbol` asks `cljs.core` in the
+  index for a `.cljs` bare name the static list lacks (`IMeta`,
+  `not-native`), after that list, so hover keeps the curated `clojure.core`
+  doc for shared names.
+- `(:require-macros …)` is read like `:require` (aliases, refers, prefix
+  lists, reader conditionals), `:refer-macros [m]` inside any libspec refers
+  like `:refer`, and `:include-macros true` binds nothing. `requires` is
+  de-duplicated (`record_require`), since a namespace often appears in both
+  clauses. Refer entries and aliases in a `:require-macros` clause are
+  rename sites (`collect_refer_occurrences`, `collect_alias_declarations`);
+  clean-ns, add-require and the tree-based lints still scan `:require` only.
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
 - Integrant EDN configs are found project-wide, not under `:paths`: the scan
   walks each project dir to `scanner::EDN_SCAN_MAX_DEPTH` (gitignore respected)

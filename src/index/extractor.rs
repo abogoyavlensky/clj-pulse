@@ -8,7 +8,7 @@ use tree_sitter::{Node, Parser};
 use tree_sitter_clojure::LANGUAGE;
 use tree_sitter_language::LanguageFn;
 
-use super::{DefKind, ExtractConfig, NsMeta, Occurrence, Symbol};
+use super::{core_ns, DefKind, Dialect, ExtractConfig, NsMeta, Occurrence, Symbol};
 
 static LANGUAGE_REF: OnceLock<tree_sitter::Language> = OnceLock::new();
 
@@ -237,6 +237,7 @@ fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<
     let ctx = OccurrenceCtx {
         source,
         ns_meta,
+        dialect: Dialect::of_path(&ns_meta.file),
         def_names: HashSet::new(),
         lint_as: NO_LINT_AS.get_or_init(HashMap::new),
     };
@@ -402,6 +403,7 @@ pub fn extract_analysis_tree(
     let ctx = OccurrenceCtx {
         source,
         ns_meta: &ns_meta,
+        dialect: Dialect::of_path(file),
         def_names,
         lint_as: &cfg.lint_as,
     };
@@ -654,7 +656,10 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
                 continue;
             }
             match node_text(kw, source) {
-                ":require" => {
+                // `(:require-macros …)` is ClojureScript's clause for the
+                // macro half of a namespace: its libspecs bind aliases and
+                // refers exactly like `:require`'s.
+                ":require" | ":require-macros" => {
                     for require_spec in &inner[1..] {
                         process_require_spec(*require_spec, source, ns_meta);
                     }
@@ -709,7 +714,7 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
                 _ => {}
             }
         }
-        "sym_lit" => ns_meta.requires.push(sym_text(spec, source).to_string()),
+        "sym_lit" => record_require(ns_meta, sym_text(spec, source).to_string()),
         // Legacy prefix list `(clojure [set :as s] string)`: each entry is a
         // libspec whose namespace is the prefix joined by a dot. The prefix
         // itself binds nothing, so `set/union` stays unresolved — only
@@ -731,9 +736,7 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
             for item in &items[1..] {
                 match item.kind() {
                     "sym_lit" => {
-                        ns_meta
-                            .requires
-                            .push(format!("{}.{}", prefix, sym_text(*item, source)))
+                        record_require(ns_meta, format!("{}.{}", prefix, sym_text(*item, source)))
                     }
                     "vec_lit" => {
                         let sub = named_children(*item);
@@ -816,6 +819,15 @@ fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
     }
 }
 
+/// Records `ns` as required. De-duplicated: ClojureScript names a namespace in
+/// both `:require` and `:require-macros` when it has a runtime and a macro
+/// half, and a repeat would surface twice in every consumer of `requires`.
+fn record_require(ns_meta: &mut NsMeta, ns: String) {
+    if !ns_meta.requires.contains(&ns) {
+        ns_meta.requires.push(ns);
+    }
+}
+
 /// Records `ns` as referred in full. De-duplicated: a reader conditional can
 /// name the same namespace in several branches, and a repeat would offer its
 /// vars twice in completion.
@@ -848,7 +860,8 @@ fn parse_refer_clojure(items: &[Node], source: &str, ns_meta: &mut NsMeta) {
             }
             ":rename" if items[i + 1].kind() == "map_lit" => {
                 for (from, to) in rename_pairs(items[i + 1], source) {
-                    ns_meta.refers.insert(to, format!("clojure.core/{}", from));
+                    let core = core_ns(Dialect::of_path(&ns_meta.file));
+                    ns_meta.refers.insert(to, format!("{}/{}", core, from));
                     // Renaming a core name unmaps the original: after
                     // `:rename {map cmap}`, bare `map` is not core's `map`.
                     if !ns_meta.core_excludes.contains(&from) {
@@ -978,7 +991,11 @@ fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &
                     i += 2;
                     continue;
                 }
-                ":refer" if i + 1 < items.len() && items[i + 1].kind() == "vec_lit" => {
+                // `:refer-macros` is ClojureScript's refer of the namespace's
+                // macro half, written inside an ordinary `:require` libspec.
+                ":refer" | ":refer-macros"
+                    if i + 1 < items.len() && items[i + 1].kind() == "vec_lit" =>
+                {
                     let refer_vec = named_children(items[i + 1]);
                     for refer_node in refer_vec {
                         if refer_node.kind() == "sym_lit" {
@@ -987,6 +1004,12 @@ fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &
                             ns_meta.refers.insert(refer_name, fqn);
                         }
                     }
+                    i += 2;
+                    continue;
+                }
+                // `:include-macros true` loads the macro half of a namespace
+                // the spec already requires; it binds nothing.
+                ":include-macros" if i + 1 < items.len() => {
                     i += 2;
                     continue;
                 }
@@ -1003,7 +1026,7 @@ fn parse_libspec_items(items: &[Node], ns_name: String, source: &str, ns_meta: &
     }
 
     if !as_alias_only {
-        ns_meta.requires.push(ns_name);
+        record_require(ns_meta, ns_name);
     }
 }
 
@@ -1615,8 +1638,8 @@ fn is_ns_form(list: Node, source: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Pushes every `:as` / `:as-alias` value symbol in the `:require` and `:use`
-/// clauses of `ns_form`.
+/// Pushes every `:as` / `:as-alias` value symbol in the `:require`,
+/// `:require-macros` and `:use` clauses of `ns_form`.
 fn collect_alias_declarations<'a>(ns_form: Node<'a>, source: &str, out: &mut Vec<Node<'a>>) {
     for clause in named_children(ns_form).into_iter().skip(2) {
         if clause.kind() != "list_lit" {
@@ -1626,7 +1649,11 @@ fn collect_alias_declarations<'a>(ns_form: Node<'a>, source: &str, out: &mut Vec
         let is_libspec_clause = inner
             .first()
             .map(|kw| {
-                kw.kind() == "kwd_lit" && matches!(node_text(*kw, source), ":require" | ":use")
+                kw.kind() == "kwd_lit"
+                    && matches!(
+                        node_text(*kw, source),
+                        ":require" | ":require-macros" | ":use"
+                    )
             })
             .unwrap_or(false);
         if !is_libspec_clause {
@@ -1724,6 +1751,7 @@ fn discarded_keyword_starts(node: Node, source: &str, out: &mut HashSet<(u32, u3
         let ctx = OccurrenceCtx {
             source,
             ns_meta: &ns_meta,
+            dialect: Dialect::Clj,
             def_names: HashSet::new(),
             lint_as: &lint_as,
         };
@@ -1956,6 +1984,10 @@ impl Scope {
 struct OccurrenceCtx<'a> {
     source: &'a str,
     ns_meta: &'a NsMeta,
+    /// The dialect of the file being walked: a bare core name belongs to
+    /// [`core_ns`] of it, and ClojureScript reads `clojure.core/x` as
+    /// `cljs.core/x`.
+    dialect: Dialect,
     def_names: HashSet<&'a str>,
     /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
     /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
@@ -2019,8 +2051,9 @@ fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mu
 }
 
 /// Whether a `sym_lit` list head names a core/special form: unqualified, or
-/// qualified to `clojure.core` (directly or via an `:as` alias). Keeps
-/// `clojure.core/let` binding locals while excluding `s/def` and friends.
+/// qualified to `clojure.core` or `cljs.core` (directly or via an `:as`
+/// alias). Keeps `clojure.core/let` binding locals while excluding `s/def` and
+/// friends.
 fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
     match head.child_by_field_name("namespace") {
         None => true,
@@ -2032,7 +2065,7 @@ fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
                 .get(alias)
                 .map(String::as_str)
                 .unwrap_or(alias);
-            resolved == "clojure.core"
+            matches!(resolved, "clojure.core" | "cljs.core")
         }
     }
 }
@@ -2073,7 +2106,7 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     }
 
     // A head names a core/special form only when it is unqualified or qualified
-    // to `clojure.core`. Matching on the name part alone would misread a
+    // to `clojure.core` (or `cljs.core`). Matching on the name part alone would misread a
     // qualified call like `s/def` as core `def` (skipping the keyword in its
     // "name" slot); requiring clojure.core still handles a `clojure.core/let`
     // (or an alias to it) as a real binding form. Other qualified heads fall
@@ -2783,7 +2816,8 @@ fn destructuring_key_ns(directive: Node, ctx: &OccurrenceCtx) -> Option<String> 
 }
 
 /// `(:require [some.ns :refer [a b]])` — refer entries are occurrences of
-/// `some.ns/a` etc., so rename can fix require clauses.
+/// `some.ns/a` etc., so rename can fix require clauses. A `:require-macros`
+/// clause and a `:refer-macros` key refer the same way.
 fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
     for child in children.iter().skip(2) {
         if child.kind() != "list_lit" {
@@ -2792,7 +2826,10 @@ fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut V
         let inner = named_children(*child);
         let is_require = inner
             .first()
-            .map(|kw| kw.kind() == "kwd_lit" && node_text(*kw, ctx.source) == ":require")
+            .map(|kw| {
+                kw.kind() == "kwd_lit"
+                    && matches!(node_text(*kw, ctx.source), ":require" | ":require-macros")
+            })
             .unwrap_or(false);
         if !is_require {
             continue;
@@ -2808,8 +2845,8 @@ fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut V
             let ns_name = sym_text(*ns_name, ctx.source).to_string();
             let mut i = 1;
             while i < items.len() {
-                let is_refer =
-                    items[i].kind() == "kwd_lit" && node_text(items[i], ctx.source) == ":refer";
+                let is_refer = items[i].kind() == "kwd_lit"
+                    && matches!(node_text(items[i], ctx.source), ":refer" | ":refer-macros");
                 if is_refer {
                     if let Some(refer_vec) = items.get(i + 1).filter(|n| n.kind() == "vec_lit") {
                         for sym in named_children(*refer_vec) {
@@ -2853,8 +2890,14 @@ fn record_occurrence(
             .ns_meta
             .aliases
             .get(alias)
-            .cloned()
-            .unwrap_or_else(|| alias.to_string());
+            .map(String::as_str)
+            .unwrap_or(alias);
+        // ClojureScript aliases `clojure.core` to `cljs.core`.
+        let ns = if ns == "clojure.core" {
+            core_ns(ctx.dialect)
+        } else {
+            ns
+        };
         out.push(Occurrence {
             fqn: format!("{}/{}", ns, name),
             name_range,
@@ -2880,7 +2923,7 @@ fn record_occurrence(
     } else if ctx.def_names.contains(name) {
         in_ns(name)
     } else if core_names().contains(name) && !ctx.ns_meta.core_excludes.iter().any(|e| e == name) {
-        format!("clojure.core/{}", name)
+        format!("{}/{}", core_ns(ctx.dialect), name)
     } else {
         in_ns(name)
     };
@@ -3112,15 +3155,16 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                 return;
             }
             // A head is a binding form when it is unqualified or explicitly
-            // qualified to `clojure.core` (`(clojure.core/let …)`), matching the
-            // occurrence walker's `head_is_core_form`. A qualified `s/def` etc.
-            // falls through to generic descent. (An `:as` alias of clojure.core
-            // is not resolved here — the primitive has no ns metadata — so
-            // `cc/let` is not treated as a binding form; that form is rare.)
+            // qualified to `clojure.core` or `cljs.core` (`(clojure.core/let
+            // …)`), matching the occurrence walker's `head_is_core_form`. A
+            // qualified `s/def` etc. falls through to generic descent. (An
+            // `:as` alias of clojure.core is not resolved here — the primitive
+            // has no ns metadata — so `cc/let` is not treated as a binding
+            // form; that form is rare.)
             let core_form = head.kind() == "sym_lit"
                 && match head.child_by_field_name("namespace") {
                     None => true,
-                    Some(ns) => node_text(ns, source) == "clojure.core",
+                    Some(ns) => matches!(node_text(ns, source), "clojure.core" | "cljs.core"),
                 };
             if !core_form {
                 // A qualified defining head (`mu/defn`) binds like the form its

@@ -5,7 +5,7 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::{DocumentStore, Snapshot};
-use crate::index::{extractor, DefKind, Index, Occurrence, Symbol, SymbolSource};
+use crate::index::{extractor, DefKind, Dialect, Index, Occurrence, Symbol, SymbolSource};
 
 pub fn references(
     index: &Index,
@@ -30,9 +30,10 @@ pub fn references(
 
     let mut locations = Vec::new();
     if params.context.include_declaration {
-        if let Some(sym) = index.lookup(&fqn) {
-            // Declarations in any source are listed: project/dir files as
-            // `file:` URIs, JAR entries as `jar:` URIs.
+        // Every definition, in both dialects: the halves of a namespace split
+        // across `.clj` and `.cljs` are one var. Declarations in any source are
+        // listed: project/dir files as `file:` URIs, JAR entries as `jar:` URIs.
+        for sym in index.lookup_all(&fqn) {
             if let Ok(decl_uri) = crate::uri::from_index_path(&sym.file) {
                 locations.push(Location {
                     uri: decl_uri,
@@ -148,7 +149,10 @@ pub enum RenameTarget {
         word: String,
         refs: extractor::LocalRefs,
     },
-    /// A project-wide var, record, keyword-free symbol — renamed by fqn.
+    /// A project-wide var, record, keyword-free symbol — renamed by fqn. `sym`
+    /// is the definition the asking file's dialect resolves to, the one the
+    /// project-source check was made against; the edit renames every project
+    /// definition of `fqn` (both halves of a `.clj`/`.cljs` namespace).
     Global { fqn: String, sym: Symbol },
     /// A qualified project keyword: every site that reads it, already checked
     /// down to the range of the name its notation ends with.
@@ -223,7 +227,7 @@ pub fn rename_target(
         return keyword_target(index, documents, fqn);
     }
     let sym = index
-        .lookup(&fqn)
+        .lookup_for(&fqn, Dialect::of_path(&origin))
         .ok_or_else(|| anyhow::anyhow!("cannot rename: no definition found for {}", fqn))?;
     if sym.source != SymbolSource::Project {
         anyhow::bail!("cannot rename library or built-in symbol {}", fqn);
@@ -672,15 +676,23 @@ pub fn rename(
 
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
 
-    // Declaration edit — from live text when the defining file is open
-    // (its indexed range may be stale against unsaved edits).
-    let decl_uri = Url::from_file_path(&sym.file)
-        .map_err(|_| anyhow::anyhow!("invalid path: {:?}", sym.file))?;
-    let decl_range = live_definition_range(index, documents, &sym, &fqn);
-    changes.entry(decl_uri).or_default().push(TextEdit {
-        range: decl_range,
-        new_text: new_name.clone(),
-    });
+    // Declaration edits — one per project definition, both halves of a
+    // namespace split across `.clj` and `.cljs` included — from live text when
+    // the defining file is open (its indexed range may be stale against
+    // unsaved edits).
+    let definitions = index
+        .lookup_all(&fqn)
+        .into_iter()
+        .filter(|def| def.source == SymbolSource::Project);
+    for def in std::iter::once(sym.clone()).chain(definitions.filter(|d| d.file != sym.file)) {
+        let decl_uri = Url::from_file_path(&def.file)
+            .map_err(|_| anyhow::anyhow!("invalid path: {:?}", def.file))?;
+        let decl_range = live_definition_range(index, documents, &def, &fqn);
+        changes.entry(decl_uri).or_default().push(TextEdit {
+            range: decl_range,
+            new_text: new_name.clone(),
+        });
+    }
 
     for (file, occs) in occurrences_for(index, documents, &fqn) {
         let Ok(file_uri) = Url::from_file_path(&file) else {
@@ -776,7 +788,7 @@ pub fn resolve_fqn_at(
         return None;
     }
     let ns = index
-        .ns_meta(&current_ns)
+        .ns_meta_for(&current_ns, Dialect::of_path(&path))
         .and_then(|m| m.aliases.get(alias).cloned())
         .unwrap_or_else(|| alias.to_string());
     Some(format!("{}/{}", ns, name))

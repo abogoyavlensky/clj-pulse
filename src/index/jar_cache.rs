@@ -17,7 +17,9 @@ use super::{NsMeta, Symbol};
 /// 10: `NsMeta.imports` added (`:import` parsing).
 /// 11: `DefKind::Deftest` + `NsMeta.refer_all` (layout change).
 /// 12: `Symbol.private` (layout change).
-pub const CACHE_FORMAT_VERSION: u32 = 18;
+/// 19: a `.cljs` entry's `NsMeta` reads `:require-macros` / `:refer-macros`
+///     and refers a `:refer-clojure :rename` to `cljs.core`.
+pub const CACHE_FORMAT_VERSION: u32 = 19;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

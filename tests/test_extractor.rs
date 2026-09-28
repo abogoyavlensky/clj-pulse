@@ -620,6 +620,49 @@ fn test_occurrence_refer_usage_and_vector_entry() {
 }
 
 #[test]
+fn cljs_core_names_resolve_to_cljs_core() {
+    let src = "(ns x)\n(not (when true 1))\n";
+    let (_, _, occs) = extract_full(src, Path::new("x.cljs")).unwrap();
+    assert_eq!(occurrences_of(&occs, "cljs.core/not").len(), 1, "{occs:?}");
+    assert_eq!(occurrences_of(&occs, "cljs.core/when").len(), 1, "{occs:?}");
+    assert!(
+        occs.iter().all(|o| !o.fqn.starts_with("clojure.core/")),
+        "a .cljs file has no clojure.core: {occs:?}"
+    );
+    // `.cljc` asks as Clojure, like `.clj`.
+    for file in ["x.clj", "x.cljc"] {
+        let (_, _, occs) = extract_full(src, Path::new(file)).unwrap();
+        assert_eq!(
+            occurrences_of(&occs, "clojure.core/not").len(),
+            1,
+            "{file}: {occs:?}"
+        );
+    }
+}
+
+#[test]
+fn cljs_qualified_clojure_core_is_cljs_core() {
+    // ClojureScript aliases `clojure.core` to `cljs.core`.
+    let src = "(ns x (:require [clojure.core :as cc]))\n(cc/inc 1)\n(clojure.core/dec 1)\n";
+    let (_, _, occs) = extract_full(src, Path::new("x.cljs")).unwrap();
+    assert_eq!(occurrences_of(&occs, "cljs.core/inc").len(), 1, "{occs:?}");
+    assert_eq!(occurrences_of(&occs, "cljs.core/dec").len(), 1, "{occs:?}");
+}
+
+#[test]
+fn cljs_refer_clojure_rename_refers_cljs_core() {
+    let (meta, _) = extract(
+        "(ns x (:refer-clojure :rename {map cmap}))\n",
+        Path::new("x.cljs"),
+    )
+    .unwrap();
+    assert_eq!(
+        meta.refers.get("cmap").map(String::as_str),
+        Some("cljs.core/map")
+    );
+}
+
+#[test]
 fn test_occurrence_locals_shadow_defs() {
     let src = "(ns my.app)\n(defn helper [x] x)\n(defn f [helper] (helper 1))\n(defn g [] (let [helper 2] (helper 3)))";
     let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
@@ -1040,6 +1083,64 @@ fn test_is_integrant_edn_detection() {
     assert!(!is_integrant_edn(Path::new("data.edn"), "{:a 1 :b 2}"));
 }
 
+const REQUIRE_MACROS_NS: &str = "(ns x (:require-macros [a.macros :as m :refer [defthing]]) (:require [a.macros :refer [helper]]))";
+
+#[test]
+fn require_macros_binds_aliases_and_refers() {
+    let (meta, _) = extract(REQUIRE_MACROS_NS, Path::new("x.cljs")).unwrap();
+    assert_eq!(meta.aliases.get("m").map(String::as_str), Some("a.macros"));
+    assert_eq!(
+        meta.refers.get("defthing").map(String::as_str),
+        Some("a.macros/defthing")
+    );
+    assert_eq!(
+        meta.refers.get("helper").map(String::as_str),
+        Some("a.macros/helper")
+    );
+    // Named by both clauses, required once.
+    assert_eq!(
+        meta.requires.iter().filter(|r| *r == "a.macros").count(),
+        1,
+        "requires: {:?}",
+        meta.requires
+    );
+}
+
+#[test]
+fn refer_macros_and_include_macros_in_a_require_spec() {
+    let (meta, _) = extract(
+        "(ns x (:require [a.macros :refer-macros [defthing] :include-macros true]))",
+        Path::new("x.cljs"),
+    )
+    .unwrap();
+    assert_eq!(
+        meta.refers.get("defthing").map(String::as_str),
+        Some("a.macros/defthing")
+    );
+    assert_eq!(meta.requires, vec!["a.macros".to_string()]);
+}
+
+#[test]
+fn require_macros_usage_is_an_occurrence() {
+    let src = format!("{REQUIRE_MACROS_NS}\n(defthing foo 1)\n(m/other 2)");
+    let (_, _, occs) = extract_full(&src, Path::new("x.cljs")).unwrap();
+    // The refer entry in the clause and the usage.
+    let lines: Vec<u32> = occurrences_of(&occs, "a.macros/defthing")
+        .iter()
+        .map(|o| o.name_range.start.line)
+        .collect();
+    assert_eq!(lines, vec![0, 1], "{occs:?}");
+    assert_eq!(occurrences_of(&occs, "a.macros/other").len(), 1, "{occs:?}");
+    // A `:refer-macros` entry inside a `:require` libspec is one too.
+    let src = "(ns x (:require [a.macros :refer-macros [defthing]]))\n(defthing foo 1)";
+    let (_, _, occs) = extract_full(src, Path::new("x.cljs")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "a.macros/defthing").len(),
+        2,
+        "{occs:?}"
+    );
+}
+
 #[test]
 fn test_ns_refer_all_and_use_recorded() {
     let (meta, _) = extract(
@@ -1297,8 +1398,13 @@ fn test_are_binds_template_locals_in_every_require_style() {
             heads, 1,
             "{src}: head recorded once under {head_fqn}: {occs:?}"
         );
+        let core_eq = if path.ends_with(".cljs") {
+            "cljs.core/="
+        } else {
+            "clojure.core/="
+        };
         assert_eq!(
-            occurrences_of(&occs, "clojure.core/=").len(),
+            occurrences_of(&occs, core_eq).len(),
             1,
             "{src}: occurrences: {occs:?}"
         );
@@ -2271,6 +2377,19 @@ h/f
             sites.declarations.iter().all(|d| !sites.usages.contains(d)),
             "declaration listed as a usage"
         );
+    }
+
+    #[test]
+    fn require_macros_alias_is_a_rename_site() {
+        let src = "(ns x (:require-macros [a.macros :as m]))\n(m/defthing foo 1)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("x.cljs"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "m", &occs);
+        let declarations: Vec<(u32, u32, u32)> = sites.declarations.iter().map(triple).collect();
+        assert_eq!(declarations, vec![(0, 37, 38)], "{:?}", sites.declarations);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(usages, vec![(1, 1, 2)], "{:?}", sites.usages);
     }
 
     #[test]
