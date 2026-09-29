@@ -2,7 +2,7 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `keyword/qualified`, `keyword/alias`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
+- **Status:** fixed — binding values by the gaps change on 2026-09-18 (plan `docs/plans/2026-09-18-0751-discards-and-comments-are-gaps.md`), quoted data on 2026-09-28 (plan `docs/plans/2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md`, which also pins the binding-value shape in a test); archived. Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom

@@ -2036,9 +2036,10 @@ fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mu
         // user wrote is not the keyword the program sees.
         "ns_map_lit" => walk_ns_map(node, ctx, scope, out),
         "list_lit" => walk_list(node, ctx, scope, out),
-        // 'foo quotes data, not a var usage; skip. Syntax-quoted forms in
-        // macros do reference real vars, so walk those.
-        "quoting_lit" => {}
+        // 'foo quotes data: its keywords are still keywords, its symbols are
+        // not var usages. Syntax-quoted forms in macros do reference real
+        // vars, so those take the ordinary walk.
+        "quoting_lit" => walk_quoted_data(node, ctx, out),
         // A gap handed over directly (`named_children` never yields one)
         // records nothing: the reader drops what a discard or comment holds.
         "comment" | "dis_expr" => {}
@@ -2119,8 +2120,21 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     };
 
     match head_text {
-        Some("ns") => collect_refer_occurrences(&children, ctx, out),
-        Some("quote") => {}
+        Some("ns") => {
+            collect_refer_occurrences(&children, ctx, out);
+            // The attr-map (`(ns x {:clj-kondo/config '{…}})`) is read, never
+            // evaluated: its keywords count, its symbols do not.
+            for child in children.iter().skip(2) {
+                if child.kind() != "list_lit" {
+                    walk_quoted_data(*child, ctx, out);
+                }
+            }
+        }
+        Some("quote") => {
+            for child in &children[1..] {
+                walk_quoted_data(*child, ctx, out);
+            }
+        }
         Some("letfn") => {
             record_occurrence(*head, ctx, scope, out);
             walk_letfn_form(&children, ctx, scope, out);
@@ -2931,9 +2945,28 @@ fn record_occurrence(
     out.push(Occurrence { fqn, name_range });
 }
 
-/// Records a keyword usage. The range spans the whole keyword token so
-/// navigation resolves from a click anywhere on `:ns/name` / `::name`
-/// (keyword rename is unsupported in v1, so a name-only range buys nothing).
+/// Walks quoted data (`'{…}`, `(quote …)`, nested quotes included). The
+/// reader resolves `::k` and `::alias/k` before the quote sees them, so every
+/// keyword is an occurrence under the usual rule and a namespaced map still
+/// qualifies its keys; a symbol is data, never a usage, and records nothing.
+fn walk_quoted_data(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
+    match node.kind() {
+        "kwd_lit" => record_keyword_occurrence(node, ctx, out),
+        "ns_map_lit" => walk_ns_map_entries(node, ctx, out, &mut |entry, out| {
+            walk_quoted_data(entry, ctx, out)
+        }),
+        "comment" | "dis_expr" => {}
+        _ => {
+            for child in named_children(node) {
+                walk_quoted_data(child, ctx, out);
+            }
+        }
+    }
+}
+
+/// Records a keyword usage — in code and in quoted data alike. The range spans
+/// the whole keyword token so navigation resolves from a click anywhere on
+/// `:ns/name` / `::name`; a keyword rename edits the name the token ends with.
 fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
     if let Some(fqn) = keyword_occurrence_fqn(node, ctx.ns_meta, ctx.source) {
         out.push(Occurrence {
@@ -2955,12 +2988,25 @@ fn record_keyword_occurrence(node: Node, ctx: &OccurrenceCtx, out: &mut Vec<Occu
 /// keywords stay unqualified, which under-reports the keys but never invents a
 /// namespace for a value.
 fn walk_ns_map(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<Occurrence>) {
+    walk_ns_map_entries(node, ctx, out, &mut |entry, out| {
+        walk_occurrences(entry, ctx, scope, out)
+    });
+}
+
+/// The key/value pairing of [`walk_ns_map`], shared with quoted data: keyword
+/// keys are recorded qualified, every other entry goes to `walk`.
+fn walk_ns_map_entries(
+    node: Node,
+    ctx: &OccurrenceCtx,
+    out: &mut Vec<Occurrence>,
+    walk: &mut dyn FnMut(Node, &mut Vec<Occurrence>),
+) {
     let map_ns = ns_map_prefix(node, ctx);
     let mut cursor = node.walk();
     let entries: Vec<Node> = node.children_by_field_name("value", &mut cursor).collect();
     if entries.iter().any(|n| n.kind() == "splicing_read_cond_lit") {
         for entry in entries {
-            walk_occurrences(entry, ctx, scope, out);
+            walk(entry, out);
         }
         return;
     }
@@ -2969,11 +3015,11 @@ fn walk_ns_map(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec
             Some(key) if key.kind() == "kwd_lit" => {
                 record_ns_map_key(*key, map_ns.as_deref(), ctx, out)
             }
-            Some(key) => walk_occurrences(*key, ctx, scope, out),
+            Some(key) => walk(*key, out),
             None => {}
         }
         if let Some(value) = pair.get(1) {
-            walk_occurrences(*value, ctx, scope, out);
+            walk(*value, out);
         }
     }
 }
@@ -3640,16 +3686,30 @@ pub fn local_references_at_tree(
 
     // The cursor must sit on a real (non-quoted) occurrence of `name`. Quoted
     // data (`'x`) is skipped by `collect_name_occurrences`, so a cursor there
-    // references no local even though the name is lexically in scope.
-    if !occurrences.iter().any(|r| lsp_range_contains(*r, pos)) {
-        return None;
-    }
+    // references no local even though the name is lexically in scope. The one
+    // qualified token that binds a local is a `{:keys [c/x]}` entry, admitted
+    // by its name part.
+    let entry = if occurrences.iter().any(|r| lsp_range_contains(*r, pos)) {
+        None
+    } else {
+        let (entry_name, range) = destructured_entry_name_at_tree(tree, source, pos)?;
+        if entry_name != name {
+            return None;
+        }
+        Some(range)
+    };
 
     let declaration = locals_at_node(root, source, pos)
         .into_iter()
         .rev()
         .find(|b| b.name == name)?
         .name_range;
+    // The entry's shape alone does not make it a binding: `{:keys [c/x]}` as
+    // data in the body of `(fn [x] …)` reads the var `c/x`, and the `x` in
+    // scope there is the param. Only the entry's own binding counts.
+    if entry.is_some_and(|range| range != declaration) {
+        return None;
+    }
 
     let mut usages = Vec::new();
     // An `are` argv is substituted into the template syntactically, quoted
@@ -3680,6 +3740,30 @@ pub fn local_references_at_tree(
         usages,
         destructured_key: is_destructured_key(root, source, declaration),
     })
+}
+
+/// The local a qualified `:keys`/`:strs`/`:syms` destructuring entry binds,
+/// when `pos` is inside the entry's name part: `{:keys [c/x]}` binds `x`
+/// (read from `:c/x`). Returns the name and the name part's range, which is
+/// the binding's `name_range`. `None` on the namespace half (the keyword),
+/// on any other qualified symbol, and on an unqualified entry, which is an
+/// ordinary occurrence of its name. The test is shape alone, so a caller must
+/// still check that the binding it resolves to is the entry itself.
+pub fn destructured_entry_name_at_tree(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    pos: Position,
+) -> Option<(String, Range)> {
+    let root = tree.root_node();
+    let sym = node_path_at(root, source, pos)
+        .into_iter()
+        .next()
+        .filter(|n| n.kind() == "sym_lit")?;
+    sym.child_by_field_name("namespace")?;
+    let name = sym.child_by_field_name("name")?;
+    let range = node_to_lsp_range(name, source);
+    (lsp_range_contains(range, pos) && is_destructured_key(root, source, range))
+        .then(|| (node_text(name, source).to_string(), range))
 }
 
 /// The template expression of the `are` form whose argv holds the binding
@@ -4255,6 +4339,25 @@ mod tests {
         let refs = local_references_at(src, pos_of(src, "(inc a)", 0, 5), "a").expect("local");
         assert!(refs.destructured_key, "{{:keys [a]}} binding: {:?}", refs);
         assert_eq!(refs.usages.len(), 1, "one body usage: {:?}", refs.usages);
+    }
+
+    #[test]
+    fn destructured_entry_name_is_the_name_part_of_a_qualified_entry() {
+        let src = "(ns x)\n(defn f [{:keys [c/x] :as m}] (c/g m) x)\n(defn h [{:keys [y]}] y)";
+        let tree = parse(src);
+        let at = |needle: &str, offset: usize| {
+            destructured_entry_name_at_tree(&tree, src, pos_of(src, needle, 0, offset))
+        };
+        let (name, range) = at("[c/x]", 3).expect("name part of the entry");
+        assert_eq!(name, "x");
+        let expected = Range {
+            start: pos_of(src, "[c/x]", 0, 3),
+            end: pos_of(src, "[c/x]", 0, 4),
+        };
+        assert_eq!(range, expected);
+        assert_eq!(at("[c/x]", 1), None, "namespace half");
+        assert_eq!(at("(c/g", 3), None, "a qualified call");
+        assert_eq!(at("[y]", 1), None, "an unqualified entry");
     }
 
     #[test]

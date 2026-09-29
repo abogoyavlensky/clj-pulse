@@ -7274,6 +7274,59 @@ fn test_e2e_rename_refuses_qualified_keys_destructuring() {
 }
 
 #[test]
+fn test_e2e_keyword_sites_in_quoted_data() {
+    // A quote stops evaluation, not the reader: `'{:simple.core/thing 1}`
+    // holds the keyword `::c/thing` reads. References must list it, and a rename
+    // must rewrite it, or quoted config keeps reading the old key.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/quoted_cfg.clj");
+    let probe_text = "(ns simple.quoted-cfg)\n\n(def cfg '{:simple.core/thing 1})\n";
+    std::fs::write(&probe, probe_text).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, "::c/thing");
+
+    let refs = client.references(&keywords, line, col + 5, true);
+    let (probe_line, probe_col) = start_of(probe_text, ":simple.core/thing");
+    assert!(
+        refs.as_array().unwrap().iter().any(|l| l["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/src/quoted_cfg.clj")
+            && l["range"]["start"] == json!({ "line": probe_line, "character": probe_col })),
+        "quoted site missing from references: {}",
+        refs
+    );
+
+    let result = client.rename(&keywords, line, col + 5, "flag");
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(uri, _)| uri.ends_with("/src/quoted_cfg.clj"))
+        .unwrap_or_else(|| panic!("quoted site not edited: {}", result))
+        .1
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        apply_edits(probe_text, &edits),
+        "(ns simple.quoted-cfg)\n\n(def cfg '{:simple.core/flag 1})\n"
+    );
+
+    // Definition from the quoted keyword answers without an error.
+    client.did_open(&probe);
+    client.goto_definition(&probe, probe_line, probe_col + 5);
+}
+
+#[test]
 fn test_e2e_rename_keyword_sees_unsaved_definition() {
     // A dispatch keyword is a *symbol*, not an occurrence, so it needs its own
     // collection pass — and one typed but never saved has no indexed symbol at
@@ -7573,6 +7626,173 @@ fn test_e2e_rename_from_destructuring_entry_refuses_like_keyword_rename() {
     assert_eq!(
         prepare_msg, msg,
         "prepareRename refuses exactly what rename does"
+    );
+}
+
+#[test]
+fn test_e2e_qualified_keys_entry_is_a_local() {
+    // `{:keys [c/x]}` binds the local `x`: from the name half of the entry,
+    // references, highlight, rename and definition answer the local, as they
+    // do from its usage. The `c` half still reads the keyword `:c/x`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/data_keys.clj");
+    let probe_text =
+        "(ns simple.data-keys\n  (:require [simple.core :as c]))\n\n(defn h [x] {:keys [c/x]})\n";
+    std::fs::write(&probe, probe_text).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let file = root.join("src/alias_sites.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+    let (line, start) = start_of(&text, "(defn g [{:keys [c/x]}] x)");
+    let entry = start + "(defn g [{:keys [c/".len() as u32;
+    let usage = start + "(defn g [{:keys [c/x]}] ".len() as u32;
+    let range_at = |col: u32| {
+        json!({ "start": { "line": line, "character": col },
+                "end": { "line": line, "character": col + 1 } })
+    };
+    let ranges = |locs: &Value| -> Vec<Value> {
+        let mut out: Vec<Value> = locs
+            .as_array()
+            .unwrap_or_else(|| panic!("expected locations: {locs}"))
+            .iter()
+            .map(|l| l["range"].clone())
+            .collect();
+        out.sort_by_key(|r| r["start"]["character"].as_u64());
+        out
+    };
+
+    let from_entry = client.references(&file, line, entry, true);
+    assert_eq!(
+        ranges(&from_entry),
+        vec![range_at(entry), range_at(usage)],
+        "{from_entry}"
+    );
+    let from_usage = client.references(&file, line, usage, true);
+    assert_eq!(ranges(&from_entry), ranges(&from_usage));
+
+    let highlight = client.document_highlight(&file, line, entry);
+    let items = highlight.as_array().unwrap();
+    assert_eq!(items.len(), 2, "{highlight}");
+    assert_eq!(items[0]["range"], range_at(entry), "{highlight}");
+    assert_eq!(items[0]["kind"], 3, "the entry is a Write: {highlight}");
+    assert_eq!(items[1]["kind"], 2, "{highlight}");
+
+    let prepare_msg = client.prepare_rename_error(&file, line, entry);
+    assert!(
+        prepare_msg.contains(":keys/:strs/:syms destructured binding 'x'"),
+        "{prepare_msg}"
+    );
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", file.display()) },
+            "position": { "line": line, "character": entry },
+            "newName": "y"
+        }),
+    );
+    assert_eq!(error["message"].as_str().unwrap(), prepare_msg);
+
+    let def = client.goto_definition(&file, line, entry);
+    let def = if def.is_array() { def[0].clone() } else { def };
+    assert!(def["uri"]
+        .as_str()
+        .unwrap()
+        .ends_with("/src/alias_sites.clj"));
+    assert_eq!(def["range"], range_at(entry), "{def}");
+
+    // The namespace half is the keyword the entry reads — `:c/x`, verbatim,
+    // since destructuring never resolves the alias — spanning the whole entry.
+    let keyword_refs = client.references(&file, line, entry - 2, true);
+    assert_eq!(
+        ranges(&keyword_refs),
+        vec![json!({ "start": { "line": line, "character": entry - 2 },
+                     "end": { "line": line, "character": entry + 1 } })],
+        "{keyword_refs}"
+    );
+
+    // As data, the same entry evaluates nothing and binds nothing: it is not
+    // the param `x` in scope around it.
+    client.did_open(&probe);
+    let (p_line, p_start) = start_of(probe_text, "{:keys [c/x]}");
+    let p_entry = p_start + "{:keys [c/".len() as u32;
+    let param = json!({ "start": { "line": p_line, "character": 8 },
+                        "end": { "line": p_line, "character": 9 } });
+    let data_refs = client.references(&probe, p_line, p_entry, true);
+    assert!(
+        data_refs
+            .as_array()
+            .is_none_or(|a| a.iter().all(|l| l["range"] != param)),
+        "{data_refs}"
+    );
+    let data_def = client.goto_definition(&probe, p_line, p_entry);
+    assert!(
+        !data_def.to_string().contains(&param.to_string()),
+        "{data_def}"
+    );
+}
+
+#[test]
+fn test_e2e_rename_refuses_literal_namespace_keys_entry() {
+    // `{:simple.core/keys [x]}` reads `:simple.core/x` and binds `x`: the
+    // entry is a destructured local, refused by rename like `{::c/keys [x]}`,
+    // and a site of the keyword it reads. A comment used to re-pair a binding
+    // vector so this entry resolved as a plain usage (fixed by the gaps work).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/ns_keys.clj");
+    let probe_text = "(ns simple.ns-keys)\n(defn f [{:simple.core/keys [x]}]\n  x)\n";
+    std::fs::write(&probe, probe_text).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&probe);
+
+    let (line, start) = start_of(probe_text, "[x]");
+    let entry = start + 1;
+    let msg = client.prepare_rename_error(&probe, line, entry);
+    assert!(msg.contains("destructured binding 'x'"), "{msg}");
+    client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", probe.display()) },
+            "position": { "line": line, "character": entry },
+            "newName": "y"
+        }),
+    );
+
+    let refs = client.references(&probe, line, entry, true);
+    let mut sites: Vec<(u64, u64)> = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["range"]["start"]["line"].as_u64().unwrap(),
+                l["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    sites.sort();
+    assert_eq!(sites, vec![(line as u64, entry as u64), (2, 2)], "{refs}");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (k_line, k_col) = start_of(&text, ":simple.core/x");
+    let keyword_refs = client.references(&keywords, k_line, k_col + 3, true);
+    assert!(
+        keyword_refs.as_array().unwrap().iter().any(|l| l["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/src/ns_keys.clj")
+            && l["range"]["start"]["line"] == line),
+        "{keyword_refs}"
     );
 }
 

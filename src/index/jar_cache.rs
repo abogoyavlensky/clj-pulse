@@ -19,7 +19,8 @@ use super::{NsMeta, Symbol};
 /// 12: `Symbol.private` (layout change).
 /// 19: a `.cljs` entry's `NsMeta` reads `:require-macros` / `:refer-macros`
 ///     and refers a `:refer-clojure :rename` to `cljs.core`.
-pub const CACHE_FORMAT_VERSION: u32 = 19;
+/// 20: keywords inside quoted data and the ns attr-map are occurrences.
+pub const CACHE_FORMAT_VERSION: u32 = 20;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

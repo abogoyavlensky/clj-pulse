@@ -315,6 +315,19 @@ the release.
       (Backlog, 2026-09-17). `var-usage/library` on clj-kondo went to 163
       agree, 0 diverge, 2 null.
       Plan: [2026-09-27-2031-clojurescript-core-macros-and-twins.md](plans/2026-09-27-2031-clojurescript-core-macros-and-twins.md) — done
+- [x] **Keyword occurrences in quoted data; qualified `:keys` entries as locals.**
+      A keyword under a quote (`'{:deps …}`, `(quote […])`, the ns attr-map)
+      is not an occurrence, so references miss it and a keyword rename leaves
+      quoted config on the old key; a `{:keys [c/x]}` entry resolves as the
+      keyword `:c/x` instead of the local `x` it binds. Keywords in binding
+      values and `{:ns/keys [a]}` renaming the local were already resolved by
+      the gaps fix and only get regression tests. Issues:
+      [keywords in binding values and quoted data](archive/2026-09-17-keywords-in-binding-values-and-quoted-data.md),
+      [`{:ns/keys [a]}` renames the local](archive/2026-09-17-ns-keys-with-explicit-namespace-renames-the-local.md),
+      [a qualified `{:keys [c/x]}` entry resolves as the keyword](archive/2026-09-17-qualified-keys-entry-resolves-as-the-keyword.md)
+      (Backlog, 2026-09-17). `keyword/qualified` on clj-kondo went from 142
+      agree, 93 diverge, 41 null to 234, 40, 2.
+      Plan: [2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md](plans/2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -390,16 +403,22 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-17 `bb compare` on clj-kondo found fourteen divergence classes, one
   issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
   got, where to look, how to verify):
-  - [Keywords in binding values and quoted data are not occurrences](backlog/2026-09-17-keywords-in-binding-values-and-quoted-data.md).
   - [Locals inside `(binding […] (let […] …))` resolve wrong](backlog/2026-09-17-locals-under-binding-and-let.md).
-  - [`{:ns/keys [a]}` with an explicit namespace renames the local](backlog/2026-09-17-ns-keys-with-explicit-namespace-renames-the-local.md).
   - [A `defmulti` is missing from its own references](backlog/2026-09-17-defmulti-missing-from-its-own-references.md).
   - [Constructor calls are not references of a `deftype`/`defrecord`](backlog/2026-09-17-constructor-calls-are-not-references.md).
   - [`:lint-as` to `defprotocol` and `declare` is only half honored](backlog/2026-09-17-lint-as-defprotocol-and-declare-half-honored.md).
   - [`import-vars` re-exports are not definitions](backlog/2026-09-17-import-vars-re-exports-are-not-definitions.md).
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
-  - [A qualified `{:keys [c/x]}` entry resolves as the keyword it reads](backlog/2026-09-17-qualified-keys-entry-resolves-as-the-keyword.md) — in `KNOWN`.
   - [`one-of` in a `for` `:let` resolves to its own line](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md).
+- 2026-09-28 **Keywords in non-Integrant `.edn` files under source paths.**
+  clj-kondo lints every `.edn` file under the source roots
+  (`config.types.edn`, `test-regression/**/findings.edn` on its own corpus),
+  so its keywords are sites there; the index keeps only the configs
+  `is_integrant_edn` accepts, so references and a keyword rename skip the
+  rest. 20 of the 42 `keyword/qualified` answers `bb compare` still flags on
+  clj-kondo, 2 of them null (`docs/MEMORY.md`, 2026-09-28). Indexing them
+  would have to decide what an arbitrary `.edn` file means first — a
+  `findings.edn` fixture is test data, not configuration.
 - 2026-09-17 **Clojure Pulse tooltip shows the `lintStatus` detail.** The
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders
