@@ -1,5 +1,7 @@
 # Defmulti, Constructor and `:lint-as` Declare Sites Implementation Plan
 
+> **Status: completed 2026-09-29.**
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** References and rename reach a `defmulti`'s own line, a `deftype`/`defrecord`'s constructor calls, and the names a `:lint-as … clojure.core/declare` macro declares; the `:lint-as … defprotocol` half is proven and its corpus divergence re-attributed.
@@ -307,6 +309,8 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
 - [x] **Step 5:** `bb bench` and `bb soak` (default clj-kondo corpus) — the index and extractor changed. Bench is not a gate: compare against the tables in `docs/MEMORY.md` and note any drift there. Soak must pass.
 - [x] **Step 6:** `bb compare clj-kondo > .tmp/compare-after.log` — compare the six rows against the table in the Design section; every `var-def/defmulti`, `var-def/programs` and `var-def/declare` divergence gone, `deftype`/`defrecord` in-file `T.` sites agreeing, `->T` extras `known`. Any surprise is a finding to fix or to backlog with a dated line, not to allowlist silently.
 
+> Deviation: `bb bench` ran once per server (`CLJ_PULSE_BENCH_RUNS` 1); a first run was killed by a session restart and re-run. `bb e2e-pulse` ran twice, before and after the Task 4 fix.
+
 ### Task 6: Docs, backlog and roadmap
 
 **Files:**
@@ -321,3 +325,20 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
   > Deviation: following the repo's precedent (#46, #47), the three entries moved to `docs/archive/` with a `fixed` status line, their Backlog lines were removed, and the milestone item added at start was ticked `done`.
 - [x] **Step 7: Commit**
   `git commit -m "docs: record defmulti, constructor and lint-as declare sites"`
+
+> Deviation: the three backlog files are archived under `docs/archive/` with a `fixed` status and their ROADMAP backlog lines removed, the precedent of the 2026-09-28 plan, rather than left in place as `done`; the ROADMAP item was added as a Milestone 5 entry at the start. `CLAUDE.md` is a symlink to `AGENTS.md`. A new ROADMAP backlog line records the renamed-refer gap for plain vars.
+
+
+---
+
+## Completion (2026-09-29)
+
+**Status: complete.** Gates: `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva`, `bb soak` (clj-kondo, 20 rounds, no divergence) green; `bb bench` within the recorded spread (RSS ~6% above tables that predate #46/#47); `bb compare clj-kondo` moved as designed — `defmulti` 6/6, `declare` 28/28, `programs` 6/6, `deftype` 0 → 18 of 20, 40 `defrecord` answers `known` (`->T` supersets), total diverge 249 → 219.
+
+**Implemented:** a `Defmethod` symbol never takes an index slot; `CtorShape` + `builds` name the constructor shapes; constructor calls are sites of their type in references, rename, highlight and prepareRename (narrowed to the name, only when the token spells the constructor), and `resolve_fqn_at` canonicalizes a constructor to its type; `:lint-as … clojure.core/declare` is honored and a declare-only name is its symbol alone (first of repeated declares kept); `CACHE_FORMAT_VERSION` 21.
+
+**Issues:** a concurrent session was executing this plan in the same tree during Task 1 (stopped on the user's instruction; its Task 1 work kept). Codex found two real bugs, both fixed in follow-up commits: a `:rename`d constructor refer produced an inverted rename edit, and a repeated `declare` lost its first site. It also asked for a second cache bump; declined, as v21 is unreleased and only this branch's gate runs wrote it.
+
+**Deviations:** see the `> Deviation:` notes under Tasks 1–6.
+
+**What the plan could have specified better:** it assumed every constructor occurrence spells its constructor, and the `declared` rule was keyed by name. A shape inventory (renamed refers, repeated forms) for each new site rule would have caught both before review.
