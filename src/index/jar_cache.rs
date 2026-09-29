@@ -20,8 +20,8 @@ use super::{NsMeta, Symbol};
 /// 19: a `.cljs` entry's `NsMeta` reads `:require-macros` / `:refer-macros`
 ///     and refers a `:refer-clojure :rename` to `cljs.core`.
 /// 20: keywords inside quoted data and the ns attr-map are occurrences.
-/// 21: a `defmethod`'s own symbol no longer carries an index slot, and a
-///     declare-only name is its `Declare` symbol alone, not also an occurrence.
+/// 21: a declare-only name is its first `Declare` symbol alone, not also an
+///     occurrence; a repeated declare is a usage of that first one.
 pub const CACHE_FORMAT_VERSION: u32 = 21;
 
 #[derive(Serialize, Deserialize)]
