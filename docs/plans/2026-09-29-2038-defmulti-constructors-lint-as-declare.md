@@ -326,7 +326,7 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
 - [x] **Step 7: Commit**
   `git commit -m "docs: record defmulti, constructor and lint-as declare sites"`
 
-> Deviation: the three backlog files are archived under `docs/archive/` with a `fixed` status and their ROADMAP backlog lines removed, the precedent of the 2026-09-28 plan, rather than left in place as `done`; the ROADMAP item was added as a Milestone 5 entry at the start. `CLAUDE.md` is a symlink to `AGENTS.md`. A new ROADMAP backlog line records the renamed-refer gap for plain vars.
+> Deviation: `CLAUDE.md` is a symlink to `AGENTS.md`, which the invariants went into. A new ROADMAP backlog line records the renamed-refer gap for plain vars.
 
 
 ---
