@@ -30,7 +30,10 @@ Language features:
   export file the editor points at, never the network - see
   [ClojureDocs data](EDITORS.md#clojuredocs-data).
 - **Signature help** - argument hints while typing a call (after `(` and spaces).
-- **Find references** - locate every usage of a symbol across the project.
+- **Find references** - locate every usage of a symbol across the project. A
+  `defmulti` lists its own line with every `defmethod`, and a `deftype` or
+  `defrecord` lists the calls that build it: `(Point. …)`, `->Point` and
+  `map->Point`.
 - **Rename** - rename a project symbol and all of its references, or a local
   binding (params, `let`/`loop`/`for` bindings, destructured names) within
   its scope. The editor's rename box opens on the exact token that will change,
@@ -38,7 +41,9 @@ Language features:
   `:keys`-destructured bindings - are refused up front with a reason. The name
   half of a qualified entry (`x` in `{:keys [c/x]}`) is the local it binds,
   refused like any destructured binding, while the `c` half is the keyword
-  `:c/x` the entry reads.
+  `:c/x` the entry reads. Renaming a `deftype`/`defrecord` rewrites the type
+  name inside its constructor calls too (`->Point` becomes `->Pt`), unless the
+  namespace defines a `->Point` of its own, which then stays its own var.
 - **Keyword rename** - rename a qualified keyword across the project. Each site
   keeps the notation it was written in, because only the name at the end of the
   token is replaced: `::db`, `::alias/db` and `:my.app/db` all become `::store`,
@@ -98,7 +103,8 @@ Clojure & project support:
   `(:use ns)`), `:rename`, `:refer-clojure :exclude` / `:rename`, `:import`,
   ClojureScript's `:require-macros`, `:refer-macros` and `:include-macros`,
   reader conditionals, and legacy prefix lists `(clojure [set :as s] string)`.
-  `declare` is indexed too, so a name that is only declared still navigates.
+  `declare` is indexed too, so a name that is only declared still navigates,
+  and so is a macro mapped to `clojure.core/declare` through `:lint-as`.
 - **Project types:** `deps.edn` (resolved from the `.cpcache` classpath),
   Leiningen `project.clj`, and let-go `.lg` projects, whose lgx dependencies at `lgx.edn`
   (git and `:local/root` deps under `~/.lgx/gitlibs`) are indexed and navigable.

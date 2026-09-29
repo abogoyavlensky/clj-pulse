@@ -300,23 +300,24 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
 
 ### Task 5: Gates
 
-- [ ] **Step 1:** `bb check` — Expected: green (fmt, clippy `-D warnings`, all tests).
-- [ ] **Step 2:** `bb e2e` — Expected: PASS.
-- [ ] **Step 3:** `bb e2e-pulse` — Expected: PASS (rename edit shapes are client-visible).
-- [ ] **Step 4:** `bb e2e-calva` — Expected: PASS (definition and location shapes: the CLAUDE.md gate table asks for it).
-- [ ] **Step 5:** `bb bench` and `bb soak` (default clj-kondo corpus) — the index and extractor changed. Bench is not a gate: compare against the tables in `docs/MEMORY.md` and note any drift there. Soak must pass.
-- [ ] **Step 6:** `bb compare clj-kondo > .tmp/compare-after.log` — compare the six rows against the table in the Design section; every `var-def/defmulti`, `var-def/programs` and `var-def/declare` divergence gone, `deftype`/`defrecord` in-file `T.` sites agreeing, `->T` extras `known`. Any surprise is a finding to fix or to backlog with a dated line, not to allowlist silently.
+- [x] **Step 1:** `bb check` — Expected: green (fmt, clippy `-D warnings`, all tests).
+- [x] **Step 2:** `bb e2e` — Expected: PASS.
+- [x] **Step 3:** `bb e2e-pulse` — Expected: PASS (rename edit shapes are client-visible).
+- [x] **Step 4:** `bb e2e-calva` — Expected: PASS (definition and location shapes: the CLAUDE.md gate table asks for it).
+- [x] **Step 5:** `bb bench` and `bb soak` (default clj-kondo corpus) — the index and extractor changed. Bench is not a gate: compare against the tables in `docs/MEMORY.md` and note any drift there. Soak must pass.
+- [x] **Step 6:** `bb compare clj-kondo > .tmp/compare-after.log` — compare the six rows against the table in the Design section; every `var-def/defmulti`, `var-def/programs` and `var-def/declare` divergence gone, `deftype`/`defrecord` in-file `T.` sites agreeing, `->T` extras `known`. Any surprise is a finding to fix or to backlog with a dated line, not to allowlist silently.
 
 ### Task 6: Docs, backlog and roadmap
 
 **Files:**
 - Modify: `docs/FEATURES.md`, `docs/SETTINGS.md`, `docs/MEMORY.md`, `CLAUDE.md`, `docs/ROADMAP.md`, `docs/backlog/*.md`
 
-- [ ] **Step 1: FEATURES.md** — under Rename / Find references: renaming a `deftype`/`defrecord` rewrites its `->T`, `map->T` and `T.` calls, and references list them; a `defmulti` is listed with its defmethods. In the ns/`declare` line: a `:lint-as … clojure.core/declare` macro declares its names.
-- [ ] **Step 2: SETTINGS.md** — the `:lint-as` bullet: the accepted targets are the `def` family plus `defprotocol`, `defmulti`, `defrecord`, `deftype` and `declare`; "a target that names no def-family form drops the macro" stays.
-- [ ] **Step 3: CLAUDE.md invariants** — three additions, in the style of the existing ones: (a) a `Defmethod` symbol is for the outline alone and never takes a slot (`insert_file` / `insert_lib_file`); (b) constructor calls are sites of the type through `references::constructor_forms` + `matching_occurrences`, ranges narrowed to the name, `resolve_fqn_at` canonicalizes `->T`/`map->T`/`T.` to the type, the cross-namespace `:import` + `T.` case is deliberately out; (c) `declare` walks as a def form: a declare-only name is its `Declare` symbol alone, a name the file defines has the declare line as an occurrence, and `:lint-as` to `clojure.core/declare` is honored. Bump note: `CACHE_FORMAT_VERSION` 21.
-- [ ] **Step 4: MEMORY.md** — a new dated compare table row set (or the delta rows) from `.tmp/compare-after.log`, following the existing table's shape.
-- [ ] **Step 5: README** — read it; the constructor-rename and defmulti behavior are feature detail (FEATURES.md), so expect no change, but confirm nothing in it now misstates rename.
-- [ ] **Step 6: Backlog and roadmap** — close the three backlog entries (status `done`, date, one line on the cause, per the /backlog skill's close convention); add the `defprotocol+` corpus sites (node.clj:38/122, indent.clj:27/29, parser/core.clj:174/193, hooks_api.clj:91, meta.clj:9, reader_macro.clj:11/42/69) to `2026-09-17-import-vars-re-exports-are-not-definitions.md` as evidence. In `docs/ROADMAP.md`, tick the three backlog lines with this plan linked.
-- [ ] **Step 7: Commit**
+- [x] **Step 1: FEATURES.md** — under Rename / Find references: renaming a `deftype`/`defrecord` rewrites its `->T`, `map->T` and `T.` calls, and references list them; a `defmulti` is listed with its defmethods. In the ns/`declare` line: a `:lint-as … clojure.core/declare` macro declares its names.
+- [x] **Step 2: SETTINGS.md** — the `:lint-as` bullet: the accepted targets are the `def` family plus `defprotocol`, `defmulti`, `defrecord`, `deftype` and `declare`; "a target that names no def-family form drops the macro" stays.
+- [x] **Step 3: CLAUDE.md invariants** — three additions, in the style of the existing ones: (a) a `Defmethod` symbol is for the outline alone and never takes a slot (`insert_file` / `insert_lib_file`); (b) constructor calls are sites of the type through `references::constructor_forms` + `matching_occurrences`, ranges narrowed to the name, `resolve_fqn_at` canonicalizes `->T`/`map->T`/`T.` to the type, the cross-namespace `:import` + `T.` case is deliberately out; (c) `declare` walks as a def form: a declare-only name is its `Declare` symbol alone, a name the file defines has the declare line as an occurrence, and `:lint-as` to `clojure.core/declare` is honored. Bump note: `CACHE_FORMAT_VERSION` 21.
+- [x] **Step 4: MEMORY.md** — a new dated compare table row set (or the delta rows) from `.tmp/compare-after.log`, following the existing table's shape.
+- [x] **Step 5: README** — read it; the constructor-rename and defmulti behavior are feature detail (FEATURES.md), so expect no change, but confirm nothing in it now misstates rename.
+- [x] **Step 6: Backlog and roadmap** — close the three backlog entries (status `done`, date, one line on the cause, per the /backlog skill's close convention); add the `defprotocol+` corpus sites (node.clj:38/122, indent.clj:27/29, parser/core.clj:174/193, hooks_api.clj:91, meta.clj:9, reader_macro.clj:11/42/69) to `2026-09-17-import-vars-re-exports-are-not-definitions.md` as evidence. In `docs/ROADMAP.md`, tick the three backlog lines with this plan linked.
+  > Deviation: following the repo's precedent (#46, #47), the three entries moved to `docs/archive/` with a `fixed` status line, their Backlog lines were removed, and the milestone item added at start was ticked `done`.
+- [x] **Step 7: Commit**
   `git commit -m "docs: record defmulti, constructor and lint-as declare sites"`

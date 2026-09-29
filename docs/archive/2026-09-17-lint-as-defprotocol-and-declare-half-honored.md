@@ -2,7 +2,7 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `var-def/defprotocol+`, `var-def/programs`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
+- **Status:** fixed 2026-09-29 (plan `docs/plans/2026-09-29-2038-defmulti-constructors-lint-as-declare.md`); archived. `declare` was not a `from_def_symbol` target, so `:lint-as` dropped `programs`; it is now, and `var-def/programs` is 6 of 6. The `defprotocol` half was already honored (pinned by `test_lint_as_defprotocol_indexes_methods_and_callers`): every caller `var-def/defprotocol+` misses goes through the `import-vars` facade, recorded on that entry. Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom

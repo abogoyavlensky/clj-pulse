@@ -24,6 +24,17 @@ caller that went through the facade.
   (a `defmacro`): references miss the 5 callers that spell it
   `node/make-printable!` (`node/indent.clj:46`, `node/meta.clj:35`, …).
 
+- `var-def/defprotocol+` (0 of 26, 2026-09-29): the protocol
+  `parser/clj_kondo/impl/rewrite_clj/node/protocols.clj` defines through
+  `defprotocol+` is indexed with its methods, and every caller the probes
+  miss spells a method or `Node` through the facade namespace
+  `clj-kondo.impl.rewrite-clj.node`: `node/tag` at `node/indent.clj:29`,
+  `parser/core.clj:174`, `hooks_api.clj:91`; bare `tag` at `node.clj:122`
+  beside `(import-vars …)`; `node/Node` in `defrecord` specs at `node.clj:38`,
+  `node/indent.clj:27`, `parser/core.clj:193`, `node/meta.clj:9`,
+  `node/reader_macro.clj:11`, `:42`, `:69`. The 16 extra sites per method
+  are implementations, the protocol entry of `KNOWN`.
+
 Also the metabase shape (`potemkin/import-vars` in `metabase.events.core`,
 which `sites::namespace_file` already works around).
 

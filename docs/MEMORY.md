@@ -115,6 +115,17 @@ Edit target `src/clj_kondo/impl/analyzer.clj` (233 KiB — already under
 The three warm runs of clj-pulse: first navigation 523 / 533 / 530 ms, all
 dependencies 524 / 533 / 532 ms. This corpus is stable run to run.
 
+A single-run check on 2026-09-29, after the `defmulti`, constructor and
+`:lint-as` declare change (`CLJ_PULSE_BENCH_RUNS` 1, same container): every
+timeline and latency row within the spread above on both corpora (metabase
+warm: first navigation 3.5 s, all dependencies 3.9 s, clj-kondo finished
+54 s, definition 27 ms, 375 / 868 ms to diagnostics; clj-kondo warm: 548 /
+558 ms, definition 17 ms, 765 ms). RSS settled reads about 6% higher on both
+— 390 / 387 MiB on metabase, 123 / 94 MiB here — against tables that
+predate the ClojureScript and quoted-keyword changes, so the step is not
+this change's alone; the change itself drops symbols (`defmethod`) and
+occurrences (declare-only names) rather than adding any.
+
 ### macOS (2026-09-22)
 
 The same `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the maintainer's 2021 MacBook
@@ -395,6 +406,41 @@ qualified `{:keys [c/x]}` entry, which never matched a clj-kondo probe;
 `var-usage/core/macro` reads 196/191/0/5 on both sides, against the
 2026-09-18 table's 195/193/0/2: two `deftype`/`defrecord` heads and a
 `proxy-super` joined the null set before this change, on master already.
+
+### After `defmulti`, constructor and `:lint-as` declare sites (2026-09-29)
+
+Same corpus, kondo and container; the "before" columns are a run of the
+same day on master (`de487a6`). The rows that moved:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `var-def/declare` | 28 | 28 | 0 | 0 | 0 | 27 | 1 | 0 |
+| `var-def/defmulti` | 6 | 6 | 0 | 0 | 0 | 3 | 3 | 0 |
+| `var-def/defrecord` | 52 | 8 | 2 | 40 | 2 | 44 | 6 | 2 |
+| `var-def/deftype` | 20 | 18 | 2 | 0 | 0 | 0 | 20 | 0 |
+| `var-def/programs` | 6 | 6 | 0 | 0 | 0 | 3 | 3 | 0 |
+| `var-usage/core` | 200 | 200 | 0 | 0 | 0 | 199 | 0 | 1 |
+| `var-usage/core/macro` | 196 | 191 | 0 | 0 | 5 | 193 | 0 | 2 |
+| `var-usage/project` | 200 | 193 | 4 | 0 | 3 | 192 | 5 | 3 |
+| **total** | 5249 | 4913 | 219 | 60 | 57 | 4924 | 249 | 55 |
+
+A `defmethod` no longer takes its
+`defmulti`'s index slot, which empties `defmulti` and the one `declare`
+divergence (`inspect*`). `me.raynes.conch/programs`, mapped to
+`clojure.core/declare`, now declares its names, so their rename probes
+answer. Constructor calls are sites of their type: `deftype` goes from
+0 to 18 agree on the in-namespace `(T. …)` sites, and 40 `defrecord`
+answers turn `known`, whose only extra sites are `->T` / `map->T` calls
+that kondo keys under the constructor var (`KNOWN`, 2026-09-29) — agree
+drops because those answers were exact before and are supersets now. What
+is left: the two `defrecord` divergences plus two nulls are `TaggedLiteral`
+and `ReaderConditional` inside `(compile-when …)` (backlog: defs nested in a
+wrapping macro), and the two `deftype` ones are one missing site, the type
+hint `^SourceLoggingPushbackReader` at `reader_types.clj:287` — a type hint
+is not an occurrence. `var-def/defprotocol+` stays 0 of 26: every caller it
+misses goes through the `import-vars` facade (see that backlog entry).
+`var-usage/core/macro` matches the 2026-09-28 note (the probe set shifted
+by one); `var-usage/core` gained the probe that shift removed.
 
 ## Soak: memory over a long session (2026-09-11)
 

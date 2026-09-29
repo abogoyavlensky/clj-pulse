@@ -2,7 +2,7 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `var-def/defmulti`, `var-def/declare`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
+- **Status:** fixed 2026-09-29 (plan `docs/plans/2026-09-29-2038-defmulti-constructors-lint-as-declare.md`); archived. Cause: every `defmethod` emitted a symbol with the multimethod's own fqn, and the last one in the file took the `defmulti`'s index slot; a `Defmethod` symbol no longer takes a slot. `var-def/defmulti` 6 of 6, `var-def/declare` 28 of 28. Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom

@@ -367,7 +367,29 @@ there.
   `:refer-clojure :rename` pair, since renaming a core name unmaps it.
 - `declare` symbols are de-duplicated at the end of extraction: a `Declare`
   whose fqn another symbol in the same file defines is dropped, so definition
-  lands on the real def while references and rename still reach the declare.
+  lands on the real def while references and rename still reach the declare,
+  and of two `Declare`s for one fqn the first is kept. The walker treats
+  `declare` as a def form (`walk_def_form`): a name at the position of a kept
+  `Declare` (`OccurrenceCtx.declared`) is that symbol alone, never also an
+  occurrence, so references list it once and rename edits it once; any other
+  declared name is an occurrence of the definition that kept the slot.
+  `:lint-as … clojure.core/declare` (`DefKind::from_def_symbol`) is honored
+  like the literal head (conch's `programs`). `CACHE_FORMAT_VERSION` 21.
+- A `Defmethod` symbol is for the outline alone and never takes an index slot
+  (`insert_file` / `insert_lib_file` skip it via `takes_slot`): its fqn is the
+  multimethod's own, so it would displace the `defmulti` among equals and
+  plant a junk var for a multimethod of another namespace.
+- Constructor calls are sites of the type they build. `handlers::factory_target`
+  names the three shapes (`CtorShape`: `->T`, `map->T` records only, `T.`)
+  and `builds` holds the kind rule; `references::constructor_forms` lists a
+  type's constructor fqns unless the index holds one as a var of its own
+  (`(defn ->T …)` wins), and `matching_occurrences` — read by references,
+  rename (through `occurrences_for`), highlight and `prepareRename` — adds
+  each call narrowed to the `T` inside the token, provided the token spells
+  the constructor (a `:refer … :rename {->T mk}` call does not, and is
+  skipped). `resolve_fqn_at` canonicalizes `->T` / `map->T` / `T.` to the
+  type (`canonical_type_fqn`). A class `:import`ed from another namespace and
+  called as `(T. …)` is deliberately not linked, as in clj-kondo.
 - A panicking request handler must not take the process down. tower-lsp polls
   handler futures inline, so `PanicGuard` (`src/panic_guard.rs`) wraps the
   service in `catch_unwind` and answers that one request with an internal
