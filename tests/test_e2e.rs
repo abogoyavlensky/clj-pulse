@@ -8884,3 +8884,69 @@ fn test_e2e_letgo_unused_require_diagnostic() {
         unused
     );
 }
+
+/// `(line, character)` of every location in a references answer, sorted.
+fn ref_starts(refs: &Value) -> Vec<(u64, u64)> {
+    let mut starts: Vec<(u64, u64)> = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("no references: {}", refs))
+        .iter()
+        .map(|l| {
+            (
+                l["range"]["start"]["line"].as_u64().unwrap(),
+                l["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    starts.sort();
+    starts
+}
+
+/// `(line, character)` of every edit in a single-file rename answer, sorted.
+fn edit_starts(result: &Value) -> Vec<(u64, u64)> {
+    let changes = result["changes"].as_object().unwrap();
+    let mut starts: Vec<(u64, u64)> = changes
+        .values()
+        .flat_map(|edits| edits.as_array().unwrap().clone())
+        .map(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().unwrap(),
+                e["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    starts.sort();
+    starts
+}
+
+#[test]
+fn test_e2e_defmulti_is_its_own_reference() {
+    // Each same-file `defmethod` used to overwrite the `defmulti`'s index slot,
+    // so the `defmulti` line vanished from its own references.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/multi.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (multi_line, _) = start_of(&text, "(defmulti area");
+    let (circle_line, _) = start_of(&text, "(defmethod area :circle");
+    let (square_line, _) = start_of(&text, "(defmethod area :square");
+    let (call_line, call_ch) = start_of(&text, "(area {:shape");
+    let expected = vec![
+        (multi_line as u64, 10),
+        (circle_line as u64, 11),
+        (square_line as u64, 11),
+        (call_line as u64, call_ch as u64 + 1),
+    ];
+
+    let refs = client.references(&file, call_line, call_ch + 2, true);
+    assert_eq!(ref_starts(&refs), expected, "references: {}", refs);
+
+    let result = client.rename(&file, multi_line, 11, "surface");
+    assert_eq!(edit_starts(&result), expected, "rename: {}", result);
+}

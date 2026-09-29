@@ -696,7 +696,7 @@ impl Index {
         self.replace_occurrences(file.clone(), occurrences);
 
         let mut fqns: Vec<String> = Vec::with_capacity(symbols.len());
-        for sym in symbols {
+        for sym in symbols.into_iter().filter(takes_slot) {
             if !fqns.contains(&sym.fqn) {
                 fqns.push(sym.fqn.clone());
             }
@@ -967,7 +967,7 @@ impl Index {
 
         let rank = slot_rank(false, &meta.file);
         let mut fqns = Vec::with_capacity(symbols.len());
-        for sym in symbols {
+        for sym in symbols.into_iter().filter(takes_slot) {
             fqns.push(sym.fqn.clone());
             let fqn = sym.fqn.clone();
             rank_insert(
@@ -992,6 +992,14 @@ impl Index {
             |old| self.meta_rank(old),
         );
     }
+}
+
+/// Whether `sym` gets an index slot. A `defmethod` head names the multimethod
+/// it extends, so its fqn is the `defmulti`'s own: inserted, it would take the
+/// slot among equals and hide the `defmulti` from definition and references.
+/// Extraction keeps it for the outline alone.
+fn takes_slot(sym: &Symbol) -> bool {
+    sym.kind != DefKind::Defmethod
 }
 
 #[cfg(test)]
@@ -1554,6 +1562,47 @@ mod tests {
         index.remove_file(Path::new(A));
         assert_eq!(file_of(index.lookup("user/b-only")), B);
         assert_eq!(ns_file_of(index.ns_meta("user")), B);
+    }
+
+    #[test]
+    fn defmethod_never_displaces_its_defmulti() {
+        const FILE: &str = "/p/src/app.clj";
+        let index = Index::new();
+        let mut defmulti = project_symbol("app/dispatch", FILE);
+        defmulti.kind = DefKind::Defmulti;
+        defmulti.name_range.start.line = 2;
+        let mut defmethod = project_symbol("app/dispatch", FILE);
+        defmethod.kind = DefKind::Defmethod;
+        defmethod.name_range.start.line = 4;
+        index.insert_file(
+            project_meta("app", FILE),
+            vec![defmulti, defmethod],
+            some_occurrence(),
+        );
+
+        let sym = index.lookup("app/dispatch").expect("the defmulti");
+        assert_eq!(sym.kind, DefKind::Defmulti);
+        assert_eq!(index.lookup_all("app/dispatch").len(), 1);
+        assert_eq!(sorted_ns_symbols(&index, "app"), vec!["app/dispatch"]);
+
+        // A defmethod for a multimethod of another namespace plants nothing.
+        const OTHER: &str = "/p/src/impl.clj";
+        let mut foreign = project_symbol("other/foo", OTHER);
+        foreign.kind = DefKind::Defmethod;
+        index.insert_file(
+            project_meta("impl", OTHER),
+            vec![foreign],
+            some_occurrence(),
+        );
+        assert!(index.lookup("other/foo").is_none());
+        assert!(index.files.get(Path::new(OTHER)).unwrap().fqns.is_empty());
+
+        // Nor does a library one.
+        const LIB: &str = "/m2/lib.jar!/lib.clj";
+        let mut lib_method = lib_symbol("lib/bar", LIB);
+        lib_method.kind = DefKind::Defmethod;
+        index.insert_lib_file(ns_meta_in("lib", LIB), vec![lib_method]);
+        assert!(index.lookup("lib/bar").is_none());
     }
 
     #[test]
