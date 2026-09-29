@@ -398,13 +398,18 @@ pub fn extract_analysis_tree(
         .map(|s| s.fqn.clone())
         .collect();
     symbols.retain(|s| s.kind != DefKind::Declare || !defined.contains(&s.fqn));
+    // A name declared twice keeps its first declaration as the symbol; a later
+    // one is a usage of it, or it would have no site at all once the index
+    // keeps one entry per fqn.
+    let mut seen: HashSet<String> = HashSet::new();
+    symbols.retain(|s| s.kind != DefKind::Declare || seen.insert(s.fqn.clone()));
 
     // Second pass: occurrences, resolved through the completed ns metadata
     let def_names: HashSet<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
-    let declared: HashSet<&str> = symbols
+    let declared: HashSet<(u32, u32)> = symbols
         .iter()
         .filter(|s| s.kind == DefKind::Declare)
-        .map(|s| s.name.as_str())
+        .map(|s| (s.name_range.start.line, s.name_range.start.character))
         .collect();
     let ctx = OccurrenceCtx {
         source,
@@ -1997,10 +2002,11 @@ struct OccurrenceCtx<'a> {
     /// `cljs.core/x`.
     dialect: Dialect,
     def_names: HashSet<&'a str>,
-    /// Names whose `Declare` symbol survived extraction — declared and never
-    /// defined in this file. Such a name in a declare form is that symbol
-    /// alone, never also an occurrence.
-    declared: HashSet<&'a str>,
+    /// Where (line, character) each `Declare` symbol that survived extraction
+    /// names its var —
+    /// declared and never defined in this file. The name at such a position
+    /// is that symbol alone, never also an occurrence.
+    declared: HashSet<(u32, u32)>,
     /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
     /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
     lint_as: &'a HashMap<String, DefKind>,
@@ -2228,12 +2234,13 @@ fn walk_def_form(
     }
 
     // `(declare a b)`: a name the file never defines is its `Declare` symbol
-    // alone. One the file goes on to define lost that symbol at extraction,
-    // so its declare line is a usage of the real definition — references and
-    // rename still reach it.
+    // alone. One the file goes on to define, or declared again, lost that
+    // symbol at extraction, so its declare is a usage of the definition that
+    // did keep it — references and rename still reach it.
     if kind == DefKind::Declare {
         for name in children.iter().skip(1) {
-            if name.kind() == "sym_lit" && !ctx.declared.contains(sym_text(*name, ctx.source)) {
+            let start = node_to_lsp_range(sym_name_node(*name), ctx.source).start;
+            if name.kind() == "sym_lit" && !ctx.declared.contains(&(start.line, start.character)) {
                 record_occurrence(*name, ctx, scope, out);
             }
         }

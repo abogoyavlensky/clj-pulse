@@ -2618,6 +2618,23 @@ fn test_declare_only_name_is_a_symbol_not_an_occurrence() {
         "the declare of a defined name is a usage: {:?}",
         occs
     );
+
+    // Declared twice: the first is the symbol, the second a usage of it, so
+    // both lines stay sites once the index keeps one entry per fqn.
+    let src = "(ns app)\n(declare helper)\n(declare helper)\n(helper)\n";
+    let (_, syms, occs) = extract_full(src, Path::new("app.clj")).unwrap();
+    let declares: Vec<u32> = syms
+        .iter()
+        .filter(|s| s.fqn == "app/helper")
+        .map(|s| s.name_range.start.line)
+        .collect();
+    assert_eq!(declares, vec![1], "{:?}", syms);
+    let mut lines: Vec<u32> = occurrences_of(&occs, "app/helper")
+        .iter()
+        .map(|o| o.name_range.start.line)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec![2, 3], "{:?}", occs);
 }
 
 #[test]
