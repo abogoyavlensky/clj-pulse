@@ -328,6 +328,17 @@ the release.
       (Backlog, 2026-09-17). `keyword/qualified` on clj-kondo went from 142
       agree, 93 diverge, 41 null to 234, 40, 2.
       Plan: [2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md](plans/2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md) — done
+- [ ] **`defmulti`, constructor and `:lint-as` declare sites.** The last
+      `defmethod` in a file overwrites its `defmulti`'s index slot, so the
+      `defmulti` line is missing from its own references; `(Foo. 1)`, `->Foo`
+      and `map->Foo` calls are not sites of their `deftype`/`defrecord`, so a
+      record rename leaves them behind; and a macro mapped to
+      `clojure.core/declare` through `:lint-as` declares nothing. Issues:
+      [`defmulti` missing from its own references](backlog/2026-09-17-defmulti-missing-from-its-own-references.md),
+      [constructor calls are not references](backlog/2026-09-17-constructor-calls-are-not-references.md),
+      [`:lint-as` to `defprotocol` and `declare`](backlog/2026-09-17-lint-as-defprotocol-and-declare-half-honored.md)
+      (Backlog, 2026-09-17).
+      Plan: [2026-09-29-2038-defmulti-constructors-lint-as-declare.md](plans/2026-09-29-2038-defmulti-constructors-lint-as-declare.md) — in progress
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
