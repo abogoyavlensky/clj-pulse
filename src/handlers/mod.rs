@@ -190,16 +190,41 @@ pub fn resolve_symbol(
     None
 }
 
-/// The type a constructor function builds, plus whether it is the map
-/// constructor: `map->DB` → `("DB", true)`, `->DB` → `("DB", false)`. `None`
-/// for non-factory names (and the bare `->`/`map->`).
-fn factory_target(name: &str) -> Option<(&str, bool)> {
-    if let Some(t) = name.strip_prefix("map->") {
-        (!t.is_empty()).then_some((t, true))
+/// The three shapes of a generated `deftype`/`defrecord` constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CtorShape {
+    /// `->T`, both kinds.
+    Positional,
+    /// `map->T`, records only.
+    Map,
+    /// `T.`, the class constructor, both kinds.
+    Dot,
+}
+
+/// The type a constructor name builds, and its shape: `map->DB` → `("DB",
+/// Map)`, `->DB` → `("DB", Positional)`, `DB.` → `("DB", Dot)`. `None` for
+/// other names and for a bare `->`, `map->` or `.`. Whether the stem names a
+/// type is the index's question: `java.io.File.` parses too.
+pub(crate) fn factory_target(name: &str) -> Option<(&str, CtorShape)> {
+    let (target, shape) = if let Some(t) = name.strip_prefix("map->") {
+        (t, CtorShape::Map)
     } else if let Some(t) = name.strip_prefix("->") {
-        (!t.is_empty()).then_some((t, false))
+        (t, CtorShape::Positional)
+    } else if let Some(t) = name.strip_suffix('.') {
+        (t, CtorShape::Dot)
     } else {
-        None
+        return None;
+    };
+    (!target.is_empty() && !target.ends_with('.')).then_some((target, shape))
+}
+
+/// Whether a type of `kind` generates a constructor of `shape`: `deftype`
+/// has `->T` and `T.` but no map constructor.
+pub(crate) fn builds(kind: &DefKind, shape: CtorShape) -> bool {
+    match kind {
+        DefKind::Defrecord => true,
+        DefKind::Deftype => shape != CtorShape::Map,
+        _ => false,
     }
 }
 
@@ -210,17 +235,11 @@ fn lookup_in_ns_for(index: &Index, ns: &str, name: &str, dialect: Dialect) -> Op
 
 /// Resolves an auto-generated record/type constructor to the `defrecord`/
 /// `deftype` it builds, so navigation/hover land on the type. Gated on kind so
-/// a plain fn named `->foo` is never hijacked; `map->X` is records-only, since
-/// `deftype` generates `->X` but no map constructor.
+/// a plain fn named `->foo` is never hijacked ([`builds`]).
 fn resolve_factory(index: &Index, ns: &str, name: &str, dialect: Dialect) -> Option<Symbol> {
-    let (target, is_map_ctor) = factory_target(name)?;
+    let (target, shape) = factory_target(name)?;
     let sym = lookup_in_ns_for(index, ns, target, dialect)?;
-    let ok = match sym.kind {
-        DefKind::Defrecord => true,
-        DefKind::Deftype => !is_map_ctor,
-        _ => false,
-    };
-    ok.then_some(sym)
+    builds(&sym.kind, shape).then_some(sym)
 }
 
 #[cfg(test)]
@@ -232,12 +251,18 @@ mod tests {
     use tower_lsp::lsp_types::Range;
 
     #[test]
-    fn factory_target_strips_prefixes_and_flags_map_ctor() {
-        assert_eq!(factory_target("map->DB"), Some(("DB", true)));
-        assert_eq!(factory_target("->DB"), Some(("DB", false)));
+    fn factory_target_names_each_constructor_shape() {
+        use CtorShape::*;
+        assert_eq!(factory_target("map->DB"), Some(("DB", Map)));
+        assert_eq!(factory_target("->DB"), Some(("DB", Positional)));
+        assert_eq!(factory_target("DB."), Some(("DB", Dot)));
+        // The index, not the parser, decides a Java class is not a record.
+        assert_eq!(factory_target("java.io.File."), Some(("java.io.File", Dot)));
         assert_eq!(factory_target("plain"), None);
         assert_eq!(factory_target("->"), None);
         assert_eq!(factory_target("map->"), None);
+        assert_eq!(factory_target("."), None);
+        assert_eq!(factory_target(".."), None);
     }
 
     fn sym(name: &str, ns: &str, kind: DefKind) -> Symbol {
@@ -308,7 +333,7 @@ mod tests {
     #[test]
     fn resolve_symbol_navigates_factory_to_record() {
         let index = index_with(vec![sym("DB", "my.ns", DefKind::Defrecord)]);
-        for factory in ["map->DB", "->DB"] {
+        for factory in ["map->DB", "->DB", "DB."] {
             match resolve_symbol(&index, factory, "my.ns", Dialect::Clj) {
                 Some(ResolvedSymbol::Project(s)) => assert_eq!(s.name, "DB"),
                 other => panic!("{} did not resolve to DB: {:?}", factory, other),
@@ -321,16 +346,19 @@ mod tests {
         // A plain fn named `foo` must not be reachable via `->foo`.
         let index = index_with(vec![sym("foo", "my.ns", DefKind::Defn)]);
         assert!(resolve_symbol(&index, "->foo", "my.ns", Dialect::Clj).is_none());
+        assert!(resolve_symbol(&index, "foo.", "my.ns", Dialect::Clj).is_none());
     }
 
     #[test]
     fn map_constructor_is_record_only() {
         // deftype generates `->T` but no `map->T`.
         let index = index_with(vec![sym("T", "my.ns", DefKind::Deftype)]);
-        assert!(matches!(
-            resolve_symbol(&index, "->T", "my.ns", Dialect::Clj),
-            Some(ResolvedSymbol::Project(_))
-        ));
+        for ctor in ["->T", "T."] {
+            assert!(matches!(
+                resolve_symbol(&index, ctor, "my.ns", Dialect::Clj),
+                Some(ResolvedSymbol::Project(_))
+            ));
+        }
         assert!(resolve_symbol(&index, "map->T", "my.ns", Dialect::Clj).is_none());
     }
 

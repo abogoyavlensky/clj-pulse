@@ -566,6 +566,59 @@ fn test_e2e_lint_as_navigates_to_macro_defined_name() {
 }
 
 #[test]
+fn test_e2e_lint_as_declare_names_are_renamable() {
+    // `:lint-as {app.macros/programs clojure.core/declare}` makes
+    // `(programs rm mv)` declare `rm` and `mv`, as conch's macro does.
+    let project = setup_named("lint_as_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/app/core.clj");
+    client.did_open(&core);
+    let text = std::fs::read_to_string(&core).unwrap();
+    let (decl_line, decl_ch) = start_of(&text, "rm mv)");
+    let (call_line, call_ch) = start_of(&text, "rm \"-rf\"");
+
+    let result = client.goto_definition(&core, call_line, call_ch + 1);
+    assert_eq!(
+        result["range"]["start"]["line"],
+        json!(decl_line),
+        "{result}"
+    );
+
+    let refs = client.references(&core, call_line, call_ch + 1, true);
+    assert_eq!(
+        ref_starts(&refs),
+        vec![
+            (decl_line as u64, decl_ch as u64),
+            (call_line as u64, call_ch as u64)
+        ],
+        "the declaration once, then the call: {refs}"
+    );
+
+    let result = client.rename(&core, call_line, call_ch + 1, "remove");
+    assert_eq!(
+        edit_starts(&result),
+        vec![
+            (decl_line as u64, decl_ch as u64),
+            (call_line as u64, call_ch as u64)
+        ],
+        "{result}"
+    );
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    let renamed = apply_edits(&text, edits.as_array().unwrap());
+    assert!(renamed.contains("(programs remove mv)"), "{renamed}");
+    assert!(renamed.contains("(remove \"-rf\")"), "{renamed}");
+}
+
+#[test]
 fn test_e2e_lint_as_config_live_reload() {
     // Editing `.clj-kondo/config.edn` reloads `:lint-as` without a restart:
     // goto-def on a macro-defined name works, then stops once the mapping is
@@ -8883,4 +8936,298 @@ fn test_e2e_letgo_unused_require_diagnostic() {
         "message names the namespace: {}",
         unused
     );
+}
+
+/// `(line, character)` of every location in a references answer, sorted.
+fn ref_starts(refs: &Value) -> Vec<(u64, u64)> {
+    let mut starts: Vec<(u64, u64)> = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("no references: {}", refs))
+        .iter()
+        .map(|l| {
+            (
+                l["range"]["start"]["line"].as_u64().unwrap(),
+                l["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    starts.sort();
+    starts
+}
+
+/// `(line, character)` of every edit in a single-file rename answer, sorted.
+fn edit_starts(result: &Value) -> Vec<(u64, u64)> {
+    let changes = result["changes"].as_object().unwrap();
+    let mut starts: Vec<(u64, u64)> = changes
+        .values()
+        .flat_map(|edits| edits.as_array().unwrap().clone())
+        .map(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().unwrap(),
+                e["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    starts.sort();
+    starts
+}
+
+#[test]
+fn test_e2e_defmulti_is_its_own_reference() {
+    // Each same-file `defmethod` used to overwrite the `defmulti`'s index slot,
+    // so the `defmulti` line vanished from its own references.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let file = root.join("src/multi.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+
+    let (multi_line, _) = start_of(&text, "(defmulti area");
+    let (circle_line, _) = start_of(&text, "(defmethod area :circle");
+    let (square_line, _) = start_of(&text, "(defmethod area :square");
+    let (call_line, call_ch) = start_of(&text, "(area {:shape");
+    let expected = vec![
+        (multi_line as u64, 10),
+        (circle_line as u64, 11),
+        (square_line as u64, 11),
+        (call_line as u64, call_ch as u64 + 1),
+    ];
+
+    let refs = client.references(&file, call_line, call_ch + 2, true);
+    assert_eq!(ref_starts(&refs), expected, "references: {}", refs);
+
+    let result = client.rename(&file, multi_line, 11, "surface");
+    assert_eq!(edit_starts(&result), expected, "rename: {}", result);
+}
+
+/// `(file name, line, character)` of every location in a `Location[]` answer,
+/// sorted.
+fn loc_starts(locations: &Value) -> Vec<(String, u64, u64)> {
+    let mut out: Vec<(String, u64, u64)> = locations
+        .as_array()
+        .unwrap_or_else(|| panic!("expected locations, got {locations}"))
+        .iter()
+        .map(|loc| {
+            (
+                loc["uri"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_string(),
+                loc["range"]["start"]["line"].as_u64().unwrap(),
+                loc["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `(line, character)` of the start of `needle` in `path`.
+fn start_in(path: &Path, needle: &str) -> (u32, u32) {
+    start_of(&std::fs::read_to_string(path).unwrap(), needle)
+}
+
+/// `(file name, line, character)` of `needle` in `path`, shifted by `offset`.
+fn site(path: &Path, needle: &str, offset: u32) -> (String, u64, u64) {
+    let (line, ch) = start_in(path, needle);
+    (
+        path.file_name().unwrap().to_string_lossy().into_owned(),
+        line as u64,
+        (ch + offset) as u64,
+    )
+}
+
+#[test]
+fn test_e2e_constructor_calls_are_references_of_the_record() {
+    // `(Point. …)`, `->Point` and `map->Point` build the record, so they are
+    // its sites, each narrowed to the `Point` inside the token.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let records = root.join("src/records.clj");
+    let consumer = root.join("src/records_consumer.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&records);
+
+    let (line, ch) = start_in(&records, "Point [x y]");
+    let refs = client.references(&records, line, ch + 1, true);
+    let mut expected = vec![
+        site(&records, "Point [x y]", 0),
+        site(&records, "Point. 1 2", 0),
+        site(&records, "->Point 3 4", 2),
+        site(&records, "map->Point {:x 5}", 5),
+        site(&consumer, "->Point]]", 2),
+        site(&consumer, "map->Point {}", 5),
+        site(&consumer, "->Point 0 0", 2),
+    ];
+    expected.sort();
+    assert_eq!(loc_starts(&refs), expected, "Point: {}", refs);
+
+    let (line, ch) = start_in(&records, "Cell [v]");
+    let refs = client.references(&records, line, ch + 1, true);
+    let mut expected = vec![
+        site(&records, "Cell [v]", 0),
+        site(&records, "Cell. 1", 0),
+        site(&records, "->Cell 2", 2),
+        site(&consumer, "->Cell 1", 2),
+    ];
+    expected.sort();
+    assert_eq!(loc_starts(&refs), expected, "Cell: {}", refs);
+
+    // Definition from `(Cell. 1)` and from an alias-qualified `rec/->Cell`
+    // lands on the deftype.
+    let (cell_line, _) = start_in(&records, "(deftype Cell");
+    for (file, needle, offset) in [(&records, "Cell. 1", 1), (&consumer, "->Cell 1", 3)] {
+        client.did_open(file);
+        let (line, ch) = start_in(file, needle);
+        let result = client.goto_definition(file, line, ch + offset);
+        assert!(
+            result["uri"]
+                .as_str()
+                .unwrap()
+                .ends_with("/src/records.clj"),
+            "{needle}: {result}"
+        );
+        assert_eq!(
+            result["range"]["start"]["line"],
+            json!(cell_line),
+            "{needle}"
+        );
+    }
+}
+
+#[test]
+fn test_e2e_rename_record_rewrites_its_constructors() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let records = root.join("src/records.clj");
+    let consumer = root.join("src/records_consumer.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&records);
+
+    // prepareRename pre-selects the `Point` inside `->Point`, whether the
+    // cursor is on the name or on the `->` prefix.
+    let (line, ch) = start_in(&records, "->Point 3 4");
+    for cursor in [ch, ch + 3] {
+        let range = client.prepare_rename(&records, line, cursor);
+        assert_eq!(range["start"]["character"], json!(ch + 2), "{range}");
+        assert_eq!(range["end"]["character"], json!(ch + 7), "{range}");
+    }
+
+    let result = client.rename(&records, line, ch + 3, "Pt");
+    let changes = result["changes"].as_object().unwrap();
+    assert_eq!(changes.len(), 2, "{result}");
+    for (uri, edits) in changes {
+        for edit in edits.as_array().unwrap() {
+            let range = &edit["range"];
+            let len = range["end"]["character"].as_u64().unwrap()
+                - range["start"]["character"].as_u64().unwrap();
+            assert_eq!(len, 5, "{uri}: {edit}");
+        }
+    }
+    let edits_for = |path: &Path| {
+        let uri = format!("file://{}", path.display());
+        changes[&uri].as_array().unwrap().clone()
+    };
+    let renamed = apply_edits(
+        &std::fs::read_to_string(&records).unwrap(),
+        &edits_for(&records),
+    );
+    for expected in [
+        "(defrecord Pt [x y])",
+        "(Pt. 1 2)",
+        "(->Pt 3 4)",
+        "(map->Pt {:x 5})",
+    ] {
+        assert!(renamed.contains(expected), "{expected} missing:\n{renamed}");
+    }
+    assert!(renamed.contains("(Cell. 1)") && renamed.contains("(->Cell 2)"));
+    let renamed = apply_edits(
+        &std::fs::read_to_string(&consumer).unwrap(),
+        &edits_for(&consumer),
+    );
+    for expected in [":refer [->Pt]", "(rec/map->Pt {})", "(->Pt 0 0)"] {
+        assert!(renamed.contains(expected), "{expected} missing:\n{renamed}");
+    }
+}
+
+#[test]
+fn test_e2e_explicit_constructor_var_wins() {
+    // A `defn ->Box` beside `(defrecord Box …)` is a var of its own: its calls
+    // stay its own, and a record rename never rewrites them.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let file = root.join("src/explicit_ctor.clj");
+    std::fs::write(
+        &file,
+        "(ns simple.explicit-ctor)\n\n(defrecord Box [v])\n\n(defn ->Box [v] (Box. v))\n\n(defn make [] (->Box 1))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&file);
+
+    let (line, ch) = start_in(&file, "Box [v]");
+    let refs = client.references(&file, line, ch + 1, true);
+    let expected = vec![site(&file, "Box [v]", 0), site(&file, "Box. v", 0)];
+    assert_eq!(loc_starts(&refs), expected, "{refs}");
+
+    let (line, ch) = start_in(&file, "->Box 1");
+    let result = client.goto_definition(&file, line, ch + 3);
+    let (defn_line, _) = start_in(&file, "(defn ->Box");
+    assert_eq!(
+        result["range"]["start"]["line"],
+        json!(defn_line),
+        "{result}"
+    );
+}
+
+#[test]
+fn test_e2e_highlight_covers_constructors() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let records = root.join("src/records.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&records);
+
+    let (line, ch) = start_in(&records, "Point [x y]");
+    let result = client.document_highlight(&records, line, ch + 1);
+    let found: Vec<(u64, u64, u64, u64)> = result
+        .as_array()
+        .unwrap_or_else(|| panic!("no highlights: {result}"))
+        .iter()
+        .map(|h| {
+            (
+                h["range"]["start"]["line"].as_u64().unwrap(),
+                h["range"]["start"]["character"].as_u64().unwrap(),
+                h["range"]["end"]["character"].as_u64().unwrap(),
+                h["kind"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let at = |needle: &str, offset: u32, kind: u64| {
+        let (_, l, c) = site(&records, needle, offset);
+        (l, c, c + 5, kind)
+    };
+    // WRITE = 3, READ = 2.
+    let expected = vec![
+        at("Point [x y]", 0, 3),
+        at("Point. 1 2", 0, 2),
+        at("->Point 3 4", 2, 2),
+        at("map->Point {:x 5}", 5, 2),
+    ];
+    assert_eq!(found, expected, "{result}");
 }

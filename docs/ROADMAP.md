@@ -328,6 +328,19 @@ the release.
       (Backlog, 2026-09-17). `keyword/qualified` on clj-kondo went from 142
       agree, 93 diverge, 41 null to 234, 40, 2.
       Plan: [2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md](plans/2026-09-28-2134-quoted-keywords-and-qualified-keys-locals.md) — done
+- [x] **`defmulti`, constructor and `:lint-as` declare sites.** The last
+      `defmethod` in a file overwrites its `defmulti`'s index slot, so the
+      `defmulti` line is missing from its own references; `(Foo. 1)`, `->Foo`
+      and `map->Foo` calls are not sites of their `deftype`/`defrecord`, so a
+      record rename leaves them behind; and a macro mapped to
+      `clojure.core/declare` through `:lint-as` declares nothing. Issues:
+      [`defmulti` missing from its own references](archive/2026-09-17-defmulti-missing-from-its-own-references.md),
+      [constructor calls are not references](archive/2026-09-17-constructor-calls-are-not-references.md),
+      [`:lint-as` to `defprotocol` and `declare`](archive/2026-09-17-lint-as-defprotocol-and-declare-half-honored.md)
+      (Backlog, 2026-09-17). On clj-kondo `var-def/defmulti`, `declare` and
+      `programs` agree throughout, and `var-def/deftype` went from 0 to 18 of
+      20; record `->T` calls are `known` supersets.
+      Plan: [2026-09-29-2038-defmulti-constructors-lint-as-declare.md](plans/2026-09-29-2038-defmulti-constructors-lint-as-declare.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -404,9 +417,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
   issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
   got, where to look, how to verify):
   - [Locals inside `(binding […] (let […] …))` resolve wrong](backlog/2026-09-17-locals-under-binding-and-let.md).
-  - [A `defmulti` is missing from its own references](backlog/2026-09-17-defmulti-missing-from-its-own-references.md).
-  - [Constructor calls are not references of a `deftype`/`defrecord`](backlog/2026-09-17-constructor-calls-are-not-references.md).
-  - [`:lint-as` to `defprotocol` and `declare` is only half honored](backlog/2026-09-17-lint-as-defprotocol-and-declare-half-honored.md).
   - [`import-vars` re-exports are not definitions](backlog/2026-09-17-import-vars-re-exports-are-not-definitions.md).
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
   - [`one-of` in a `for` `:let` resolves to its own line](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md).
@@ -419,6 +429,13 @@ One line each, newest last. Promote or reject; never let this grow silently.
   clj-kondo, 2 of them null (`docs/MEMORY.md`, 2026-09-28). Indexing them
   would have to decide what an arbitrary `.edn` file means first — a
   `findings.edn` fixture is test data, not configuration.
+- 2026-09-29 **Renaming a var referred under another name.** With
+  `[a :refer [foo] :rename {foo f}]`, a `(f)` call is recorded under `a/foo`
+  over the token `f`, and the `:rename` key `foo` is no occurrence: renaming
+  `foo` rewrites the local name `f` and leaves the key reading the old var.
+  A constructor referred that way is skipped rather than narrowed (codex
+  review of the constructor-sites change), so only plain vars are affected.
+  The call should stay `f` and the key should be a site.
 - 2026-09-17 **Clojure Pulse tooltip shows the `lintStatus` detail.** The
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders

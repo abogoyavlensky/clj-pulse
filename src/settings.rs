@@ -96,13 +96,16 @@ mod tests {
                 pair("dc/dc", "clojure.core/def"),
                 pair("p/for-map", "clojure.core/for"),
                 pair("p/fn->", "clojure.core/->"),
+                pair("conch/programs", "clojure.core/declare"),
             ],
             vec![],
         );
         assert_eq!(cfg.lint_as.get("dc/dc"), Some(&DefKind::Def));
         assert!(!cfg.lint_as.contains_key("p/for-map"));
         assert!(!cfg.lint_as.contains_key("p/fn->"));
-        assert_eq!(cfg.lint_as.len(), 1);
+        // `declare` defines nothing yet, but declares a var per name.
+        assert_eq!(cfg.lint_as.get("conch/programs"), Some(&DefKind::Declare));
+        assert_eq!(cfg.lint_as.len(), 2);
     }
 
     #[test]

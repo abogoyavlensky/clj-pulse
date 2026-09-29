@@ -2,7 +2,7 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `var-def/deftype`, `var-def/defrecord`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
+- **Status:** fixed 2026-09-29 (plan `docs/plans/2026-09-29-2038-defmulti-constructors-lint-as-declare.md`); archived. `(T. …)`, `->T` and `map->T` calls are sites of the type, narrowed to its name, in references, rename and highlight; the `->T` extras kondo keys under the constructor are `KNOWN`. `var-def/deftype` 18 of 20: the two left are one type hint, `^SourceLoggingPushbackReader` at `reader_types.clj:287`, which is not an occurrence. `(T. …)` of a class `:import`ed from another namespace stays unlinked, as in kondo. Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom

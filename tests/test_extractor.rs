@@ -2596,3 +2596,100 @@ h/f
         assert_eq!(at(9), None, "the key's name");
     }
 }
+
+#[test]
+fn test_declare_only_name_is_a_symbol_not_an_occurrence() {
+    // A declare-only name is its `Declare` symbol alone: an occurrence on the
+    // same token would list the line twice in references and edit it twice in
+    // a rename. A name the file defines keeps the declare line as a usage.
+    let src = "(ns app)\n(declare helper later)\n(defn later [] (helper))\n";
+    let (_, syms, occs) = extract_full(src, Path::new("app.clj")).unwrap();
+
+    assert!(syms
+        .iter()
+        .any(|s| s.fqn == "app/helper" && s.kind == DefKind::Declare));
+    let helper = occurrences_of(&occs, "app/helper");
+    assert_eq!(helper.len(), 1, "the call only: {:?}", occs);
+    assert_eq!(helper[0].name_range.start.line, 2);
+
+    let later = occurrences_of(&occs, "app/later");
+    assert!(
+        later.iter().any(|o| o.name_range.start.line == 1),
+        "the declare of a defined name is a usage: {:?}",
+        occs
+    );
+
+    // Declared twice: the first is the symbol, the second a usage of it, so
+    // both lines stay sites once the index keeps one entry per fqn.
+    let src = "(ns app)\n(declare helper)\n(declare helper)\n(helper)\n";
+    let (_, syms, occs) = extract_full(src, Path::new("app.clj")).unwrap();
+    let declares: Vec<u32> = syms
+        .iter()
+        .filter(|s| s.fqn == "app/helper")
+        .map(|s| s.name_range.start.line)
+        .collect();
+    assert_eq!(declares, vec![1], "{:?}", syms);
+    let mut lines: Vec<u32> = occurrences_of(&occs, "app/helper")
+        .iter()
+        .map(|o| o.name_range.start.line)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec![2, 3], "{:?}", occs);
+}
+
+#[test]
+fn test_lint_as_declare_declares_each_name() {
+    let cfg = clj_pulse::index::ExtractConfig {
+        lint_as: std::collections::HashMap::from([(
+            "conch/programs".to_string(),
+            DefKind::Declare,
+        )]),
+    };
+    let src = "(ns t (:require [conch :refer [programs]]))\n(programs rm mv)\n(defn go [] (rm \"-rf\"))\n";
+    let (_, syms, occs) =
+        clj_pulse::index::extractor::extract_full_with(src, Path::new("t.clj"), &cfg).unwrap();
+
+    for name in ["t/rm", "t/mv"] {
+        assert!(
+            syms.iter()
+                .any(|s| s.fqn == name && s.kind == DefKind::Declare),
+            "{name} not declared: {:?}",
+            syms
+        );
+    }
+    let head: Vec<u32> = occurrences_of(&occs, "conch/programs")
+        .iter()
+        .map(|o| o.name_range.start.line)
+        .collect();
+    assert!(head.contains(&1), "the head is a usage: {:?}", occs);
+    let rm = occurrences_of(&occs, "t/rm");
+    assert_eq!(rm.len(), 1, "the call only: {:?}", occs);
+    assert_eq!(rm[0].name_range.start.line, 2);
+    assert!(occurrences_of(&occs, "t/mv").is_empty(), "{:?}", occs);
+}
+
+#[test]
+fn test_lint_as_defprotocol_indexes_methods_and_callers() {
+    let cfg = clj_pulse::index::ExtractConfig {
+        lint_as: std::collections::HashMap::from([(
+            "pot/defprotocol+".to_string(),
+            DefKind::Defprotocol,
+        )]),
+    };
+    let src = "(ns t (:require [pot]))\n\
+               (pot/defprotocol+ Node (tag [_]) (sexpr [_]))\n\
+               (defrecord R [] Node (tag [_] :r))\n\
+               (defn f [n] (tag n))\n";
+    let (_, syms, occs) =
+        clj_pulse::index::extractor::extract_full_with(src, Path::new("t.clj"), &cfg).unwrap();
+
+    for name in ["t/Node", "t/tag", "t/sexpr"] {
+        assert!(syms.iter().any(|s| s.fqn == name), "{name}: {:?}", syms);
+    }
+    let mut tag_lines: Vec<u32> = occurrences_of(&occs, "t/tag")
+        .iter()
+        .map(|o| o.name_range.start.line)
+        .collect();
+    tag_lines.sort();
+    assert_eq!(tag_lines, vec![2, 3], "impl head and call only: {:?}", occs);
+}

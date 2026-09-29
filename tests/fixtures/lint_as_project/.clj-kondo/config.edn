@@ -1,1 +1,2 @@
-{:lint-as {app.macros/defthing clojure.core/def}}
+{:lint-as {app.macros/defthing clojure.core/def
+           app.macros/programs clojure.core/declare}}

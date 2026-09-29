@@ -239,6 +239,7 @@ fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<
         ns_meta,
         dialect: Dialect::of_path(&ns_meta.file),
         def_names: HashSet::new(),
+        declared: HashSet::new(),
         lint_as: NO_LINT_AS.get_or_init(HashMap::new),
     };
     let map_ns = ns_map_prefix(node, &ctx);
@@ -397,14 +398,25 @@ pub fn extract_analysis_tree(
         .map(|s| s.fqn.clone())
         .collect();
     symbols.retain(|s| s.kind != DefKind::Declare || !defined.contains(&s.fqn));
+    // A name declared twice keeps its first declaration as the symbol; a later
+    // one is a usage of it, or it would have no site at all once the index
+    // keeps one entry per fqn.
+    let mut seen: HashSet<String> = HashSet::new();
+    symbols.retain(|s| s.kind != DefKind::Declare || seen.insert(s.fqn.clone()));
 
     // Second pass: occurrences, resolved through the completed ns metadata
     let def_names: HashSet<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    let declared: HashSet<(u32, u32)> = symbols
+        .iter()
+        .filter(|s| s.kind == DefKind::Declare)
+        .map(|s| (s.name_range.start.line, s.name_range.start.character))
+        .collect();
     let ctx = OccurrenceCtx {
         source,
         ns_meta: &ns_meta,
         dialect: Dialect::of_path(file),
         def_names,
+        declared,
         lint_as: &cfg.lint_as,
     };
     let mut occurrences = Vec::new();
@@ -613,18 +625,18 @@ fn process_top_level_list(
         return;
     }
 
-    // `(declare a b c)` introduces one var per name, none of them defined yet.
-    if first_text == "declare" {
-        extract_declare(node, &children, source, file, &ns_meta.name, symbols);
-        return;
-    }
-
     // A built-in def form (`defn`, `def`, …), or a `:lint-as` / well-known macro
     // mapped to one (`defcomponent` → `def`, `clojure.test/deftest` →
     // `deftest`). The mapped kind reuses the normal def extraction, so the
     // macro's defined name becomes a real symbol.
     let kind = str_to_defkind(first_text)
         .or_else(|| head_def_kind(&children, ns_meta, source, &cfg.lint_as).map(|(_, kind)| kind));
+    // `(declare a b c)` — or a macro mapped to it — introduces one var per
+    // name, none of them defined yet.
+    if kind == Some(DefKind::Declare) {
+        extract_declare(node, &children, source, file, &ns_meta.name, symbols);
+        return;
+    }
     if let Some(kind) = kind {
         let is_defmethod = kind == DefKind::Defmethod;
         extract_def(node, &children, source, file, &ns_meta.name, kind, symbols);
@@ -1753,6 +1765,7 @@ fn discarded_keyword_starts(node: Node, source: &str, out: &mut HashSet<(u32, u3
             ns_meta: &ns_meta,
             dialect: Dialect::Clj,
             def_names: HashSet::new(),
+            declared: HashSet::new(),
             lint_as: &lint_as,
         };
         let mut scope = Scope::new();
@@ -1989,6 +2002,11 @@ struct OccurrenceCtx<'a> {
     /// `cljs.core/x`.
     dialect: Dialect,
     def_names: HashSet<&'a str>,
+    /// Where (line, character) each `Declare` symbol that survived extraction
+    /// names its var —
+    /// declared and never defined in this file. The name at such a position
+    /// is that symbol alone, never also an occurrence.
+    declared: HashSet<(u32, u32)>,
     /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
     /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
     lint_as: &'a HashMap<String, DefKind>,
@@ -2212,6 +2230,20 @@ fn walk_def_form(
     // as usages, double-counting them in references/rename. There are no real
     // usages to find, so skip the body entirely.
     if kind == DefKind::Defprotocol {
+        return;
+    }
+
+    // `(declare a b)`: a name the file never defines is its `Declare` symbol
+    // alone. One the file goes on to define, or declared again, lost that
+    // symbol at extraction, so its declare is a usage of the definition that
+    // did keep it — references and rename still reach it.
+    if kind == DefKind::Declare {
+        for name in children.iter().skip(1) {
+            let start = node_to_lsp_range(sym_name_node(*name), ctx.source).start;
+            if name.kind() == "sym_lit" && !ctx.declared.contains(&(start.line, start.character)) {
+                record_occurrence(*name, ctx, scope, out);
+            }
+        }
         return;
     }
 

@@ -44,7 +44,9 @@ Notes:
 - `:lint-as` maps a *defining macro's* fully-qualified name to the `def` form
   it behaves like, exactly as clj-kondo does. clj-pulse reads
   `.clj-kondo/config.edn` for the same key and its own file wins per macro.
-  A target that names no `def`-family form drops the macro.
+  The accepted targets are the `def` family plus `defprotocol`, `defmulti`,
+  `defrecord`, `deftype` and `declare`; a target that names no `def`-family
+  form drops the macro.
 - Live reload watches `**/.clj-pulse/config.edn` and `**/.clj-kondo/config.edn`:
   a save re-resolves classpaths, reloads `:lint-as` and re-indexes, and
   re-probes clj-kondo. No restart.
@@ -172,8 +174,8 @@ the two files (with `.clj-pulse/config.edn` winning on conflicts) and watches
 them, reloading `:lint-as` when either changes, with no restart needed. A
 project that
 already configures `:lint-as` for clj-kondo works with no extra setup. Only
-mappings to `def`-family forms (`def`, `defn`, `defmethod`, ...) take effect;
-others (such as `clojure.core/for`) are ignored.
+mappings to `def`-family forms (`def`, `defn`, `defmethod`, `defprotocol`,
+`declare`, ...) take effect; others (such as `clojure.core/for`) are ignored.
 
 `.clj-pulse/` also holds generated data (`jar-cache/`, `server.log`), so commit
 `config.edn` and gitignore the rest.
