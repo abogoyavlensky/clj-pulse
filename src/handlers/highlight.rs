@@ -56,7 +56,7 @@ pub fn document_highlight(
     {
         // A type's constructor calls count, narrowed to the type name.
         let forms = references::constructor_forms(index, &fqn);
-        for occ in references::matching_occurrences(&occs, &fqn, &forms) {
+        for occ in references::matching_occurrences(&occs, &fqn, &forms, Some(&snapshot.text)) {
             highlights.push(highlight(occ.name_range, usage_kind));
         }
         for sym in &syms {

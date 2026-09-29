@@ -590,7 +590,7 @@ fn occurrence_range_at(
         .filter(|s| s.fqn == fqn)
         .map(|s| (s.name_range, s.name_range))
         .chain(
-            matching_sites(&occs, fqn, &forms)
+            matching_sites(&occs, fqn, &forms, Some(&snapshot.text))
                 .into_iter()
                 .map(|(occ, token)| (occ.name_range, token)),
         )
@@ -842,6 +842,8 @@ fn range_contains(range: &Range, pos: Position) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CtorForm {
     pub fqn: String,
+    /// The constructor's own name (`->T`), the text a call site must spell.
+    pub spelling: String,
     pub prefix: u32,
     pub suffix: u32,
 }
@@ -866,12 +868,14 @@ pub(crate) fn constructor_forms(index: &Index, fqn: &str) -> Vec<CtorForm> {
         let Some(def) = defs.iter().find(|d| builds(&d.kind, shape)) else {
             continue;
         };
-        let form = format!("{}/{}{}{}", def.ns, prefix, def.name, suffix);
+        let spelling = format!("{}{}{}", prefix, def.name, suffix);
+        let form = format!("{}/{}", def.ns, spelling);
         if !index.lookup_all(&form).is_empty() {
             continue;
         }
         forms.push(CtorForm {
             fqn: form,
+            spelling,
             prefix: prefix.encode_utf16().count() as u32,
             suffix: suffix.encode_utf16().count() as u32,
         });
@@ -920,20 +924,41 @@ fn narrow(occ: &Occurrence, form: &CtorForm) -> Occurrence {
 /// The sites of `fqn` among `occs`: its own occurrences, then each
 /// constructor call in `forms` narrowed to the type name, each paired with
 /// the whole token it came from — where a cursor counts as on the site.
-fn matching_sites(occs: &[Occurrence], fqn: &str, forms: &[CtorForm]) -> Vec<(Occurrence, Range)> {
+/// `text` is the source `occs` were extracted from: a constructor site must
+/// spell the constructor there, since a referred one renamed in the ns form
+/// (`:rename {->Foo mk}`) is recorded under it while its token holds no
+/// `Foo` to narrow to. Without the text no constructor site is claimed.
+fn matching_sites(
+    occs: &[Occurrence],
+    fqn: &str,
+    forms: &[CtorForm],
+    text: Option<&str>,
+) -> Vec<(Occurrence, Range)> {
     let mut out: Vec<(Occurrence, Range)> = occs
         .iter()
         .filter(|o| o.fqn == fqn)
         .map(|o| (o.clone(), o.name_range))
         .collect();
+    let Some(text) = text else {
+        return out;
+    };
     for form in forms {
         out.extend(
             occs.iter()
-                .filter(|o| o.fqn == form.fqn)
+                .filter(|o| {
+                    o.fqn == form.fqn
+                        && token_at(text, o.name_range).as_deref() == Some(form.spelling.as_str())
+                })
                 .map(|o| (narrow(o, form), o.name_range)),
         );
     }
     out
+}
+
+/// Whether any of `occs` is a call of one of `forms` — the question that
+/// decides whether an indexed file's text is worth reading.
+fn calls_any(occs: &[Occurrence], forms: &[CtorForm]) -> bool {
+    occs.iter().any(|o| forms.iter().any(|f| f.fqn == o.fqn))
 }
 
 /// The sites of `fqn` among `occs`, constructor calls narrowed to the type
@@ -943,8 +968,9 @@ pub(crate) fn matching_occurrences(
     occs: &[Occurrence],
     fqn: &str,
     forms: &[CtorForm],
+    text: Option<&str>,
 ) -> Vec<Occurrence> {
-    matching_sites(occs, fqn, forms)
+    matching_sites(occs, fqn, forms, text)
         .into_iter()
         .map(|(occ, _)| occ)
         .collect()
@@ -959,7 +985,7 @@ pub fn occurrences_for(
     documents: &DocumentStore,
     fqn: &str,
 ) -> Vec<(PathBuf, Vec<Occurrence>)> {
-    let mut live: HashMap<PathBuf, Vec<Occurrence>> = HashMap::new();
+    let mut live: HashMap<PathBuf, (Vec<Occurrence>, String)> = HashMap::new();
     for uri in documents.open_uris() {
         // Open JAR docs (`jar:` URIs) convert to their virtual index path, so a
         // library file the user is viewing contributes its live occurrences.
@@ -975,7 +1001,7 @@ pub fn occurrences_for(
             &path,
             &index.extract_config(),
         );
-        live.insert(path, occs);
+        live.insert(path, (occs, snapshot.text.to_string()));
     }
 
     let forms = constructor_forms(index, fqn);
@@ -984,13 +1010,17 @@ pub fn occurrences_for(
         if live.contains_key(entry.key()) {
             continue;
         }
-        let matching = matching_occurrences(entry.value(), fqn, &forms);
+        // Only a file that calls a constructor is read, to check the spelling.
+        let text = calls_any(entry.value(), &forms)
+            .then(|| std::fs::read_to_string(entry.key()).ok())
+            .flatten();
+        let matching = matching_occurrences(entry.value(), fqn, &forms, text.as_deref());
         if !matching.is_empty() {
             result.push((entry.key().clone(), matching));
         }
     }
-    for (path, occs) in live {
-        let matching = matching_occurrences(&occs, fqn, &forms);
+    for (path, (occs, text)) in live {
+        let matching = matching_occurrences(&occs, fqn, &forms, Some(&text));
         if !matching.is_empty() {
             result.push((path, matching));
         }
@@ -1050,6 +1080,42 @@ mod tests {
         assert!(name_suffix_range(token_range(0, "app/db"), "app/db", "db").is_none());
         // A longer name that merely ends the same is a different keyword.
         assert!(name_suffix_range(token_range(0, ":ns/mydb"), ":ns/mydb", "db").is_none());
+    }
+
+    #[test]
+    fn a_constructor_site_must_spell_the_constructor() {
+        // `[a :refer [map->Foo] :rename {map->Foo f}]` records `(f {})` under
+        // `a/map->Foo` with a range covering `f`: narrowing it by `map->`
+        // would invert the range, so it is no site of `Foo`.
+        let text = "(map->Foo {}) (f {})\n";
+        let occ = |start: u32, end: u32| Occurrence {
+            fqn: "a/map->Foo".to_string(),
+            name_range: Range {
+                start: Position {
+                    line: 0,
+                    character: start,
+                },
+                end: Position {
+                    line: 0,
+                    character: end,
+                },
+            },
+        };
+        let occs = vec![occ(1, 9), occ(15, 16)];
+        let forms = vec![CtorForm {
+            fqn: "a/map->Foo".to_string(),
+            spelling: "map->Foo".to_string(),
+            prefix: 5,
+            suffix: 0,
+        }];
+        let sites = matching_occurrences(&occs, "a/Foo", &forms, Some(text));
+        let ranges: Vec<(u32, u32)> = sites
+            .iter()
+            .map(|o| (o.name_range.start.character, o.name_range.end.character))
+            .collect();
+        assert_eq!(ranges, vec![(6, 9)]);
+        // Without the source nothing can be checked, so nothing is claimed.
+        assert!(matching_occurrences(&occs, "a/Foo", &forms, None).is_empty());
     }
 
     #[test]
