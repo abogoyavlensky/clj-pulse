@@ -187,38 +187,42 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
 - Modify: `src/index/mod.rs`
 - Test: `src/index/mod.rs` (unit tests module), `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the failing index test**
+- [x] **Step 1: Write the failing index test**
   In the `tests` module of `src/index/mod.rs`, next to `same_dialect_collision_keeps_the_losers_record`: insert one project file whose symbols are a `Defmulti` `app/dispatch` at line 2 followed by a `Defmethod` with the same fqn at line 4 (build them with the module's existing symbol helper). Assert `index.lookup("app/dispatch")` is the `Defmulti`, `lookup_all` has exactly one entry, and `ns_symbols["app"]` holds the fqn once. Add a second case: a file whose only symbol is a `Defmethod` for `other/foo` — `lookup("other/foo")` is `None` and the file's `FileRecord.fqns` is empty.
 
-- [ ] **Step 2: Write the failing e2e test**
+- [x] **Step 2: Write the failing e2e test**
   Add `(defmulti area :shape)` plus two same-file `(defmethod area …)` forms and a call `(area {:shape :circle})` to `tests/fixtures/simple_project/src/core.clj` (or a new small file if core.clj is crowded; keep `compare_simple_project` in mind — the fixture is linted by kondo too). Test `test_e2e_defmulti_is_its_own_reference`: `references` with `includeDeclaration` from the call includes the `defmulti` line and lists each `defmethod` line once; `rename` from the `defmulti` line produces one edit on that line and one per defmethod head and call, no duplicate ranges.
   Run: `cargo test --test test_e2e test_e2e_defmulti` — Expected: FAIL (defmulti line missing).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
   In `insert_file` and `insert_lib_file`, skip `sym.kind == DefKind::Defmethod` before the fqn bookkeeping and `rank_insert` (one shared predicate with a doc comment: a defmethod head names the multimethod it extends; it is a symbol for the outline alone). Leave extraction and `symbols.rs` untouched.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
   Run: `cargo test --lib index && cargo test --test test_e2e test_e2e_defmulti` — Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "index: a defmethod symbol never displaces the defmulti's slot"`
+
+> Deviation: the fix, `multi.clj` fixture and e2e test were written by a concurrent session in the same tree (stopped on the user's instruction); kept as-is after a red/green check. The index test also asserts a library `defmethod` plants nothing.
 
 ### Task 2: Constructor shapes in one place
 
 **Files:**
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Extend the unit tests**
+- [x] **Step 1: Extend the unit tests**
   In `factory_target_strips_prefixes_and_flags_map_ctor`, switch the expectations to the `CtorShape` enum and add `"Foo."` → `("Foo", Dot)`, `"."` → `None`, `"java.io.File."` → `("java.io.File", Dot)` (the index lookup, not the parser, decides it is not a record). Add to `map_constructor_is_record_only` that `"T."` resolves for a `Deftype`, and to `resolve_factory_ignores_non_record_targets` that `"foo."` with a `Defn` `foo` resolves to nothing.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
   Define `pub(crate) enum CtorShape { Positional, Map, Dot }`; `factory_target` returns `Option<(&str, CtorShape)>` — `map->` first, then `->`, then a trailing `.` (non-empty stem, and the stem must not itself end in `.`). `resolve_factory` allows `Map` for `Defrecord` only. Update the two call sites in `resolve_symbol`.
 
-- [ ] **Step 3: Run**
+- [x] **Step 3: Run**
   Run: `cargo test --lib handlers` — Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git commit -m "handlers: name the three constructor shapes in factory_target"`
+
+> Deviation: the kind rule is a shared `builds(kind, shape)` helper, so `resolve_factory` and Task 3's `constructor_forms` / canonicalization read one rule. `resolve_factory` has four call sites, not two; none needed changes.
 
 ### Task 3: Constructor occurrences are sites of their type
 
@@ -227,10 +231,10 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
 - Modify: `tests/fixtures/simple_project/src/records.clj` (new), `tests/fixtures/simple_project/src/consumer.clj` (or a new consumer)
 - Test: `tests/test_e2e.rs`, `tests/test_compare.rs`
 
-- [ ] **Step 1: Fixture**
+- [x] **Step 1: Fixture**
   `records.clj` (`simple.records`): `(defrecord Point [x y])`, `(deftype Cell [v])`, and a fn using `(Point. 1 2)`, `(->Point 3 4)`, `(map->Point {:x 5})`, `(Cell. 1)`, `(->Cell 2)`. A consumer namespace requires it `:as rec` and `:refer [->Point]`, and calls `(rec/map->Point {})`, `(->Point 0 0)`, `(rec/->Cell 1)`.
 
-- [ ] **Step 2: Write the failing e2e tests**
+- [x] **Step 2: Write the failing e2e tests**
   - `test_e2e_constructor_calls_are_references_of_the_record`: references from the `defrecord Point` name include the `Point.`, `->Point`, `map->Point` lines in records.clj and the three consumer sites (the `:refer [->Point]` token included — kondo counts it too); references from the `deftype Cell` name include `Cell.` and both `->Cell` calls.
   - `test_e2e_rename_record_rewrites_its_constructors`: rename `Point` → `Pt` from the `(->Point 3 4)` cursor (canonicalization) yields edits whose ranges cover exactly `Point` inside `->Point`, `map->Point`, `Point.` — assert `start.character` is 2 / 5 / 0 past the token start and the range length is 5 — plus the definition. `prepareRename` on `->Point` returns the `Point` sub-range from a cursor on the `P` *and* from a cursor on the `-` of the prefix.
   - `test_e2e_explicit_constructor_var_wins`: a fixture namespace with `(defrecord Box [v])` and `(defn ->Box [v] (Box. v))` plus a `(->Box 1)` call — references on `Box` list `Box.` but not the `->Box` call; definition from the call lands on the `defn`.
@@ -238,7 +242,7 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
   - Definition from `(Cell. 1)` lands on the `deftype` line (guards the `Dot` shape through the position path).
   Run: `cargo test --test test_e2e constructor` — Expected: FAIL.
 
-- [ ] **Step 3: Implement in references.rs**
+- [x] **Step 3: Implement in references.rs**
   - `CtorForm { fqn, prefix, suffix }` and `constructor_forms(index, fqn)`: any `lookup_all(fqn)` entry of kind `Defrecord` → three forms, `Deftype` → `->T` and `T.`, otherwise empty; drop a form whose fqn `lookup_all` finds as a symbol. Build the fqns from the symbol's `ns` and `name`.
   - `narrow(occ, &form)` and `pub(crate) fn matching_occurrences(occs: &[Occurrence], fqn: &str, forms: &[CtorForm]) -> Vec<Occurrence>` (exact matches first, then each form's matches narrowed).
   - `occurrences_for`: compute the forms once, use `matching_occurrences` for both the indexed and the live branches.
@@ -249,17 +253,19 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
   after matching. Rename and references use the narrowed range only.
   - `resolve_fqn_at`: after an occurrence match (and only there — a symbol match is already the type), `canonical_type_fqn(index, &fqn)`: split at the last `/`, `factory_target` on the name part, look up `ns/stem`, accept by the same kind rule as `resolve_factory`. Do the same on the alias-fallback result at the end.
 
-- [ ] **Step 4: highlight.rs**
+- [x] **Step 4: highlight.rs**
   Replace the `occ.fqn == fqn` filter with `matching_occurrences(&occs, &fqn, &references::constructor_forms(index, &fqn))`.
 
-- [ ] **Step 5: KNOWN entry in tests/test_compare.rs**
+- [x] **Step 5: KNOWN entry in tests/test_compare.rs**
   Add, dated 2026-09-29: bucket prefix `var-def/defrecord` and `var-def/deftype` (two entries or one with `starts_with` on both), matching `Verdict::Diverge { missing: 0, .. }`, reason "a record's `->T`/`map->T` calls are sites of the record in clj-pulse (rename must rewrite them); kondo keys them under the constructor var". Keep `compare_simple_project` at zero *new* divergences — the new fixture's `->Point` calls become `known`, not `diverge`.
 
-- [ ] **Step 6: Run**
+- [x] **Step 6: Run**
   Run: `cargo test --test test_e2e constructor && cargo test --test test_e2e -- declare && cargo test --test test_compare compare_simple_project` — Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
   `git commit -m "references: constructor calls are sites of their deftype/defrecord"`
+
+> Deviation: the consumer is a new `records_consumer.clj`; the explicit-`->Box` case is written by its test, so `compare_simple_project` never sees a redefined var. `CtorForm` carries its `spelling`, and `matching_occurrences` takes the source text: a constructor site must spell the constructor (codex review — a `:refer [map->Foo] :rename {map->Foo f}` call is recorded under the constructor with a range covering `f`, and narrowing it produced an inverted rename edit). Indexed files are read from disk only when they call a constructor.
 
 ### Task 4: `:lint-as … clojure.core/declare`
 
@@ -268,27 +274,29 @@ Expected `bb compare clj-kondo` movement (baseline 2026-09-29, `.tmp/compare-clj
 - Modify: `tests/fixtures/lint_as_project/.clj-kondo/config.edn`, `tests/fixtures/lint_as_project/src/app/core.clj`
 - Test: `tests/test_extractor.rs`, `tests/test_e2e.rs`, `src/settings.rs` tests
 
-- [ ] **Step 1: Write the failing extractor tests**
+- [x] **Step 1: Write the failing extractor tests**
   - `test_declare_only_name_is_a_symbol_not_an_occurrence`: `(ns app)\n(declare helper later)\n(defn later [] (helper))` — occurrences of `app/helper` are exactly one (the call), none on the declare line; occurrences of `app/later` include the declare line (the file defines it; today's behavior). Adjust `test_declare_indexes_each_name` if its `app/helper` assertion now needs the call site.
   - `test_lint_as_declare_declares_each_name`: with `ExtractConfig { lint_as: {"conch/programs" → Declare} }` and `(ns t (:require [conch :refer [programs]]))\n(programs rm mv)\n(defn go [] (rm "-rf"))`: symbols `t/rm` and `t/mv` of kind `Declare`; occurrences hold `conch/programs` at the head, `t/rm` at the call only, nothing for `t/mv`.
   - `test_lint_as_defprotocol_indexes_methods_and_callers` (pins item 4): `lint_as {"pot/defprotocol+" → Defprotocol}`, `(pot/defprotocol+ Node (tag [_]) (sexpr [_]))`, a `(defrecord R [] Node (tag [_] :r))` and `(defn f [n] (tag n))` in the same file: symbols `t/Node`, `t/tag`, `t/sexpr`; occurrences of `t/tag` are the impl head and the call, none inside the protocol body.
   Run: `cargo test --test test_extractor declare && cargo test --test test_extractor lint_as` — Expected: FAIL.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
   - `from_def_symbol`: `"declare" => DefKind::Declare`. Update `src/settings.rs`'s `merge` test with a `clojure.core/declare` target that is kept.
   - `process_top_level_list`: replace the `first_text == "declare"` branch by routing `Some(DefKind::Declare)` from the kind resolution to `extract_declare`; everything else through `extract_def` as now.
   - `OccurrenceCtx.declared: HashSet<&str>` filled in `extract_analysis_tree` from the retained `Declare` symbols; empty in `collect_edn_ns_map` and the test-only constructor near line 1751.
   - `walk_def_form`: a `Declare` arm before the `binds_vector` logic — for each `sym_lit` in `children[1..]` whose name is not in `ctx.declared`, `record_occurrence`; then return.
   - `CACHE_FORMAT_VERSION` → 21.
 
-- [ ] **Step 3: Fixture and e2e**
+- [x] **Step 3: Fixture and e2e**
   `lint_as_project/.clj-kondo/config.edn` gains `app.macros/programs clojure.core/declare`; `core.clj` requires `programs` and has `(programs rm mv)` and `(defn clean [] (rm "-rf"))`. `test_e2e_lint_as_declare_names_are_renamable`: definition from the `rm` call lands on the `programs` line; `rename` `rm` → `remove` edits the declaration token and the call; references list the declaration once. Keep `test_e2e_lint_as_config_live_reload` green (it edits the same config file — read it first).
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
   Run: `cargo test --test test_extractor && cargo test --test test_e2e lint_as && cargo test --test test_e2e declare` — Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "extractor: honor :lint-as to clojure.core/declare and stop double-counting declare-only names"`
+
+> Deviation: `walk_def_form`'s `Declare` arm no longer records the `declare` head itself, as for every other core def head (definition and hover on `declare` resolve through the bare word). `jar_cache` documents version 21. `test_declare_indexes_each_name` needed no change.
 
 ### Task 5: Gates
 

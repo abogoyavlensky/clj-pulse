@@ -73,6 +73,7 @@ impl DefKind {
             "defprotocol" => DefKind::Defprotocol,
             "defrecord" => DefKind::Defrecord,
             "deftype" => DefKind::Deftype,
+            "declare" => DefKind::Declare,
             _ => return None,
         })
     }

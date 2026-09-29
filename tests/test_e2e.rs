@@ -566,6 +566,59 @@ fn test_e2e_lint_as_navigates_to_macro_defined_name() {
 }
 
 #[test]
+fn test_e2e_lint_as_declare_names_are_renamable() {
+    // `:lint-as {app.macros/programs clojure.core/declare}` makes
+    // `(programs rm mv)` declare `rm` and `mv`, as conch's macro does.
+    let project = setup_named("lint_as_project");
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+
+    let core = root.join("src/app/core.clj");
+    client.did_open(&core);
+    let text = std::fs::read_to_string(&core).unwrap();
+    let (decl_line, decl_ch) = start_of(&text, "rm mv)");
+    let (call_line, call_ch) = start_of(&text, "rm \"-rf\"");
+
+    let result = client.goto_definition(&core, call_line, call_ch + 1);
+    assert_eq!(
+        result["range"]["start"]["line"],
+        json!(decl_line),
+        "{result}"
+    );
+
+    let refs = client.references(&core, call_line, call_ch + 1, true);
+    assert_eq!(
+        ref_starts(&refs),
+        vec![
+            (decl_line as u64, decl_ch as u64),
+            (call_line as u64, call_ch as u64)
+        ],
+        "the declaration once, then the call: {refs}"
+    );
+
+    let result = client.rename(&core, call_line, call_ch + 1, "remove");
+    assert_eq!(
+        edit_starts(&result),
+        vec![
+            (decl_line as u64, decl_ch as u64),
+            (call_line as u64, call_ch as u64)
+        ],
+        "{result}"
+    );
+    let edits = result["changes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    let renamed = apply_edits(&text, edits.as_array().unwrap());
+    assert!(renamed.contains("(programs remove mv)"), "{renamed}");
+    assert!(renamed.contains("(remove \"-rf\")"), "{renamed}");
+}
+
+#[test]
 fn test_e2e_lint_as_config_live_reload() {
     // Editing `.clj-kondo/config.edn` reloads `:lint-as` without a restart:
     // goto-def on a macro-defined name works, then stops once the mapping is
