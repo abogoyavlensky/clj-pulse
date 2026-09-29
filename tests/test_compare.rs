@@ -415,6 +415,19 @@ static KNOWN: &[Known] = &[
         matches: |_, verdict| matches!(verdict, Verdict::Diverge { missing: 0, .. }),
         reason: "protocol method implementations are sites in clj-pulse; kondo lists callers only",
     },
+    // A record's `->T` / `map->T` calls build it, so clj-pulse lists them as
+    // sites of the type — a rename that skipped them would leave broken code —
+    // while kondo keys them under the constructor var. Extra sites only.
+    Known {
+        bucket_prefix: "var-def/defrecord",
+        matches: |_, verdict| matches!(verdict, Verdict::Diverge { missing: 0, .. }),
+        reason: "a type's `->T`/`map->T` calls are sites of the type in clj-pulse (rename must rewrite them); kondo keys them under the constructor var (2026-09-29)",
+    },
+    Known {
+        bucket_prefix: "var-def/deftype",
+        matches: |_, verdict| matches!(verdict, Verdict::Diverge { missing: 0, .. }),
+        reason: "a type's `->T`/`map->T` calls are sites of the type in clj-pulse (rename must rewrite them); kondo keys them under the constructor var (2026-09-29)",
+    },
     // A `.cljs` var used in the syntax-quoted template of the macro its `.clj`
     // twin defines (`reader_types.clj` emitting a call to a
     // `reader_types.cljs` fn): the macro expands to a call of that var, so

@@ -8950,3 +8950,231 @@ fn test_e2e_defmulti_is_its_own_reference() {
     let result = client.rename(&file, multi_line, 11, "surface");
     assert_eq!(edit_starts(&result), expected, "rename: {}", result);
 }
+
+/// `(file name, line, character)` of every location in a `Location[]` answer,
+/// sorted.
+fn loc_starts(locations: &Value) -> Vec<(String, u64, u64)> {
+    let mut out: Vec<(String, u64, u64)> = locations
+        .as_array()
+        .unwrap_or_else(|| panic!("expected locations, got {locations}"))
+        .iter()
+        .map(|loc| {
+            (
+                loc["uri"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_string(),
+                loc["range"]["start"]["line"].as_u64().unwrap(),
+                loc["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `(line, character)` of the start of `needle` in `path`.
+fn start_in(path: &Path, needle: &str) -> (u32, u32) {
+    start_of(&std::fs::read_to_string(path).unwrap(), needle)
+}
+
+/// `(file name, line, character)` of `needle` in `path`, shifted by `offset`.
+fn site(path: &Path, needle: &str, offset: u32) -> (String, u64, u64) {
+    let (line, ch) = start_in(path, needle);
+    (
+        path.file_name().unwrap().to_string_lossy().into_owned(),
+        line as u64,
+        (ch + offset) as u64,
+    )
+}
+
+#[test]
+fn test_e2e_constructor_calls_are_references_of_the_record() {
+    // `(Point. …)`, `->Point` and `map->Point` build the record, so they are
+    // its sites, each narrowed to the `Point` inside the token.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let records = root.join("src/records.clj");
+    let consumer = root.join("src/records_consumer.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&records);
+
+    let (line, ch) = start_in(&records, "Point [x y]");
+    let refs = client.references(&records, line, ch + 1, true);
+    let mut expected = vec![
+        site(&records, "Point [x y]", 0),
+        site(&records, "Point. 1 2", 0),
+        site(&records, "->Point 3 4", 2),
+        site(&records, "map->Point {:x 5}", 5),
+        site(&consumer, "->Point]]", 2),
+        site(&consumer, "map->Point {}", 5),
+        site(&consumer, "->Point 0 0", 2),
+    ];
+    expected.sort();
+    assert_eq!(loc_starts(&refs), expected, "Point: {}", refs);
+
+    let (line, ch) = start_in(&records, "Cell [v]");
+    let refs = client.references(&records, line, ch + 1, true);
+    let mut expected = vec![
+        site(&records, "Cell [v]", 0),
+        site(&records, "Cell. 1", 0),
+        site(&records, "->Cell 2", 2),
+        site(&consumer, "->Cell 1", 2),
+    ];
+    expected.sort();
+    assert_eq!(loc_starts(&refs), expected, "Cell: {}", refs);
+
+    // Definition from `(Cell. 1)` and from an alias-qualified `rec/->Cell`
+    // lands on the deftype.
+    let (cell_line, _) = start_in(&records, "(deftype Cell");
+    for (file, needle, offset) in [(&records, "Cell. 1", 1), (&consumer, "->Cell 1", 3)] {
+        client.did_open(file);
+        let (line, ch) = start_in(file, needle);
+        let result = client.goto_definition(file, line, ch + offset);
+        assert!(
+            result["uri"]
+                .as_str()
+                .unwrap()
+                .ends_with("/src/records.clj"),
+            "{needle}: {result}"
+        );
+        assert_eq!(
+            result["range"]["start"]["line"],
+            json!(cell_line),
+            "{needle}"
+        );
+    }
+}
+
+#[test]
+fn test_e2e_rename_record_rewrites_its_constructors() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let records = root.join("src/records.clj");
+    let consumer = root.join("src/records_consumer.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&records);
+
+    // prepareRename pre-selects the `Point` inside `->Point`, whether the
+    // cursor is on the name or on the `->` prefix.
+    let (line, ch) = start_in(&records, "->Point 3 4");
+    for cursor in [ch, ch + 3] {
+        let range = client.prepare_rename(&records, line, cursor);
+        assert_eq!(range["start"]["character"], json!(ch + 2), "{range}");
+        assert_eq!(range["end"]["character"], json!(ch + 7), "{range}");
+    }
+
+    let result = client.rename(&records, line, ch + 3, "Pt");
+    let changes = result["changes"].as_object().unwrap();
+    assert_eq!(changes.len(), 2, "{result}");
+    for (uri, edits) in changes {
+        for edit in edits.as_array().unwrap() {
+            let range = &edit["range"];
+            let len = range["end"]["character"].as_u64().unwrap()
+                - range["start"]["character"].as_u64().unwrap();
+            assert_eq!(len, 5, "{uri}: {edit}");
+        }
+    }
+    let edits_for = |path: &Path| {
+        let uri = format!("file://{}", path.display());
+        changes[&uri].as_array().unwrap().clone()
+    };
+    let renamed = apply_edits(
+        &std::fs::read_to_string(&records).unwrap(),
+        &edits_for(&records),
+    );
+    for expected in [
+        "(defrecord Pt [x y])",
+        "(Pt. 1 2)",
+        "(->Pt 3 4)",
+        "(map->Pt {:x 5})",
+    ] {
+        assert!(renamed.contains(expected), "{expected} missing:\n{renamed}");
+    }
+    assert!(renamed.contains("(Cell. 1)") && renamed.contains("(->Cell 2)"));
+    let renamed = apply_edits(
+        &std::fs::read_to_string(&consumer).unwrap(),
+        &edits_for(&consumer),
+    );
+    for expected in [":refer [->Pt]", "(rec/map->Pt {})", "(->Pt 0 0)"] {
+        assert!(renamed.contains(expected), "{expected} missing:\n{renamed}");
+    }
+}
+
+#[test]
+fn test_e2e_explicit_constructor_var_wins() {
+    // A `defn ->Box` beside `(defrecord Box …)` is a var of its own: its calls
+    // stay its own, and a record rename never rewrites them.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let file = root.join("src/explicit_ctor.clj");
+    std::fs::write(
+        &file,
+        "(ns simple.explicit-ctor)\n\n(defrecord Box [v])\n\n(defn ->Box [v] (Box. v))\n\n(defn make [] (->Box 1))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&file);
+
+    let (line, ch) = start_in(&file, "Box [v]");
+    let refs = client.references(&file, line, ch + 1, true);
+    let expected = vec![site(&file, "Box [v]", 0), site(&file, "Box. v", 0)];
+    assert_eq!(loc_starts(&refs), expected, "{refs}");
+
+    let (line, ch) = start_in(&file, "->Box 1");
+    let result = client.goto_definition(&file, line, ch + 3);
+    let (defn_line, _) = start_in(&file, "(defn ->Box");
+    assert_eq!(
+        result["range"]["start"]["line"],
+        json!(defn_line),
+        "{result}"
+    );
+}
+
+#[test]
+fn test_e2e_highlight_covers_constructors() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let records = root.join("src/records.clj");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&records);
+
+    let (line, ch) = start_in(&records, "Point [x y]");
+    let result = client.document_highlight(&records, line, ch + 1);
+    let found: Vec<(u64, u64, u64, u64)> = result
+        .as_array()
+        .unwrap_or_else(|| panic!("no highlights: {result}"))
+        .iter()
+        .map(|h| {
+            (
+                h["range"]["start"]["line"].as_u64().unwrap(),
+                h["range"]["start"]["character"].as_u64().unwrap(),
+                h["range"]["end"]["character"].as_u64().unwrap(),
+                h["kind"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let at = |needle: &str, offset: u32, kind: u64| {
+        let (_, l, c) = site(&records, needle, offset);
+        (l, c, c + 5, kind)
+    };
+    // WRITE = 3, READ = 2.
+    let expected = vec![
+        at("Point [x y]", 0, 3),
+        at("Point. 1 2", 0, 2),
+        at("->Point 3 4", 2, 2),
+        at("map->Point {:x 5}", 5, 2),
+    ];
+    assert_eq!(found, expected, "{result}");
+}

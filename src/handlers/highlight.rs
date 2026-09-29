@@ -54,10 +54,10 @@ pub fn document_highlight(
     } else if let Ok((_, syms, occs)) =
         extractor::extract_full_tree(&snapshot.tree, &snapshot.text, &path, &cfg)
     {
-        for occ in &occs {
-            if occ.fqn == fqn {
-                highlights.push(highlight(occ.name_range, usage_kind));
-            }
+        // A type's constructor calls count, narrowed to the type name.
+        let forms = references::constructor_forms(index, &fqn);
+        for occ in references::matching_occurrences(&occs, &fqn, &forms) {
+            highlights.push(highlight(occ.name_range, usage_kind));
         }
         for sym in &syms {
             // A `defmethod` head names the multimethod it extends rather than
