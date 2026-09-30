@@ -327,6 +327,47 @@ mod gaps {
         );
     }
 
+    /// The corpus shape behind the "`one-of` in a `for` `:let`" issue: a
+    /// `;;` comment inside a `let` vector shifted the pairs so a call to the
+    /// referred macro landed in a name slot, and a `:let` rebinding whose
+    /// value starts with the head looked like the culprit (archive,
+    /// 2026-09-17). The head is a var usage at every call and never a local.
+    #[test]
+    fn test_macro_head_in_for_let_and_after_a_comment_is_a_usage() {
+        let src = r#"(ns x (:require [u :refer [one-of]]))
+(defn f [clauses t]
+  (for [c clauses
+        :let [kw-node (-> c :children first)
+              kw (:k kw-node)
+              kw (one-of kw [:require :use])]
+        :when kw]
+    [kw-node kw])
+  (let [quote? (= :quote t)
+        ;; nested syntax quotes are treated as normal quoted expressions
+        sq? (= :syntax-quote t)
+        unq? (one-of t [:unquote :unquote-splicing])]
+    [quote? sq? unq?]))
+"#;
+        let a = analysis(src);
+        let one_of: Vec<u32> = occurrences_of(&a.occurrences, "u/one-of")
+            .iter()
+            .map(|o| o.name_range.start.line)
+            .collect();
+        assert_eq!(one_of, vec![0, 5, 11], "the :refer entry and both calls");
+        for line in [5usize, 11] {
+            let head = Position::new(line as u32, col(src, line, "one-of"));
+            assert!(
+                local_references_at(src, head, "one-of").is_none(),
+                "`one-of` is no local at line {line}"
+            );
+        }
+        assert!(
+            a.unused_bindings.is_empty(),
+            "every binding is used: {:?}",
+            a.unused_bindings
+        );
+    }
+
     #[test]
     fn test_discarded_usage_does_not_count_for_the_local() {
         let src = "(ns x)\n(let [a 1] #_a nil)\n";
