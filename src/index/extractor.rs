@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
@@ -2074,12 +2074,16 @@ fn walk_occurrences(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mu
 /// alias). Keeps `clojure.core/let` binding locals while excluding `s/def` and
 /// friends.
 fn head_is_core_form(head: Node, ctx: &OccurrenceCtx) -> bool {
+    head_resolves_to_core(head, ctx.ns_meta, ctx.source)
+}
+
+/// [`head_is_core_form`]'s rule, for the locals walker too (`walk_scope`).
+fn head_resolves_to_core(head: Node, ns_meta: &NsMeta, source: &str) -> bool {
     match head.child_by_field_name("namespace") {
         None => true,
         Some(ns_node) => {
-            let alias = node_text(ns_node, ctx.source);
-            let resolved = ctx
-                .ns_meta
+            let alias = node_text(ns_node, source);
+            let resolved = ns_meta
                 .aliases
                 .get(alias)
                 .map(String::as_str)
@@ -3154,25 +3158,87 @@ pub struct LocalBinding {
 /// `extend-*`) bind their params like the occurrence walker's
 /// `walk_method_impl` (`walk_scope_type_specs`).
 ///
-/// Limitation: only literal binding heads are recognized. A `:lint-as` macro
-/// mapped to `defn`/`defmacro` is not treated as a binding form here (that would
-/// need the merged `ExtractConfig` + ns aliases, which this pure `source`-only
-/// primitive intentionally omits), so its params are not surfaced as locals —
-/// the same fall-through as before local support existed, not a regression.
+/// List heads are classified the way the occurrence walker classifies them —
+/// `:lint-as` and the built-in macro table first, then the name-part rule, `are`
+/// by fqn, a core form through the ns form's aliases ([`ScopeCtx`]) — so the
+/// two walkers agree about what binds. This variant parses `source` and uses
+/// the default (empty) [`ExtractConfig`]; [`locals_in_scope_at_tree`] honors
+/// `:lint-as`.
 pub fn locals_in_scope_at(source: &str, pos: Position) -> Vec<LocalBinding> {
     let Some(tree) = parse_tree(source) else {
         return vec![];
     };
-    locals_in_scope_at_tree(&tree, source, pos)
+    locals_in_scope_at_tree(&tree, source, pos, &ExtractConfig::default())
 }
 
-/// [`locals_in_scope_at`] over an already-parsed `tree` of `source`.
+/// [`locals_in_scope_at`] over an already-parsed `tree` of `source`, honoring
+/// `cfg` (`:lint-as`).
 pub fn locals_in_scope_at_tree(
     tree: &tree_sitter::Tree,
     source: &str,
     pos: Position,
+    cfg: &ExtractConfig,
 ) -> Vec<LocalBinding> {
-    locals_at_node(tree.root_node(), source, pos)
+    let ns_meta = ns_meta_of_tree(tree, source);
+    let ctx = ScopeCtx {
+        source,
+        ns_meta: &ns_meta,
+        lint_as: &cfg.lint_as,
+    };
+    locals_at_node(tree.root_node(), &ctx, pos)
+}
+
+/// What the locals walker needs to classify a list head the way the
+/// occurrence walker does (`OccurrenceCtx` is its twin there): the file's ns
+/// metadata, read from the same tree the walk runs over so an unsaved `ns`
+/// edit counts, and the merged `:lint-as` map. Built once per question —
+/// references re-resolve every occurrence of a name against one context.
+struct ScopeCtx<'a> {
+    source: &'a str,
+    ns_meta: &'a NsMeta,
+    lint_as: &'a HashMap<String, DefKind>,
+}
+
+/// The ns metadata of `tree` alone: the `ns` forms at top level and in
+/// top-level reader conditionals, read by the code extraction runs
+/// ([`extract_ns`]), with no symbol or occurrence pass.
+fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
+    let mut ns_meta = NsMeta {
+        name: String::new(),
+        file: PathBuf::new(),
+        aliases: HashMap::new(),
+        refers: HashMap::new(),
+        requires: Vec::new(),
+        imports: HashMap::new(),
+        refer_all: Vec::new(),
+        as_aliases: Vec::new(),
+        core_excludes: Vec::new(),
+    };
+    let mut read_ns = |form: Node| {
+        if form.kind() != "list_lit" {
+            return;
+        }
+        let children = named_children(form);
+        let is_ns = children
+            .first()
+            .is_some_and(|h| h.kind() == "sym_lit" && node_text(*h, source) == "ns");
+        if is_ns {
+            extract_ns(&children, source, &mut ns_meta);
+        }
+    };
+    for child in named_children(tree.root_node()) {
+        match child.kind() {
+            "list_lit" => read_ns(child),
+            // Alternating `:dialect form` pairs, as `process_reader_conditional`.
+            "read_cond_lit" => {
+                for form in named_children(child).into_iter().skip(1).step_by(2) {
+                    read_ns(form);
+                }
+            }
+            _ => {}
+        }
+    }
+    ns_meta
 }
 
 /// Parses `source` with the Clojure grammar, or `None` on setup/parse failure.
@@ -3186,9 +3252,9 @@ pub fn parse_tree(source: &str) -> Option<tree_sitter::Tree> {
 
 /// [`locals_in_scope_at`] against an already-parsed `root`, so callers that
 /// resolve many positions in one buffer (references) parse only once.
-fn locals_at_node(root: Node, source: &str, pos: Position) -> Vec<LocalBinding> {
+fn locals_at_node(root: Node, ctx: &ScopeCtx, pos: Position) -> Vec<LocalBinding> {
     let mut out = Vec::new();
-    descend_into(root, source, pos, &mut out);
+    descend_into(root, ctx, pos, &mut out);
     out
 }
 
@@ -3204,10 +3270,11 @@ fn lsp_range_contains(range: Range, pos: Position) -> bool {
 
 /// Descends into whichever named child of `node` contains `pos`, continuing the
 /// scope walk there. The generic step for any form that introduces no bindings.
-fn descend_into(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn descend_into(node: Node, ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBinding>) {
+    let source = ctx.source;
     for child in named_children(node) {
         if lsp_range_contains(node_to_lsp_range(child, source), pos) {
-            walk_scope(child, source, pos, out);
+            walk_scope(child, ctx, pos, out);
             return;
         }
     }
@@ -3215,65 +3282,58 @@ fn descend_into(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBind
 
 /// Dispatches on a node's form: binding forms collect their in-scope names and
 /// steer descent; everything else descends generically.
-fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn walk_scope(node: Node, ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBinding>) {
+    let source = ctx.source;
     if node.kind() == "list_lit" {
         let children = named_children(node);
         if let Some(head) = children.first() {
-            // `(are [x y] expr & values)` binds its argv in the template. This
-            // walker has no ns metadata, so it matches the head's name part
-            // alone — bare or qualified (`are`, `t/are`, `clojure.test/are`) —
-            // the rule `qualified_head_def_kind` already applies to `mu/defn`.
-            // A bare `are` in a file without clojure.test therefore binds here
-            // but not in the occurrence walker (ROADMAP backlog, 2026-09-10).
-            if head.kind() == "sym_lit"
-                && node_text(sym_name_node(*head), source) == "are"
-                && children.get(1).map(|n| n.kind()) == Some("vec_lit")
-            {
-                walk_scope_are(&children, source, pos, out);
-                return;
-            }
-            // A head is a binding form when it is unqualified or explicitly
-            // qualified to `clojure.core` or `cljs.core` (`(clojure.core/let
-            // …)`), matching the occurrence walker's `head_is_core_form`. A
-            // qualified `s/def` etc. falls through to generic descent. (An
-            // `:as` alias of clojure.core is not resolved here — the primitive
-            // has no ns metadata — so `cc/let` is not treated as a binding
-            // form; that form is rare.)
-            let core_form = head.kind() == "sym_lit"
-                && match head.child_by_field_name("namespace") {
-                    None => true,
-                    Some(ns) => matches!(node_text(ns, source), "clojure.core" | "cljs.core"),
-                };
-            if !core_form {
-                // A qualified defining head (`mu/defn`) binds like the form its
-                // name part names, matching `head_def_kind` in the occurrence
-                // walker. `:lint-as` is not visible here (no ns metadata), so
-                // only the name-part rule applies.
-                if let Some(kind) = qualified_head_def_kind(&children, source) {
-                    walk_scope_def(kind, &children, source, pos, out);
+            // The same order as the occurrence walker's `walk_list`, through
+            // the same resolvers, so the two agree about what binds. First a
+            // defining head: `:lint-as`, the built-in macro table, then the
+            // name part of a qualified head (`mu/defn`). The config outranks
+            // the name part, so a head mapped to a non-fn kind binds nothing.
+            if head.kind() == "sym_lit" {
+                if let Some((_, kind)) = head_def_kind(&children, ctx.ns_meta, source, ctx.lint_as)
+                {
+                    walk_scope_def(kind, &children, ctx, pos, out);
+                    return;
+                }
+                // `(are [x y] expr & values)` binds its argv in the template,
+                // resolved by fqn: a bare `are` in a file that never pulls in
+                // clojure.test is an ordinary call.
+                if children.get(1).map(|n| n.kind()) == Some("vec_lit")
+                    && are_head_fqn(*head, ctx.ns_meta, source).is_some()
+                {
+                    walk_scope_are(&children, ctx, pos, out);
                     return;
                 }
             }
+            // A head names a core form when it is unqualified or qualified to
+            // `clojure.core` / `cljs.core`, directly or through an `:as` alias
+            // (`cc/let`). A qualified `s/def` etc. falls through to generic
+            // descent.
+            let core_form =
+                head.kind() == "sym_lit" && head_resolves_to_core(*head, ctx.ns_meta, source);
             if core_form {
                 let head_text = sym_text(*head, source);
                 if let Some(kind) = str_to_defkind(head_text) {
-                    walk_scope_def(kind, &children, source, pos, out);
+                    walk_scope_def(kind, &children, ctx, pos, out);
                     return;
                 }
                 if is_let_like(head_text) {
-                    walk_scope_let(&children, source, pos, out);
+                    walk_scope_let(&children, ctx, pos, out);
                     return;
                 }
                 if head_text == "fn" {
-                    walk_scope_fn(&children, source, pos, out);
+                    walk_scope_fn(&children, ctx, pos, out);
                     return;
                 }
                 if head_text == "letfn" {
-                    walk_scope_letfn(&children, source, pos, out);
+                    walk_scope_letfn(&children, ctx, pos, out);
                     return;
                 }
                 if head_text == "catch" || head_text == "as->" {
-                    walk_scope_binding_tail(&children, source, pos, out);
+                    walk_scope_binding_tail(&children, ctx, pos, out);
                     return;
                 }
                 // Type forms: the specs interleave protocol/type symbols with
@@ -3286,10 +3346,10 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                     _ => None,
                 };
                 if let Some(start) = specs_start {
-                    walk_scope_type_specs(&children[start.min(children.len())..], source, pos, out);
+                    walk_scope_type_specs(&children[start.min(children.len())..], ctx, pos, out);
                     if let Some(target) = children.get(1).filter(|_| start == 2) {
                         if lsp_range_contains(node_to_lsp_range(*target, source), pos) {
-                            walk_scope(*target, source, pos, out);
+                            walk_scope(*target, ctx, pos, out);
                         }
                     }
                     return;
@@ -3297,20 +3357,21 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
             }
         }
     }
-    descend_into(node, source, pos, out);
+    descend_into(node, ctx, pos, out);
 }
 
 /// `(let [pat expr …] body…)` and every `is_let_like` form. Bindings accumulate
 /// left-to-right, then the body sees them all.
-fn walk_scope_let(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn walk_scope_let(children: &[Node], ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBinding>) {
+    let source = ctx.source;
     if let Some(bindings) = children.get(1).filter(|n| n.kind() == "vec_lit") {
-        if walk_scope_binding_vec(*bindings, source, pos, out) {
+        if walk_scope_binding_vec(*bindings, ctx, pos, out) {
             return; // cursor was inside the binding vector; don't scan the body
         }
     }
     for body in children.iter().skip(2) {
         if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
-            walk_scope(*body, source, pos, out);
+            walk_scope(*body, ctx, pos, out);
             return;
         }
     }
@@ -3323,10 +3384,11 @@ fn walk_scope_let(children: &[Node], source: &str, pos: Position, out: &mut Vec<
 /// nested `:let`, or an LHS), so the caller stops before the body.
 fn walk_scope_binding_vec(
     bindings: Node,
-    source: &str,
+    ctx: &ScopeCtx,
     pos: Position,
     out: &mut Vec<LocalBinding>,
 ) -> bool {
+    let source = ctx.source;
     let items = named_children(bindings);
     let mut i = 0;
     while i < items.len() {
@@ -3337,13 +3399,13 @@ fn walk_scope_binding_vec(
             // any other (`:when`/`:while`) has a plain expression RHS.
             if node_text(lhs, source) == ":let" {
                 if let Some(v) = rhs.filter(|n| n.kind() == "vec_lit") {
-                    if walk_scope_binding_vec(v, source, pos, out) {
+                    if walk_scope_binding_vec(v, ctx, pos, out) {
                         return true;
                     }
                 }
             } else if let Some(r) = rhs {
                 if lsp_range_contains(node_to_lsp_range(r, source), pos) {
-                    walk_scope(r, source, pos, out);
+                    walk_scope(r, ctx, pos, out);
                     return true;
                 }
             }
@@ -3352,7 +3414,7 @@ fn walk_scope_binding_vec(
         }
         if let Some(r) = rhs {
             if lsp_range_contains(node_to_lsp_range(r, source), pos) {
-                walk_scope(r, source, pos, out); // cursor in this RHS: LHS not yet bound
+                walk_scope(r, ctx, pos, out); // cursor in this RHS: LHS not yet bound
                 return true;
             }
         }
@@ -3369,14 +3431,15 @@ fn walk_scope_binding_vec(
 /// for `children[3..]`. The occurrence-walker twin is `walk_binding_tail`.
 fn walk_scope_binding_tail(
     children: &[Node],
-    source: &str,
+    ctx: &ScopeCtx,
     pos: Position,
     out: &mut Vec<LocalBinding>,
 ) {
+    let source = ctx.source;
     // A cursor in the class/seed expression sees no new binding.
     if let Some(expr) = children.get(1) {
         if lsp_range_contains(node_to_lsp_range(*expr, source), pos) {
-            walk_scope(*expr, source, pos, out);
+            walk_scope(*expr, ctx, pos, out);
             return;
         }
     }
@@ -3393,7 +3456,7 @@ fn walk_scope_binding_tail(
     for body in children.iter().skip(3) {
         if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
             out.extend(bound);
-            walk_scope(*body, source, pos, out);
+            walk_scope(*body, ctx, pos, out);
             return;
         }
     }
@@ -3402,7 +3465,8 @@ fn walk_scope_binding_tail(
 /// `(are [x y] expr & values)`: the argv (`children[1]`, a `vec_lit` at the
 /// dispatch site) binds for the template `children[2]` alone; a cursor in a
 /// value sees nothing from it. The occurrence-walker twin is `walk_are_form`.
-fn walk_scope_are(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn walk_scope_are(children: &[Node], ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBinding>) {
+    let source = ctx.source;
     let mut bound = Vec::new();
     if let Some(argv) = children.get(1) {
         collect_binding_targets(*argv, source, &mut bound);
@@ -3415,31 +3479,33 @@ fn walk_scope_are(children: &[Node], source: &str, pos: Position, out: &mut Vec<
     if let Some(template) = children.get(2) {
         if lsp_range_contains(node_to_lsp_range(*template, source), pos) {
             out.extend(bound);
-            walk_scope(*template, source, pos, out);
+            walk_scope(*template, ctx, pos, out);
             return;
         }
     }
     for value in children.iter().skip(3) {
         if lsp_range_contains(node_to_lsp_range(*value, source), pos) {
-            walk_scope(*value, source, pos, out);
+            walk_scope(*value, ctx, pos, out);
             return;
         }
     }
 }
 
 /// `(fn name? [params] body…)` or multi-arity `(fn name? ([params] body…) …)`.
-fn walk_scope_fn(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn walk_scope_fn(children: &[Node], ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBinding>) {
+    let source = ctx.source;
     let mut rest_start = 1;
     if let Some(name) = children.get(1).filter(|n| n.kind() == "sym_lit") {
         collect_binding_targets(*name, source, out); // optional self-reference name
         rest_start = 2;
     }
-    walk_scope_fn_tail(&children[rest_start..], source, pos, out);
+    walk_scope_fn_tail(&children[rest_start..], ctx, pos, out);
 }
 
 /// Params + bodies of a fn-like tail: a leading vector binds params; each
 /// `([params] body…)` list is a per-arity scope entered only when it holds `pos`.
-fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn walk_scope_fn_tail(parts: &[Node], ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBinding>) {
+    let source = ctx.source;
     let mut params_bound = false;
     for child in parts {
         match child.kind() {
@@ -3461,7 +3527,9 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
                     return; // cursor on a param binding site: params self-resolve
                 }
             }
-            "list_lit" if arity_body(*child) => {
+            // An arity list only while no param vector was seen: after one,
+            // `([x] 0)` is a body expression calling a vector.
+            "list_lit" if !params_bound && arity_body(*child) => {
                 if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
                     let inner = named_children(*child);
                     let params = inner.first();
@@ -3482,7 +3550,7 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
                     }
                     for body in inner.iter().skip(1) {
                         if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
-                            walk_scope(*body, source, pos, out);
+                            walk_scope(*body, ctx, pos, out);
                             return;
                         }
                     }
@@ -3491,7 +3559,7 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
             }
             _ => {
                 if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
-                    walk_scope(*child, source, pos, out);
+                    walk_scope(*child, ctx, pos, out);
                     return;
                 }
             }
@@ -3505,16 +3573,17 @@ fn walk_scope_fn_tail(parts: &[Node], source: &str, pos: Position, out: &mut Vec
 fn walk_scope_def(
     kind: DefKind,
     children: &[Node],
-    source: &str,
+    ctx: &ScopeCtx,
     pos: Position,
     out: &mut Vec<LocalBinding>,
 ) {
+    let source = ctx.source;
     match kind {
         DefKind::Defn | DefKind::DefnPrivate | DefKind::Defmacro => {
             // Skip the name and everything between it and the parameters.
             let rest = skip_def_preamble(children, 2, source);
             if rest <= children.len() {
-                walk_scope_fn_tail(&children[rest.min(children.len())..], source, pos, out);
+                walk_scope_fn_tail(&children[rest.min(children.len())..], ctx, pos, out);
             }
         }
         DefKind::Defmethod => {
@@ -3522,25 +3591,25 @@ fn walk_scope_def(
             // be a vector, so params start at index 3, not "first vec_lit".
             if let Some(dispatch) = children.get(2) {
                 if lsp_range_contains(node_to_lsp_range(*dispatch, source), pos) {
-                    walk_scope(*dispatch, source, pos, out);
+                    walk_scope(*dispatch, ctx, pos, out);
                     return;
                 }
             }
             let rest = skip_def_preamble(children, 3, source);
             if children.len() > rest {
-                walk_scope_fn_tail(&children[rest..], source, pos, out);
+                walk_scope_fn_tail(&children[rest..], ctx, pos, out);
             }
         }
         DefKind::Defrecord | DefKind::Deftype => {
             if let Some(fields) = children.get(2).filter(|n| n.kind() == "vec_lit") {
                 collect_binding_targets(*fields, source, out);
             }
-            walk_scope_type_specs(&children[3.min(children.len())..], source, pos, out);
+            walk_scope_type_specs(&children[3.min(children.len())..], ctx, pos, out);
         }
         _ => {
             for child in children.iter().skip(2) {
                 if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
-                    walk_scope(*child, source, pos, out);
+                    walk_scope(*child, ctx, pos, out);
                     return;
                 }
             }
@@ -3554,7 +3623,13 @@ fn walk_scope_def(
 /// params bind for its bodies — after any fields already in `out`, so a param
 /// shadowing a field wins. Anything else descends generically. The
 /// occurrence-walker twins are `walk_type_specs` and `walk_method_impl`.
-fn walk_scope_type_specs(specs: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn walk_scope_type_specs(
+    specs: &[Node],
+    ctx: &ScopeCtx,
+    pos: Position,
+    out: &mut Vec<LocalBinding>,
+) {
+    let source = ctx.source;
     let Some(spec) = specs
         .iter()
         .find(|spec| lsp_range_contains(node_to_lsp_range(**spec, source), pos))
@@ -3569,16 +3644,17 @@ fn walk_scope_type_specs(specs: &[Node], source: &str, pos: Position, out: &mut 
             if lsp_range_contains(node_to_lsp_range(*name, source), pos) {
                 return;
             }
-            walk_scope_fn_tail(&inner[1..], source, pos, out);
+            walk_scope_fn_tail(&inner[1..], ctx, pos, out);
             return;
         }
     }
-    walk_scope(*spec, source, pos, out);
+    walk_scope(*spec, ctx, pos, out);
 }
 
 /// `(letfn [(name [params] body…) …] body…)`: the fn names are mutually
 /// recursive locals visible in every fn body and the letfn body.
-fn walk_scope_letfn(children: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+fn walk_scope_letfn(children: &[Node], ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBinding>) {
+    let source = ctx.source;
     let specs: Vec<Node> = children
         .get(1)
         .filter(|n| n.kind() == "vec_lit")
@@ -3599,13 +3675,13 @@ fn walk_scope_letfn(children: &[Node], source: &str, pos: Position, out: &mut Ve
     for spec in &specs {
         if spec.kind() == "list_lit" && lsp_range_contains(node_to_lsp_range(*spec, source), pos) {
             let inner = named_children(*spec);
-            walk_scope_fn_tail(&inner[1.min(inner.len())..], source, pos, out);
+            walk_scope_fn_tail(&inner[1.min(inner.len())..], ctx, pos, out);
             return;
         }
     }
     for body in children.iter().skip(2) {
         if lsp_range_contains(node_to_lsp_range(*body, source), pos) {
-            walk_scope(*body, source, pos, out);
+            walk_scope(*body, ctx, pos, out);
             return;
         }
     }
@@ -3742,7 +3818,7 @@ pub struct LocalRefs {
 /// and a same-named global outside the local's scope is not matched.
 pub fn local_references_at(source: &str, pos: Position, name: &str) -> Option<LocalRefs> {
     let tree = parse_tree(source)?;
-    local_references_at_tree(&tree, source, pos, name)
+    local_references_at_tree(&tree, source, pos, name, &ExtractConfig::default())
 }
 
 /// [`local_references_at`] over an already-parsed `tree` of `source`.
@@ -3751,8 +3827,15 @@ pub fn local_references_at_tree(
     source: &str,
     pos: Position,
     name: &str,
+    cfg: &ExtractConfig,
 ) -> Option<LocalRefs> {
     let root = tree.root_node();
+    let ns_meta = ns_meta_of_tree(tree, source);
+    let ctx = &ScopeCtx {
+        source,
+        ns_meta: &ns_meta,
+        lint_as: &cfg.lint_as,
+    };
 
     let mut occurrences = Vec::new();
     collect_name_occurrences(root, source, name, &mut occurrences);
@@ -3772,7 +3855,7 @@ pub fn local_references_at_tree(
         Some(range)
     };
 
-    let declaration = locals_at_node(root, source, pos)
+    let declaration = locals_at_node(root, ctx, pos)
         .into_iter()
         .rev()
         .find(|b| b.name == name)?
@@ -3792,14 +3875,14 @@ pub fn local_references_at_tree(
     // skip the scope filter below: a quoted `(fn [form] …)` is data, not a
     // rebinding. A cursor *on* the quoted symbol still resolves nothing: the
     // entry check above only accepts evaluated occurrences.
-    if let Some(template) = are_template_of_argv(root, source, declaration) {
+    if let Some(template) = are_template_of_argv(root, ctx, declaration) {
         collect_quoted_name_occurrences(template, false, source, name, &mut usages);
     }
     for occ in occurrences {
         if occ == declaration {
             continue; // the binding site itself, reported as the declaration
         }
-        let resolved = locals_at_node(root, source, occ.start)
+        let resolved = locals_at_node(root, ctx, occ.start)
             .into_iter()
             .rev()
             .find(|b| b.name == name)
@@ -3841,9 +3924,14 @@ pub fn destructured_entry_name_at_tree(
 
 /// The template expression of the `are` form whose argv holds the binding
 /// site at `declaration`, if it is one: the innermost enclosing `vec_lit` that
-/// is the second child of a list headed by `are` (name part; the locals walker
-/// has no ns metadata, see `walk_scope`). `None` for every other binding.
-fn are_template_of_argv<'a>(root: Node<'a>, source: &str, declaration: Range) -> Option<Node<'a>> {
+/// is the second child of a list headed by `are` (by fqn, as `walk_scope`
+/// resolves it). `None` for every other binding.
+fn are_template_of_argv<'a>(
+    root: Node<'a>,
+    ctx: &ScopeCtx,
+    declaration: Range,
+) -> Option<Node<'a>> {
+    let source = ctx.source;
     let sym = find_binding_sym(root, source, declaration)?;
     let mut node = sym;
     while let Some(parent) = node.parent() {
@@ -3851,7 +3939,7 @@ fn are_template_of_argv<'a>(root: Node<'a>, source: &str, declaration: Range) ->
             let children = named_children(parent);
             let is_are_argv = children
                 .first()
-                .map(|h| h.kind() == "sym_lit" && node_text(sym_name_node(*h), source) == "are")
+                .map(|h| h.kind() == "sym_lit" && are_head_fqn(*h, ctx.ns_meta, source).is_some())
                 == Some(true)
                 && children.get(1).map(|n| n.id()) == Some(node.id());
             if is_are_argv {

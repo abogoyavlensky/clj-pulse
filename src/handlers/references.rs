@@ -5,7 +5,9 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::{DocumentStore, Snapshot};
-use crate::index::{extractor, DefKind, Dialect, Index, Occurrence, Symbol, SymbolSource};
+use crate::index::{
+    extractor, DefKind, Dialect, ExtractConfig, Index, Occurrence, Symbol, SymbolSource,
+};
 
 use super::{builds, factory_target, CtorShape};
 
@@ -20,9 +22,13 @@ pub fn references(
     // Local bindings (let/fn/loop/…) shadow vars and are never recorded as
     // occurrences, so resolve their usages structurally, before the fqn path.
     // When the cursor is on a local, this is authoritative — don't fall through.
-    if let Some(locations) =
-        local_references(documents, &uri, pos, params.context.include_declaration)
-    {
+    if let Some(locations) = local_references(
+        index,
+        documents,
+        &uri,
+        pos,
+        params.context.include_declaration,
+    ) {
         return Ok((!locations.is_empty()).then_some(locations));
     }
 
@@ -70,12 +76,13 @@ pub fn references(
 /// `Some` — possibly empty — when it is, so a local never leaks into the fqn
 /// path. Mirrors `local_definition`'s keyword/qualified guards.
 fn local_references(
+    index: &Index,
     documents: &DocumentStore,
     uri: &Url,
     pos: Position,
     include_declaration: bool,
 ) -> Option<Vec<Location>> {
-    let (_, refs) = local_refs_at(documents, uri, pos)?;
+    let (_, refs) = local_refs_at(index, documents, uri, pos)?;
 
     let mut locations = Vec::new();
     if include_declaration {
@@ -124,6 +131,7 @@ pub(crate) fn local_name_at(
 /// fall back to the fqn path. Shared by find-references, rename and document
 /// highlight so they all agree on what counts as a local.
 pub(crate) fn local_refs_at(
+    index: &Index,
     documents: &DocumentStore,
     uri: &Url,
     pos: Position,
@@ -131,7 +139,13 @@ pub(crate) fn local_refs_at(
     // `local_references_at_tree` makes the entry check itself.
     let (word, _) = local_name_at(documents, uri, pos)?;
     let snapshot = documents.snapshot(uri)?;
-    let refs = extractor::local_references_at_tree(&snapshot.tree, &snapshot.text, pos, &word)?;
+    let refs = extractor::local_references_at_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        pos,
+        &word,
+        &index.extract_config(),
+    )?;
     Some((word, refs))
 }
 
@@ -141,6 +155,7 @@ pub(crate) fn local_refs_at(
 /// means something else. A new name that merely shadows a *var* is allowed —
 /// that is ordinary Clojure, and the local wins by design.
 fn reject_local_capture(
+    cfg: &ExtractConfig,
     snapshot: &Snapshot,
     refs: &extractor::LocalRefs,
     word: &str,
@@ -148,9 +163,10 @@ fn reject_local_capture(
 ) -> Result<()> {
     let sites = std::iter::once(refs.declaration).chain(refs.usages.iter().copied());
     for site in sites {
-        let taken = extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, site.start)
-            .into_iter()
-            .any(|b| b.name == new_name);
+        let taken =
+            extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, site.start, cfg)
+                .into_iter()
+                .any(|b| b.name == new_name);
         if taken {
             anyhow::bail!(
                 "cannot rename '{}' to '{}': '{}' is already bound in that scope",
@@ -218,7 +234,7 @@ pub fn rename_target(
     // Locals (let/fn/defn params, destructuring, …) are resolved structurally
     // and never reach the fqn path, so renaming a param that shadows a global
     // edits only the local's own binding and usages, all in this document.
-    if let Some((word, refs)) = local_refs_at(documents, uri, pos) {
+    if let Some((word, refs)) = local_refs_at(index, documents, uri, pos) {
         if refs.destructured_key {
             anyhow::bail!(
                 "cannot rename a :keys/:strs/:syms destructured binding '{}': \
@@ -647,7 +663,7 @@ pub fn rename(
     let (fqn, sym) = match target {
         RenameTarget::Local { word, refs } => {
             if let Some(snapshot) = documents.snapshot(&uri) {
-                reject_local_capture(&snapshot, &refs, &word, &new_name)?;
+                reject_local_capture(&index.extract_config(), &snapshot, &refs, &word, &new_name)?;
             }
             let mut edits = vec![TextEdit {
                 range: refs.declaration,

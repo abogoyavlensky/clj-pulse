@@ -37,7 +37,7 @@ pub fn handle(
     // Local bindings (let/fn/loop/…) shadow vars, so a cursor on a locally-bound
     // name navigates to its binding site in the same file — checked before the
     // var/alias/core resolvers below.
-    if let Some(loc) = local_definition(documents, &uri, pos) {
+    if let Some(loc) = local_definition(index, documents, &uri, pos) {
         return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
     }
 
@@ -134,13 +134,23 @@ pub fn handle(
 /// part (`references::local_name_at`), or any name not bound in scope at `pos`, so ordinary var/alias/namespace resolution proceeds unchanged.
 /// The innermost binding wins, so a local correctly shadows an outer one or a
 /// same-named global var.
-fn local_definition(documents: &DocumentStore, uri: &Url, pos: Position) -> Option<Location> {
+fn local_definition(
+    index: &Index,
+    documents: &DocumentStore,
+    uri: &Url,
+    pos: Position,
+) -> Option<Location> {
     let (word, entry) = super::references::local_name_at(documents, uri, pos)?;
     let snapshot = documents.snapshot(uri)?;
-    let binding = extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, pos)
-        .into_iter()
-        .rev()
-        .find(|b| b.name == word)?;
+    let binding = extractor::locals_in_scope_at_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        pos,
+        &index.extract_config(),
+    )
+    .into_iter()
+    .rev()
+    .find(|b| b.name == word)?;
     // A `{:keys [c/x]}` entry names a local only where it is the binding: as
     // data it reads the var `c/x`, whatever `x` is in scope around it.
     if entry.is_some_and(|range| range != binding.name_range) {

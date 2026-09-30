@@ -21,7 +21,7 @@ pub fn document_highlight(
     // Locals shadow vars and are never recorded as occurrences, so resolve
     // them structurally first. As in `references`, this branch is
     // authoritative: a param shadowing a global highlights only itself.
-    if let Some(highlights) = local_highlights(documents, &uri, pos) {
+    if let Some(highlights) = local_highlights(index, documents, &uri, pos) {
         return Ok((!highlights.is_empty()).then_some(highlights));
     }
 
@@ -94,11 +94,12 @@ pub fn document_highlight(
 /// usage a READ. `None` when the cursor is not on a local, so the caller falls
 /// through to the fqn path.
 fn local_highlights(
+    index: &Index,
     documents: &DocumentStore,
     uri: &Url,
     pos: Position,
 ) -> Option<Vec<DocumentHighlight>> {
-    let (_, refs) = references::local_refs_at(documents, uri, pos)?;
+    let (_, refs) = references::local_refs_at(index, documents, uri, pos)?;
     let mut highlights = vec![highlight(refs.declaration, DocumentHighlightKind::WRITE)];
     for range in refs.usages {
         highlights.push(highlight(range, DocumentHighlightKind::READ));
