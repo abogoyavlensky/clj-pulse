@@ -1,5 +1,7 @@
 # Locals Under `binding`/`let` and Macro Heads in a `for` `:let` Implementation Plan
 
+**Status:** completed 2026-09-30.
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the two `bb compare` backlog entries the gaps change already resolved — locals inside `(binding […] (let […] …))` and `one-of` in a `for` `:let` — with regression tests, archive them, and record the remaining `local/plain` class as a backlog entry.
@@ -133,7 +135,7 @@ is the closing evidence and is already recorded.
 **Files:**
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Add the item** under Milestone 5, directly before
+- [x] **Step 1: Add the item** under Milestone 5, directly before
   `- [ ] **Release**`, in the style of its neighbours:
   `- [ ] **Locals under `binding`/`let` and macro heads in a `for` `:let`.**`
   with two or three lines saying both were resolved by the gaps change and
@@ -143,7 +145,7 @@ is the closing evidence and is already recorded.
   line (working rule 1 asks for the `in progress` status; Task 6 flips it
   to `done`).
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -m "docs: start the binding/let locals and for :let macro-head item"`
 
 ### Task 2: Regression test for locals under `binding`/`let`
@@ -152,7 +154,7 @@ is the closing evidence and is already recorded.
 - Modify: `tests/test_extractor.rs` (the `gaps` mod, after
   `test_comment_in_let_vector_does_not_shift_pairs`)
 
-- [ ] **Step 1: Write the test** `test_binding_then_let_with_comment_and_split_pair`.
+- [x] **Step 1: Write the test** `test_binding_then_let_with_comment_and_split_pair`.
   Source, as a raw string so the columns are easy to read:
 
   ```clojure
@@ -183,21 +185,23 @@ is the closing evidence and is already recorded.
     LHS): usages on line 10 alone.
   - `analysis(src).unused_bindings` is empty.
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
   Run: `cargo test --test test_extractor gaps::test_binding_then_let -- --nocapture`
   Expected: PASS. If a line number assertion fails, check the corpus
   reproduction in the Design section before touching the walker: the
   expectation above was verified on master with the fuller corpus shape.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "test: locals under binding/let with a comment and a split pair"`
+
+> Deviation: the Codex review checkpoint ran once over Tasks 1–3 together (one commit is a ROADMAP line, the tests are two short additions) instead of after each task; it found nothing actionable. Tasks 4–6 are docs-only and got one review at the end.
 
 ### Task 3: Regression test for a macro head in a `for` `:let`
 
 **Files:**
 - Modify: `tests/test_extractor.rs` (the `gaps` mod, after Task 2's test)
 
-- [ ] **Step 1: Write the test** `test_macro_head_in_for_let_and_after_a_comment_is_a_usage`.
+- [x] **Step 1: Write the test** `test_macro_head_in_for_let_and_after_a_comment_is_a_usage`.
   Source:
 
   ```clojure
@@ -223,11 +227,11 @@ is the closing evidence and is already recorded.
   is `None`. Also assert `analysis(src).unused_bindings` is empty, so the
   `kw` rebinding and `sq?` are read as bound and used.
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
   Run: `cargo test --test test_extractor gaps::test_macro_head -- --nocapture`
   Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "test: a referred macro head in a for :let stays a var usage"`
 
 ### Task 4: Backlog entry for method params in type bodies
@@ -236,7 +240,7 @@ is the closing evidence and is already recorded.
 - Create: `docs/backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md`
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: Write the issue file** in the shape of the 2026-09-17
+- [x] **Step 1: Write the issue file** in the shape of the 2026-09-17
   entries. Title: "Method params in `deftype`/`defrecord`/`extend-*` bodies
   are not locals". Found: 2026-09-30, `bb compare` re-run on the clj-kondo
   corpus while closing the two gap entries; bucket `local/plain`. Status:
@@ -255,12 +259,12 @@ is the closing evidence and is already recorded.
   body `v`; `bb compare` `local/plain` on clj-kondo (3 diverge, 6 null on
   2026-09-30, all this class).
 
-- [ ] **Step 2: ROADMAP Backlog line**, newest last, dated 2026-09-30,
+- [x] **Step 2: ROADMAP Backlog line**, newest last, dated 2026-09-30,
   one sentence with the link:
   `[Method params in type bodies are not locals](backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md)`
   — the nine `local/plain` answers `bb compare` still flags on clj-kondo.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -m "backlog: method params in deftype/extend-* bodies are not locals"`
 
 ### Task 5: Record the compare run
@@ -268,7 +272,7 @@ is the closing evidence and is already recorded.
 **Files:**
 - Modify: `docs/MEMORY.md`
 
-- [ ] **Step 1: Add a subsection** after "After `defmulti`, constructor
+- [x] **Step 1: Add a subsection** after "After `defmulti`, constructor
   and `:lint-as` declare sites (2026-09-29)":
   `### Re-check of the two gap-resolved local entries (2026-09-30)`.
   Three to five sentences, no table: same corpus, kondo and container on
@@ -280,7 +284,7 @@ is the closing evidence and is already recorded.
   misses are all method params in type bodies (link the new backlog file).
   Mention the compare log name is not kept — the numbers are.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   `git commit -m "docs: record the 2026-09-30 compare re-check"`
 
 ### Task 6: Archive and close out
@@ -290,7 +294,7 @@ is the closing evidence and is already recorded.
 - Move: `docs/backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md` → `docs/archive/`
 - Modify: `docs/ROADMAP.md`
 
-- [ ] **Step 1: `git mv` both files** into `docs/archive/`, then replace
+- [x] **Step 1: `git mv` both files** into `docs/archive/`, then replace
   each `**Status:** open.` line with
   `**Status:** fixed 2026-09-18 by the gaps change (plan `docs/plans/2026-09-18-0751-discards-and-comments-are-gaps.md`); regression test added 2026-09-30 (plan `docs/plans/2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md`); archived.`
   keeping the "Sites were …" tail as the archived entries do. Add one
@@ -299,12 +303,12 @@ is the closing evidence and is already recorded.
   comment at `usages.clj:138`), so a reader does not re-suspect `binding`
   or the `:let` rebinding.
 
-- [ ] **Step 2: ROADMAP** — tick the Milestone 5 item, rewrite its two
+- [x] **Step 2: ROADMAP** — tick the Milestone 5 item, rewrite its two
   issue links from `backlog/` to `archive/`, append ` — done` to its
   `Plan:` line, and delete the two sub-lines under the 2026-09-17 Backlog
   entry (leave the entry and its other two sub-lines).
 
-- [ ] **Step 3: README and AGENTS.md** (`CLAUDE.md` is a symlink to
+- [x] **Step 3: README and AGENTS.md** (`CLAUDE.md` is a symlink to
   `AGENTS.md`) — working rule 2 asks for both in the closing change. Read
   the README features paragraph and the `AGENTS.md` "Testing notes" and
   the locals/rename invariants against what this plan changed. No server
@@ -313,10 +317,32 @@ is the closing evidence and is already recorded.
   it. Say in the commit message which of the two changed and why the
   other did not.
 
-- [ ] **Step 4: `bb check`**
+- [x] **Step 4: `bb check`**
   Run: `bb check`
   Expected: fmt clean, clippy clean, all tests pass (including the two
   new ones and `compare_simple_project`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git commit -m "docs: archive the binding/let locals and for :let one-of issues (README, CLAUDE.md unchanged)"`
+
+## Completion summary
+
+No server code changed. Both entries were the comment-in-a-binding-vector
+class the gaps change (#43) fixed; `bb compare clj-kondo` on master
+reproduced the 2026-09-29 numbers with neither site flagged. Added two
+regression tests in the `gaps` mod of `tests/test_extractor.rs` pinning
+the `binding`-then-`let` shape (comment in the inner vector, split pair,
+`:keys` name rebound) and the referred macro head in a `for` `:let` and
+after a comment in a `let` vector. Archived both issue files with the
+mechanism recorded, ticked the Milestone 5 item, added a dated MEMORY
+note, and filed one new backlog entry for the class that is all nine
+remaining `local/plain` misses: method params inside `deftype`,
+`defrecord`, `extend-protocol` and `extend-type` bodies. README and
+AGENTS.md reviewed and left unchanged. `bb check` green.
+
+Deviations: one Codex review over Tasks 1–3 instead of three, one over
+Tasks 4–6.
+
+What the plan could have specified better: nothing — the test sources
+were verified as written before the plan was committed, and the line
+assertions held.
