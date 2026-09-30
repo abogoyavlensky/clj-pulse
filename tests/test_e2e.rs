@@ -9231,3 +9231,131 @@ fn test_e2e_highlight_covers_constructors() {
     ];
     assert_eq!(found, expected, "{result}");
 }
+
+// --- a var referred under another name (`:refer [foo] :rename {foo f}`) ------
+
+/// A defining namespace and a consumer that refers `foo` as `f`.
+fn write_refer_rename_fixture(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let source = root.join("src/refsrc.clj");
+    let user = root.join("src/refuser.clj");
+    std::fs::write(&source, "(ns simple.refsrc)\n\n(defn foo [] 1)\n\n(foo)\n").unwrap();
+    std::fs::write(
+        &user,
+        "(ns simple.refuser\n  (:require [simple.refsrc :refer [foo] :rename {foo f}]))\n\n(f)\n",
+    )
+    .unwrap();
+    (source, user)
+}
+
+/// The text of every file a rename edits, keyed by file name, after the edits.
+fn renamed_files(result: &Value) -> std::collections::BTreeMap<String, String> {
+    result["changes"]
+        .as_object()
+        .expect("WorkspaceEdit.changes")
+        .iter()
+        .map(|(uri, edits)| {
+            let path = uri.strip_prefix("file://").unwrap();
+            let text = std::fs::read_to_string(path).unwrap();
+            (
+                Path::new(path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                apply_edits(&text, edits.as_array().unwrap()),
+            )
+        })
+        .collect()
+}
+
+const REFUSER_RENAMED: &str =
+    "(ns simple.refuser\n  (:require [simple.refsrc :refer [bar] :rename {bar f}]))\n\n(f)\n";
+const REFSRC_RENAMED: &str = "(ns simple.refsrc)\n\n(defn bar [] 1)\n\n(bar)\n";
+
+#[test]
+fn test_e2e_rename_keeps_a_refer_renamed_local_name() {
+    // Renaming `foo` rewrites the `:refer` entry and the `:rename` key; the
+    // local name `f` and its calls stay. The consumer is *not* open, so its
+    // text is read from disk to check what each site spells.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let (source, _user) = write_refer_rename_fixture(&root);
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&source);
+
+    let (line, ch) = start_in(&source, "foo [] 1");
+    let result = client.rename(&source, line, ch + 1, "bar");
+    let files = renamed_files(&result);
+    assert_eq!(files.len(), 2, "{result}");
+    assert_eq!(files["refsrc.clj"], REFSRC_RENAMED, "{result}");
+    assert_eq!(files["refuser.clj"], REFUSER_RENAMED, "{result}");
+}
+
+#[test]
+fn test_e2e_rename_from_the_rename_key() {
+    // The key is a site of the var: a rename started there is the same rename,
+    // with the consumer open this time (live text).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let (source, user) = write_refer_rename_fixture(&root);
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&user);
+
+    let (line, ch) = start_in(&user, "foo f}");
+    let range = client.prepare_rename(&user, line, ch + 1);
+    assert_eq!(range["start"]["character"], json!(ch), "{range}");
+    assert_eq!(range["end"]["character"], json!(ch + 3), "{range}");
+
+    let result = client.rename(&user, line, ch + 1, "bar");
+    let files = renamed_files(&result);
+    assert_eq!(files.len(), 2, "{result}");
+    assert_eq!(files["refsrc.clj"], REFSRC_RENAMED, "{result}");
+    assert_eq!(files["refuser.clj"], REFUSER_RENAMED, "{result}");
+
+    // References list the key and the call under its local name.
+    let (def_line, def_ch) = start_in(&source, "foo [] 1");
+    client.did_open(&source);
+    let refs = client.references(&source, def_line, def_ch + 1, true);
+    let mut expected = vec![
+        site(&source, "foo [] 1", 0),
+        site(&source, "(foo)", 1),
+        site(&user, "foo]", 0),
+        site(&user, "foo f}", 0),
+        site(&user, "(f)", 1),
+    ];
+    expected.sort();
+    assert_eq!(loc_starts(&refs), expected, "{refs}");
+}
+
+#[test]
+fn test_e2e_rename_refuses_on_the_refer_renamed_name() {
+    // `f` is `simple.refsrc/foo` under another name: there is no `foo` in the
+    // token to rewrite, so prepareRename and rename refuse alike.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let (_source, user) = write_refer_rename_fixture(&root);
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&user);
+
+    let (line, ch) = start_in(&user, "(f)");
+    let prepared = client.prepare_rename_error(&user, line, ch + 1);
+    assert!(
+        prepared.contains("cannot rename 'f' here") && prepared.contains("simple.refsrc/foo"),
+        "{prepared}"
+    );
+    let renamed = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", user.display()) },
+            "position": { "line": line, "character": ch + 1 },
+            "newName": "bar"
+        }),
+    );
+    assert_eq!(renamed["message"].as_str().unwrap(), prepared);
+}
