@@ -3150,9 +3150,9 @@ pub struct LocalBinding {
 /// only into the child subtree containing `pos`. It mirrors the scope rules of
 /// the occurrence walker (`walk_let_form`/`walk_fn_form`/`walk_letfn_form`/
 /// `collect_binding_names`); `collect_binding_targets` additionally records each
-/// name's range. Exotic type-spec method params (`reify`/`extend-*`) are left to
-/// generic descent — enclosing scopes stay correct, those method params don't
-/// bind (outside the `let`/`fn` cases this targets).
+/// name's range. Method impls in type forms (`defrecord`/`deftype`/`reify`/
+/// `extend-*`) bind their params like the occurrence walker's
+/// `walk_method_impl` (`walk_scope_type_specs`).
 ///
 /// Limitation: only literal binding heads are recognized. A `:lint-as` macro
 /// mapped to `defn`/`defmacro` is not treated as a binding form here (that would
@@ -3274,6 +3274,24 @@ fn walk_scope(node: Node, source: &str, pos: Position, out: &mut Vec<LocalBindin
                 }
                 if head_text == "catch" || head_text == "as->" {
                     walk_scope_binding_tail(&children, source, pos, out);
+                    return;
+                }
+                // Type forms: the specs interleave protocol/type symbols with
+                // method impls, whose params bind (`walk_type_specs` is the
+                // occurrence-walker twin). `extend-type`/`extend-protocol`
+                // name a type or protocol first; `reify` starts with specs.
+                let specs_start = match head_text {
+                    "extend-type" | "extend-protocol" => Some(2),
+                    "reify" => Some(1),
+                    _ => None,
+                };
+                if let Some(start) = specs_start {
+                    walk_scope_type_specs(&children[start.min(children.len())..], source, pos, out);
+                    if let Some(target) = children.get(1).filter(|_| start == 2) {
+                        if lsp_range_contains(node_to_lsp_range(*target, source), pos) {
+                            walk_scope(*target, source, pos, out);
+                        }
+                    }
                     return;
                 }
             }
@@ -3517,12 +3535,7 @@ fn walk_scope_def(
             if let Some(fields) = children.get(2).filter(|n| n.kind() == "vec_lit") {
                 collect_binding_targets(*fields, source, out);
             }
-            for child in children.iter().skip(3) {
-                if lsp_range_contains(node_to_lsp_range(*child, source), pos) {
-                    walk_scope(*child, source, pos, out);
-                    return;
-                }
-            }
+            walk_scope_type_specs(&children[3.min(children.len())..], source, pos, out);
         }
         _ => {
             for child in children.iter().skip(2) {
@@ -3533,6 +3546,34 @@ fn walk_scope_def(
             }
         }
     }
+}
+
+/// The protocol/method specs of a type form (`defrecord`, `deftype`,
+/// `extend-type`, `extend-protocol`, `reify`): a list spec headed by a symbol
+/// is a method impl `(name [params] body…)` or its multi-arity form, and its
+/// params bind for its bodies — after any fields already in `out`, so a param
+/// shadowing a field wins. Anything else descends generically. The
+/// occurrence-walker twins are `walk_type_specs` and `walk_method_impl`.
+fn walk_scope_type_specs(specs: &[Node], source: &str, pos: Position, out: &mut Vec<LocalBinding>) {
+    let Some(spec) = specs
+        .iter()
+        .find(|spec| lsp_range_contains(node_to_lsp_range(**spec, source), pos))
+    else {
+        return;
+    };
+    if spec.kind() == "list_lit" {
+        let inner = named_children(*spec);
+        if let Some(name) = inner.first().filter(|n| n.kind() == "sym_lit") {
+            // The method name is outside its own params' scope: a cursor on
+            // `count` in `(count [count] …)` is on the method.
+            if lsp_range_contains(node_to_lsp_range(*name, source), pos) {
+                return;
+            }
+            walk_scope_fn_tail(&inner[1..], source, pos, out);
+            return;
+        }
+    }
+    walk_scope(*spec, source, pos, out);
 }
 
 /// `(letfn [(name [params] body…) …] body…)`: the fn names are mutually

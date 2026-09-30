@@ -2794,3 +2794,122 @@ fn test_lint_as_defprotocol_indexes_methods_and_callers() {
     tag_lines.sort();
     assert_eq!(tag_lines, vec![2, 3], "impl head and call only: {:?}", occs);
 }
+
+// --- method params in type and protocol bodies are locals --------------------
+
+mod method_params {
+    use clj_pulse::index::extractor::{local_references_at, locals_in_scope_at};
+    use tower_lsp::lsp_types::Position;
+
+    /// The position `offset` characters into the first `needle` in `src`
+    /// (ASCII sources).
+    fn pos(src: &str, needle: &str, offset: u32) -> Position {
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in {src:?}"));
+        let line = src[..at].matches('\n').count() as u32;
+        let line_start = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        Position::new(line, (at - line_start) as u32 + offset)
+    }
+
+    fn names_at(src: &str, p: Position) -> Vec<String> {
+        locals_in_scope_at(src, p)
+            .into_iter()
+            .map(|b| b.name)
+            .collect()
+    }
+
+    /// The declaration the innermost binding of `name` at `p` points to.
+    fn declared_at(src: &str, p: Position, name: &str) -> Position {
+        locals_in_scope_at(src, p)
+            .into_iter()
+            .rev()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is a local at {p:?} in {src:?}"))
+            .name_range
+            .start
+    }
+
+    #[test]
+    fn extend_protocol_method_param_is_a_local() {
+        let src = "(ns x)\n(extend-protocol P\n  Object\n  (m [v]\n    (inc v)))\n";
+        let usage = pos(src, "(inc v)", 5);
+        assert_eq!(declared_at(src, usage, "v"), pos(src, "[v]", 1));
+        let refs = local_references_at(src, pos(src, "[v]", 1), "v").expect("`v` is a local");
+        assert_eq!(refs.declaration.start, pos(src, "[v]", 1));
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+        assert_eq!(refs.usages[0].start, usage);
+    }
+
+    #[test]
+    fn extend_type_method_param_is_a_local() {
+        let src = "(ns x)\n(extend-type T\n  P\n  (m [this x] (f x)))\n";
+        assert_eq!(names_at(src, pos(src, "(f x)", 3)), vec!["this", "x"]);
+    }
+
+    #[test]
+    fn deftype_method_param_shadows_a_field() {
+        let src = "(ns x)\n(deftype T [reader]\n  P\n  (get-line [reader] (str reader))\n  (peek-it [this] (first reader)))\n";
+        assert_eq!(
+            declared_at(src, pos(src, "(str reader)", 5), "reader"),
+            pos(src, "[reader] (str", 1),
+            "the param, not the field"
+        );
+        assert_eq!(
+            declared_at(src, pos(src, "(first reader)", 7), "reader"),
+            pos(src, "[reader]\n", 1),
+            "the field where no param shadows it"
+        );
+        // References from the param stay inside its method.
+        let refs = local_references_at(src, pos(src, "[reader] (str", 1), "reader").unwrap();
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+        // The field's own references skip the shadowing method.
+        let field = local_references_at(src, pos(src, "[reader]\n", 1), "reader").unwrap();
+        assert_eq!(field.usages.len(), 1, "{field:?}");
+        assert_eq!(field.usages[0].start, pos(src, "(first reader)", 7));
+    }
+
+    #[test]
+    fn defrecord_method_sees_fields_and_params() {
+        let src = "(ns x)\n(defrecord R [a]\n  P\n  (m [_ b] (+ a b)))\n";
+        assert_eq!(names_at(src, pos(src, "(+ a b)", 3)), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn reify_method_param_is_a_local() {
+        let src = "(ns x)\n(def r (reify P (m [this y] (inc y))))\n";
+        assert_eq!(names_at(src, pos(src, "(inc y)", 5)), vec!["this", "y"]);
+    }
+
+    #[test]
+    fn multi_arity_method_binds_per_arity() {
+        let src = "(ns x)\n(deftype T []\n  P\n  (m ([x] (one x))\n     ([x y] (two x y))))\n";
+        assert_eq!(names_at(src, pos(src, "(one x)", 5)), vec!["x"]);
+        assert_eq!(names_at(src, pos(src, "(two x y)", 7)), vec!["x", "y"]);
+        assert_eq!(
+            declared_at(src, pos(src, "(two x y)", 5), "x"),
+            pos(src, "[x y]", 1)
+        );
+    }
+
+    #[test]
+    fn protocol_symbol_and_method_name_bind_nothing() {
+        let src = "(ns x)\n(extend-protocol Proto\n  Object\n  (meth [v] v))\n";
+        assert!(names_at(src, pos(src, "Proto", 2)).is_empty());
+        assert!(names_at(src, pos(src, "Object", 2)).is_empty());
+        assert!(names_at(src, pos(src, "meth", 2)).is_empty());
+    }
+
+    #[test]
+    fn realistic_replace_children_shape() {
+        // rewrite-clj's SeqNode, as in the clj-kondo corpus.
+        let src = "(ns x)\n(defrecord SeqNode [tag children]\n  node/Node\n  (tag [this] tag)\n  node/InnerNode\n  (replace-children [this children']\n    (assoc this :children children')))\n";
+        let usage = pos(src, "children'))", 2);
+        let refs = local_references_at(src, usage, "children'").expect("a local");
+        assert_eq!(refs.declaration.start, pos(src, "children']", 0));
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+        let this_refs =
+            local_references_at(src, pos(src, "(assoc this", 7), "this").expect("a local");
+        assert_eq!(this_refs.declaration.start, pos(src, "this children']", 0));
+    }
+}
