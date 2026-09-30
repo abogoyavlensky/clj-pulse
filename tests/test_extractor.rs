@@ -267,6 +267,66 @@ mod gaps {
         );
     }
 
+    /// The corpus shape behind the "locals under `binding`/`let`" issue:
+    /// a `;;` comment inside the inner `let` vector re-paired the bindings
+    /// after it, and a name split from its value across two lines made the
+    /// shifted pairing look like a `binding`-form problem (archive,
+    /// 2026-09-17). `binding` is not let-like on purpose and is descended
+    /// through generically.
+    #[test]
+    fn test_binding_then_let_with_comment_and_split_pair() {
+        let src = r#"(ns x (:require [h :as hooks]))
+(defn run! [{:keys [config debug copy-configs] :as args}]
+  (let [copy-configs (if copy-configs (run! args) copy-configs)]
+    (binding [hooks/*debug* debug]
+      (let [cfg-dir
+            (cond config (config) :else (str "user.dir"))
+            ;; a comment inside the binding vector
+            config (assoc config :dir cfg-dir)
+            classpath (:classpath config)
+            config (dissoc config :classpath)]
+        [copy-configs cfg-dir config classpath]))))
+"#;
+        let lines = |refs: &clj_pulse::index::extractor::LocalRefs| -> Vec<u32> {
+            refs.usages.iter().map(|u| u.start.line).collect()
+        };
+
+        let cfg_dir = Position::new(4, col(src, 4, "cfg-dir"));
+        let refs = local_references_at(src, cfg_dir, "cfg-dir").expect("`cfg-dir` is a local");
+        assert_eq!(lines(&refs), vec![7, 10], "cfg-dir usages: {refs:?}");
+
+        // The first inner rebinding of the `:keys` name: its own line is the
+        // declaration, its RHS reads the outer entry, and the last rebinding
+        // shadows it in the body.
+        let config = Position::new(7, col(src, 7, "config (assoc"));
+        let refs = local_references_at(src, config, "config").expect("`config` is a local");
+        assert_eq!(
+            refs.declaration.start.line, 7,
+            "declared by the inner let: {refs:?}"
+        );
+        assert!(
+            !refs.destructured_key,
+            "the inner binding is no :keys entry"
+        );
+        assert_eq!(lines(&refs), vec![8, 9], "config usages: {refs:?}");
+
+        let copy_configs = Position::new(2, col(src, 2, "copy-configs"));
+        let refs = local_references_at(src, copy_configs, "copy-configs")
+            .expect("`copy-configs` is a local");
+        assert_eq!(
+            lines(&refs),
+            vec![10],
+            "the outer let's binding is read in the inner body"
+        );
+
+        let a = analysis(src);
+        assert!(
+            a.unused_bindings.is_empty(),
+            "every binding is used: {:?}",
+            a.unused_bindings
+        );
+    }
+
     #[test]
     fn test_discarded_usage_does_not_count_for_the_local() {
         let src = "(ns x)\n(let [a 1] #_a nil)\n";
