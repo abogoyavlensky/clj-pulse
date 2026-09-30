@@ -2,7 +2,7 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `local/plain`, `local/destructured`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
+- **Status:** fixed 2026-09-18 by the gaps change (plan `docs/plans/2026-09-18-0751-discards-and-comments-are-gaps.md`); regression test added 2026-09-30 (plan `docs/plans/2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md`); archived. Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom
@@ -10,6 +10,11 @@
 Inside a `let` nested in `binding`, references on a local find the binding
 alone, and a rebinding of a name that an outer `:keys` destructuring also
 binds resolves to the outer binding instead of its own usages.
+
+The mechanism was the `;; for backward compatibility …` comment inside the
+inner `let` vector (`core.clj:138`), a named child the walker counted as a
+form, so every pair after it shifted; the `binding` form and the split
+`cfg-dir` pair were bystanders (re-check of 2026-09-30).
 
 ## Evidence
 
