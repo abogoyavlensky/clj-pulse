@@ -341,6 +341,17 @@ the release.
       `programs` agree throughout, and `var-def/deftype` went from 0 to 18 of
       20; record `->T` calls are `known` supersets.
       Plan: [2026-09-29-2038-defmulti-constructors-lint-as-declare.md](plans/2026-09-29-2038-defmulti-constructors-lint-as-declare.md) — done
+- [x] **Locals under `binding`/`let` and macro heads in a `for` `:let`.**
+      Inside a `let` nested in `binding`, references on a local found the
+      binding alone and a rebinding of a `:keys` name resolved to the outer
+      entry; a referred macro head in a `for` `:let` vector resolved to its
+      own line. Both were a `;;` comment inside the binding vector re-pairing
+      the bindings, which the gaps change fixed; this item pins the shapes
+      with regression tests and archives the issues. Issues:
+      [locals inside `(binding […] (let […] …))`](archive/2026-09-17-locals-under-binding-and-let.md),
+      [`one-of` in a `for` `:let`](archive/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md)
+      (Backlog, 2026-09-17).
+      Plan: [2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md](plans/2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -416,10 +427,7 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-17 `bb compare` on clj-kondo found fourteen divergence classes, one
   issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
   got, where to look, how to verify):
-  - [Locals inside `(binding […] (let […] …))` resolve wrong](backlog/2026-09-17-locals-under-binding-and-let.md).
-  - [`import-vars` re-exports are not definitions](backlog/2026-09-17-import-vars-re-exports-are-not-definitions.md).
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
-  - [`one-of` in a `for` `:let` resolves to its own line](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md).
 - 2026-09-28 **Keywords in non-Integrant `.edn` files under source paths.**
   clj-kondo lints every `.edn` file under the source roots
   (`config.types.edn`, `test-regression/**/findings.edn` on its own corpus),
@@ -440,6 +448,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders
   `engine`, `version` and `warming` only.
+- 2026-09-30 **Method params in type bodies are not locals.** A parameter of
+  a method implementation inside `deftype`, `defrecord`, `extend-protocol` or
+  `extend-type` is neither a local nor a var to the scope walker, so
+  definition, references and rename on it answer null: the nine `local/plain`
+  answers `bb compare` still flags on clj-kondo. Issue:
+  [method params in type bodies are not locals](backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md).
 
 ## Best effort — do when cheap or asked
 
@@ -484,3 +498,9 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - `.lsp/config.edn` compatibility; `.clj-pulse/config.edn` plus read-only
   clj-kondo config is enough.
 - Embedding clj-kondo or reimplementing its linters natively.
+- `potemkin/import-vars` re-exports as definitions of the facade namespace
+  (rejected 2026-09-30, [archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md)).
+  It would teach the extractor one library macro's semantics — a namespace
+  defining vars it does not own — for a facade pattern the corpora use in
+  two places; the originals still resolve, and the `var-def/import-vars`
+  and `defprotocol+` rows of `bb compare` stay visible as the record of it.

@@ -438,9 +438,28 @@ and `ReaderConditional` inside `(compile-when …)` (backlog: defs nested in a
 wrapping macro), and the two `deftype` ones are one missing site, the type
 hint `^SourceLoggingPushbackReader` at `reader_types.clj:287` — a type hint
 is not an occurrence. `var-def/defprotocol+` stays 0 of 26: every caller it
-misses goes through the `import-vars` facade (see that backlog entry).
+misses goes through the `import-vars` facade (rejected 2026-09-30, see the
+archived issue and *Not planned*).
 `var-usage/core/macro` matches the 2026-09-28 note (the probe set shifted
 by one); `var-usage/core` gained the probe that shift removed.
+
+### Re-check of the two gap-resolved local entries (2026-09-30)
+
+Same corpus, kondo and container, on master `eb34a94`; every row and the
+total match the 2026-09-29 table (5249 probes, 4913 agree, 219 diverge, 60
+known, 57 null). The two remaining local entries from the 2026-09-17
+backlog — locals inside `(binding […] (let […] …))` and `one-of` in a `for`
+`:let` — turned out to be the same class the gaps change fixed: a `;;`
+comment inside a binding vector (`core.clj:138`, `usages.clj:138`)
+re-paired the bindings after it, and the `binding` form and the `:let`
+rebinding were bystanders. The exact corpus nestings answer right on
+master, and `test_extractor.rs` (`gaps` mod) now pins both shapes;
+`var-usage/project/macro` is 192 of 192 and `local/destructured` 507 of
+507. The nine `local/plain` answers still flagged (3 diverge, 6 null) are
+all method parameters inside `deftype`, `defrecord`, `extend-protocol` and
+`extend-type` bodies, which the scope walker never binds
+([backlog](backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md)).
+The compare log is not kept; the numbers are.
 
 ## Soak: memory over a long session (2026-09-11)
 

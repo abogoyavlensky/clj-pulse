@@ -2,7 +2,7 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `var-def/import-vars`, `var-usage/project/aliased`, `var-def/defmacro`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
+- **Status:** rejected 2026-09-30 (will not do; reason in ROADMAP *Not planned*); archived. Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom
