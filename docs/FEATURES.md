@@ -35,8 +35,9 @@ Language features:
   `defrecord` lists the calls that build it: `(Point. …)`, `->Point` and
   `map->Point`.
 - **Rename** - rename a project symbol and all of its references, or a local
-  binding (params, `let`/`loop`/`for` bindings, destructured names) within
-  its scope. The editor's rename box opens on the exact token that will change,
+  binding (params, `let`/`loop`/`for` bindings, destructured names, the
+  parameters of a method in a `deftype`, `defrecord`, `extend-protocol`,
+  `extend-type` or `reify` body) within its scope. The editor's rename box opens on the exact token that will change,
   and names that cannot be renamed - library and built-in symbols,
   `:keys`-destructured bindings - are refused up front with a reason. The name
   half of a qualified entry (`x` in `{:keys [c/x]}`) is the local it binds,
@@ -44,6 +45,10 @@ Language features:
   `:c/x` the entry reads. Renaming a `deftype`/`defrecord` rewrites the type
   name inside its constructor calls too (`->Point` becomes `->Pt`), unless the
   namespace defines a `->Point` of its own, which then stays its own var.
+  A var referred under another name (`[a :refer [foo] :rename {foo f}]`)
+  keeps that name: renaming `foo` rewrites the `:refer` entry and the
+  `:rename` key and leaves `f` and its calls, and a rename started on `f` is
+  refused.
 - **Keyword rename** - rename a qualified keyword across the project. Each site
   keeps the notation it was written in, because only the name at the end of the
   token is replaced: `::db`, `::alias/db` and `:my.app/db` all become `::store`,

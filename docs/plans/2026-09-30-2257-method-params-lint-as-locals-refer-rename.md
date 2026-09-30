@@ -1,8 +1,10 @@
 # Method-param locals, `:lint-as` in the locals walker, and `:refer … :rename` sites Implementation Plan
 
-> **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Close three backlog items so the locals walker and the occurrence walker agree about what binds, and a var rename stops corrupting a `:refer … :rename` require.
+
+**Status:** completed 2026-09-30.
 
 **Tech Stack:** Rust, tree-sitter-clojure, tower-lsp; tests in `tests/test_extractor.rs`, `tests/test_e2e.rs`, `bb compare`.
 
@@ -206,20 +208,20 @@ the `:rename` map's key is no occurrence. Renaming `foo` → `bar` rewrites
 
 **Files:** `docs/ROADMAP.md`
 
-- [ ] **Step 1:** `git checkout -b locals-method-params-lint-as-refer-rename`
-- [ ] **Step 2:** In Milestone 5, above the `Release` item, add an unticked
+- [x] **Step 1:** `git checkout -b locals-method-params-lint-as-refer-rename`
+- [x] **Step 2:** In Milestone 5, above the `Release` item, add an unticked
   item "**Method-param locals, `:lint-as` in the locals walker, and
   `:refer … :rename` sites.**" summarizing A, B, C in the style of its
   neighbors, naming the three Backlog entries by date, with
   `Plan: [2026-09-30-2257-method-params-lint-as-locals-refer-rename.md](plans/2026-09-30-2257-method-params-lint-as-locals-refer-rename.md) — in progress`.
   Leave the Backlog lines in place until Task 6.
-- [ ] **Step 3:** `git commit -m "roadmap: schedule method-param locals, lint-as locals and refer-rename sites"`
+- [x] **Step 3:** `git commit -m "roadmap: schedule method-param locals, lint-as locals and refer-rename sites"`
 
 ### Task 1: Method params bind in the locals walker (A)
 
 **Files:** `src/index/extractor.rs`, `tests/test_extractor.rs`
 
-- [ ] **Step 1: Failing tests** in `tests/test_extractor.rs` (a new `mod
+- [x] **Step 1: Failing tests** in `tests/test_extractor.rs` (a new `mod
   method_params` beside the existing locals tests, using
   `locals_in_scope_at` / `local_references_at`):
   - `(extend-protocol P Object (m [v] v))`: the body `v` resolves to the
@@ -235,12 +237,12 @@ the `:rename` map's key is no occurrence. Renaming `foo` → `bar` rewrites
   - A cursor on the protocol symbol or the method name yields no param.
   - Realistic shape from the issue: `(replace-children [this children']
     (assoc this :children children'))`.
-- [ ] **Step 2:** `cargo test --test test_extractor method_params` — FAIL.
-- [ ] **Step 3: Implement** the helper and the four call sites per Design A.
+- [x] **Step 2:** `cargo test --test test_extractor method_params` — FAIL.
+- [x] **Step 3: Implement** the helper and the four call sites per Design A.
   Keep the head checks inside the existing `core_form` block (Task 2 reworks
   that block; do not pre-empt it).
-- [ ] **Step 4:** `cargo test --test test_extractor` — PASS; `cargo test --lib` — PASS.
-- [ ] **Step 5:** `git commit -m "locals: bind method params in type and protocol bodies"`
+- [x] **Step 4:** `cargo test --test test_extractor` — PASS; `cargo test --lib` — PASS.
+- [x] **Step 5:** `git commit -m "locals: bind method params in type and protocol bodies"`
 
 ### Task 2: `ScopeCtx` — the locals walker resolves heads like the occurrence walker (B)
 
@@ -248,7 +250,7 @@ the `:rename` map's key is no occurrence. Renaming `foo` → `bar` rewrites
 `src/handlers/definition.rs`, `src/handlers/completion.rs`,
 `src/handlers/highlight.rs`, `tests/test_extractor.rs`
 
-- [ ] **Step 1: Failing tests** (`tests/test_extractor.rs`, using the
+- [x] **Step 1: Failing tests** (`tests/test_extractor.rs`, using the
   `_tree` variants with an `ExtractConfig` whose `lint_as` is filled, as
   `extractor.rs:4000` does):
   - `:lint-as {my.lib/defcomponent clojure.core/defn}` with
@@ -273,41 +275,41 @@ the `:rename` map's key is no occurrence. Renaming `foo` → `bar` rewrites
   - `local_references_at_tree` and `locals_in_scope_at_tree` still agree
     with their non-tree twins under the default config (extend the existing
     equivalence test near `test_extractor.rs:2100`).
-- [ ] **Step 2:** run them — FAIL (compile errors count; land the signature
+- [x] **Step 2:** run them — FAIL (compile errors count; land the signature
   first if needed to get a red test run).
-- [ ] **Step 3: Implement** per Design B: `ScopeCtx`, the ns-only pass, the
+- [x] **Step 3: Implement** per Design B: `ScopeCtx`, the ns-only pass, the
   dispatch order, the shared core-head check, new public signatures, caller
   updates. Fix existing tests whose bare `are` needs a clojure.test require.
-- [ ] **Step 4:** Update the doc comment on `locals_in_scope_at` and the
+- [x] **Step 4:** Update the doc comment on `locals_in_scope_at` and the
   comments in `walk_scope` that describe the removed limitations.
-- [ ] **Step 5:** `cargo test` — PASS (whole suite: handler callers changed).
-- [ ] **Step 6:** `git commit -m "locals: resolve heads through ns metadata and :lint-as"`
+- [x] **Step 5:** `cargo test` — PASS (whole suite: handler callers changed).
+- [x] **Step 6:** `git commit -m "locals: resolve heads through ns metadata and :lint-as"`
 
 ### Task 3: `:rename` keys are sites (C, extractor half)
 
 **Files:** `src/index/extractor.rs`, `src/index/jar_cache.rs`, `tests/test_extractor.rs`
 
-- [ ] **Step 1: Failing test:** for
+- [x] **Step 1: Failing test:** for
   `(ns b (:require [a :refer [foo] :rename {foo f}])) (f)` the occurrences of
   `a/foo` are exactly three: the `:refer` entry, the `:rename` key, the call
   token `f`; the map value `f` records nothing. Also a `:require-macros`
   libspec with `:rename`, and a `:rename` written before its `:refer`.
-- [ ] **Step 2:** run — FAIL.
-- [ ] **Step 3: Implement** in `collect_refer_occurrences`; bump
+- [x] **Step 2:** run — FAIL.
+- [x] **Step 3: Implement** in `collect_refer_occurrences`; bump
   `CACHE_FORMAT_VERSION` to 22 and update any test asserting the number.
-- [ ] **Step 4:** `cargo test` — PASS. Watch the native lints
+- [x] **Step 4:** `cargo test` — PASS. Watch the native lints
   (`unused-namespace`, `duplicate-require`) and clean-ns tests in
   particular: a new occurrence inside the ns form must not count as a use of
   the namespace. `:refer` entries are already occurrences there, so the
   existing exclusion should cover it; if a lint test fails, fix the lint's
   exclusion, not the occurrence.
-- [ ] **Step 5:** `git commit -m "extractor: record :rename keys as occurrences of the var"`
+- [x] **Step 5:** `git commit -m "extractor: record :rename keys as occurrences of the var"`
 
 ### Task 4: Rename edits only tokens that spell the name (C, handler half)
 
 **Files:** `src/handlers/references.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1: Failing e2e tests** (`LspClient`, `setup_project()` pattern;
+- [x] **Step 1: Failing e2e tests** (`LspClient`, `setup_project()` pattern;
   add the two-file shape to the copied fixture at test time, as neighboring
   rename tests do):
   - Rename `foo` → `bar` from its definition in `a.clj`: edits in `b.clj`
@@ -322,47 +324,47 @@ the `:rename` map's key is no occurrence. Renaming `foo` → `bar` rewrites
     `Foo.` calls (existing tests should already cover it; confirm they run).
   - With `b.clj` **not open** (index path, text read from disk) the edit set
     is the same.
-- [ ] **Step 2:** `bb e2e` filtered to the new tests — FAIL.
-- [ ] **Step 3: Implement** the spelling filter in `rename` and the refusal
+- [x] **Step 2:** `bb e2e` filtered to the new tests — FAIL.
+- [x] **Step 3: Implement** the spelling filter in `rename` and the refusal
   in `rename_target` per Design C. Add a unit test beside
   `a_constructor_site_must_spell_the_constructor` for the filter.
-- [ ] **Step 4:** `bb e2e` — PASS.
-- [ ] **Step 5:** `git commit -m "rename: leave a :rename'd local name alone, edit the key"`
+- [x] **Step 4:** `bb e2e` — PASS.
+- [x] **Step 5:** `git commit -m "rename: leave a :rename'd local name alone, edit the key"`
 
 ### Task 5: e2e for method-param locals, then the gates
 
 **Files:** `tests/test_e2e.rs`, `docs/MEMORY.md`
 
-- [ ] **Step 1:** One e2e test: in an `extend-protocol` method body,
+- [x] **Step 1:** One e2e test: in an `extend-protocol` method body,
   `definition` on a param use lands on the argv, `references` lists both,
   and `rename` edits both and nothing else; completion in the body offers
   the param.
-- [ ] **Step 2:** `bb check` — green. `bb e2e` — green. `bb e2e-pulse` —
+- [x] **Step 2:** `bb check` — green. `bb e2e` — green. `bb e2e-pulse` —
   green. `bb e2e-calva` — green.
-- [ ] **Step 3:** `bb compare clj-kondo`. Expected: `local/plain` 594 of 594
+- [x] **Step 3:** `bb compare clj-kondo`. Expected: `local/plain` 594 of 594
   agree, no new divergence in any other bucket, total diverge/null down by
   the nine. Record the new rows and totals in `docs/MEMORY.md` under a dated
   heading in the style of "Re-check of the two gap-resolved local entries".
   Anything unexpected is triaged before moving on — a fix, or a backlog
   line; never a silent `KNOWN` entry.
-- [ ] **Step 4:** `bb bench clj-kondo`. Compare the definition median with
+- [x] **Step 4:** `bb bench clj-kondo`. Compare the definition median with
   the MEMORY.md table; a visible regression means the ns-only pass needs
   tightening before continuing.
-- [ ] **Step 5:** `git commit -m "test: e2e for method-param locals; record compare re-run"`
+- [x] **Step 5:** `git commit -m "test: e2e for method-param locals; record compare re-run"`
 
 ### Task 6: Docs and roadmap close-out
 
 **Files:** `docs/ROADMAP.md`, `docs/backlog/…`, `docs/archive/…`, `CLAUDE.md`
 (and `AGENTS.md` if separate), `docs/FEATURES.md`
 
-- [ ] **Step 1:** `git mv docs/backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md docs/archive/`
+- [x] **Step 1:** `git mv docs/backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md docs/archive/`
   and set its status to closed with the date and this plan.
-- [ ] **Step 2:** ROADMAP: tick the Task 0 item, status `done`, link the
+- [x] **Step 2:** ROADMAP: tick the Task 0 item, status `done`, link the
   archived issue and state the compare result; delete the three Backlog
   lines (2026-09-10 `:lint-as` in the locals walker, 2026-09-29 renaming a
   var referred under another name, 2026-09-30 method params). The
   2026-09-17 "defs nested in a wrapping macro" line stays.
-- [ ] **Step 3:** Invariants in `CLAUDE.md`:
+- [x] **Step 3:** Invariants in `CLAUDE.md`:
   - "Defining macros resolve by fqn…": replace the sentence saying
     `walk_scope` has neither ns metadata nor `ExtractConfig` with the new
     rule (one resolver, three readers; ns metadata read from the live tree,
@@ -374,7 +376,49 @@ the `:rename` map's key is no occurrence. Renaming `foo` → `bar` rewrites
     site; a rename edits only tokens spelling the old name; a cursor on the
     renamed local name is refused by `rename_target`.
   - `CACHE_FORMAT_VERSION` 22 where 21 is quoted.
-- [ ] **Step 4:** `docs/FEATURES.md`: adjust the locals and rename sections
+- [x] **Step 4:** `docs/FEATURES.md`: adjust the locals and rename sections
   if they describe the old limits. README only if it mentions them.
-- [ ] **Step 5:** `bb check` — green.
-- [ ] **Step 6:** `git commit -m "docs: close method-param locals, lint-as locals and refer-rename items"`
+- [x] **Step 5:** `bb check` — green.
+- [x] **Step 6:** `git commit -m "docs: close method-param locals, lint-as locals and refer-rename items"`
+
+## Completion summary (2026-09-30)
+
+Implemented as designed: the locals walker binds method params
+(`walk_scope_type_specs`), classifies heads through `head_def_kind`,
+`are_head_fqn` and `head_resolves_to_core` over a `ScopeCtx` whose ns
+metadata is read from the live tree (`ns_meta_of_tree`), the `:rename` key
+is an occurrence, and a var rename edits only tokens spelling the old name,
+refusing from the renamed local name. `CACHE_FORMAT_VERSION` 22.
+
+Gates: `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva` green;
+`bb compare clj-kondo` `local/plain` 594 of 594, total 4920 agree / 216
+diverge / 62 known / 51 null (4913 / 219 / 60 / 57 on master);
+`bb bench clj-kondo` definition 19 / 18 ms (17 / 18 recorded).
+
+Deviations:
+
+> Deviation (Task 1, from its codex review): a vector-headed list after a
+> parameter vector is a body expression, not another arity
+> (`walk_scope_fn_tail`); it also applies to `defn`/`fn`. Landed in the
+> Task 2 commit. A cursor on a method's own name sees no params.
+
+> Deviation (Task 2): the `_tree` entry points take no `path` — the ns-only
+> pass needs none (the plan allowed dropping it). No existing test relied on
+> a bare `are` without clojure.test, so none changed.
+
+> Deviation (Task 5): the clj-kondo corpus itself uses
+> `:refer [assert-submaps2] :rename {assert-submaps2 assert-submaps}`, so
+> the rename change moved two `var-def/defmacro` answers from agree to
+> diverge, by design (kondo lists the renamed calls and not the key). The
+> plan said "never a silent `KNOWN` entry": this one is dated, reasoned,
+> matched only when every file with an extra site holds a
+> `:rename {<name> …` entry, and recorded in `docs/MEMORY.md`.
+
+> Deviation (process): per-task codex reviews ran in the background while
+> the next task started, instead of blocking; findings were folded into the
+> following commit. No session task list — the tool is not available in
+> this harness; this document is the record.
+
+What the plan could have specified better: it should have checked the
+compare corpus for the `:rename` shape before promising "no new divergence
+in any other bucket".

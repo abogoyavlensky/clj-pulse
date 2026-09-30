@@ -323,12 +323,15 @@ there.
   `defmethod` define, whatever library the qualifier points at. `:lint-as` is
   consulted first, so it always outranks the fallback, and the fallback applies
   only when the form's second child is a symbol, which leaves `(s/def ::user …)`
-  naming a keyword. Definition extraction (`process_top_level_list`) and the
-  occurrence walker (`walk_list`) share the resolver, or the index and the
-  occurrences disagree about what binds; `walk_scope` has neither ns metadata
-  nor `ExtractConfig`, so it applies the name-part rule alone — a head
-  `:lint-as` maps to a *non*-fn kind still binds its vector there (ROADMAP
-  backlog, 2026-09-10). A `:-` marker annotates rather than binds, wherever it
+  naming a keyword. Definition extraction (`process_top_level_list`), the
+  occurrence walker (`walk_list`) and the locals walker (`walk_scope`) share
+  the resolver (`head_def_kind`), or the index, the occurrences and the
+  locals disagree about what binds. The locals walker reads its ns metadata
+  from the tree it walks (`ns_meta_of_tree`, the `ns` forms alone, so an
+  unsaved `ns` edit counts) and `:lint-as` from the `ExtractConfig` its
+  `_tree` entry points take, both held in one `ScopeCtx` built once per
+  question; a core form is told through the ns form's aliases in both
+  walkers (`head_resolves_to_core`), so `cc/let` binds. A `:-` marker annotates rather than binds, wherever it
   appears: `[x :- s/Int]` binds `x` and reads `s/Int`, and a return schema
   (`(mu/defn f :- [:vector :int] [xs] …)`) is an expression, so the parameter
   vector is the one after it. `NsMeta.refer_all` records
@@ -340,7 +343,8 @@ there.
   enclosing scope. The occurrence walker (`walk_are_form`) resolves the head by
   fqn through `head_fqn_candidates`, the list `macro_def_kind` also reads, so
   a bare `are` without clojure.test stays a plain call; the locals walker
-  (`walk_scope_are`) matches the name part alone. Argv bindings are lintable.
+  (`walk_scope_are`, `are_template_of_argv`) resolves it the same way
+  (`are_head_fqn`). Argv bindings are lintable.
   `are` substitutes syntactically, quoted data included, so a `'form` in the
   template counts as a use for the lint (`mark_quoted_symbols_used`) and is a
   usage `local_references_at` returns from the argv, or a rename would leave
@@ -374,7 +378,25 @@ there.
   occurrence, so references list it once and rename edits it once; any other
   declared name is an occurrence of the definition that kept the slot.
   `:lint-as … clojure.core/declare` (`DefKind::from_def_symbol`) is honored
-  like the literal head (conch's `programs`). `CACHE_FORMAT_VERSION` 21.
+  like the literal head (conch's `programs`).
+- A parameter of a method implementation is a local. In `deftype`,
+  `defrecord`, `extend-type`, `extend-protocol` and `reify` the locals walker
+  (`walk_scope_type_specs`) mirrors the occurrence walker's `walk_type_specs`
+  / `walk_method_impl`: a list spec headed by a symbol binds its argv — or
+  each arity's — for its bodies, after the type's fields, so a param
+  shadowing a field wins. The method name is outside that scope, and a
+  vector-headed list after a parameter vector is a body expression, not
+  another arity (`walk_scope_fn_tail`). `proxy` has no arm in either walker.
+- A var rename edits only tokens that spell the old name
+  (`references::spells`, from the open buffer or the file on disk). With
+  `[a :refer [foo] :rename {foo f}]` the `:refer` entry and the `:rename`
+  key are occurrences of `a/foo` (`collect_refer_occurrences`) and are
+  rewritten; the call `(f)` is an occurrence too — references and highlight
+  list it — but its token is the local name, so rename leaves it, and a
+  rename *started* on `f` is refused by `rename_target` (so `prepareRename`
+  refuses alike). The map's value `f` records nothing.
+  `(:refer-clojure :rename …)` keys are not recorded: a core var is never
+  renamed. `CACHE_FORMAT_VERSION` 22.
 - A `Defmethod` symbol is for the outline alone and never takes an index slot
   (`insert_file` / `insert_lib_file` skip it via `takes_slot`): its fqn is the
   multimethod's own, so it would displace the `defmulti` among equals and
