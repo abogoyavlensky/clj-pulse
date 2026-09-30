@@ -461,6 +461,35 @@ all method parameters inside `deftype`, `defrecord`, `extend-protocol` and
 ([backlog](backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md)).
 The compare log is not kept; the numbers are.
 
+### After method-param locals, `:lint-as` locals and `:refer … :rename` sites (2026-09-30)
+
+Same corpus, kondo and container; the "before" columns are a run of the
+same day on master (`867a6b2`). The rows that moved:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `local/plain` | 594 | 594 | 0 | 0 | 0 | 585 | 3 | 6 |
+| `var-def/defmacro` | 58 | 50 | 6 | 2 | 0 | 52 | 6 | 0 |
+| **total** | 5249 | 4920 | 216 | 62 | 51 | 4913 | 219 | 57 |
+
+The nine `local/plain` answers were all method parameters in `deftype`,
+`defrecord`, `extend-protocol` and `extend-type` bodies, which the locals
+walker now binds. The two `defmacro` answers that left `agree` are
+`assert-submaps2` (`test/clj_kondo/test_utils.clj:96`), which five test
+namespaces refer as `:refer [lint! assert-submaps2] :rename
+{assert-submaps2 assert-submaps}` — the shape the rename change is about.
+References now count the `:rename` key (its line twice), and rename no
+longer rewrites the 51 calls spelled `assert-submaps`, where kondo lists
+those calls and not the key: by design, `KNOWN` 2026-09-30, matched only
+when every file with an extra site holds a `:rename {<name> …` entry.
+Nothing else moved.
+
+`bb bench clj-kondo` the same day (`CLJ_PULSE_BENCH_RUNS` 1, same
+container), because every locals question now reads the `ns` form first:
+definition 19 ms cold and 18 ms warm against 17 / 18 ms in the table above,
+warm first navigation 528 ms, 756 ms to diagnostics, RSS settled 129 / 90
+MiB — all within the recorded spread.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,

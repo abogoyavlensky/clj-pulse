@@ -443,7 +443,28 @@ static KNOWN: &[Known] = &[
         },
         reason: "a `.cljs` var used in the syntax-quoted template of its `.clj` macro twin is a site in clj-pulse; kondo resolves nothing inside that template (2026-09-27)",
     },
+    // `[a :refer [foo] :rename {foo f}]`: the `:rename` key is a site of
+    // `a/foo` in clj-pulse (a rename must rewrite it, so its line counts
+    // twice), and a rename leaves the calls spelled `f` alone — rewriting
+    // them would discard the local name. Kondo lists the `:refer` entry and
+    // every `f` call as usages of `foo`. Only when every file with an extra
+    // site renames the probed var in its require.
+    Known {
+        bucket_prefix: "var-def/",
+        matches: |probe, verdict| {
+            matches!(verdict, Verdict::Diverge { extra_files, .. }
+                if !extra_files.is_empty()
+                    && extra_files.iter().all(|f| renames_refer(f, &probe.token)))
+        },
+        reason: "a `:refer … :rename {foo f}` key is a site of `foo` and its `f` calls are not rename sites in clj-pulse; kondo lists the calls and not the key (2026-09-30)",
+    },
 ];
+
+/// Whether `file` refers `name` under another name: its text holds a
+/// `:rename {name …` map entry.
+fn renames_refer(file: &Path, name: &str) -> bool {
+    std::fs::read_to_string(file).is_ok_and(|text| text.contains(&format!(":rename {{{name} ")))
+}
 
 /// Whether `other` is the `.clj` twin of the `.cljs` file `cljs`: the same
 /// directory and file stem, so the same namespace.

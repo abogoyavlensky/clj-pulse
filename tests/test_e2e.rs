@@ -9359,3 +9359,67 @@ fn test_e2e_rename_refuses_on_the_refer_renamed_name() {
     );
     assert_eq!(renamed["message"].as_str().unwrap(), prepared);
 }
+
+#[test]
+fn test_e2e_method_param_is_a_local() {
+    // A parameter of a method implementation is a local: definition lands on
+    // the argv, references and rename stay inside the method, completion
+    // offers it.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let file = root.join("src/coerce.clj");
+    std::fs::write(
+        &file,
+        "(ns simple.coerce)\n\n(defprotocol Coerceable\n  (coerce [this]))\n\n(extend-protocol Coerceable\n  Object\n  (coerce [value]\n    (str value))\n  String\n  (coerce [s]\n    (keyword s)))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.did_open(&file);
+
+    let (decl_line, decl_ch) = start_in(&file, "value]");
+    let (use_line, use_ch) = start_in(&file, "value))");
+
+    let result = client.goto_definition(&file, use_line, use_ch + 1);
+    assert_eq!(
+        result["range"]["start"]["line"],
+        json!(decl_line),
+        "{result}"
+    );
+    assert_eq!(
+        result["range"]["start"]["character"],
+        json!(decl_ch),
+        "{result}"
+    );
+
+    let refs = client.references(&file, use_line, use_ch + 1, true);
+    assert_eq!(
+        loc_starts(&refs),
+        vec![
+            ("coerce.clj".to_string(), decl_line as u64, decl_ch as u64),
+            ("coerce.clj".to_string(), use_line as u64, use_ch as u64),
+        ],
+        "{refs}"
+    );
+
+    let result = client.rename(&file, use_line, use_ch + 1, "v");
+    let files = renamed_files(&result);
+    assert_eq!(files.len(), 1, "{result}");
+    assert_eq!(
+        files["coerce.clj"],
+        "(ns simple.coerce)\n\n(defprotocol Coerceable\n  (coerce [this]))\n\n(extend-protocol Coerceable\n  Object\n  (coerce [v]\n    (str v))\n  String\n  (coerce [s]\n    (keyword s)))\n",
+        "only the Object method's param: {result}"
+    );
+
+    // `(str val|ue)` in the body offers the param.
+    let items = client.completion_items(&file, use_line, use_ch + 3);
+    assert!(
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "value"),
+        "{items}"
+    );
+}
