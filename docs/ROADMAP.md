@@ -451,6 +451,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders
   `engine`, `version` and `warming` only.
+- 2026-09-30 **Method params in type bodies are not locals.** A parameter of
+  a method implementation inside `deftype`, `defrecord`, `extend-protocol` or
+  `extend-type` is neither a local nor a var to the scope walker, so
+  definition, references and rename on it answer null: the nine `local/plain`
+  answers `bb compare` still flags on clj-kondo. Issue:
+  [method params in type bodies are not locals](backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md).
 
 ## Best effort — do when cheap or asked
 
