@@ -352,6 +352,16 @@ the release.
       [`one-of` in a `for` `:let`](archive/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md)
       (Backlog, 2026-09-17).
       Plan: [2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md](plans/2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md) — done
+- [ ] **Method-param locals, `:lint-as` in the locals walker, and
+      `:refer … :rename` sites.** A parameter of a method implementation
+      inside `deftype`, `defrecord`, `extend-protocol`, `extend-type` or
+      `reify` is no local, so definition, references and rename on it answer
+      null; the locals walker reads neither ns metadata nor `:lint-as`, so it
+      disagrees with the occurrence walker about which heads bind; and
+      renaming a var referred as `[a :refer [foo] :rename {foo f}]` rewrites
+      the local name `f` and leaves the `:rename` key behind (Backlog,
+      2026-09-30, 2026-09-10 and 2026-09-29).
+      Plan: [2026-09-30-2257-method-params-lint-as-locals-refer-rename.md](plans/2026-09-30-2257-method-params-lint-as-locals-refer-rename.md) — in progress
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
