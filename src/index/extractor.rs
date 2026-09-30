@@ -2867,7 +2867,8 @@ fn destructuring_key_ns(directive: Node, ctx: &OccurrenceCtx) -> Option<String> 
 
 /// `(:require [some.ns :refer [a b]])` — refer entries are occurrences of
 /// `some.ns/a` etc., so rename can fix require clauses. A `:require-macros`
-/// clause and a `:refer-macros` key refer the same way.
+/// clause and a `:refer-macros` key refer the same way, and the keys of a
+/// `:rename {a b}` map are occurrences of `some.ns/a` too.
 fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut Vec<Occurrence>) {
     for child in children.iter().skip(2) {
         if child.kind() != "list_lit" {
@@ -2904,6 +2905,28 @@ fn collect_refer_occurrences(children: &[Node], ctx: &OccurrenceCtx, out: &mut V
                                 out.push(Occurrence {
                                     fqn: format!("{}/{}", ns_name, sym_text(sym, ctx.source)),
                                     name_range: node_to_lsp_range(sym_name_node(sym), ctx.source),
+                                });
+                            }
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                // `:rename {foo f}`: the key names the var (`f` is only the
+                // local name it goes by here), so a rename of `foo` must
+                // rewrite it along with the `:refer` entry.
+                let is_rename =
+                    items[i].kind() == "kwd_lit" && node_text(items[i], ctx.source) == ":rename";
+                if is_rename {
+                    if let Some(map) = items.get(i + 1).filter(|n| n.kind() == "map_lit") {
+                        for pair in named_children(*map).chunks_exact(2) {
+                            if pair[0].kind() == "sym_lit" && pair[1].kind() == "sym_lit" {
+                                out.push(Occurrence {
+                                    fqn: format!("{}/{}", ns_name, sym_text(pair[0], ctx.source)),
+                                    name_range: node_to_lsp_range(
+                                        sym_name_node(pair[0]),
+                                        ctx.source,
+                                    ),
                                 });
                             }
                         }

@@ -22,7 +22,8 @@ use super::{NsMeta, Symbol};
 /// 20: keywords inside quoted data and the ns attr-map are occurrences.
 /// 21: a declare-only name is its first `Declare` symbol alone, not also an
 ///     occurrence; a repeated declare is a usage of that first one.
-pub const CACHE_FORMAT_VERSION: u32 = 21;
+/// 22: the keys of a `:refer … :rename {a b}` map are occurrences of the var.
+pub const CACHE_FORMAT_VERSION: u32 = 22;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

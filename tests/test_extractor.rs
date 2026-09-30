@@ -3051,3 +3051,56 @@ mod scope_heads {
         assert_eq!(refs.usages[0].start, pos(src, "([x] 0)", 2));
     }
 }
+
+// --- `:rename` keys in a require are occurrences of the var ------------------
+
+mod refer_rename {
+    use clj_pulse::index::extractor::file_occurrences;
+    use std::path::Path;
+    use tower_lsp::lsp_types::Position;
+
+    /// Start positions of every occurrence of `fqn` in `src`, in order.
+    fn starts(src: &str, fqn: &str) -> Vec<Position> {
+        let mut at: Vec<Position> = file_occurrences(src, Path::new("b.clj"))
+            .into_iter()
+            .filter(|o| o.fqn == fqn)
+            .map(|o| o.name_range.start)
+            .collect();
+        at.sort_by_key(|p| (p.line, p.character));
+        at
+    }
+
+    fn col(src: &str, line: usize, needle: &str) -> Position {
+        let c = src.lines().nth(line).unwrap().find(needle).unwrap();
+        Position::new(line as u32, c as u32)
+    }
+
+    #[test]
+    fn the_rename_key_is_a_site_and_the_new_name_is_not() {
+        let src = "(ns b (:require [a :refer [foo] :rename {foo f}]))\n(f)\n";
+        assert_eq!(
+            starts(src, "a/foo"),
+            vec![
+                col(src, 0, "foo]"),
+                col(src, 0, "foo f}"),
+                Position::new(1, 1)
+            ],
+            "the refer entry, the rename key, the call under its local name"
+        );
+    }
+
+    #[test]
+    fn a_rename_written_before_its_refer() {
+        let src = "(ns b (:require [a :rename {foo f} :refer [foo]]))\n(f)\n";
+        assert_eq!(starts(src, "a/foo").len(), 3);
+    }
+
+    #[test]
+    fn require_macros_renames_too() {
+        let src = "(ns b (:require-macros [a :refer [m] :rename {m mm}]))\n(mm)\n";
+        assert_eq!(
+            starts(src, "a/m"),
+            vec![col(src, 0, "m]"), col(src, 0, "m mm}"), Position::new(1, 1)]
+        );
+    }
+}
