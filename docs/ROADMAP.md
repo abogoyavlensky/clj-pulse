@@ -341,6 +341,17 @@ the release.
       `programs` agree throughout, and `var-def/deftype` went from 0 to 18 of
       20; record `->T` calls are `known` supersets.
       Plan: [2026-09-29-2038-defmulti-constructors-lint-as-declare.md](plans/2026-09-29-2038-defmulti-constructors-lint-as-declare.md) — done
+- [ ] **Locals under `binding`/`let` and macro heads in a `for` `:let`.**
+      Inside a `let` nested in `binding`, references on a local found the
+      binding alone and a rebinding of a `:keys` name resolved to the outer
+      entry; a referred macro head in a `for` `:let` vector resolved to its
+      own line. Both were a `;;` comment inside the binding vector re-pairing
+      the bindings, which the gaps change fixed; this item pins the shapes
+      with regression tests and archives the issues. Issues:
+      [locals inside `(binding […] (let […] …))`](backlog/2026-09-17-locals-under-binding-and-let.md),
+      [`one-of` in a `for` `:let`](backlog/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md)
+      (Backlog, 2026-09-17).
+      Plan: [2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md](plans/2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md) — in progress
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
