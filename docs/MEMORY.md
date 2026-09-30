@@ -438,7 +438,8 @@ and `ReaderConditional` inside `(compile-when …)` (backlog: defs nested in a
 wrapping macro), and the two `deftype` ones are one missing site, the type
 hint `^SourceLoggingPushbackReader` at `reader_types.clj:287` — a type hint
 is not an occurrence. `var-def/defprotocol+` stays 0 of 26: every caller it
-misses goes through the `import-vars` facade (see that backlog entry).
+misses goes through the `import-vars` facade (rejected 2026-09-30, see the
+archived issue and *Not planned*).
 `var-usage/core/macro` matches the 2026-09-28 note (the probe set shifted
 by one); `var-usage/core` gained the probe that shift removed.
 

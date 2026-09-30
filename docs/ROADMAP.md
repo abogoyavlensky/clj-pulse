@@ -427,7 +427,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-17 `bb compare` on clj-kondo found fourteen divergence classes, one
   issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
   got, where to look, how to verify):
-  - [`import-vars` re-exports are not definitions](backlog/2026-09-17-import-vars-re-exports-are-not-definitions.md).
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
 - 2026-09-28 **Keywords in non-Integrant `.edn` files under source paths.**
   clj-kondo lints every `.edn` file under the source roots
@@ -499,3 +498,9 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - `.lsp/config.edn` compatibility; `.clj-pulse/config.edn` plus read-only
   clj-kondo config is enough.
 - Embedding clj-kondo or reimplementing its linters natively.
+- `potemkin/import-vars` re-exports as definitions of the facade namespace
+  (rejected 2026-09-30, [archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md)).
+  It would teach the extractor one library macro's semantics — a namespace
+  defining vars it does not own — for a facade pattern the corpora use in
+  two places; the originals still resolve, and the `var-def/import-vars`
+  and `defprotocol+` rows of `bb compare` stay visible as the record of it.
