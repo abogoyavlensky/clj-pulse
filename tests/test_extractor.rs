@@ -2101,17 +2101,25 @@ mod tree_variant {
         let pos = Position::new(3, 20);
         assert_eq!(
             locals_in_scope_at(src, pos),
-            locals_in_scope_at_tree(&tree, src, pos)
+            locals_in_scope_at_tree(&tree, src, pos, &ExtractConfig::default())
         );
         let in_body = Position::new(3, 22);
         assert_eq!(
             local_references_at(src, in_body, "z"),
-            local_references_at_tree(&tree, src, in_body, "z")
+            local_references_at_tree(&tree, src, in_body, "z", &ExtractConfig::default())
         );
-        assert!(local_references_at_tree(&tree, src, in_body, "z").is_some());
+        assert!(
+            local_references_at_tree(&tree, src, in_body, "z", &ExtractConfig::default()).is_some()
+        );
         assert_eq!(
             local_references_at(src, Position::new(0, 2), "z"),
-            local_references_at_tree(&tree, src, Position::new(0, 2), "z")
+            local_references_at_tree(
+                &tree,
+                src,
+                Position::new(0, 2),
+                "z",
+                &ExtractConfig::default()
+            )
         );
 
         // An `are` template argument is a local the same way in both variants.
@@ -2120,11 +2128,13 @@ mod tree_variant {
         let template = Position::new(1, 14);
         assert_eq!(
             locals_in_scope_at(src, template),
-            locals_in_scope_at_tree(&tree, src, template)
+            locals_in_scope_at_tree(&tree, src, template, &ExtractConfig::default())
         );
-        assert!(locals_in_scope_at_tree(&tree, src, template)
-            .iter()
-            .any(|b| b.name == "x"));
+        assert!(
+            locals_in_scope_at_tree(&tree, src, template, &ExtractConfig::default())
+                .iter()
+                .any(|b| b.name == "x")
+        );
     }
 }
 
@@ -2793,4 +2803,304 @@ fn test_lint_as_defprotocol_indexes_methods_and_callers() {
         .collect();
     tag_lines.sort();
     assert_eq!(tag_lines, vec![2, 3], "impl head and call only: {:?}", occs);
+}
+
+// --- method params in type and protocol bodies are locals --------------------
+
+mod method_params {
+    use clj_pulse::index::extractor::{local_references_at, locals_in_scope_at};
+    use tower_lsp::lsp_types::Position;
+
+    /// The position `offset` characters into the first `needle` in `src`
+    /// (ASCII sources).
+    fn pos(src: &str, needle: &str, offset: u32) -> Position {
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in {src:?}"));
+        let line = src[..at].matches('\n').count() as u32;
+        let line_start = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        Position::new(line, (at - line_start) as u32 + offset)
+    }
+
+    fn names_at(src: &str, p: Position) -> Vec<String> {
+        locals_in_scope_at(src, p)
+            .into_iter()
+            .map(|b| b.name)
+            .collect()
+    }
+
+    /// The declaration the innermost binding of `name` at `p` points to.
+    fn declared_at(src: &str, p: Position, name: &str) -> Position {
+        locals_in_scope_at(src, p)
+            .into_iter()
+            .rev()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is a local at {p:?} in {src:?}"))
+            .name_range
+            .start
+    }
+
+    #[test]
+    fn extend_protocol_method_param_is_a_local() {
+        let src = "(ns x)\n(extend-protocol P\n  Object\n  (m [v]\n    (inc v)))\n";
+        let usage = pos(src, "(inc v)", 5);
+        assert_eq!(declared_at(src, usage, "v"), pos(src, "[v]", 1));
+        let refs = local_references_at(src, pos(src, "[v]", 1), "v").expect("`v` is a local");
+        assert_eq!(refs.declaration.start, pos(src, "[v]", 1));
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+        assert_eq!(refs.usages[0].start, usage);
+    }
+
+    #[test]
+    fn extend_type_method_param_is_a_local() {
+        let src = "(ns x)\n(extend-type T\n  P\n  (m [this x] (f x)))\n";
+        assert_eq!(names_at(src, pos(src, "(f x)", 3)), vec!["this", "x"]);
+    }
+
+    #[test]
+    fn deftype_method_param_shadows_a_field() {
+        let src = "(ns x)\n(deftype T [reader]\n  P\n  (get-line [reader] (str reader))\n  (peek-it [this] (first reader)))\n";
+        assert_eq!(
+            declared_at(src, pos(src, "(str reader)", 5), "reader"),
+            pos(src, "[reader] (str", 1),
+            "the param, not the field"
+        );
+        assert_eq!(
+            declared_at(src, pos(src, "(first reader)", 7), "reader"),
+            pos(src, "[reader]\n", 1),
+            "the field where no param shadows it"
+        );
+        // References from the param stay inside its method.
+        let refs = local_references_at(src, pos(src, "[reader] (str", 1), "reader").unwrap();
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+        // The field's own references skip the shadowing method.
+        let field = local_references_at(src, pos(src, "[reader]\n", 1), "reader").unwrap();
+        assert_eq!(field.usages.len(), 1, "{field:?}");
+        assert_eq!(field.usages[0].start, pos(src, "(first reader)", 7));
+    }
+
+    #[test]
+    fn defrecord_method_sees_fields_and_params() {
+        let src = "(ns x)\n(defrecord R [a]\n  P\n  (m [_ b] (+ a b)))\n";
+        assert_eq!(names_at(src, pos(src, "(+ a b)", 3)), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn reify_method_param_is_a_local() {
+        let src = "(ns x)\n(def r (reify P (m [this y] (inc y))))\n";
+        assert_eq!(names_at(src, pos(src, "(inc y)", 5)), vec!["this", "y"]);
+    }
+
+    #[test]
+    fn multi_arity_method_binds_per_arity() {
+        let src = "(ns x)\n(deftype T []\n  P\n  (m ([x] (one x))\n     ([x y] (two x y))))\n";
+        assert_eq!(names_at(src, pos(src, "(one x)", 5)), vec!["x"]);
+        assert_eq!(names_at(src, pos(src, "(two x y)", 7)), vec!["x", "y"]);
+        assert_eq!(
+            declared_at(src, pos(src, "(two x y)", 5), "x"),
+            pos(src, "[x y]", 1)
+        );
+    }
+
+    #[test]
+    fn protocol_symbol_and_method_name_bind_nothing() {
+        let src = "(ns x)\n(extend-protocol Proto\n  Object\n  (meth [v] v))\n";
+        assert!(names_at(src, pos(src, "Proto", 2)).is_empty());
+        assert!(names_at(src, pos(src, "Object", 2)).is_empty());
+        assert!(names_at(src, pos(src, "meth", 2)).is_empty());
+    }
+
+    #[test]
+    fn realistic_replace_children_shape() {
+        // rewrite-clj's SeqNode, as in the clj-kondo corpus.
+        let src = "(ns x)\n(defrecord SeqNode [tag children]\n  node/Node\n  (tag [this] tag)\n  node/InnerNode\n  (replace-children [this children']\n    (assoc this :children children')))\n";
+        let usage = pos(src, "children'))", 2);
+        let refs = local_references_at(src, usage, "children'").expect("a local");
+        assert_eq!(refs.declaration.start, pos(src, "children']", 0));
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+        let this_refs =
+            local_references_at(src, pos(src, "(assoc this", 7), "this").expect("a local");
+        assert_eq!(this_refs.declaration.start, pos(src, "this children']", 0));
+    }
+}
+
+// --- the locals walker classifies heads like the occurrence walker -----------
+
+mod scope_heads {
+    use std::collections::HashMap;
+
+    use clj_pulse::index::extractor::{
+        local_references_at, local_references_at_tree, locals_in_scope_at, locals_in_scope_at_tree,
+        parse_tree,
+    };
+    use clj_pulse::index::{DefKind, ExtractConfig};
+    use tower_lsp::lsp_types::Position;
+
+    fn pos(src: &str, needle: &str, offset: u32) -> Position {
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in {src:?}"));
+        let line = src[..at].matches('\n').count() as u32;
+        let line_start = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        Position::new(line, (at - line_start) as u32 + offset)
+    }
+
+    fn lint_as(fqn: &str, kind: DefKind) -> ExtractConfig {
+        ExtractConfig {
+            lint_as: HashMap::from([(fqn.to_string(), kind)]),
+        }
+    }
+
+    fn names_with(src: &str, p: Position, cfg: &ExtractConfig) -> Vec<String> {
+        let tree = parse_tree(src).unwrap();
+        locals_in_scope_at_tree(&tree, src, p, cfg)
+            .into_iter()
+            .map(|b| b.name)
+            .collect()
+    }
+
+    fn names(src: &str, p: Position) -> Vec<String> {
+        locals_in_scope_at(src, p)
+            .into_iter()
+            .map(|b| b.name)
+            .collect()
+    }
+
+    #[test]
+    fn a_referred_lint_as_defn_binds_its_params() {
+        let src =
+            "(ns app (:require [my.lib :refer [defcomponent]]))\n(defcomponent c [x] (inc x))\n";
+        let body = pos(src, "(inc x)", 5);
+        let cfg = lint_as("my.lib/defcomponent", DefKind::Defn);
+        assert_eq!(names_with(src, body, &cfg), vec!["x"]);
+        // Without the config the head is an ordinary call.
+        assert!(names(src, body).is_empty());
+
+        let tree = parse_tree(src).unwrap();
+        let refs = local_references_at_tree(&tree, src, body, "x", &cfg).expect("a local");
+        assert_eq!(refs.declaration.start, pos(src, "[x]", 1));
+        assert_eq!(refs.usages.len(), 1);
+    }
+
+    #[test]
+    fn lint_as_outranks_the_name_part_of_a_qualified_head() {
+        // `lib/defn` would bind `[a b]` by its name part; the config says the
+        // form is a `def`, whose vector is an initializer expression.
+        let src = "(ns app (:require [my.lib :as lib]))\n(lib/defn cfg [a b])\n";
+        let at = pos(src, "[a b]", 1);
+        assert_eq!(names(src, at), vec!["a", "b"], "name-part rule alone");
+        let cfg = lint_as("my.lib/defn", DefKind::Def);
+        assert!(names_with(src, at, &cfg).is_empty());
+    }
+
+    #[test]
+    fn a_bare_are_binds_only_when_it_is_clojure_tests() {
+        let template = |src: &str| names(src, pos(src, "(= a 1)", 3));
+        assert!(template("(ns x)\n(are [a] (= a 1) 1)\n").is_empty());
+        assert!(template("(are [a] (= a 1) 1)\n").is_empty());
+        assert_eq!(
+            template("(ns x (:require [clojure.test :refer [are]]))\n(are [a] (= a 1) 1)\n"),
+            vec!["a"]
+        );
+        assert_eq!(
+            template("(ns x (:require [clojure.test :refer :all]))\n(are [a] (= a 1) 1)\n"),
+            vec!["a"]
+        );
+        assert_eq!(
+            template("(ns x (:use clojure.test))\n(are [a] (= a 1) 1)\n"),
+            vec!["a"]
+        );
+        assert_eq!(
+            template("(ns x (:require [clojure.test :as t]))\n(t/are [a] (= a 1) 1)\n"),
+            vec!["a"]
+        );
+        assert_eq!(
+            template("(ns x (:require [cljs.test :refer-macros [are]]))\n(are [a] (= a 1) 1)\n"),
+            vec!["a"]
+        );
+    }
+
+    #[test]
+    fn a_quoted_template_symbol_is_a_usage_only_of_a_real_are() {
+        let with = "(ns x (:require [clojure.test :refer [are]]))\n(are [a] (= 'a a) 1)\n";
+        let refs = local_references_at(with, pos(with, "[a]", 1), "a").expect("argv binding");
+        assert_eq!(refs.usages.len(), 2, "quoted and evaluated: {refs:?}");
+        // Without clojure.test the argv binds nothing at all.
+        let without = "(ns x)\n(are [a] (= 'a a) 1)\n";
+        assert!(local_references_at(without, pos(without, "[a]", 1), "a").is_none());
+    }
+
+    #[test]
+    fn an_aliased_core_form_binds() {
+        let src = "(ns a (:require [clojure.core :as cc]))\n(cc/let [y 1] (inc y))\n";
+        assert_eq!(names(src, pos(src, "(inc y)", 5)), vec!["y"]);
+    }
+
+    #[test]
+    fn the_ns_form_in_a_reader_conditional_counts() {
+        let src = "#?(:clj (ns x (:require [clojure.test :refer [are]])))\n(are [a] (= a 1) 1)\n";
+        assert_eq!(names(src, pos(src, "(= a 1)", 3)), vec!["a"]);
+    }
+
+    #[test]
+    fn a_vector_call_after_the_params_is_a_body_expression() {
+        // `([x] 0)` calls a vector; it is not a second arity.
+        let src = "(ns x)\n(extend-protocol P Object (m [this x] ([x] 0)))\n";
+        let refs = local_references_at(src, pos(src, "x]", 0), "x").expect("a local");
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+        assert_eq!(refs.usages[0].start, pos(src, "([x] 0)", 2));
+    }
+}
+
+// --- `:rename` keys in a require are occurrences of the var ------------------
+
+mod refer_rename {
+    use clj_pulse::index::extractor::file_occurrences;
+    use std::path::Path;
+    use tower_lsp::lsp_types::Position;
+
+    /// Start positions of every occurrence of `fqn` in `src`, in order.
+    fn starts(src: &str, fqn: &str) -> Vec<Position> {
+        let mut at: Vec<Position> = file_occurrences(src, Path::new("b.clj"))
+            .into_iter()
+            .filter(|o| o.fqn == fqn)
+            .map(|o| o.name_range.start)
+            .collect();
+        at.sort_by_key(|p| (p.line, p.character));
+        at
+    }
+
+    fn col(src: &str, line: usize, needle: &str) -> Position {
+        let c = src.lines().nth(line).unwrap().find(needle).unwrap();
+        Position::new(line as u32, c as u32)
+    }
+
+    #[test]
+    fn the_rename_key_is_a_site_and_the_new_name_is_not() {
+        let src = "(ns b (:require [a :refer [foo] :rename {foo f}]))\n(f)\n";
+        assert_eq!(
+            starts(src, "a/foo"),
+            vec![
+                col(src, 0, "foo]"),
+                col(src, 0, "foo f}"),
+                Position::new(1, 1)
+            ],
+            "the refer entry, the rename key, the call under its local name"
+        );
+    }
+
+    #[test]
+    fn a_rename_written_before_its_refer() {
+        let src = "(ns b (:require [a :rename {foo f} :refer [foo]]))\n(f)\n";
+        assert_eq!(starts(src, "a/foo").len(), 3);
+    }
+
+    #[test]
+    fn require_macros_renames_too() {
+        let src = "(ns b (:require-macros [a :refer [m] :rename {m mm}]))\n(mm)\n";
+        assert_eq!(
+            starts(src, "a/m"),
+            vec![col(src, 0, "m]"), col(src, 0, "m mm}"), Position::new(1, 1)]
+        );
+    }
 }

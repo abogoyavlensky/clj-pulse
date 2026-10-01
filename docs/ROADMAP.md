@@ -352,6 +352,23 @@ the release.
       [`one-of` in a `for` `:let`](archive/2026-09-17-one-of-in-a-for-let-resolves-to-its-own-line.md)
       (Backlog, 2026-09-17).
       Plan: [2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md](plans/2026-09-30-0907-binding-let-locals-and-for-let-macro-heads.md) — done
+- [x] **Method-param locals, `:lint-as` in the locals walker, and
+      `:refer … :rename` sites.** A parameter of a method implementation
+      inside `deftype`, `defrecord`, `extend-protocol`, `extend-type` or
+      `reify` was no local, so definition, references and rename on it
+      answered null; the locals walker read neither ns metadata nor
+      `:lint-as`, so it disagreed with the occurrence walker about which
+      heads bind; and renaming a var referred as
+      `[a :refer [foo] :rename {foo f}]` rewrote the local name `f` and left
+      the `:rename` key behind. The locals walker now binds method params and
+      classifies heads through the occurrence walker's resolvers, reading ns
+      metadata from the live tree; the `:rename` key is a site, and a rename
+      edits only tokens that spell the old name. Issue:
+      [method params in type bodies are not locals](archive/2026-09-30-method-params-in-type-bodies-are-not-locals.md)
+      (Backlog, 2026-09-30, 2026-09-10 and 2026-09-29). On clj-kondo
+      `local/plain` is 594 of 594; the corpus's own
+      `:rename {assert-submaps2 assert-submaps}` is a `known` divergence.
+      Plan: [2026-09-30-2257-method-params-lint-as-locals-refer-rename.md](plans/2026-09-30-2257-method-params-lint-as-locals-refer-rename.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -396,13 +413,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
   silently answer as if it required nothing, while definition — occurrence
   based — still works. Found writing the let-go Clojure Pulse fixture; keying
   namespace metadata by file would fix it.
-- 2026-09-10 **`:lint-as` in the locals walker.** `extractor::walk_scope` has no
-  ns metadata or `ExtractConfig`, so a head the config maps to a non-fn kind
-  still binds its vector as parameters there while the occurrence walker does
-  not. Narrow, but it makes local resolution and references disagree; the fix
-  is threading `ExtractConfig` through `locals_in_scope_at`. `are` is matched
-  by name part there too, so a bare `are` in a file without clojure.test binds
-  in the locals walker but not in the occurrence walker.
 - 2026-09-10 **Cache the extraction per document version, not just the tree.**
   Every position request re-walks the open buffer:
   `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which
@@ -437,23 +447,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   clj-kondo, 2 of them null (`docs/MEMORY.md`, 2026-09-28). Indexing them
   would have to decide what an arbitrary `.edn` file means first — a
   `findings.edn` fixture is test data, not configuration.
-- 2026-09-29 **Renaming a var referred under another name.** With
-  `[a :refer [foo] :rename {foo f}]`, a `(f)` call is recorded under `a/foo`
-  over the token `f`, and the `:rename` key `foo` is no occurrence: renaming
-  `foo` rewrites the local name `f` and leaves the key reading the old var.
-  A constructor referred that way is skipped rather than narrowed (codex
-  review of the constructor-sites change), so only plain vars are affected.
-  The call should stay `f` and the key should be a site.
 - 2026-09-17 **Clojure Pulse tooltip shows the `lintStatus` detail.** The
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders
   `engine`, `version` and `warming` only.
-- 2026-09-30 **Method params in type bodies are not locals.** A parameter of
-  a method implementation inside `deftype`, `defrecord`, `extend-protocol` or
-  `extend-type` is neither a local nor a var to the scope walker, so
-  definition, references and rename on it answer null: the nine `local/plain`
-  answers `bb compare` still flags on clj-kondo. Issue:
-  [method params in type bodies are not locals](backlog/2026-09-30-method-params-in-type-bodies-are-not-locals.md).
 
 ## Best effort — do when cheap or asked
 

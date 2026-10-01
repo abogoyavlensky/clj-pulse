@@ -8,7 +8,7 @@ use serde_json::json;
 use super::builtins;
 use super::matching::match_score;
 use crate::document::{DocumentStore, KeywordContext, Snapshot};
-use crate::index::{extractor, CoreSymbol, DefKind, Dialect, Index, NsMeta, Symbol};
+use crate::index::{extractor, CoreSymbol, DefKind, Dialect, ExtractConfig, Index, NsMeta, Symbol};
 
 pub fn handle(
     index: &Index,
@@ -52,7 +52,8 @@ pub fn handle(
     // globals, so offer them ahead of the index symbols. Qualified prefixes
     // (`alias/…`) can't name a local, so skip the walk there.
     if !prefix.contains('/') {
-        let mut merged = local_completions(snapshot.as_ref(), pos, &prefix);
+        let mut merged =
+            local_completions(&index.extract_config(), snapshot.as_ref(), pos, &prefix);
         merged.extend(items);
         items = merged;
     }
@@ -76,6 +77,7 @@ pub fn handle(
 /// and de-duplicated by name (an inner binding shadows an outer one). Locals are
 /// pool 0, so within a match tier they rank above every var and core name.
 fn local_completions(
+    cfg: &ExtractConfig,
     snapshot: Option<&Snapshot>,
     pos: Position,
     prefix: &str,
@@ -85,7 +87,7 @@ fn local_completions(
     };
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for binding in extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, pos)
+    for binding in extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, pos, cfg)
         .into_iter()
         .rev()
     {

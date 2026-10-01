@@ -5,7 +5,9 @@ use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::{DocumentStore, Snapshot};
-use crate::index::{extractor, DefKind, Dialect, Index, Occurrence, Symbol, SymbolSource};
+use crate::index::{
+    extractor, DefKind, Dialect, ExtractConfig, Index, Occurrence, Symbol, SymbolSource,
+};
 
 use super::{builds, factory_target, CtorShape};
 
@@ -20,9 +22,13 @@ pub fn references(
     // Local bindings (let/fn/loop/…) shadow vars and are never recorded as
     // occurrences, so resolve their usages structurally, before the fqn path.
     // When the cursor is on a local, this is authoritative — don't fall through.
-    if let Some(locations) =
-        local_references(documents, &uri, pos, params.context.include_declaration)
-    {
+    if let Some(locations) = local_references(
+        index,
+        documents,
+        &uri,
+        pos,
+        params.context.include_declaration,
+    ) {
         return Ok((!locations.is_empty()).then_some(locations));
     }
 
@@ -70,12 +76,13 @@ pub fn references(
 /// `Some` — possibly empty — when it is, so a local never leaks into the fqn
 /// path. Mirrors `local_definition`'s keyword/qualified guards.
 fn local_references(
+    index: &Index,
     documents: &DocumentStore,
     uri: &Url,
     pos: Position,
     include_declaration: bool,
 ) -> Option<Vec<Location>> {
-    let (_, refs) = local_refs_at(documents, uri, pos)?;
+    let (_, refs) = local_refs_at(index, documents, uri, pos)?;
 
     let mut locations = Vec::new();
     if include_declaration {
@@ -124,6 +131,7 @@ pub(crate) fn local_name_at(
 /// fall back to the fqn path. Shared by find-references, rename and document
 /// highlight so they all agree on what counts as a local.
 pub(crate) fn local_refs_at(
+    index: &Index,
     documents: &DocumentStore,
     uri: &Url,
     pos: Position,
@@ -131,7 +139,13 @@ pub(crate) fn local_refs_at(
     // `local_references_at_tree` makes the entry check itself.
     let (word, _) = local_name_at(documents, uri, pos)?;
     let snapshot = documents.snapshot(uri)?;
-    let refs = extractor::local_references_at_tree(&snapshot.tree, &snapshot.text, pos, &word)?;
+    let refs = extractor::local_references_at_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        pos,
+        &word,
+        &index.extract_config(),
+    )?;
     Some((word, refs))
 }
 
@@ -141,6 +155,7 @@ pub(crate) fn local_refs_at(
 /// means something else. A new name that merely shadows a *var* is allowed —
 /// that is ordinary Clojure, and the local wins by design.
 fn reject_local_capture(
+    cfg: &ExtractConfig,
     snapshot: &Snapshot,
     refs: &extractor::LocalRefs,
     word: &str,
@@ -148,9 +163,10 @@ fn reject_local_capture(
 ) -> Result<()> {
     let sites = std::iter::once(refs.declaration).chain(refs.usages.iter().copied());
     for site in sites {
-        let taken = extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, site.start)
-            .into_iter()
-            .any(|b| b.name == new_name);
+        let taken =
+            extractor::locals_in_scope_at_tree(&snapshot.tree, &snapshot.text, site.start, cfg)
+                .into_iter()
+                .any(|b| b.name == new_name);
         if taken {
             anyhow::bail!(
                 "cannot rename '{}' to '{}': '{}' is already bound in that scope",
@@ -218,7 +234,7 @@ pub fn rename_target(
     // Locals (let/fn/defn params, destructuring, …) are resolved structurally
     // and never reach the fqn path, so renaming a param that shadows a global
     // edits only the local's own binding and usages, all in this document.
-    if let Some((word, refs)) = local_refs_at(documents, uri, pos) {
+    if let Some((word, refs)) = local_refs_at(index, documents, uri, pos) {
         if refs.destructured_key {
             anyhow::bail!(
                 "cannot rename a :keys/:strs/:syms destructured binding '{}': \
@@ -253,6 +269,23 @@ pub fn rename_target(
         .ok_or_else(|| anyhow::anyhow!("cannot rename: no definition found for {}", fqn))?;
     if sym.source != SymbolSource::Project {
         anyhow::bail!("cannot rename library or built-in symbol {}", fqn);
+    }
+    // A var referred under another name (`:refer [foo] :rename {foo f}`) is a
+    // site of `foo` whose token holds no `foo`: a rename edits only tokens
+    // that spell the name, so there is nothing to rewrite from here.
+    if let Some(range) = occurrence_range_at(index, documents, uri, pos, &fqn) {
+        let token = documents
+            .snapshot(uri)
+            .and_then(|snapshot| token_at(&snapshot.text, range));
+        if let Some(token) = token.filter(|token| *token != sym.name) {
+            anyhow::bail!(
+                "cannot rename '{}' here: it is '{}' under a :rename in this namespace's \
+                 require — rename '{}' at its definition or a plain usage",
+                token,
+                fqn,
+                sym.name
+            );
+        }
     }
     Ok(RenameTarget::Global { fqn, sym })
 }
@@ -647,7 +680,7 @@ pub fn rename(
     let (fqn, sym) = match target {
         RenameTarget::Local { word, refs } => {
             if let Some(snapshot) = documents.snapshot(&uri) {
-                reject_local_capture(&snapshot, &refs, &word, &new_name)?;
+                reject_local_capture(&index.extract_config(), &snapshot, &refs, &word, &new_name)?;
             }
             let mut edits = vec![TextEdit {
                 range: refs.declaration,
@@ -728,6 +761,21 @@ pub fn rename(
         let Ok(file_uri) = Url::from_file_path(&file) else {
             continue;
         };
+        // Only a token that spells the old name is rewritten: a var referred
+        // under another name (`:rename {foo f}`) is called as `f`, and that
+        // local name is not the var's. The text is the live buffer's when the
+        // file is open; a file that cannot be read keeps all its sites.
+        let text = match documents.snapshot(&file_uri) {
+            Some(snapshot) => Some(snapshot.text.to_string()),
+            None => std::fs::read_to_string(&file).ok(),
+        };
+        let occs: Vec<Occurrence> = occs
+            .into_iter()
+            .filter(|occ| spells(text.as_deref(), occ.name_range, &sym.name))
+            .collect();
+        if occs.is_empty() {
+            continue;
+        }
         let edits = changes.entry(file_uri).or_default();
         for occ in occs {
             edits.push(TextEdit {
@@ -741,6 +789,16 @@ pub fn rename(
         changes: Some(changes),
         ..Default::default()
     }))
+}
+
+/// Whether the token at `range` in `text` is `name`. With no text to check
+/// (an unreadable file) the site is taken as spelled, which is what rename
+/// did before it looked.
+fn spells(text: Option<&str>, range: Range, name: &str) -> bool {
+    match text {
+        Some(text) => token_at(text, range).as_deref() == Some(name),
+        None => true,
+    }
 }
 
 fn is_valid_symbol_name(name: &str) -> bool {
@@ -1116,6 +1174,15 @@ mod tests {
         assert_eq!(ranges, vec![(6, 9)]);
         // Without the source nothing can be checked, so nothing is claimed.
         assert!(matching_occurrences(&occs, "a/Foo", &forms, None).is_empty());
+    }
+
+    #[test]
+    fn a_rename_site_must_spell_the_old_name() {
+        let text = "(ns b (:require [a :refer [foo] :rename {foo f}]))\n(f) (foo)\n";
+        assert!(spells(Some(text), at(0, 27, 30), "foo"));
+        assert!(!spells(Some(text), at(1, 1, 2), "foo"), "`f` is not `foo`");
+        assert!(spells(Some(text), at(1, 5, 8), "foo"));
+        assert!(spells(None, at(1, 1, 2), "foo"), "unreadable: kept");
     }
 
     #[test]

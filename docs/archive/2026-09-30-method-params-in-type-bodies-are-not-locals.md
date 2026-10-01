@@ -3,8 +3,8 @@
 - **Found:** 2026-09-30, `bb compare` re-run on the clj-kondo corpus while
   closing the two gap-resolved local entries (`docs/MEMORY.md`, "Re-check of
   the two gap-resolved local entries"); bucket `local/plain`.
-- **Status:** open. Sites are `file:line[:col]` in the pinned checkout under
-  `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
+- **Status:** fixed 2026-09-30 (plan `docs/plans/2026-09-30-2257-method-params-lint-as-locals-refer-rename.md`); `local/plain` is 594 of 594 on clj-kondo; archived. Sites were `file:line[:col]` in the pinned checkout under
+  `.tmp/bench/clj-kondo/`.
 
 ## Symptom
 
