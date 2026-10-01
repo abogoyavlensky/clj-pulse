@@ -93,9 +93,6 @@ and real-world feedback are welcome.
 
 - Clojure Pulse, Calva, and Neovim are the primary editor targets. Zed is
   best effort and does not yet support library JAR navigation.
-- ClojureScript is best effort: `.cljs` and `.cljc` files are indexed and
-  `:require-macros` is understood, but shadow-cljs classpaths are not
-  supported.
 - Java support covers JDK classes, static members, and constructors.
   Instance methods, library classes, and decompilation are not supported yet.
 - Whole-document formatting is provided by the editor. Clojure Pulse uses
