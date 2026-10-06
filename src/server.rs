@@ -2080,6 +2080,30 @@ fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
         })
 }
 
+/// The namespace a newly created file at `uri` should declare, or `None`
+/// when it must be left alone: not Clojure source, not empty (an Explorer
+/// copy carries content; an open buffer outranks the disk), or outside every
+/// source root of its project.
+fn ns_for_new_file(
+    documents: &DocumentStore,
+    project_list: &[projects::Project],
+    uri: &Url,
+) -> Option<String> {
+    let path = uri.to_file_path().ok()?;
+    if !config::is_clojure_source(&path) {
+        return None;
+    }
+    let empty = match documents.snapshot(uri) {
+        Some(snapshot) => snapshot.text.is_empty(),
+        None => std::fs::read_to_string(&path).ok()?.is_empty(),
+    };
+    if !empty {
+        return None;
+    }
+    let project = owning_project(project_list, &path)?;
+    handlers::new_file::ns_for_path(&path, &config::source_paths(&project.dir))
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
@@ -2348,6 +2372,27 @@ impl LanguageServer for Backend {
                     first_trigger_character: "\n".to_string(),
                     more_trigger_character: None,
                 }),
+                // One plain glob per extension rather than `**/*.{clj,…}`:
+                // brace support differs between clients' glob engines.
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: None,
+                    file_operations: Some(WorkspaceFileOperationsServerCapabilities {
+                        did_create: Some(FileOperationRegistrationOptions {
+                            filters: ["clj", "cljs", "cljc", "lg"]
+                                .iter()
+                                .map(|ext| FileOperationFilter {
+                                    scheme: Some("file".to_string()),
+                                    pattern: FileOperationPattern {
+                                        glob: format!("**/*.{ext}"),
+                                        matches: Some(FileOperationPatternKind::File),
+                                        options: None,
+                                    },
+                                })
+                                .collect(),
+                        }),
+                        ..Default::default()
+                    }),
+                }),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
                 })),
@@ -2540,6 +2585,26 @@ impl LanguageServer for Backend {
         self.documents.close(&uri);
         // Clear diagnostics for the closed document.
         self.client.publish_diagnostics(uri, vec![], None).await;
+    }
+
+    async fn did_create_files(&self, params: CreateFilesParams) {
+        let project_list = self.projects.lock().unwrap().clone();
+        // One file at a time, each edit answered before the next: a batch
+        // stays in the order the client listed it.
+        for file in params.files {
+            let Ok(uri) = Url::parse(&file.uri) else {
+                continue;
+            };
+            let Some(ns) = ns_for_new_file(&self.documents, &project_list, &uri) else {
+                continue;
+            };
+            let edit = handlers::new_file::ns_insert_edit(uri.clone(), &ns);
+            match self.client.apply_edit(edit).await {
+                Ok(r) if r.applied => tracing::info!("inserted ns {ns} into new file {uri}"),
+                Ok(r) => tracing::debug!("ns edit for {uri} not applied: {:?}", r.failure_reason),
+                Err(e) => tracing::debug!("ns edit for {uri} failed: {e}"),
+            }
+        }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {

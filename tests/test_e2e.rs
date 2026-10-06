@@ -9423,3 +9423,104 @@ fn test_e2e_method_param_is_a_local() {
         "{items}"
     );
 }
+
+/// The `edit.changes` keys of every `workspace/applyEdit` the server has sent
+/// so far, in arrival order.
+fn apply_edit_uris(client: &LspClient) -> Vec<String> {
+    client
+        .notifications
+        .iter()
+        .filter(|m| m["method"] == "workspace/applyEdit")
+        .flat_map(|m| {
+            m["params"]["edit"]["changes"]
+                .as_object()
+                .map(|c| c.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+#[test]
+fn test_e2e_new_file_capability_advertised() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    let init = client.initialize(&root);
+
+    let filters = init["capabilities"]["workspace"]["fileOperations"]["didCreate"]["filters"]
+        .as_array()
+        .expect("didCreate filters");
+    let globs: Vec<&str> = filters
+        .iter()
+        .map(|f| f["pattern"]["glob"].as_str().unwrap())
+        .collect();
+    for ext in ["clj", "cljs", "cljc", "lg"] {
+        assert!(globs.contains(&format!("**/*.{ext}").as_str()), "{globs:?}");
+    }
+}
+
+#[test]
+fn test_e2e_new_file_empty_gets_ns() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let file = root.join("src/fresh/new_thing.clj");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "").unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    let uri = format!("file://{}", file.display());
+    client.notify(
+        "workspace/didCreateFiles",
+        json!({ "files": [{ "uri": uri }] }),
+    );
+
+    let params = client.wait_for_notification_where("workspace/applyEdit", |_| true);
+    let edits = params["edit"]["changes"][&uri]
+        .as_array()
+        .unwrap_or_else(|| panic!("no edit for {uri}: {params}"));
+    assert_eq!(edits.len(), 1, "{params}");
+    assert_eq!(edits[0]["newText"], "(ns fresh.new-thing)\n");
+    let zero = json!({ "line": 0, "character": 0 });
+    assert_eq!(edits[0]["range"], json!({ "start": zero, "end": zero }));
+}
+
+#[test]
+fn test_e2e_new_file_with_content_or_outside_roots_untouched() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let fresh = root.join("src/fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::create_dir_all(root.join("resources")).unwrap();
+    let copied = fresh.join("copied.clj");
+    let stray = root.join("resources/stray.clj");
+    let typed = fresh.join("typed.clj");
+    let marker = fresh.join("marker.clj");
+    std::fs::write(&copied, "(ns fresh.copied)\n").unwrap();
+    for empty in [&stray, &typed, &marker] {
+        std::fs::write(empty, "").unwrap();
+    }
+    let uri = |p: &Path| format!("file://{}", p.display());
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    // Empty on disk, but the open buffer already holds text: the buffer wins.
+    client.did_open_uri(&uri(&typed), "(def x 1)");
+    // The handler walks `files` in order within one call, so the marker's
+    // edit arriving means the first three were already decided.
+    client.notify(
+        "workspace/didCreateFiles",
+        json!({ "files": [
+            { "uri": uri(&copied) },
+            { "uri": uri(&stray) },
+            { "uri": uri(&typed) },
+            { "uri": uri(&marker) },
+        ] }),
+    );
+
+    client.wait_for_notification_where("workspace/applyEdit", |_| true);
+    assert_eq!(apply_edit_uris(&client), vec![uri(&marker)]);
+}
