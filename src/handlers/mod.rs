@@ -10,6 +10,7 @@ pub mod indent;
 pub mod java;
 mod letgo_native_names;
 pub mod matching;
+pub mod new_file;
 pub mod references;
 pub mod selection;
 pub mod signature;

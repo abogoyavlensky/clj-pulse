@@ -90,7 +90,7 @@ VS Code creates the file on disk, fires the event, and opens the editor. `didOpe
 - Create: `src/handlers/new_file.rs`
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Write the failing unit tests** in `src/handlers/new_file.rs` (`#[cfg(test)] mod tests`), with the module declared in `handlers/mod.rs` and `ns_for_path` stubbed to `None`. Use absolute `PathBuf`s built from a fixed base such as `/p` (`Path::new("/p").join("src")`), so no files are needed. Cases:
+- [x] **Step 1: Write the failing unit tests** in `src/handlers/new_file.rs` (`#[cfg(test)] mod tests`), with the module declared in `handlers/mod.rs` and `ns_for_path` stubbed to `None`. Use absolute `PathBuf`s built from a fixed base such as `/p` (`Path::new("/p").join("src")`), so no files are needed. Cases:
   - `src/foo/bar_baz.clj` → `Some("foo.bar-baz")`
   - `test/foo/bar_test.cljc` → `Some("foo.bar-test")`
   - `src/app/main.lg` → `Some("app.main")`
@@ -100,10 +100,10 @@ VS Code creates the file on disk, fires the event, and opens the editor. `didOpe
   - a path equal to a root → `None`
   - unusable names → `None`: `src/my file.clj`, `src/foo.bar.clj`, `src/1st/x.clj`
   - `ns_insert_edit` returns one `TextEdit` at range 0:0–0:0 with `new_text` `"(ns foo.bar)\n"` under the given URI.
-- [ ] **Step 2: Run them and watch them fail.** Run: `cargo test --lib new_file`. Expected: the `ns_for_path` cases FAIL.
-- [ ] **Step 3: Implement** `ns_for_path` (longest prefix root, `strip_prefix`, file stem for the last component, `.`-join, `_`→`-`) and `ns_insert_edit`, with doc comments in the style of the surrounding modules.
-- [ ] **Step 4: Run them and watch them pass.** Run: `cargo test --lib new_file`. Expected: PASS.
-- [ ] **Step 5: Commit.** `git commit -m "new files: derive the ns from a path and its source roots"`
+- [x] **Step 2: Run them and watch them fail.** Run: `cargo test --lib new_file`. Expected: the `ns_for_path` cases FAIL.
+- [x] **Step 3: Implement** `ns_for_path` (longest prefix root, `strip_prefix`, file stem for the last component, `.`-join, `_`→`-`) and `ns_insert_edit`, with doc comments in the style of the surrounding modules.
+- [x] **Step 4: Run them and watch them pass.** Run: `cargo test --lib new_file`. Expected: PASS.
+- [x] **Step 5: Commit.** `git commit -m "new files: derive the ns from a path and its source roots"`
 
 ### Task 3: Capability and `did_create_files`
 
