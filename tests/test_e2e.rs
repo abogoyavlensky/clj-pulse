@@ -9524,3 +9524,28 @@ fn test_e2e_new_file_with_content_or_outside_roots_untouched() {
     client.wait_for_notification_where("workspace/applyEdit", |_| true);
     assert_eq!(apply_edit_uris(&client), vec![uri(&marker)]);
 }
+
+#[test]
+fn test_e2e_new_file_right_after_initialize_gets_ns() {
+    // A file created before startup detection has stored the project list
+    // still gets its ns: the workspace root stands in for the project.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let file = root.join("src/early.clj");
+    std::fs::write(&file, "").unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize_no_wait(&root);
+    let uri = format!("file://{}", file.display());
+    client.notify(
+        "workspace/didCreateFiles",
+        json!({ "files": [{ "uri": uri }] }),
+    );
+
+    let params = client.wait_for_notification_where("workspace/applyEdit", |_| true);
+    assert_eq!(
+        params["edit"]["changes"][&uri][0]["newText"],
+        "(ns early)\n"
+    );
+}

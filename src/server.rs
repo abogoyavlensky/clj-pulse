@@ -2083,10 +2083,13 @@ fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
 /// The namespace a newly created file at `uri` should declare, or `None`
 /// when it must be left alone: not Clojure source, not empty (an Explorer
 /// copy carries content; an open buffer outranks the disk), or outside every
-/// source root of its project.
+/// source root of its project. Before startup detection has stored the
+/// project list, the workspace root stands in as the only project, so a file
+/// created in that window still gets its `ns` in a single-project workspace.
 fn ns_for_new_file(
     documents: &DocumentStore,
     project_list: &[projects::Project],
+    workspace_root: Option<&std::path::Path>,
     uri: &Url,
 ) -> Option<String> {
     let path = uri.to_file_path().ok()?;
@@ -2100,8 +2103,12 @@ fn ns_for_new_file(
     if !empty {
         return None;
     }
-    let project = owning_project(project_list, &path)?;
-    handlers::new_file::ns_for_path(&path, &config::source_paths(&project.dir))
+    let project_dir = match owning_project(project_list, &path) {
+        Some(project) => project.dir.as_path(),
+        None if project_list.is_empty() => workspace_root?,
+        None => return None,
+    };
+    handlers::new_file::ns_for_path(&path, &config::source_paths(project_dir))
 }
 
 #[tower_lsp::async_trait]
@@ -2589,13 +2596,20 @@ impl LanguageServer for Backend {
 
     async fn did_create_files(&self, params: CreateFilesParams) {
         let project_list = self.projects.lock().unwrap().clone();
+        let workspace_root = self.root.lock().unwrap().clone();
         // One file at a time, each edit answered before the next: a batch
         // stays in the order the client listed it.
         for file in params.files {
             let Ok(uri) = Url::parse(&file.uri) else {
                 continue;
             };
-            let Some(ns) = ns_for_new_file(&self.documents, &project_list, &uri) else {
+            let ns = ns_for_new_file(
+                &self.documents,
+                &project_list,
+                workspace_root.as_deref(),
+                &uri,
+            );
+            let Some(ns) = ns else {
                 continue;
             };
             let edit = handlers::new_file::ns_insert_edit(uri.clone(), &ns);
