@@ -130,9 +130,11 @@ VS Code creates the file on disk, fires the event, and opens the editor. `didOpe
 **Files:**
 - Modify: `scripts/pulse-e2e/tests.js`
 
-- [ ] **Step 1: Add check 11** before the final `failed` tally. Build a `vscode.WorkspaceEdit` that calls `createFile` for `src/fresh/new_thing.clj` under the fixture workspace (`ignoreIfExists: true`), apply it with `vscode.workspace.applyEdit`, then `poll(30000, …)` `vscode.workspace.openTextDocument(uri)` until `getText()` starts with `(ns fresh.new-thing)`. Then `check(...)` with the text as detail. Read `runner.js` first. If the run works on the committed fixture instead of a copy, delete the file afterwards (`vscode.workspace.fs.delete`) so the fixture stays clean. Extend the header comment's list of what the suite covers.
-- [ ] **Step 2: Run the gate.** Run: `cargo build && bb e2e-pulse`. Expected: every check passes, including the new one.
-- [ ] **Step 3: Commit.** `git commit -m "e2e-pulse: new file gets its ns form"`
+- [x] **Step 1: Add check 11** before the final `failed` tally. Build a `vscode.WorkspaceEdit` that calls `createFile` for `src/fresh/new_thing.clj` under the fixture workspace (`ignoreIfExists: true`), apply it with `vscode.workspace.applyEdit`, then `poll(30000, …)` `vscode.workspace.openTextDocument(uri)` until `getText()` starts with `(ns fresh.new-thing)`. Then `check(...)` with the text as detail. Read `runner.js` first. If the run works on the committed fixture instead of a copy, delete the file afterwards (`vscode.workspace.fs.delete`) so the fixture stays clean. Extend the header comment's list of what the suite covers.
+- [x] **Step 2: Run the gate.** Run: `cargo build && bb e2e-pulse`. Expected: every check passes, including the new one.
+- [x] **Step 3: Commit.** `git commit -m "e2e-pulse: new file gets its ns form"`
+
+> Note: `runner.js` copies the fixture to a temp dir, so the check needs no cleanup.
 
 ### Task 5: Verification gates
 

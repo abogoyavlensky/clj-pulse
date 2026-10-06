@@ -2,7 +2,7 @@
 // activated. Exercises the user-visible surface of the server through the
 // extension's own client: project and library definition, jar: content served
 // by the extension's clojure/dependencyContents provider, hover, completion,
-// and diagnostics.
+// diagnostics, and the ns form a newly created file gets.
 
 const vscode = require("vscode");
 
@@ -305,6 +305,23 @@ exports.run = async () => {
     lgDiags.some((d) => codeOf(d) === "unused-namespace" && d.message.includes("lgutil")),
     "letgo: the unused `lgutil` require is reported as unused-namespace",
     JSON.stringify(lgDiags.map((d) => ({ code: codeOf(d), source: d.source, message: d.message })))
+  );
+
+  // 11. A new, empty file gets its ns form: VS Code reports the creation
+  //     (`workspace/didCreateFiles`, the Explorer's New File path) and the
+  //     server answers with a `workspace/applyEdit` the client applies.
+  const newUri = vscode.Uri.file(`${root}/src/fresh/new_thing.clj`);
+  const create = new vscode.WorkspaceEdit();
+  create.createFile(newUri, { ignoreIfExists: true });
+  check(await vscode.workspace.applyEdit(create), "VS Code creates src/fresh/new_thing.clj");
+  const newText = await poll(30000, async () => {
+    const text = (await vscode.workspace.openTextDocument(newUri)).getText();
+    return text.startsWith("(ns fresh.new-thing)") ? text : undefined;
+  });
+  check(
+    newText !== undefined,
+    "new file: an empty src/fresh/new_thing.clj gets (ns fresh.new-thing)",
+    JSON.stringify((await vscode.workspace.openTextDocument(newUri)).getText())
   );
 
   const failed = checks.filter((c) => !c.cond);
