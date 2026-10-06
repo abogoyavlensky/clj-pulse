@@ -1,5 +1,7 @@
 # Namespace Form for New Files Implementation Plan
 
+**Status: complete** (2026-10-06, branch `feat/ns-for-new-files`).
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** When the editor creates an empty `.clj`/`.cljs`/`.cljc`/`.lg` file under a project source root (VS Code Explorer → New File…), the server inserts `(ns <name>)` derived from the file's path, through the standard `workspace/didCreateFiles` → `workspace/applyEdit` exchange (ROADMAP Milestone 4).
@@ -138,18 +140,35 @@ VS Code creates the file on disk, fires the event, and opens the editor. `didOpe
 
 ### Task 5: Verification gates
 
-- [ ] **Step 1:** Run `bb check`. Expected: fmt, clippy `-D warnings`, and all tests green.
-- [ ] **Step 2:** Run `bb e2e`. Expected: PASS.
-- [ ] **Step 3:** Run `bb e2e-nvim`. Expected: PASS. The capability is new, and Neovim must still initialize cleanly.
+- [x] **Step 1:** Run `bb check`. Expected: fmt, clippy `-D warnings`, and all tests green.
+- [x] **Step 2:** Run `bb e2e`. Expected: PASS.
+- [x] **Step 3:** Run `bb e2e-nvim`. Expected: PASS. The capability is new, and Neovim must still initialize cleanly.
 
 ### Task 6: Docs and close-out
 
 **Files:**
 - Modify: `docs/FEATURES.md`, `README.md`, `AGENTS.md`, `docs/ROADMAP.md`, this plan
 
-- [ ] **Step 1: FEATURES.md.** Add a bullet after "Code actions": `- **ns form for new files** - an empty .clj/.cljs/.cljc/.lg file created in the editor (Explorer → New File) under a source root gets \`(ns …)\` from its path, e.g. \`src/foo/bar_baz.clj\` → \`(ns foo.bar-baz)\`. Needs a client that sends \`workspace/didCreateFiles\` (VS Code does; Neovim does not).`
-- [ ] **Step 2: README.md.** Check whether any feature list or status line enumerates capabilities. If one does, add the feature there. If none does, leave README unchanged and record that in the commit message.
-- [ ] **Step 3: AGENTS.md.** Add one invariant bullet: `did_create_files` acts only on files that are empty (the open buffer, else disk) and inside a `config::source_paths` root of the owning project, and it inserts a bare `(ns …)` via `workspace/applyEdit`. A file outside every root is left alone.
-- [ ] **Step 4: ROADMAP.md.** Tick the item and set it to `— done`. In "Where we stand", add one sentence on the feature to the shipped paragraph.
-- [ ] **Step 5: This plan.** Add `**Status: complete** (<date>, branch <name>).` under the title.
-- [ ] **Step 6: Commit.** `git commit -m "docs: ns form for new files"`
+- [x] **Step 1: FEATURES.md.** Add a bullet after "Code actions": `- **ns form for new files** - an empty .clj/.cljs/.cljc/.lg file created in the editor (Explorer → New File) under a source root gets \`(ns …)\` from its path, e.g. \`src/foo/bar_baz.clj\` → \`(ns foo.bar-baz)\`. Needs a client that sends \`workspace/didCreateFiles\` (VS Code does; Neovim does not).`
+- [x] **Step 2: README.md.** Check whether any feature list or status line enumerates capabilities. If one does, add the feature there. If none does, leave README unchanged and record that in the commit message.
+- [x] **Step 3: AGENTS.md.** Add one invariant bullet: `did_create_files` acts only on files that are empty (the open buffer, else disk) and inside a `config::source_paths` root of the owning project, and it inserts a bare `(ns …)` via `workspace/applyEdit`. A file outside every root is left alone.
+- [x] **Step 4: ROADMAP.md.** Tick the item and set it to `— done`. In "Where we stand", add one sentence on the feature to the shipped paragraph.
+- [x] **Step 5: This plan.** Add `**Status: complete** (<date>, branch <name>).` under the title.
+- [x] **Step 6: Commit.** `git commit -m "docs: ns form for new files"`
+
+## Summary
+
+Implemented: `src/handlers/new_file.rs` (`ns_for_path`, `ns_insert_edit`), the `workspace.fileOperations.didCreate` capability (four plain globs) and `did_create_files` in `src/server.rs`, four e2e tests in `tests/test_e2e.rs`, check 11 in `scripts/pulse-e2e/tests.js`, and docs in FEATURES, README, AGENTS and ROADMAP. Gates: `bb check` (1422 passed), `bb e2e`, `bb e2e-pulse` (a real VS Code `createFile` gets `(ns fresh.new-thing)`), `bb e2e-nvim`: all green.
+
+Issues found by codex per-task review and fixed:
+- `ns_for_path` accepted names the reader takes as literals: `nil`, `true` and `false` as a whole name, a segment starting with a signed digit (`-1`), and a leading `:`. These are now rejected.
+- A startup race: `didCreateFiles` before project detection was dropped. A root fallback was tried and replaced by a `projects_ready` watch flag, since the fallback could insert a wrong ns in a monorepo.
+
+Deviations (also noted under each task):
+- The per-file decision is a free fn `ns_for_new_file` beside `owning_project`.
+- An e2e test was renamed so `cargo test new_file` selects it.
+- The `projects_ready` wait was added (Task 3).
+- `README.md` did enumerate everyday features, so the feature was added there.
+
+What the plan could have specified better: startup's asynchronous project population. The design assumed the project list exists whenever a notification arrives, and the same gap applies to any future handler that reads `self.projects` early.
+

@@ -16,9 +16,9 @@ A fast-starting, low-memory Clojure language server.
   cached dependencies, with [classpath settings per project](docs/SETTINGS.md#projects-and-classpaths).
 
 Everyday tools include: fuzzy completion with auto-require, hover and signature
-help, references, rename, keyword completion, symbol search, and namespace
-quickfixes. Built-in diagnostics work out of the box; optional clj-kondo adds
-its full linter set. See the [feature reference](docs/FEATURES.md).
+help, references, rename, keyword completion, symbol search, namespace
+quickfixes, and an `ns` form for each new file. Built-in diagnostics work out
+of the box; optional clj-kondo adds its full linter set. See the [feature reference](docs/FEATURES.md).
 
 ## Quick start
 

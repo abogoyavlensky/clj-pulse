@@ -305,6 +305,11 @@ there.
   rename sites (`collect_refer_occurrences`, `collect_alias_declarations`);
   clean-ns, add-require and the tree-based lints still scan `:require` only.
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
+- `did_create_files` inserts a bare `(ns …)` via `workspace/applyEdit` only
+  into a file that is empty (the open buffer, else the disk) and inside a
+  `config::source_paths` root of its owning project; anything else, and a
+  name no namespace can spell, is left alone. It waits for startup's project
+  detection (`projects_ready`, bounded), never for stage 3.
 - Integrant EDN configs are found project-wide, not under `:paths`: the scan
   walks each project dir to `scanner::EDN_SCAN_MAX_DEPTH` (gitignore respected)
   and keeps what `is_integrant_edn` accepts. `:paths` is a classpath decision
