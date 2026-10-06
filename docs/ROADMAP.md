@@ -197,6 +197,9 @@ Each is small because the index already holds the data.
 - [ ] Sort requires, as an extension of clean-ns.
 - [ ] `workspace/willRenameFiles`. Rewrite the `ns` form and every require
       when a file moves.
+- [ ] **ns form for new files.** `workspace/didCreateFiles`: an empty Clojure
+      file created under a source root gets `(ns …)` from its path.
+  Plan: [2026-10-06-1414-ns-for-new-files.md](plans/2026-10-06-1414-ns-for-new-files.md) — in progress
 - [ ] Reference-count code lens, off by default.
   Plan: —
 - [x] **Rename a require alias.** From the `:as`/`:as-alias` binding or any
