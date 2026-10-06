@@ -1062,6 +1062,9 @@ static KONDO_WARM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 
 /// A cold scan of a large classpath is slow but bounded; past ten minutes
 /// something is wrong and the process should not linger.
+/// How long `did_create_files` waits for startup's project detection.
+const PROJECTS_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const KONDO_WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Whether clj-kondo has a config/cache directory it can write to for this
@@ -1539,6 +1542,9 @@ pub struct Backend {
     kondo: KondoWarmer,
     /// See [`ClojureDocsState`].
     clojuredocs: SharedClojureDocs,
+    /// Flips to `true` once startup has stored the detected project list;
+    /// `did_create_files` waits on it (detection only, never stage 3).
+    projects_ready: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Backend {
@@ -1558,6 +1564,7 @@ impl Backend {
             editor_kondo: SharedEditorKondo::default(),
             kondo: KondoWarmer::default(),
             clojuredocs: SharedClojureDocs::default(),
+            projects_ready: Arc::new(tokio::sync::watch::channel(false).0),
         }
     }
 
@@ -2083,13 +2090,10 @@ fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
 /// The namespace a newly created file at `uri` should declare, or `None`
 /// when it must be left alone: not Clojure source, not empty (an Explorer
 /// copy carries content; an open buffer outranks the disk), or outside every
-/// source root of its project. Before startup detection has stored the
-/// project list, the workspace root stands in as the only project, so a file
-/// created in that window still gets its `ns` in a single-project workspace.
+/// source root of its project.
 fn ns_for_new_file(
     documents: &DocumentStore,
     project_list: &[projects::Project],
-    workspace_root: Option<&std::path::Path>,
     uri: &Url,
 ) -> Option<String> {
     let path = uri.to_file_path().ok()?;
@@ -2103,12 +2107,8 @@ fn ns_for_new_file(
     if !empty {
         return None;
     }
-    let project_dir = match owning_project(project_list, &path) {
-        Some(project) => project.dir.as_path(),
-        None if project_list.is_empty() => workspace_root?,
-        None => return None,
-    };
-    handlers::new_file::ns_for_path(&path, &config::source_paths(project_dir))
+    let project = owning_project(project_list, &path)?;
+    handlers::new_file::ns_for_path(&path, &config::source_paths(&project.dir))
 }
 
 #[tower_lsp::async_trait]
@@ -2176,6 +2176,7 @@ impl LanguageServer for Backend {
                 let startup_guard = self.config_apply_lock.clone().lock_owned().await;
                 let progress = self.progress.clone();
                 let warmer = self.kondo.clone();
+                let projects_ready = self.projects_ready.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
 
@@ -2193,6 +2194,7 @@ impl LanguageServer for Backend {
                         resolved.iter().map(|p| &p.rel_path).collect::<Vec<_>>()
                     );
                     *projects_arc.lock().unwrap() = resolved.clone();
+                    projects_ready.send_replace(true);
                     {
                         let mut state = state_arc.lock().unwrap();
                         for p in &resolved {
@@ -2595,21 +2597,24 @@ impl LanguageServer for Backend {
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {
+        // No workspace root: no project list will ever come.
+        if self.root.lock().unwrap().is_none() {
+            return;
+        }
+        // Startup stores the project list from a spawned task; a file created
+        // before that would find no owning project. Wait for detection alone
+        // (stage 3 may run for minutes), bounded so a stuck detection never
+        // holds the handler.
+        let mut ready = self.projects_ready.subscribe();
+        let _ = tokio::time::timeout(PROJECTS_READY_TIMEOUT, ready.wait_for(|r| *r)).await;
         let project_list = self.projects.lock().unwrap().clone();
-        let workspace_root = self.root.lock().unwrap().clone();
         // One file at a time, each edit answered before the next: a batch
         // stays in the order the client listed it.
         for file in params.files {
             let Ok(uri) = Url::parse(&file.uri) else {
                 continue;
             };
-            let ns = ns_for_new_file(
-                &self.documents,
-                &project_list,
-                workspace_root.as_deref(),
-                &uri,
-            );
-            let Some(ns) = ns else {
+            let Some(ns) = ns_for_new_file(&self.documents, &project_list, &uri) else {
                 continue;
             };
             let edit = handlers::new_file::ns_insert_edit(uri.clone(), &ns);

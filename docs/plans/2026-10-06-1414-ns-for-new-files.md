@@ -123,7 +123,7 @@ VS Code creates the file on disk, fires the event, and opens the editor. `didOpe
 
 > Deviation: the per-file decision lives in a free fn `ns_for_new_file(documents, project_list, uri)` beside `owning_project` rather than a `Backend` method — it needs no `self` beyond those two, and the project list is cloned once per notification. The empty-file e2e test is named `test_e2e_new_file_empty_gets_ns` so `cargo test new_file` selects all three.
 
-> Deviation (codex review): startup stores the project list in a spawned task, so a `didCreateFiles` arriving first saw an empty list and was dropped. `ns_for_new_file` now falls back to the workspace root as the only project while the list is empty (no wait on `ConfigApplyLock`, which startup holds through stage 3). Covered by `test_e2e_new_file_right_after_initialize_gets_ns`, which fails without the fallback.
+> Deviation (codex review, two rounds): startup stores the project list in a spawned task, so a `didCreateFiles` arriving first saw an empty list and was dropped. A first fix (the workspace root standing in as the only project) could insert a wrong ns in a monorepo, so it was replaced: `Backend.projects_ready` (a `watch` flag set right after startup stores the detected list) is awaited by `did_create_files`, bounded by `PROJECTS_READY_TIMEOUT` (5 s) and skipped when there is no workspace root. It waits for detection only, never `ConfigApplyLock`, which startup holds through stage 3. `test_e2e_new_file_right_after_initialize_gets_ns` fails without the wait.
 
 ### Task 4: Clojure Pulse e2e check
 

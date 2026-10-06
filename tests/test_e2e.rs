@@ -9528,7 +9528,7 @@ fn test_e2e_new_file_with_content_or_outside_roots_untouched() {
 #[test]
 fn test_e2e_new_file_right_after_initialize_gets_ns() {
     // A file created before startup detection has stored the project list
-    // still gets its ns: the workspace root stands in for the project.
+    // still gets its ns: the handler waits for detection, not for stage 3.
     let project = setup_project();
     let root = project.path().canonicalize().unwrap();
 
