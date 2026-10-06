@@ -24,15 +24,23 @@ pub fn ns_for_path(path: &Path, roots: &[PathBuf]) -> Option<String> {
             is_ns_segment(&segment).then_some(segment)
         })
         .collect::<Option<Vec<_>>>()?;
-    (!segments.is_empty()).then(|| segments.join("."))
+    let ns = segments.join(".");
+    // The reader takes these tokens as literals, never as a symbol.
+    (!ns.is_empty() && !matches!(ns.as_str(), "nil" | "true" | "false")).then_some(ns)
 }
 
-/// Whether `segment` can stand between the dots of a namespace symbol.
+/// Whether `segment` can stand between the dots of a namespace symbol: not
+/// a number (`1st`, `-1`), not a keyword (`:x`), no reader syntax inside.
 fn is_ns_segment(segment: &str) -> bool {
-    let Some(first) = segment.chars().next() else {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
         return false;
     };
+    let signed_digit =
+        matches!(first, '+' | '-') && chars.next().is_some_and(|c| c.is_ascii_digit());
     !first.is_ascii_digit()
+        && !signed_digit
+        && first != ':'
         && !segment
             .chars()
             .any(|c| c.is_whitespace() || "().[]{}\"',;@^`~\\#".contains(c))
@@ -94,6 +102,15 @@ mod tests {
         assert_eq!(ns("src/my file.clj", r), None);
         assert_eq!(ns("src/foo.bar.clj", r), None);
         assert_eq!(ns("src/1st/x.clj", r), None);
+        assert_eq!(ns("src/-1.clj", r), None);
+        assert_eq!(ns("src/:x.clj", r), None);
+        for literal in ["nil", "true", "false"] {
+            assert_eq!(ns(&format!("src/{literal}.clj"), r), None);
+        }
+        // Only the whole name is a literal; a segment spelling one is fine,
+        // and so is a symbol that merely starts with a sign.
+        assert_eq!(ns("src/app/true.clj", r).as_deref(), Some("app.true"));
+        assert_eq!(ns("src/-main.clj", r).as_deref(), Some("-main"));
     }
 
     #[test]
