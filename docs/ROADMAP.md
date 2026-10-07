@@ -158,6 +158,11 @@ Small fixes that remove wrong answers. Each extractor change bumps
       (`clojure.test/are`, `cljs.test/are`) in the occurrence walker and by
       name part in the locals walker.
   Plan: [2026-09-13-0934-are-template-locals.md](plans/2026-09-13-0934-are-template-locals.md) — done
+- [ ] **Clojure 1.13 destructuring.** Support Clojure 1.13 destructuring
+      features, including required keys, :select, :all, :excess, :missing,
+      and :defaults (plus literal keys after `&`, key→val `:or`, and the
+      `selector` macro).
+  Plan: [2026-10-06-2018-clojure-1-13-destructuring.md](plans/2026-10-06-2018-clojure-1-13-destructuring.md) — in progress
 
 ## Milestone 2 — completion quality
 
