@@ -164,6 +164,10 @@ Small fixes that remove wrong answers. Each extractor change bumps
       `selector` macro). `bb compare clj-kondo` matches master row for row
       (4921 of 5248 agree); see [MEMORY.md](MEMORY.md).
   Plan: [2026-10-06-2018-clojure-1-13-destructuring.md](plans/2026-10-06-2018-clojure-1-13-destructuring.md) — done
+- [ ] **Cursor on a reader prefix.** Hover, definition, references, rename
+      and highlight from the `@`, `#'`, `` ` `` or `~` before a symbol answer
+      as from the symbol; ranges stay on the name.
+  Plan: [2026-10-07-2258-cursor-on-reader-prefix.md](plans/2026-10-07-2258-cursor-on-reader-prefix.md) — in progress
 
 ## Milestone 2 — completion quality
 

@@ -90,7 +90,7 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
 
 ### Task 0: Roadmap link
 
-- [ ] **Step 1:** In `docs/ROADMAP.md`, under "Milestone 1 — correctness of shipped features", add the item unticked with its `Plan:` line pointing at this file (working rule: link the plan when starting). Task 4 ticks it. The working rule says to update README and CLAUDE.md on completion: CLAUDE.md gets its invariant in Task 4; README is checked in Task 4 and left unchanged if, as expected, nothing in it enumerates cursor positions — it is the short public introduction, and `docs/FEATURES.md` owns this detail. `AGENTS.md` is a symlink to `CLAUDE.md`, so it needs no separate edit.
+- [x] **Step 1:** In `docs/ROADMAP.md`, under "Milestone 1 — correctness of shipped features", add the item unticked with its `Plan:` line pointing at this file (working rule: link the plan when starting). Task 4 ticks it. The working rule says to update README and CLAUDE.md on completion: CLAUDE.md gets its invariant in Task 4; README is checked in Task 4 and left unchanged if, as expected, nothing in it enumerates cursor positions — it is the short public introduction, and `docs/FEATURES.md` owns this detail. `AGENTS.md` is a symlink to `CLAUDE.md`, so it needs no separate edit.
 
 ### Task 1: `extractor::prefixed_symbol_start` with unit tests
 
@@ -109,7 +109,7 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
   Run: `cargo test --lib prefixed_symbol_start` — Expected: compile error (function missing).
 
 - [ ] **Step 2: Implement**
-  As in the Design: `node_path_at` first element, kind match on the five prefix kinds, `child_by_field_name("value")` must be `sym_lit`, return `node_to_lsp_range(value, source).start`. Return `None` when `pos` is at or past the value's start (the position is already inside the symbol; let the caller's finders work unmodified). Doc comment as in the Design.
+  As in the Design: `node_path_at` first element, kind match on the five prefix kinds, `child_by_field_name("value")` must be `sym_lit`, return the start of its `name` field (or of the `sym_lit` when it has none), as the Design says. Return `None` when `pos` is at or past the value's start (the position is already inside the symbol; let the caller's finders work unmodified). Doc comment as in the Design.
   Run: `cargo test --lib prefixed_symbol_start` — Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -187,7 +187,7 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
 - Modify: `docs/FEATURES.md`, `docs/ROADMAP.md`, `CLAUDE.md`
 
 - [ ] **Step 1: FEATURES.md**
-  In the "Highlight occurrences" bullet (and once, in the navigation/hover area above it if it lists what the cursor may sit on), add one sentence: the cursor may sit on a symbol's reader prefix — `@pfx-state`, `#'pfx-state`, `` `state ``, `~pfx-state` — and the answer is the symbol's; the underline and every edit stay on the name, so renaming `pfx-state` leaves the `@`.
+  In the "Highlight occurrences" bullet (and once, in the navigation/hover area above it if it lists what the cursor may sit on), add one sentence: the cursor may sit on a symbol's reader prefix — `@state`, `#'state`, `` `state ``, `~state` — and the answer is the symbol's; the underline and every edit stay on the name, so renaming `state` leaves the `@`.
 
 - [ ] **Step 2: ROADMAP.md**
   Tick the item Task 0 added; final text:
