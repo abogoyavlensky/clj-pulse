@@ -21,6 +21,13 @@ pub fn handle(
         None => return Ok(None),
     };
 
+    // `word_at` keeps a var-quote's `#'` (it stops `#'x` from naming a
+    // shadowing local), but the hover is the var's: `#'x` names `x`.
+    let word = match word.strip_prefix("#'") {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => word,
+    };
+
     tracing::info!("hover: word={}", word);
 
     let path = match crate::uri::to_index_path(&uri) {

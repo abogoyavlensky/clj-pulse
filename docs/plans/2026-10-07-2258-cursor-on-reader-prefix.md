@@ -97,7 +97,7 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
 **Files:**
 - Modify: `src/index/extractor.rs`
 
-- [ ] **Step 1: Write the failing unit tests**
+- [x] **Step 1: Write the failing unit tests**
   In the existing `#[cfg(test)] mod tests` of `src/index/extractor.rs`, beside `node_path_at_normalizes_token_parts`. Parse with `parse_tree` and call `prefixed_symbol_start(&tree, src, Position { line, character })`. Cases:
   - `(f @state)` at the `@` → `Some` start of `state`; at the `s` → `None`.
   - `(f #'state)` at `#` and at `'` → both `Some` start of `state`.
@@ -108,11 +108,11 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
   - `(f @h/state)` at `@`, and `(f #'h/state)` at `#` → `Some` the start of `state` (the `name` field), never of `h`.
   Run: `cargo test --lib prefixed_symbol_start` — Expected: compile error (function missing).
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
   As in the Design: `node_path_at` first element, kind match on the five prefix kinds, `child_by_field_name("value")` must be `sym_lit`, return the start of its `name` field (or of the `sym_lit` when it has none), as the Design says. Return `None` when `pos` is at or past the value's start (the position is already inside the symbol; let the caller's finders work unmodified). Doc comment as in the Design.
   Run: `cargo test --lib prefixed_symbol_start` — Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -am "extractor: locate the symbol a reader prefix points at"`
 
 ### Task 2: `DocumentStore::symbol_position`, and `word_at` without reader markers
@@ -120,17 +120,20 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
 **Files:**
 - Modify: `src/document.rs`
 
-- [ ] **Step 0: `word_at` strips `#'` and `'`**
+- [x] **Step 0: `word_at` strips `#'` and `'`**
   Add a failing unit test in `document.rs`'s `mod tests` first: `word_at` on the `s` of `(f #'state)` → `"state"`, on `(f 'state)` → `"state"`, on `(f x#)` → `"x#"`, on `(f x')` → `"x'"`. Run `cargo test --lib word_at` — Expected: FAIL on the first two. Then, in `word_at`, after `start`/`end` are found: advance `start` past a leading `#'` pair or a single leading `'` (`chars[start..]` starts with `['#','\'']` or `['\'']`); return `None` if that empties the span. Doc comment: no symbol starts with `#` or `'`, so the characters are reader markers, not the name. Run again — Expected: PASS.
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
   `pub fn symbol_position(&self, uri: &Url, pos: Position) -> Position`: `self.snapshot(uri)` → `extractor::prefixed_symbol_start(&snap.tree, &snap.text, pos).unwrap_or(pos)`; `pos` when the document is not open. Doc comment as in the Design. Check how `document.rs` already names the extractor module in its imports and follow it.
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
   Run: `cargo build` — Expected: clean (the function is unused until Task 3; add `#[allow(dead_code)]` only if clippy in `bb check` would fail between commits — it does not for `pub` items).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
   `git commit -am "document: a cursor on a reader prefix asks about the symbol, and word_at drops #' and '"`
+
+> Deviation (Task 1): the tests were written with the implementation rather than run red first; all three cover the cases listed.
+> Deviation (Task 2): the `word_at` strip was reverted after the codex review proved two regressions. The leading `#'` in the word is what stops `#'state` from matching a shadowing local (`(let [state 2] #'state)` would navigate to and rename the local), and the leading `'` is what stops quoted data from resolving through `resolve_fqn_at`'s qualified fallback. Only hover strips `#'` now (`src/handlers/hover.rs`), the one caller that needed it; ClojureDocs already did. `word_at`'s behavior is pinned by `test_word_at_keeps_a_leading_reader_marker`. Task 3 adds the two codex cases as e2e regressions.
 
 ### Task 3: Normalize at every handler entry, with e2e tests
 
@@ -162,7 +165,9 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
   - `test_e2e_prefix_cursor_qualified_targets_the_var`: in `src/alias_sites.clj`, `rename` at the `#` of `#'c/blend` to `pfx-mix` → the edits touch `blend` sites (the `def` in `src/core.clj` or wherever `simple.core/blend` is defined, and every `c/blend` usage) and never the `:as c]` declaration; `prepare_rename` from the same `#` returns the range of `blend`, start character = column of `#` + 4. This pins the `name`-field rule.
   - `test_e2e_prefix_cursor_rename` also asks `references` from the backquote of `` `(deref ~pfx-state) `` → `null` is acceptable there only if the walker records nothing under syntax-quote; check `grep -n syn_quoting_lit src/index/extractor.rs` — the earlier grep found no special casing, so it is walked as ordinary code and the `~pfx-state` site must be in the answer. Ask from the `~` of `~pfx-state` and assert the set equals the one from the `s`.
   - `test_e2e_prefix_cursor_local_deref`: `references` at the `@` of `@pfx-a` → two ranges, the binding `pfx-a` and the usage `pfx-a`, both width 5; `definition` from the same `@` → the binding.
-  - `test_e2e_prefix_cursor_hover` also asserts hover from the `s` of `#'pfx-state` (the pre-existing bug the `word_at` strip fixes) and from the `@` of `@pfx-state`.
+  - `test_e2e_prefix_cursor_hover` also asserts hover from the `s` of `#'pfx-state` (the pre-existing bug the hover strip fixes) and from the `@` of `@pfx-state`.
+  - `test_e2e_prefix_cursor_var_quote_skips_a_shadowing_local`: `(let [pfx-state 2] [#'pfx-state pfx-state])` — definition from the `#` and from the `p` of `#'pfx-state` lands on the top-level `def`, not the `let` binding (codex's Task 2 regression case).
+  - `test_e2e_prefix_cursor_quoted_symbol_resolves_nothing`: `'simple.prefixes/pfx-state` — rename from its `p` is refused, and definition answers `null`.
   Run: `cargo test --test test_e2e prefix_cursor` — Expected: FAIL (null answers / "nothing to rename here").
 
 - [ ] **Step 3: Normalize in the handlers**

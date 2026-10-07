@@ -229,16 +229,7 @@ impl DocumentStore {
             end += 1;
         }
 
-        // `#` and `'` are symbol characters (`x#`, `x'`), but no symbol starts
-        // with either, so a leading `#'` or `'` is a reader marker, not part of
-        // the name: `#'state` and `'state` both name `state`.
-        if chars[start..end].starts_with(&['#', '\'']) {
-            start += 2;
-        } else if chars[start..end].starts_with(&['\'']) {
-            start += 1;
-        }
-
-        if start >= end {
+        if start == end {
             return None;
         }
 
@@ -455,18 +446,16 @@ mod tests {
         assert_eq!(word.as_deref(), Some("f"));
     }
 
+    /// `word_at` keeps a leading `#'` or `'`: that is what stops a var-quote
+    /// from matching a shadowing local and quoted data from resolving at all.
+    /// A caller that wants the var behind `#'x` strips it itself (hover).
     #[test]
-    fn test_word_at_drops_a_leading_reader_marker() {
-        let (store, uri) = store_with("(f #'state 'quoted x# y' a'b)");
+    fn test_word_at_keeps_a_leading_reader_marker() {
+        let (store, uri) = store_with("(f #'state 'quoted x#)");
         let at = |col: u32| store.word_at(&uri, Position::new(0, col));
-        assert_eq!(at(5).as_deref(), Some("state"), "on the s of #'state");
-        assert_eq!(at(3).as_deref(), Some("state"), "on the # of #'state");
-        assert_eq!(at(12).as_deref(), Some("quoted"), "on the q of 'quoted");
-        assert_eq!(at(19).as_deref(), Some("x#"), "a trailing # stays");
-        assert_eq!(at(22).as_deref(), Some("y'"), "a trailing ' stays");
-        assert_eq!(at(25).as_deref(), Some("a'b"), "an inner ' stays");
-        let (store, uri) = store_with("(f #' )");
-        assert_eq!(store.word_at(&uri, Position::new(0, 4)), None);
+        assert_eq!(at(5).as_deref(), Some("#'state"));
+        assert_eq!(at(12).as_deref(), Some("'quoted"));
+        assert_eq!(at(19).as_deref(), Some("x#"));
     }
 
     #[test]
