@@ -2748,9 +2748,14 @@ fn collect_binding_names(
                         // pattern, and a second slot here would shadow it and
                         // report it unused. (It still resolves to that binding
                         // through the position-directed scope walk, so
-                        // references and rename cover it.)
+                        // references and rename cover it.) Clojure 1.13 also
+                        // takes a key there (`:or {::a 1}`), which is a usage
+                        // of that keyword.
                         for default in named_children(*v).chunks(2) {
-                            let [_dk, dv] = default else { continue };
+                            let [dk, dv] = default else { continue };
+                            if dk.kind() == "kwd_lit" {
+                                record_keyword_occurrence(*dk, ctx, out);
+                            }
                             walk_occurrences(*dv, ctx, scope, out);
                         }
                     } else if key_directive(*k, ctx.source).is_some() && v.kind() == "vec_lit" {

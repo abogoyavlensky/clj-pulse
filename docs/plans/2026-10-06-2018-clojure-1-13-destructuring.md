@@ -247,16 +247,18 @@ These pass today; they pin the behavior the later tasks must keep.
 
 **Files:** `src/index/extractor.rs`, `tests/test_extractor.rs`
 
-- [ ] **Step 1: Failing test** in `tests/test_extractor.rs`: in
+- [x] **Step 1: Failing test** in `tests/test_extractor.rs`: in
   `(ns my.ns)\n(defn f [{::keys [a] :keys [b] :or {::a 1 b 2}}] [a b])` the
   `::a` key is an occurrence of `:my.ns/a` with the token's range (two in
   all: the `::keys` entry and the `:or` key), and `test_occurrence_destructuring_or_defaults_are_usages`
   still passes.
-- [ ] **Step 2:** `cargo test --test test_extractor` — FAIL.
-- [ ] **Step 3:** In `collect_binding_names`'s `:or` arm, record a `kwd_lit`
+- [x] **Step 2:** `cargo test --test test_extractor` — FAIL.
+- [x] **Step 3:** In `collect_binding_names`'s `:or` arm, record a `kwd_lit`
   key with `record_keyword_occurrence`.
-- [ ] **Step 4:** `cargo test --test test_extractor` — PASS.
-- [ ] **Step 5:** `git commit -m "extractor: keyword keys of :or are keyword sites"`
+- [x] **Step 4:** `cargo test --test test_extractor` — PASS.
+- [x] **Step 5:** `git commit -m "extractor: keyword keys of :or are keyword sites"`
+
+> Deviation: this five-line change is codex-reviewed together with Task 4.
 
 ### Task 4: `selector` binds nothing (row 5)
 

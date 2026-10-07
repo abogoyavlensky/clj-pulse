@@ -984,6 +984,27 @@ fn test_occurrence_destructuring_or_defaults_are_usages() {
 }
 
 #[test]
+fn test_occurrence_or_keyword_keys_are_keyword_sites() {
+    // Clojure 1.13 lets `:or` map a key, not only a binding, to its default:
+    // `::a` there names the key `:my.ns/a`, so a keyword rename must see it.
+    // A symbol key still names the binding and records nothing.
+    let src = "(ns my.ns)\n(defn f [{::keys [a] :keys [b] :or {::a 1 b 2}}] [a b])";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    let found = occurrences_of(&occs, ":my.ns/a");
+    assert_eq!(found.len(), 2, "the entry and the :or key: {:?}", occs);
+    let (line, start, end) = token_range(src, "::a", 0);
+    assert!(
+        found.iter().any(|o| {
+            let r = o.name_range;
+            (r.start.line, r.start.character, r.end.character) == (line, start, end)
+        }),
+        "the :or key's range: {:?}",
+        found
+    );
+    assert!(occurrences_of(&occs, "my.ns/b").is_empty(), "{:?}", occs);
+}
+
+#[test]
 fn test_occurrence_keywords_recorded_in_their_own_notation() {
     // Qualified keywords (literal `:ns/name`, auto-resolved `::name`) are
     // occurrences of the namespace they resolve to; an unqualified `:plain` is
