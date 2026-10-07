@@ -229,12 +229,31 @@ impl DocumentStore {
             end += 1;
         }
 
-        if start == end {
+        // `#` and `'` are symbol characters (`x#`, `x'`), but no symbol starts
+        // with either, so a leading `#'` or `'` is a reader marker, not part of
+        // the name: `#'state` and `'state` both name `state`.
+        if chars[start..end].starts_with(&['#', '\'']) {
+            start += 2;
+        } else if chars[start..end].starts_with(&['\'']) {
+            start += 1;
+        }
+
+        if start >= end {
             return None;
         }
 
         let _ = line_start; // used for rope offset calculations if needed
         Some(chars[start..end].iter().collect())
+    }
+
+    /// `pos`, moved onto the symbol when it sits on that symbol's reader prefix
+    /// (`@`, `#'`, `` ` ``, `~`, `~@`; see [`extractor::prefixed_symbol_start`]),
+    /// so a position-based request asks about what the cursor visibly points
+    /// at. `pos` unchanged otherwise, and for a document that is not open.
+    pub fn symbol_position(&self, uri: &Url, pos: Position) -> Position {
+        self.snapshot(uri)
+            .and_then(|snap| extractor::prefixed_symbol_start(&snap.tree, &snap.text, pos))
+            .unwrap_or(pos)
     }
 
     /// Whether the identifier token under `pos` is a Clojure keyword — i.e.
@@ -434,6 +453,33 @@ mod tests {
         let col = prefix.encode_utf16().count() as u32;
         let word = store.word_at(&uri, Position::new(0, col));
         assert_eq!(word.as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn test_word_at_drops_a_leading_reader_marker() {
+        let (store, uri) = store_with("(f #'state 'quoted x# y' a'b)");
+        let at = |col: u32| store.word_at(&uri, Position::new(0, col));
+        assert_eq!(at(5).as_deref(), Some("state"), "on the s of #'state");
+        assert_eq!(at(3).as_deref(), Some("state"), "on the # of #'state");
+        assert_eq!(at(12).as_deref(), Some("quoted"), "on the q of 'quoted");
+        assert_eq!(at(19).as_deref(), Some("x#"), "a trailing # stays");
+        assert_eq!(at(22).as_deref(), Some("y'"), "a trailing ' stays");
+        assert_eq!(at(25).as_deref(), Some("a'b"), "an inner ' stays");
+        let (store, uri) = store_with("(f #' )");
+        assert_eq!(store.word_at(&uri, Position::new(0, 4)), None);
+    }
+
+    #[test]
+    fn test_symbol_position_moves_off_a_deref() {
+        let (store, uri) = store_with("(f @state)");
+        assert_eq!(
+            store.symbol_position(&uri, Position::new(0, 3)),
+            Position::new(0, 4)
+        );
+        assert_eq!(
+            store.symbol_position(&uri, Position::new(0, 6)),
+            Position::new(0, 6)
+        );
     }
 
     #[test]
