@@ -8,6 +8,8 @@ keys, literal keys after `&`, key→val `:or`, the `:select`/`:all`/`:excess`/
 unused-binding lint, keyword references and every rename stay right on code
 that uses it.
 
+**Status:** completed 2026-10-07.
+
 **Tech Stack:** Rust, tree-sitter-clojure, tower-lsp; tests in
 `tests/test_extractor.rs`, the unit tests in `src/index/extractor.rs`,
 `tests/test_e2e.rs`, `bb compare`.
@@ -297,8 +299,8 @@ These pass today; they pin the behavior the later tasks must keep.
 
 **Files:** `src/index/jar_cache.rs`, `tests/test_e2e.rs`
 
-- [ ] **Step 1:** `CACHE_FORMAT_VERSION` 22 → 23.
-- [ ] **Step 2: e2e test** `test_e2e_clojure_1_13_destructuring`, modelled
+- [x] **Step 1:** `CACHE_FORMAT_VERSION` 22 → 23.
+- [x] **Step 2: e2e test** `test_e2e_clojure_1_13_destructuring`, modelled
   on `test_e2e_rename_refuses_qualified_keys_destructuring`: write
   `src/destructuring_113.clj` into `setup_project()` with
   ```clojure
@@ -316,26 +318,28 @@ These pass today; they pin the behavior the later tasks must keep.
     `::flag` token;
   - rename of the param `a` of `h` to `b` → edits the param and the last
     `a` only, never the `a` inside `selector`.
-- [ ] **Step 3:** `bb check` — green. `bb e2e` — green.
-- [ ] **Step 4:** `bb e2e-pulse` (rename and references answers change) and
+- [x] **Step 3:** `bb check` — green. `bb e2e` — green.
+- [x] **Step 4:** `bb e2e-pulse` (rename and references answers change) and
   `bb e2e-calva` (definition inside a `selector` pattern changes) — green.
-- [ ] **Step 5:** `bb compare clj-kondo` — no new divergence against the
+- [x] **Step 5:** `bb compare clj-kondo` — no new divergence against the
   table in `docs/MEMORY.md`; note the totals for the summary. `bb bench
   clj-kondo` (extractor change) — no regression against the MEMORY.md
   tables; it is not a gate, so note the numbers.
-- [ ] **Step 6:** `git commit -m "test: e2e for 1.13 destructuring; cache format 23"`
+- [x] **Step 6:** `git commit -m "test: e2e for 1.13 destructuring; cache format 23"`
+
+> Deviation: the editor-harness `node_modules` / `.vscode-test` were symlinked from the main checkout into the worktree; compare and bench were also run on master the same day for a like-for-like baseline (MEMORY.md).
 
 ### Task 6: Docs and roadmap close-out
 
 **Files:** `docs/FEATURES.md`, `AGENTS.md` (`CLAUDE.md` is a symlink to it),
 `docs/ROADMAP.md`, this plan
 
-- [ ] **Step 1:** `docs/FEATURES.md`, Rename and Keyword rename bullets: the
+- [x] **Step 1:** `docs/FEATURES.md`, Rename and Keyword rename bullets: the
   Clojure 1.13 forms — `:keys!`/`:syms!`/`:strs!` entries are refused like
   `:keys`; literal keys after `&` and keyword keys of `:or` are keyword
   sites; `:select`/`:all`/`:excess`/`:missing`/`:defaults` names are
   ordinary locals; a `selector` pattern binds nothing.
-- [ ] **Step 2:** `AGENTS.md` invariants: a new bullet — key directives are
+- [x] **Step 2:** `AGENTS.md` invariants: a new bullet — key directives are
   classified by name part through `key_directive` (`!` forms included),
   entries bind only before `&`, the literal keys after it and `:or` keyword
   keys are keyword occurrences, `selector` (`is_core_selector`, a
@@ -345,7 +349,40 @@ These pass today; they pin the behavior the later tasks must keep.
   working rule asks for it in the same change — check it; it has no
   destructuring or Clojure-version claim today, so expect no edit and say so
   in the completion summary.
-- [ ] **Step 3:** ROADMAP: tick the item, status `done`, add the compare
+- [x] **Step 3:** ROADMAP: tick the item, status `done`, add the compare
   result. Mark this plan's steps done and append a completion summary.
-- [ ] **Step 4:** `bb check` — green.
-- [ ] **Step 5:** `git commit -m "docs: close Clojure 1.13 destructuring"`
+- [x] **Step 4:** `bb check` — green.
+- [x] **Step 5:** `git commit -m "docs: close Clojure 1.13 destructuring"`
+
+> Deviation: the compare and bench numbers also went into `docs/MEMORY.md`, as earlier plans did; the `CACHE_FORMAT_VERSION` mention moved from the `:rename` bullet to the new destructuring bullet in AGENTS.md.
+
+## Completion summary (2026-10-07)
+
+Implemented as designed. `key_directive` / `split_key_entries` classify
+`:keys`/`:syms`/`:strs` and their checked `!` forms by name part for every
+reader: a `:keys!` local is refused by rename (the e2e test fails on
+master, where the rename went through), `{:keys! [foo/bar]}` no longer
+reports `foo` unresolved, and `{::keys! [a]}` is a site of `:my.ns/a`.
+Only the entries before `&` bind; keyword keys after it and in `:or` are
+keyword sites. `is_core_selector` gives `selector` an arm in both walkers:
+its pattern binds nothing, so an outer local's rename leaves it alone.
+`:select`/`:all`/`:excess`/`:missing`/`:defaults` already bound and are now
+pinned by tests. `CACHE_FORMAT_VERSION` 23.
+
+Gates: `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva` green;
+`bb compare clj-kondo` identical to master in every row (5248 / 4921 / 216
+/ 62 / 49); `bb bench clj-kondo` within the recorded spread (MEMORY.md).
+Codex reviewed Tasks 1–2 and 3–4 with no findings. README has no
+destructuring or Clojure-version claim, so it is unchanged.
+
+Deviations (also noted under each task): the alias-sites test lives in
+`tests/test_extractor.rs`; vector arms became `*_seq` helpers so the `:-`
+rule still applies before `&`; the selector head is recorded under
+`core_ns(dialect)`; one fixture count corrected (`(def x 1)` is no
+occurrence); Tasks 1 and 3 were codex-reviewed with the task after them;
+harness deps symlinked into the worktree; results recorded in MEMORY.md.
+
+What the plan could have specified better: the `bb compare` baseline —
+probe counts depend on clj-kondo's cache state, so the plan should have
+asked for a same-day master run on the same cache rather than the table in
+MEMORY.md.
