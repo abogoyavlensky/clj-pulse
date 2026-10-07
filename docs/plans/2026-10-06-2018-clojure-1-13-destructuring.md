@@ -194,16 +194,18 @@ These pass today; they pin the behavior the later tasks must keep.
 **Files:** `src/index/extractor.rs` (unit tests module, next to
 `unused_destructured_names_reported` and `local_refs_*`)
 
-- [ ] **Step 1:** Unused lint: `unused_names("(defn f [{:keys [a] :select s :all al :excess e :missing m :or {a 1} :defaults d}] a)")`
+- [x] **Step 1:** Unused lint: `unused_names("(defn f [{:keys [a] :select s :all al :excess e :missing m :or {a 1} :defaults d}] a)")`
   reports exactly `s`, `al`, `e`, `m`, `d`; with every name used in the body,
   nothing.
-- [ ] **Step 2:** `local_references_at` from a body usage of `s` in
+- [x] **Step 2:** `local_references_at` from a body usage of `s` in
   `(defn f [{:keys [a] :select s}] (g s))` finds the `s` after `:select` as
   the declaration, `destructured_key` false (renameable).
-- [ ] **Step 3:** `locals_in_scope_at` in the body of
+- [x] **Step 3:** `locals_in_scope_at` in the body of
   `(let [{:excess e :missing m} x] |)` contains `e` and `m`.
-- [ ] **Step 4:** `cargo test --lib extractor` — PASS.
-- [ ] **Step 5:** `git commit -m "test: pin 1.13 name directives as bindings"`
+- [x] **Step 4:** `cargo test --lib extractor` — PASS.
+- [x] **Step 5:** `git commit -m "test: pin 1.13 name directives as bindings"`
+
+> Deviation: no separate codex review for this test-only task; it is reviewed with Task 2's commit.
 
 ### Task 2: Checked-key directives and the `&` tail (rows 1–2)
 

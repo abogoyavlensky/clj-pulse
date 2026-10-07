@@ -4697,4 +4697,38 @@ mod tests {
             .collect();
         assert_eq!(kinds, vec!["sym_lit", "list_lit"]);
     }
+
+    // --- Clojure 1.13 destructuring -----------------------------------------
+
+    #[test]
+    fn name_directives_bind_and_lint() {
+        // `:select`, `:all`, `:excess`, `:missing` and `:defaults` each bind
+        // one symbol to a map, so an unused one is reported like `:as`.
+        let names = unused_names(
+            "(defn f [{:keys [a] :select s :all al :excess e :missing m :or {a 1} :defaults d}] a)",
+        );
+        assert_eq!(names, vec!["s", "al", "e", "m", "d"], "got {:?}", names);
+        assert!(unused_names(
+            "(defn f [{:keys [a] :select s :all al :excess e :missing m :or {a 1} :defaults d}] \
+             [a s al e m d])"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn name_directive_is_a_renameable_local() {
+        let src = "(ns x)\n(defn f [{:keys [a] :select s}] (g s))";
+        let refs = local_references_at(src, pos_of(src, "(g s)", 0, 3), "s").expect("local");
+        assert_eq!(refs.declaration.start, pos_of(src, ":select s", 0, 8));
+        assert!(!refs.destructured_key, ":select names its own local: {:?}", refs);
+        assert_eq!(refs.usages.len(), 1, "{:?}", refs.usages);
+    }
+
+    #[test]
+    fn name_directives_are_in_scope_in_the_body() {
+        let src = "(ns x)\n(let [{:excess e :missing m} x] (f))";
+        let names = local_names(src, pos_of(src, "(f)", 0, 1));
+        assert!(names.contains(&"e".to_string()), "{:?}", names);
+        assert!(names.contains(&"m".to_string()), "{:?}", names);
+    }
 }
