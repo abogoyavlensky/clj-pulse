@@ -305,6 +305,11 @@ there.
   rename sites (`collect_refer_occurrences`, `collect_alias_declarations`);
   clean-ns, add-require and the tree-based lints still scan `:require` only.
 - Files outside deps.edn `:paths` are indexed on `didOpen`.
+- `did_create_files` inserts a bare `(ns …)` via `workspace/applyEdit` only
+  into a file that is empty (the open buffer, else the disk) and inside a
+  `config::source_paths` root of its owning project; anything else, and a
+  name no namespace can spell, is left alone. It waits for startup's project
+  detection (`projects_ready`, bounded), never for stage 3.
 - Integrant EDN configs are found project-wide, not under `:paths`: the scan
   walks each project dir to `scanner::EDN_SCAN_MAX_DEPTH` (gitignore respected)
   and keeps what `is_integrant_edn` accepts. `:paths` is a classpath decision
@@ -315,6 +320,10 @@ there.
   cannot see makes references skip it and a keyword rename silently leave it
   pointing at the old key.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
+- deps.edn is read with `edn::parse_lenient`: `^` metadata (`^:antq/exclude`)
+  and `#_` discards, stacked ones included, are blanked before parsing.
+  `edn_format` rejects both, and a failed parse silently drops every declared
+  path back to `src`/`test`.
 - Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
   first, then the built-in table `DefKind::from_macro_fqn`
   (`clojure.test/deftest` and friends), then — for a *qualified* head alone —

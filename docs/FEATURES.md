@@ -77,6 +77,10 @@ Language features:
 - **Code actions** - "Add require" quickfix for a qualified symbol whose
   namespace isn't required yet, and "Clean namespace" (`source.organizeImports`)
   that drops unused and duplicate requires.
+- **ns form for new files** - an empty `.clj`, `.cljs`, `.cljc` or `.lg` file
+  created in the editor (Explorer → New File) under a source root gets
+  `(ns …)` from its path: `src/foo/bar_baz.clj` → `(ns foo.bar-baz)`. Needs a
+  client that sends `workspace/didCreateFiles` (VS Code does; Neovim does not).
 - **Diagnostics** - unresolved-namespace, unused-namespace, duplicate-require,
   unused-binding, and unused-private-var warnings, updated live as you type;
   clj-kondo's full linter set as well when the binary is installed (see

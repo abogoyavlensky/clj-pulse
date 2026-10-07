@@ -1062,6 +1062,9 @@ static KONDO_WARM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 
 /// A cold scan of a large classpath is slow but bounded; past ten minutes
 /// something is wrong and the process should not linger.
+/// How long `did_create_files` waits for startup's project detection.
+const PROJECTS_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const KONDO_WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Whether clj-kondo has a config/cache directory it can write to for this
@@ -1539,6 +1542,9 @@ pub struct Backend {
     kondo: KondoWarmer,
     /// See [`ClojureDocsState`].
     clojuredocs: SharedClojureDocs,
+    /// Flips to `true` once startup has stored the detected project list;
+    /// `did_create_files` waits on it (detection only, never stage 3).
+    projects_ready: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Backend {
@@ -1558,6 +1564,7 @@ impl Backend {
             editor_kondo: SharedEditorKondo::default(),
             kondo: KondoWarmer::default(),
             clojuredocs: SharedClojureDocs::default(),
+            projects_ready: Arc::new(tokio::sync::watch::channel(false).0),
         }
     }
 
@@ -2080,6 +2087,30 @@ fn initialize_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
         })
 }
 
+/// The namespace a newly created file at `uri` should declare, or `None`
+/// when it must be left alone: not Clojure source, not empty (an Explorer
+/// copy carries content; an open buffer outranks the disk), or outside every
+/// source root of its project.
+fn ns_for_new_file(
+    documents: &DocumentStore,
+    project_list: &[projects::Project],
+    uri: &Url,
+) -> Option<String> {
+    let path = uri.to_file_path().ok()?;
+    if !config::is_clojure_source(&path) {
+        return None;
+    }
+    let empty = match documents.snapshot(uri) {
+        Some(snapshot) => snapshot.text.is_empty(),
+        None => std::fs::read_to_string(&path).ok()?.is_empty(),
+    };
+    if !empty {
+        return None;
+    }
+    let project = owning_project(project_list, &path)?;
+    handlers::new_file::ns_for_path(&path, &config::source_paths(&project.dir))
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
@@ -2145,6 +2176,7 @@ impl LanguageServer for Backend {
                 let startup_guard = self.config_apply_lock.clone().lock_owned().await;
                 let progress = self.progress.clone();
                 let warmer = self.kondo.clone();
+                let projects_ready = self.projects_ready.clone();
                 tokio::spawn(async move {
                     let start = std::time::Instant::now();
 
@@ -2162,6 +2194,7 @@ impl LanguageServer for Backend {
                         resolved.iter().map(|p| &p.rel_path).collect::<Vec<_>>()
                     );
                     *projects_arc.lock().unwrap() = resolved.clone();
+                    projects_ready.send_replace(true);
                     {
                         let mut state = state_arc.lock().unwrap();
                         for p in &resolved {
@@ -2347,6 +2380,27 @@ impl LanguageServer for Backend {
                 document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
                     first_trigger_character: "\n".to_string(),
                     more_trigger_character: None,
+                }),
+                // One plain glob per extension rather than `**/*.{clj,…}`:
+                // brace support differs between clients' glob engines.
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: None,
+                    file_operations: Some(WorkspaceFileOperationsServerCapabilities {
+                        did_create: Some(FileOperationRegistrationOptions {
+                            filters: ["clj", "cljs", "cljc", "lg"]
+                                .iter()
+                                .map(|ext| FileOperationFilter {
+                                    scheme: Some("file".to_string()),
+                                    pattern: FileOperationPattern {
+                                        glob: format!("**/*.{ext}"),
+                                        matches: Some(FileOperationPatternKind::File),
+                                        options: None,
+                                    },
+                                })
+                                .collect(),
+                        }),
+                        ..Default::default()
+                    }),
                 }),
                 experimental: Some(serde_json::json!({
                     "textDocumentContentProvider": { "schemes": ["jar"] }
@@ -2540,6 +2594,36 @@ impl LanguageServer for Backend {
         self.documents.close(&uri);
         // Clear diagnostics for the closed document.
         self.client.publish_diagnostics(uri, vec![], None).await;
+    }
+
+    async fn did_create_files(&self, params: CreateFilesParams) {
+        // No workspace root: no project list will ever come.
+        if self.root.lock().unwrap().is_none() {
+            return;
+        }
+        // Startup stores the project list from a spawned task; a file created
+        // before that would find no owning project. Wait for detection alone
+        // (stage 3 may run for minutes), bounded so a stuck detection never
+        // holds the handler.
+        let mut ready = self.projects_ready.subscribe();
+        let _ = tokio::time::timeout(PROJECTS_READY_TIMEOUT, ready.wait_for(|r| *r)).await;
+        let project_list = self.projects.lock().unwrap().clone();
+        // One file at a time, each edit answered before the next: a batch
+        // stays in the order the client listed it.
+        for file in params.files {
+            let Ok(uri) = Url::parse(&file.uri) else {
+                continue;
+            };
+            let Some(ns) = ns_for_new_file(&self.documents, &project_list, &uri) else {
+                continue;
+            };
+            let edit = handlers::new_file::ns_insert_edit(uri.clone(), &ns);
+            match self.client.apply_edit(edit).await {
+                Ok(r) if r.applied => tracing::info!("inserted ns {ns} into new file {uri}"),
+                Ok(r) => tracing::debug!("ns edit for {uri} not applied: {:?}", r.failure_reason),
+                Err(e) => tracing::debug!("ns edit for {uri} failed: {e}"),
+            }
+        }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {

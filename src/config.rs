@@ -111,11 +111,12 @@ pub fn source_paths(root: &Path) -> Vec<PathBuf> {
 /// Declared source roots in a `deps.edn`: top-level `:paths` plus every
 /// alias's `:extra-paths`. An alias's own `:paths` *replaces* the base paths
 /// (typically build tooling, e.g. tools.build `:build`) and is intentionally
-/// ignored. Returns `None` when nothing is declared or the EDN is malformed.
+/// ignored. Metadata and `#_` discards are read past (`edn::parse_lenient`).
+/// Returns `None` when nothing is declared or the EDN is malformed.
 fn parse_paths_from_deps_edn(contents: &str) -> Option<Vec<String>> {
     use crate::edn::{get, kw, str_vec_at};
 
-    let Ok(edn_format::Value::Map(top)) = edn_format::parse_str(contents) else {
+    let Some(edn_format::Value::Map(top)) = crate::edn::parse_lenient(contents) else {
         return None;
     };
 
@@ -343,6 +344,32 @@ mod tests {
         std::fs::write(root.join("project.clj"), r#"(defproject app "0.1.0")"#).unwrap();
         let paths = source_paths(root);
         assert_eq!(paths, vec![root.join("src"), root.join("test")]);
+    }
+
+    #[test]
+    fn test_source_paths_deps_edn_with_metadata_and_discards() {
+        // readx's shape: a `^:antq/exclude` on a dependency and a `#_`
+        // discard used to fail the whole parse, silently falling back to
+        // `src`/`test` and losing `src/clj` and friends.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("deps.edn"),
+            r#"{:deps {io.sentry/sentry-clj ^:antq/exclude {:git/sha "abc"}
+        hashp/hashp ^{:antq/exclude true} {:mvn/version "0.2.2"}
+        #_#_old/lib {:mvn/version "1"}}
+ ; a comment with ^ and #_ in it
+ :paths ["src/clj" "src/cljc" #_"gone" "resources"]
+ :aliases {:dev {:extra-paths ["dev"]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            source_paths(root),
+            ["src/clj", "src/cljc", "resources", "dev", "src", "test"]
+                .iter()
+                .map(|p| root.join(p))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -64,7 +64,9 @@ analysis. Open
 buffers keep one incrementally updated parse tree, so no request or lint pass
 parses, and clj-kondo sits out keystrokes on buffers above `:live-max-kb`.
 `documentHighlight` underlines the symbol under the cursor, and
-`selectionRange` expands the selection along the parse tree. A library
+`selectionRange` expands the selection along the parse tree. An empty
+Clojure file created in the editor under a source root gets its `(ns …)` form
+from its path (`workspace/didCreateFiles`). A library
 namespace present in both dialects navigates to the copy matching the asking
 file: `.clj` and `.cljc` open the Clojure one, `.cljs` the ClojureScript one.
 The clj-kondo probe tries every install it can find and resolves mise shims
@@ -197,6 +199,9 @@ Each is small because the index already holds the data.
 - [ ] Sort requires, as an extension of clean-ns.
 - [ ] `workspace/willRenameFiles`. Rewrite the `ns` form and every require
       when a file moves.
+- [x] **ns form for new files.** `workspace/didCreateFiles`: an empty Clojure
+      file created under a source root gets `(ns …)` from its path.
+  Plan: [2026-10-06-1414-ns-for-new-files.md](plans/2026-10-06-1414-ns-for-new-files.md) — done
 - [ ] Reference-count code lens, off by default.
   Plan: —
 - [x] **Rename a require alias.** From the `:as`/`:as-alias` binding or any
