@@ -1537,8 +1537,8 @@ pub fn node_path_at<'a>(root: Node<'a>, source: &str, pos: Position) -> Vec<Node
 /// on the var), or of the whole symbol when it is unqualified.
 ///
 /// `None` when the innermost node at `pos` is not one of those prefix forms,
-/// when its value is not a symbol (`@(f)`), or when `pos` is already inside
-/// the value. `'x` is left alone: a quoted symbol records nothing, so neither
+/// when its value is not a symbol (`@(f)`), or when `pos` is not on the
+/// marker's own characters (inside the value, or on whitespace after `@`). `'x` is left alone: a quoted symbol records nothing, so neither
 /// of its characters resolves.
 pub fn prefixed_symbol_start(
     tree: &tree_sitter::Tree,
@@ -1560,8 +1560,13 @@ pub fn prefixed_symbol_start(
     if value.kind() != "sym_lit" {
         return None;
     }
-    let value_start = node_to_lsp_range(value, source).start;
-    if (pos.line, pos.character) >= (value_start.line, value_start.character) {
+    // On the marker's own characters only: whitespace between `@` and the
+    // symbol, or a newline's indentation before it, is not the symbol.
+    let marker = node_to_lsp_range(node.child_by_field_name("marker")?, source);
+    let at = (pos.line, pos.character);
+    if at < (marker.start.line, marker.start.character)
+        || at >= (marker.end.line, marker.end.character)
+    {
         return None;
     }
     let target = value.child_by_field_name("name").unwrap_or(value);
@@ -4922,6 +4927,14 @@ mod tests {
         assert_eq!(prefixed_at(src, "'quoted", 0), None);
         // Not a prefix at all.
         assert_eq!(prefixed_at(src, "(f", 0), None);
+        // Whitespace between the marker and the symbol is not the marker.
+        let spaced = "(f @   state)\n(g @\n  other)";
+        assert_eq!(
+            prefixed_at(spaced, "@   state", 0),
+            Some(pos_of(spaced, "state", 0, 0))
+        );
+        assert_eq!(prefixed_at(spaced, "@   state", 2), None);
+        assert_eq!(prefixed_at(spaced, "  other", 1), None);
     }
 
     #[test]

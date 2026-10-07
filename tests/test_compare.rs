@@ -408,10 +408,12 @@ struct Known {
 static KNOWN: &[Known] = &[
     // `(let [x 2] #'x)`: Clojure's `var` form ignores locals and names the
     // global `x`, while kondo's analysis records the `x` as a use of the
-    // local. clj-pulse never answers the local there (2026-10-07).
+    // local. clj-pulse answers nothing there yet (docs/backlog,
+    // 2026-10-07-shadowed-var-quote-is-not-the-var.md); any other answer is
+    // a real divergence.
     Known {
         bucket_prefix: "local/",
-        matches: |probe, _| after_var_quote(probe),
+        matches: |probe, verdict| matches!(verdict, Verdict::Null { .. }) && after_var_quote(probe),
         reason: "a var-quote of a shadowed name is the var in Clojure; kondo reads it as the local (2026-10-07)",
     },
     Known {

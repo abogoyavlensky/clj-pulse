@@ -6540,6 +6540,24 @@ fn test_e2e_clojuredocs_bare_core_symbol() {
 }
 
 #[test]
+fn test_e2e_clojuredocs_from_a_reader_prefix() {
+    // A cursor on the `@` of `@map` looks up `map`, as hover does.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let f = root.join("src/docs_demo.clj");
+    std::fs::write(&f, "(ns simple.docs-demo)\n(def m @map)\n").unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize_with_options(&root, clojuredocs_options());
+    client.did_open(&f);
+
+    let msg = client.clojure_docs(json!({
+        "textDocument": { "uri": format!("file://{}", f.display()) },
+        "position": { "line": 1, "character": 7 }
+    }));
+    assert_eq!(msg["result"]["symbol"], "clojure.core/map", "{msg}");
+}
+
+#[test]
 fn test_e2e_clojuredocs_aliased_symbol() {
     // `str/join` resolves through the ns form's alias even though nothing
     // from clojure.string is indexed (no jar on this fixture's classpath).
@@ -9733,11 +9751,23 @@ fn test_e2e_prefix_cursor_references() {
     let from_name = spans(&client.references(&file, def_line, def_col, true));
     let (vl, vc) = start_of(&text, "#'pfx-state");
     let (ql, qc) = start_of(&text, "~pfx-state");
-    for (line, ch, what) in [(vl, vc, "#"), (vl, vc + 1, "'"), (ql, qc, "~")] {
+    let (sl, sc) = start_of(&text, "`pfx-state");
+    let (pl, pc) = start_of(&text, "~@pfx-state");
+    for (line, ch, what) in [
+        (vl, vc, "#"),
+        (vl, vc + 1, "'"),
+        (ql, qc, "~"),
+        (sl, sc, "backquote"),
+        (pl, pc, "~ of ~@"),
+        (pl, pc + 1, "@ of ~@"),
+    ] {
         let from_prefix = spans(&client.references(&file, line, ch, true));
         assert_eq!(from_prefix, from_name, "from the {what}");
     }
-    assert!(from_name.contains(&(ql as u64, qc as u64 + 1, qc as u64 + 10)));
+    for (line, col) in [(ql, qc + 1), (sl, sc + 1), (pl, pc + 2)] {
+        let site = (line as u64, col as u64, col as u64 + 9);
+        assert!(from_name.contains(&site), "{site:?} in {from_name:?}");
+    }
     for (_, start, end) in &from_name {
         assert_eq!(end - start, "pfx-state".len() as u64, "{from_name:?}");
     }
