@@ -87,11 +87,12 @@ pub(crate) fn prepare(src: &str) -> (Vec<char>, Vec<char>) {
             parse_buf[i] = ' ';
             in_comment = true;
         } else if c == '\\' {
-            // Character literal (`\[`, `\;`, …): blank in `locator` so it is
-            // never mistaken for a delimiter or comment.
-            locator[i] = ' ';
+            // Character literal (`\[`, `\;`, `\space`, …): neutralize it in
+            // `locator` so it is never mistaken for a delimiter or comment,
+            // but keep it one token, so a `#_` before it discards it alone.
+            locator[i] = 'x';
             if i + 1 < original.len() {
-                locator[i + 1] = ' ';
+                locator[i + 1] = 'x';
                 i += 1;
             }
         }
@@ -128,64 +129,97 @@ fn discard_ranges(loc: &[char]) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Index just past what the `#_` at `start` discards. A discard right after
-/// it discards its own form first, so `#_#_ k v` drops both `k` and `v`.
+/// Index just past what the `#_` at `start` discards: the next form, after
+/// skipping any discards in front of it, so `#_#_ k v` drops both `k` and `v`.
 fn discard_end(loc: &[char], start: usize) -> usize {
-    let mut j = start + 2;
-    while j < loc.len() && loc[j].is_whitespace() {
-        j += 1;
-    }
-    if j + 1 < loc.len() && loc[j] == '#' && loc[j + 1] == '_' {
-        form_end(loc, discard_end(loc, j))
-    } else {
-        form_end(loc, j)
-    }
+    form_end(loc, start + 2)
 }
 
-/// Index just past the next EDN form starting at/after `start` in `loc`.
-/// Handles a bracketed collection (balanced, skipping masked strings), a
-/// string, or a bare atom.
-fn form_end(loc: &[char], start: usize) -> usize {
-    let mut i = start;
-    while i < loc.len() && loc[i].is_whitespace() {
+/// Index of the first char at/after `i` that is not whitespace or a comma
+/// (the reader treats commas as whitespace).
+fn skip_gap(loc: &[char], mut i: usize) -> usize {
+    while i < loc.len() && (loc[i].is_whitespace() || loc[i] == ',') {
         i += 1;
+    }
+    i
+}
+
+/// Index just past the atom (symbol, keyword, number, …) starting at `i`:
+/// it ends at whitespace, a comma, or a delimiter.
+fn atom_end(loc: &[char], mut i: usize) -> usize {
+    while i < loc.len()
+        && !loc[i].is_whitespace()
+        && !matches!(loc[i], ',' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';')
+    {
+        i += 1;
+    }
+    i
+}
+
+/// Index just past the string whose opening quote is at `i`.
+fn string_end(loc: &[char], mut i: usize) -> usize {
+    i += 1;
+    while i < loc.len() && loc[i] != '"' {
+        i += 1;
+    }
+    (i + 1).min(loc.len())
+}
+
+/// Index just past the collection whose opening delimiter is at `i`
+/// (balanced, skipping masked strings).
+fn collection_end(loc: &[char], mut i: usize) -> usize {
+    let mut depth = 0usize;
+    let mut in_str = false;
+    while i < loc.len() {
+        match loc[i] {
+            '"' => in_str = !in_str,
+            '(' | '[' | '{' if !in_str => depth += 1,
+            ')' | ']' | '}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Index just past the next EDN form starting at/after `start` in `loc` (a
+/// string/comment-masked buffer). Discards in front of the form are skipped,
+/// a prefix (`'`, `@`, `` ` ``, `~`, `^meta`) reads the form after it, and a
+/// `#` dispatch is one form: `#{…}`, `#(…)`, `#"…"`, `#?(…)`, `#:ns{…}`,
+/// `##Inf`, or a tagged literal (`#inst "…"`, the tag and its form).
+fn form_end(loc: &[char], start: usize) -> usize {
+    let mut i = skip_gap(loc, start);
+    while i + 1 < loc.len() && loc[i] == '#' && loc[i + 1] == '_' {
+        i = skip_gap(loc, discard_end(loc, i));
     }
     if i >= loc.len() {
         return i;
     }
     match loc[i] {
-        '(' | '[' | '{' => {
-            let mut depth = 0usize;
-            let mut in_str = false;
-            while i < loc.len() {
-                match loc[i] {
-                    '"' => in_str = !in_str,
-                    '(' | '[' | '{' if !in_str => depth += 1,
-                    ')' | ']' | '}' if !in_str => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return i + 1;
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-            i
-        }
-        '"' => {
-            i += 1;
-            while i < loc.len() && loc[i] != '"' {
-                i += 1;
-            }
-            (i + 1).min(loc.len())
-        }
-        _ => {
-            while i < loc.len() && !loc[i].is_whitespace() && !matches!(loc[i], ')' | ']' | '}') {
-                i += 1;
-            }
-            i
-        }
+        '(' | '[' | '{' => collection_end(loc, i),
+        '"' => string_end(loc, i),
+        '\'' | '@' | '`' => form_end(loc, i + 1),
+        '~' if loc.get(i + 1) == Some(&'@') => form_end(loc, i + 2),
+        '~' => form_end(loc, i + 1),
+        '^' => form_end(loc, form_end(loc, i + 1)),
+        '#' => match loc.get(i + 1) {
+            Some('{' | '(') => collection_end(loc, i + 1),
+            Some('"') => string_end(loc, i + 1),
+            Some('#') => atom_end(loc, i + 2),
+            Some('\'') => form_end(loc, i + 2),
+            Some('?') if loc.get(i + 2) == Some(&'@') => form_end(loc, i + 3),
+            Some('?') => form_end(loc, i + 2),
+            // `#:ns{…}`, or a tagged literal: the tag, then its form.
+            _ => form_end(loc, atom_end(loc, i + 1)),
+        },
+        // A stray closing delimiter is not a form; never step past it.
+        ')' | ']' | '}' => i,
+        _ => atom_end(loc, i),
     }
 }
 
@@ -230,6 +264,37 @@ mod tests {
         assert_eq!(get(&map, kw("d")), Some(&Value::Integer(4)));
         // Still `None` for EDN that is broken for real.
         assert!(parse_lenient("{:a").is_none());
+    }
+
+    #[test]
+    fn parse_lenient_reads_paths_past_reader_forms() {
+        let paths = |src: &str| {
+            let Some(Value::Map(map)) = parse_lenient(src) else {
+                panic!("expected a map from {src}");
+            };
+            str_vec_at(&map, kw("paths")).unwrap_or_default()
+        };
+        let cases = [
+            // A discarded character literal keeps its extent.
+            r#"{:paths [#_\x "src/clj"]}"#,
+            r#"{:paths [#_\space "src/clj"]}"#,
+            // Commas are whitespace; an atom ends at a delimiter.
+            r#"{:paths [#_:unused,"src/clj"]}"#,
+            // `#` dispatch forms are whole forms.
+            r#"{:paths [#_#{"gone"} "src/clj"]}"#,
+            r#"{:paths [#_#inst "2020" "src/clj"]}"#,
+            r#"{:paths [#_#:a{:b 1} "src/clj"]}"#,
+            r#"{:paths [#_#?(:clj "x") "src/clj"]}"#,
+            r#"{:paths [#_##Inf "src/clj"]}"#,
+            // A discard where a stacked discard expects its second form is
+            // skipped: the reader leaves only "src/clj".
+            r#"{:paths [#_#_"a" #_"b" "c" "src/clj"]}"#,
+            // Metadata inside a discard belongs to the discarded form.
+            r#"{:paths [#_^:m "gone" "src/clj"]}"#,
+        ];
+        for src in cases {
+            assert_eq!(paths(src), vec!["src/clj".to_string()], "{src}");
+        }
     }
 
     #[test]
