@@ -7327,6 +7327,80 @@ fn test_e2e_rename_refuses_qualified_keys_destructuring() {
 }
 
 #[test]
+fn test_e2e_clojure_1_13_destructuring() {
+    // Clojure 1.13: a `:keys!` local is the key it reads, so rename refuses
+    // it; a key after `&` is a site of that keyword; and `selector` reads a
+    // pattern that binds nothing, so renaming an outer local leaves the
+    // pattern's key alone.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/destructuring_113.clj");
+    let text = "(ns simple.destructuring-113)\n\n\
+                (defn f [{:keys! [k] :select s}] [k s])\n\n\
+                (defn g [{::keys [x & ::flag]}] x)\n\n\
+                (defn h [a] [(selector {:keys [a] :select s}) a])\n";
+    std::fs::write(&probe, text).unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&probe);
+
+    let (k_line, k_col) = start_of(text, "[k s]");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", probe.display()) },
+            "position": { "line": k_line, "character": k_col + 1 },
+            "newName": "kk"
+        }),
+    );
+    assert!(
+        error["message"].as_str().unwrap().contains("destructured"),
+        "got: {}",
+        error
+    );
+
+    let (flag_line, flag_col) = start_of(text, "::flag");
+    let refs = client.references(&probe, flag_line, flag_col + 3, true);
+    let locs = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("references returned null: {}", refs));
+    assert_eq!(locs.len(), 1, "{:?}", locs);
+    assert!(locs[0]["uri"]
+        .as_str()
+        .unwrap()
+        .ends_with("/src/destructuring_113.clj"));
+    assert_eq!(locs[0]["range"]["start"]["line"], json!(flag_line));
+    assert_eq!(locs[0]["range"]["start"]["character"], json!(flag_col));
+
+    let h_line = start_of(text, "(defn h").0;
+    let line = text.lines().nth(h_line as usize).unwrap();
+    let param = line.find("[a]").unwrap() as u64 + 1;
+    let body = line.rfind(" a]").unwrap() as u64 + 1;
+    let result = client.rename(&probe, h_line, param as u32, "b");
+    let changes = result["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected a WorkspaceEdit, got: {}", result));
+    assert_eq!(changes.len(), 1, "{:?}", changes.keys().collect::<Vec<_>>());
+    let edits = changes.values().next().unwrap().as_array().unwrap();
+    let mut cols: Vec<u64> = edits
+        .iter()
+        .map(|e| {
+            assert_eq!(e["range"]["start"]["line"], json!(h_line), "{:?}", e);
+            e["range"]["start"]["character"].as_u64().unwrap()
+        })
+        .collect();
+    cols.sort_unstable();
+    assert_eq!(
+        cols,
+        vec![param, body],
+        "param + body usage only: {:?}",
+        edits
+    );
+}
+
+#[test]
 fn test_e2e_keyword_sites_in_quoted_data() {
     // A quote stops evaluation, not the reader: `'{:simple.core/thing 1}`
     // holds the keyword `::c/thing` reads. References must list it, and a rename
