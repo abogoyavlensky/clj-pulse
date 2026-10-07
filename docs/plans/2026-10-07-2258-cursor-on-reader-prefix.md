@@ -141,7 +141,7 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
 - Create: `tests/fixtures/simple_project/src/prefixes.clj`
 - Modify: `tests/test_e2e.rs`, `src/handlers/hover.rs`, `src/handlers/definition.rs`, `src/handlers/references.rs`, `src/handlers/highlight.rs`, `src/server.rs`
 
-- [ ] **Step 1: Fixture**
+- [x] **Step 1: Fixture**
   Run the grep from File Structure first. Then write `tests/fixtures/simple_project/src/prefixes.clj`:
   ```clojure
   (ns simple.prefixes)
@@ -155,7 +155,7 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
   For the qualified case, append `(def pfx-var-via-alias #'c/blend)` to `src/alias_sites.clj`, which already requires `simple.core :as c`. Append only; its existing needles are asserted by the alias-rename tests. Check `test_e2e_rename_alias_skips_literal_keyword_and_destructuring_entry` afterwards: it lists the lines an alias rename of `c` edits, and the new `#'c/blend` line is a legitimate new alias site, so add it to that test's expected lines.
   Names carry a `pfx-` prefix so no other fixture's `state` or `a` shows up in a `workspace/symbol` or hover assertion elsewhere; the needles (`@pfx-state`, `#'pfx-state`, `~pfx-state`, `@pfx-a`) are unique to this file.
 
-- [ ] **Step 2: Write the failing e2e tests**
+- [x] **Step 2: Write the failing e2e tests**
   In `tests/test_e2e.rs`, following `test_e2e_rename_alias_from_its_binding`'s shape (`setup_project`, `LspClient::start`, `initialize`, `wait_for_log("Indexed")`, `did_open`, `start_of(&text, needle)`). One test per handler, each asking from the prefix character and asserting the same answer a cursor on the symbol gives:
   - `test_e2e_prefix_cursor_hover`: `hover` at `@` of `@pfx-state` → contents mention `simple.prefixes/pfx-state`; also at `#` and at `'` of `#'pfx-state`.
   - `test_e2e_prefix_cursor_definition`: `definition` at `@` → the `pfx-state` range on the `def` line, character range of `pfx-state` only.
@@ -170,7 +170,7 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
   - `test_e2e_prefix_cursor_quoted_symbol_resolves_nothing`: `'simple.prefixes/pfx-state` — rename from its `p` is refused, and definition answers `null`.
   Run: `cargo test --test test_e2e prefix_cursor` — Expected: FAIL (null answers / "nothing to rename here").
 
-- [ ] **Step 3: Normalize in the handlers**
+- [x] **Step 3: Normalize in the handlers**
   First statement that uses `pos` in each: `let pos = documents.symbol_position(&uri, pos);`
   - `src/handlers/hover.rs` `hover`, before `word_at`.
   - `src/handlers/definition.rs` `goto_definition`, before `local_definition`.
@@ -180,30 +180,36 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
   Each site gets a one-line comment: the cursor on a reader prefix asks about the symbol it points at.
   Run: `cargo test --test test_e2e prefix_cursor` — Expected: PASS.
 
-- [ ] **Step 4: Full gate**
+- [x] **Step 4: Full gate**
   Run: `bb check` — Expected: green. Then `bb e2e` — Expected: green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git add tests/fixtures/simple_project/src/prefixes.clj && git commit -am "handlers: a cursor on @, #', \` or ~ resolves the symbol it prefixes"`
+
+> Deviation (Task 3): the qualified case uses a new namespace (`src/prefix_target.clj`, `#'c/pfx-target`) instead of `#'c/blend`: `simple.core/blend` does not exist, and pointing at `simple.core/add` broke three tests that count its references. `shadowed` became `pfx-shadow` because it fuzzy-matched the workspace-symbol query `add`.
+> Deviation (Task 3): the shadowed var-quote test asserts "never the local" rather than "lands on the def". The occurrence walker records no occurrence for `#'x` when a local `x` is in scope, from the name as well as the prefix (pre-existing). Backlogged as `docs/backlog/2026-10-07-shadowed-var-quote-is-not-the-var.md`. clj-kondo reads that `x` as the local, so `test_compare.rs` allowlists the `null` answer at such a probe (`after_var_quote`).
+> Deviation (Task 3, from review): `prefixed_symbol_start` moves the cursor only from the marker's own characters, not from whitespace between the marker and the symbol. Added coverage for a backquote directly on a symbol, both characters of `~@`, and the ClojureDocs entry point.
 
 ### Task 4: Docs
 
 **Files:**
 - Modify: `docs/FEATURES.md`, `docs/ROADMAP.md`, `CLAUDE.md`
 
-- [ ] **Step 1: FEATURES.md**
+- [x] **Step 1: FEATURES.md**
   In the "Highlight occurrences" bullet (and once, in the navigation/hover area above it if it lists what the cursor may sit on), add one sentence: the cursor may sit on a symbol's reader prefix — `@state`, `#'state`, `` `state ``, `~state` — and the answer is the symbol's; the underline and every edit stay on the name, so renaming `state` leaves the `@`.
 
-- [ ] **Step 2: ROADMAP.md**
+- [x] **Step 2: ROADMAP.md**
   Tick the item Task 0 added; final text:
   `- [x] **Cursor on a reader prefix.** Hover, definition, references, rename and highlight from the `@`, `#'`, `` ` `` or `~` before a symbol answer as from the symbol; ranges stay on the name.` with `Plan: [2026-10-07-2258-cursor-on-reader-prefix.md](plans/2026-10-07-2258-cursor-on-reader-prefix.md) — done`.
 
-- [ ] **Step 3: CLAUDE.md**
+- [x] **Step 3: CLAUDE.md**
   Under Invariants, after the `documentHighlight` bullet, add: every position-based handler (hover, definition, references, rename, prepareRename, highlight, the ClojureDocs lookup) first moves the cursor through `DocumentStore::symbol_position`, so a cursor on `@`, `#'`, `` ` ``, `~` or `~@` asks about the symbol they prefix (`extractor::prefixed_symbol_start`); `'x` is left alone because a quoted symbol records nothing; completion, code actions and signature help do not normalize. Answers always come from occurrence and definition ranges, so no range ever includes a prefix.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
   Run: `bb check` — Expected: green.
   `git commit -am "docs: cursor on a reader prefix"`
+
+> Deviation (Task 4): the FEATURES.md sentence sits under "Language features:" rather than in the highlight bullet, since it applies to all five features. README has no cursor-level detail and stays unchanged.
 
 ### Task 5: Gates
 

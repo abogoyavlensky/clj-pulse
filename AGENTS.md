@@ -532,6 +532,17 @@ there.
   highlights at its current ranges. A definition in the file is `WRITE`, a
   usage `READ`; a keyword fqn (leading `:`) is `TEXT` throughout, since a
   keyword has no read/write distinction.
+- Every position-based handler (hover, definition, references, rename,
+  prepareRename, highlight, the ClojureDocs lookup) first moves the cursor
+  through `DocumentStore::symbol_position`: on the marker characters of `@`,
+  `#'`, `` ` ``, `~` or `~@` before a symbol, the question is about that
+  symbol's name half (`extractor::prefixed_symbol_start`), so `@h/x` asks about
+  `x`, never the alias. Whitespace after a marker does not move. `'x` is left
+  alone, since a quoted symbol records nothing; completion, code actions and
+  signature help do not normalize. Answers come from occurrence and definition
+  ranges, so no range ever includes a prefix. `word_at` keeps a leading `#'`
+  or `'` on purpose — it is what stops `#'x` from matching a shadowing local
+  and quoted data from resolving — and hover strips `#'` itself.
 - `selectionRange` answers one chain per requested position, built from
   `extractor::node_path_at` over the cached tree. A qualified `sym_lit` or
   `kwd_lit` adds its `name` child as the innermost step only when the cursor
