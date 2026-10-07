@@ -9549,3 +9549,34 @@ fn test_e2e_new_file_right_after_initialize_gets_ns() {
         "(ns early)\n"
     );
 }
+
+#[test]
+fn test_e2e_new_file_under_nested_deps_path_with_metadata() {
+    // readx's layout: `:paths ["src/clj" …]` in a deps.edn whose dependency
+    // carries `^:antq/exclude` metadata. The ns comes from `src/clj`, not `src`.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("deps.edn"),
+        r#"{:deps {io.sentry/sentry-clj ^:antq/exclude {:git/sha "abc"}}
+ :paths ["src/clj" "src/cljc" "src/cljs" "resources"]}"#,
+    )
+    .unwrap();
+    let file = root.join("src/clj/readx/main.clj");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "").unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    let uri = format!("file://{}", file.display());
+    client.notify(
+        "workspace/didCreateFiles",
+        json!({ "files": [{ "uri": uri }] }),
+    );
+
+    let params = client.wait_for_notification_where("workspace/applyEdit", |_| true);
+    assert_eq!(
+        params["edit"]["changes"][&uri][0]["newText"],
+        "(ns readx.main)\n"
+    );
+}

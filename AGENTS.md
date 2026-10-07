@@ -320,6 +320,10 @@ there.
   cannot see makes references skip it and a keyword rename silently leave it
   pointing at the old key.
 - Only top-level `:paths` in deps.edn counts (not `:paths` inside `:aliases`).
+- deps.edn is read with `edn::parse_lenient`: `^` metadata (`^:antq/exclude`)
+  and `#_` discards, stacked ones included, are blanked before parsing.
+  `edn_format` rejects both, and a failed parse silently drops every declared
+  path back to `src`/`test`.
 - Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
   first, then the built-in table `DefKind::from_macro_fqn`
   (`clojure.test/deftest` and friends), then — for a *qualified* head alone —
