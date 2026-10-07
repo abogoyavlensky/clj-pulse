@@ -211,7 +211,7 @@ These pass today; they pin the behavior the later tasks must keep.
 
 **Files:** `src/index/extractor.rs`, `tests/test_extractor.rs`
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - `tests/test_extractor.rs`, next to
     `test_namespaced_keys_entries_are_keyword_occurrences`: in
     `(ns my.ns (:require [other.lib :as o]))` with
@@ -232,14 +232,16 @@ These pass today; they pin the behavior the later tasks must keep.
   - Unit test: `alias_sites_tree` for alias `o` in
     `(ns x (:require [other.lib :as o])) (defn f [{:keys! [o/x]}] (o/g x))`
     lists the `:as` symbol and `o/g`, not the entry.
-- [ ] **Step 2:** `cargo test --lib extractor && cargo test --test test_extractor` — the new tests FAIL.
-- [ ] **Step 3: Implement** `KeyRead`, `key_directive`, `split_key_entries`
+- [x] **Step 2:** `cargo test --lib extractor && cargo test --test test_extractor` — the new tests FAIL.
+- [x] **Step 3: Implement** `KeyRead`, `key_directive`, `split_key_entries`
   (signatures in the Design) and use them in `collect_qualified`,
   `record_destructuring_keys`, `is_destructured_key`,
   `collect_binding_names` and `collect_binding_targets` as the Design's
   points 1–2 say. Update the doc comments that list `:keys/:strs/:syms`.
-- [ ] **Step 4:** Both test commands — PASS, including every existing test.
-- [ ] **Step 5:** `git commit -m "extractor: checked key directives and literal keys after &"`
+- [x] **Step 4:** Both test commands — PASS, including every existing test.
+- [x] **Step 5:** `git commit -m "extractor: checked key directives and literal keys after &"`
+
+> Deviation: the `alias_sites_tree` test lives in `tests/test_extractor.rs`'s `alias_sites` module, where its siblings are. The vector arms' per-item loops became `collect_binding_names_seq` / `collect_binding_targets_seq`, so the entries before `&` keep the `:-` schema-marker rule.
 
 ### Task 3: `:or` keyword keys are sites (row 3)
 

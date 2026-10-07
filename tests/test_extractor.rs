@@ -1982,6 +1982,53 @@ fn test_namespaced_keys_entries_are_keyword_occurrences() {
 }
 
 #[test]
+fn test_checked_keys_and_literal_keys_after_amp_are_keyword_occurrences() {
+    // Clojure 1.13: `:keys!` reads its entries like `:keys` (and throws when
+    // one is missing), and the entries after `&` in any directive are literal
+    // keys — taken verbatim, never bound — so a keyword there is a usage of
+    // that key whatever the directive reads.
+    let src = "(ns my.ns\n  (:require [other.lib :as o]))\n\
+               (defn f [{::keys! [a]}] a)\n\
+               (defn g [{::o/keys! [b]}] b)\n\
+               (defn h [{:keys! [other.lib/c]}] c)\n\
+               (defn i [{::keys [x & ::p :q]}] x)\n\
+               (defn j [{:syms [y & ::r]}] y)";
+    let (_, _, occs) = extract_full(src, Path::new("keys.clj")).unwrap();
+
+    for fqn in [
+        ":my.ns/a",
+        ":other.lib/b",
+        ":other.lib/c",
+        ":my.ns/p",
+        ":q",
+        ":my.ns/r",
+    ] {
+        assert_eq!(occurrences_of(&occs, fqn).len(), 1, "{}: {:?}", fqn, occs);
+    }
+    assert!(
+        occs.iter().all(|o| !o.fqn.ends_with("/&")),
+        "`&` recorded as a key: {:?}",
+        occs
+    );
+    let (line, start, end) = token_range(src, "::p", 0);
+    let p = occurrences_of(&occs, ":my.ns/p")[0].name_range;
+    assert_eq!(
+        (p.start.line, p.start.character, p.end.character),
+        (line, start, end)
+    );
+}
+
+#[test]
+fn test_qualified_usages_skip_every_key_directive() {
+    // A `:keys!` entry and a namespaced directive's entry read keys; neither
+    // names a namespace to require.
+    use clj_pulse::index::extractor::qualified_usages;
+    let src = "(ns my.app)\n(defn f [{:keys! [foo/bar]} {:foo/keys [baz/x]}] [bar x])\n";
+    let usages = qualified_usages(src);
+    assert!(usages.is_empty(), "{:?}", usages);
+}
+
+#[test]
 fn test_namespaced_map_with_splicing_conditional_invents_no_namespace() {
     // `#?@` splices an unknown number of entries, so nothing after it can be
     // told apart as key or value. Under-reporting the keys is fine; inventing
@@ -2614,6 +2661,19 @@ h/f
         assert_eq!(declarations, vec![(0, 31, 32), (1, 32, 33)]);
         let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
         assert_eq!(usages, vec![(2, 1, 2)]);
+    }
+
+    #[test]
+    fn test_alias_sites_skip_checked_keys_entries() {
+        // `{:keys! [o/x]}` reads `:o/x` verbatim, like `{:keys [o/x]}`.
+        let src = "(ns x (:require [other.lib :as o]))\n(defn f [{:keys! [o/x]}] (o/g x))\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("x.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "o", &occs);
+        let usages: Vec<(u32, u32, u32)> = sites.usages.iter().map(triple).collect();
+        assert_eq!(sites.declarations.len(), 1, "{:?}", sites.declarations);
+        assert_eq!(usages, vec![(1, 26, 27)], "usages: {:?}", sites.usages);
     }
 
     #[test]

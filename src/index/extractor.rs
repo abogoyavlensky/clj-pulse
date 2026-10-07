@@ -95,17 +95,16 @@ fn collect_qualified(node: Node, source: &str, out: &mut Vec<QualifiedUsage>) {
             }
         }
         "map_lit" => {
-            // Skip `:keys`/`:syms`/`:strs` destructuring vectors: a symbol like
-            // `foo/bar` there binds a local from key `:foo/bar`, it isn't a
-            // namespace usage. Everything else (including a qualified symbol
-            // used as a real map key/value) is still walked.
+            // Skip key directive vectors (`:keys`, `:keys!`, `:my.ns/syms`, …):
+            // a symbol like `foo/bar` there binds a local from key `:foo/bar`,
+            // it isn't a namespace usage. Everything else (including a
+            // qualified symbol used as a real map key/value) is still walked.
             let kids = named_children(node);
             let mut i = 0;
             while i < kids.len() {
                 let key = kids[i];
                 let val = kids.get(i + 1).copied();
-                let is_destructure = key.kind() == "kwd_lit"
-                    && matches!(node_text(key, source), ":keys" | ":syms" | ":strs")
+                let is_destructure = key_directive(key, source).is_some()
                     && val.map(|v| v.kind() == "vec_lit").unwrap_or(false);
                 collect_qualified(key, source, out);
                 if let Some(v) = val {
@@ -2754,9 +2753,21 @@ fn collect_binding_names(
                             let [_dk, dv] = default else { continue };
                             walk_occurrences(*dv, ctx, scope, out);
                         }
-                    } else {
-                        // :keys/:strs/:syms vectors, :as name, …
+                    } else if key_directive(*k, ctx.source).is_some() && v.kind() == "vec_lit" {
+                        // {:keys [a b & :c]}: the symbols before `&` bind; the
+                        // keys after it are literal keys, read verbatim and
+                        // never bound, so a keyword there is a usage of that
+                        // key whatever the directive reads.
                         record_destructuring_keys(*k, *v, ctx, out);
+                        let (bound, literal) = split_key_entries(*v, ctx.source);
+                        collect_binding_names_seq(&bound, ctx, scope, out, names);
+                        for key in literal {
+                            if key.kind() == "kwd_lit" {
+                                record_keyword_occurrence(key, ctx, out);
+                            }
+                        }
+                    } else {
+                        // :as name, :select name, :all name, …
                         collect_binding_names(*v, ctx, scope, out, names);
                     }
                 } else {
@@ -2770,26 +2781,81 @@ fn collect_binding_names(
             }
         }
         "vec_lit" => {
-            // A schema annotation's type expression is a usage, not a binding.
-            let items = named_children(pattern);
-            let mut i = 0;
-            while i < items.len() {
-                if is_schema_annotation_marker(items[i], ctx.source) {
-                    if let Some(annotation) = items.get(i + 1) {
-                        walk_occurrences(*annotation, ctx, scope, out);
-                    }
-                    i += 2;
-                    continue;
-                }
-                collect_binding_names(items[i], ctx, scope, out, names);
-                i += 1;
-            }
+            collect_binding_names_seq(&named_children(pattern), ctx, scope, out, names);
         }
         _ => {
             for child in named_children(pattern) {
                 collect_binding_names(child, ctx, scope, out, names);
             }
         }
+    }
+}
+
+/// [`collect_binding_names`] over a sequence of binding forms — a vector's
+/// items, or the entries before `&` in a key directive. A schema annotation's
+/// type expression is a usage, not a binding.
+fn collect_binding_names_seq(
+    items: &[Node],
+    ctx: &OccurrenceCtx,
+    scope: &mut Scope,
+    out: &mut Vec<Occurrence>,
+    names: &mut Vec<LocalBinding>,
+) {
+    let mut i = 0;
+    while i < items.len() {
+        if is_schema_annotation_marker(items[i], ctx.source) {
+            if let Some(annotation) = items.get(i + 1) {
+                walk_occurrences(*annotation, ctx, scope, out);
+            }
+            i += 2;
+            continue;
+        }
+        collect_binding_names(items[i], ctx, scope, out, names);
+        i += 1;
+    }
+}
+
+/// What a map pattern's key directive reads: `:keys`/`:keys!` keywords,
+/// `:syms`/`:syms!` symbols, `:strs`/`:strs!` strings. The `!` forms
+/// (Clojure 1.13) throw when a key is missing but bind the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyRead {
+    Keywords,
+    Symbols,
+    Strings,
+}
+
+/// The [`KeyRead`] of a key directive, decided by the keyword's name part so
+/// `::keys!` and `:my.ns/syms` count. `None` for any other node.
+fn key_directive(kw: Node, source: &str) -> Option<KeyRead> {
+    if kw.kind() != "kwd_lit" {
+        return None;
+    }
+    let name = node_text(kw.child_by_field_name("name")?, source);
+    match name.strip_suffix('!').unwrap_or(name) {
+        "keys" => Some(KeyRead::Keywords),
+        "syms" => Some(KeyRead::Symbols),
+        "strs" => Some(KeyRead::Strings),
+        _ => None,
+    }
+}
+
+/// A key directive vector's entries split at the first `&` symbol: the
+/// binding symbols before it, the literal keys after it (Clojure 1.13:
+/// `{:keys [a & :b]}` checks or documents `:b` without binding it). The `&`
+/// itself is in neither.
+fn split_key_entries<'a>(vec: Node<'a>, source: &str) -> (Vec<Node<'a>>, Vec<Node<'a>>) {
+    let mut entries = named_children(vec);
+    match entries
+        .iter()
+        .position(|n| n.kind() == "sym_lit" && node_text(*n, source) == "&")
+    {
+        Some(amp) => {
+            let literal = entries.split_off(amp + 1);
+            entries.pop();
+            (entries, literal)
+        }
+        None => (entries, Vec::new()),
     }
 }
 
@@ -2800,24 +2866,24 @@ fn collect_binding_names(
 /// references lists it, and a keyword rename sees it instead of silently
 /// leaving it reading the old key.
 ///
-/// Only `:keys` reads keywords — `:syms` reads quoted symbols and `:strs`
-/// strings — and an unqualified entry of a plain `{:keys [a]}` reads `:a`,
-/// which no rename can target. None of those contribute an occurrence.
+/// Only `:keys`/`:keys!` read keywords — `:syms` reads quoted symbols and
+/// `:strs` strings — and an unqualified entry of a plain `{:keys [a]}` reads
+/// `:a`, which no rename can target. None of those contribute an occurrence.
+/// Only the binding entries before `&` are read here; the literal keys after
+/// it are recorded by `collect_binding_names`.
 fn record_destructuring_keys(
     directive: Node,
     entries: Node,
     ctx: &OccurrenceCtx,
     out: &mut Vec<Occurrence>,
 ) {
-    let reads_keywords = directive
-        .child_by_field_name("name")
-        .map(|n| node_text(n, ctx.source) == "keys")
-        .unwrap_or(false);
-    if !reads_keywords || entries.kind() != "vec_lit" {
+    if key_directive(directive, ctx.source) != Some(KeyRead::Keywords)
+        || entries.kind() != "vec_lit"
+    {
         return;
     }
     let directive_ns = destructuring_key_ns(directive, ctx);
-    for entry in named_children(entries) {
+    for entry in split_key_entries(entries, ctx.source).0 {
         if entry.kind() != "sym_lit" {
             continue;
         }
@@ -3740,8 +3806,12 @@ fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBindi
                     // goto-definition. (This is where the binding-site collection
                     // deliberately diverges from `collect_binding_names`, which
                     // adds `:or` keys to a name-set where a duplicate is inert.)
-                    if node_text(*k, source) != ":or" {
-                        // :keys/:strs/:syms vectors, :as name, …
+                    if key_directive(*k, source).is_some() && v.kind() == "vec_lit" {
+                        // Only the entries before `&` bind; the literal keys
+                        // after it do not (`collect_binding_names` twin).
+                        collect_binding_targets_seq(&split_key_entries(*v, source).0, source, out);
+                    } else if node_text(*k, source) != ":or" {
+                        // :as name, :select name, :all name, …
                         collect_binding_targets(*v, source, out);
                     }
                 } else {
@@ -3750,25 +3820,27 @@ fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBindi
                 }
             }
         }
-        "vec_lit" => {
-            // Same rule as `collect_binding_names`: `[x :- s/Int]` binds `x`
-            // alone, so a cursor on `Int` resolves to the schema var.
-            let items = named_children(pattern);
-            let mut i = 0;
-            while i < items.len() {
-                if is_schema_annotation_marker(items[i], source) {
-                    i += 2;
-                    continue;
-                }
-                collect_binding_targets(items[i], source, out);
-                i += 1;
-            }
-        }
+        "vec_lit" => collect_binding_targets_seq(&named_children(pattern), source, out),
         _ => {
             for child in named_children(pattern) {
                 collect_binding_targets(child, source, out);
             }
         }
+    }
+}
+
+/// [`collect_binding_targets`] over a sequence of binding forms. Same rule as
+/// `collect_binding_names_seq`: `[x :- s/Int]` binds `x` alone, so a cursor on
+/// `Int` resolves to the schema var.
+fn collect_binding_targets_seq(items: &[Node], source: &str, out: &mut Vec<LocalBinding>) {
+    let mut i = 0;
+    while i < items.len() {
+        if is_schema_annotation_marker(items[i], source) {
+            i += 2;
+            continue;
+        }
+        collect_binding_targets(items[i], source, out);
+        i += 1;
     }
 }
 
@@ -3998,9 +4070,10 @@ fn collect_quoted_name_occurrences(
     }
 }
 
-/// Whether the binding site at `declaration` is a name inside a
-/// `{:keys [...]}` / `:strs` / `:syms` vector — where the symbol is both the
-/// local's name and (modulo the key type) the key read from the map.
+/// Whether the binding site at `declaration` is a name inside a key directive
+/// vector (`{:keys [...]}`, `:strs`, `:syms`, or a checked `:keys!` form) —
+/// where the symbol is both the local's name and (modulo the key type) the
+/// key read from the map.
 /// Namespaced entries (`{:keys [foo/bar]}`) live in the same vector, so the
 /// same structural check covers them.
 fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
@@ -4019,18 +4092,9 @@ fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
     while let Some(gap) = directive.filter(|n| is_gap(*n)) {
         directive = gap.prev_named_sibling();
     }
-    directive
-        .map(|kw| {
-            // The directive may be namespaced (`{:user/keys [name]}`,
-            // `{::keys [name]}`), which binds the same way — match on the
-            // keyword's name part, not its literal text.
-            kw.kind() == "kwd_lit"
-                && kw
-                    .child_by_field_name("name")
-                    .map(|n| matches!(node_text(n, source), "keys" | "strs" | "syms"))
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false)
+    // The directive may be namespaced (`{:user/keys [name]}`, `{::keys
+    // [name]}`) or checked (`:keys!`), which bind the same way.
+    directive.is_some_and(|kw| key_directive(kw, source).is_some())
 }
 
 /// The `sym_lit` whose name range is exactly `range`. Skips quoted data, like
@@ -4720,8 +4784,47 @@ mod tests {
         let src = "(ns x)\n(defn f [{:keys [a] :select s}] (g s))";
         let refs = local_references_at(src, pos_of(src, "(g s)", 0, 3), "s").expect("local");
         assert_eq!(refs.declaration.start, pos_of(src, ":select s", 0, 8));
-        assert!(!refs.destructured_key, ":select names its own local: {:?}", refs);
+        assert!(
+            !refs.destructured_key,
+            ":select names its own local: {:?}",
+            refs
+        );
         assert_eq!(refs.usages.len(), 1, "{:?}", refs.usages);
+    }
+
+    #[test]
+    fn keys_after_amp_bind_nothing() {
+        let src = "(ns x)\n(defn f [{:syms [a & 'b] :strs [c & \"d\"] :keys [e & :f]}] [a c e])";
+        assert!(unused_names(src).is_empty(), "{:?}", unused_names(src));
+        let names = local_names(src, pos_of(src, "[a c e]", 0, 1));
+        for absent in ["b", "d", "f", "&"] {
+            assert!(
+                !names.contains(&absent.to_string()),
+                "{}: {:?}",
+                absent,
+                names
+            );
+        }
+        for present in ["a", "c", "e"] {
+            assert!(
+                names.contains(&present.to_string()),
+                "{}: {:?}",
+                present,
+                names
+            );
+        }
+    }
+
+    #[test]
+    fn local_refs_flag_checked_key_directives() {
+        // `:keys!` and friends read the binding's own name as the key, like
+        // `:keys`, so a rename would change the key read.
+        for directive in [":keys!", "::keys!", ":syms!", ":strs!", ":user/keys!"] {
+            let src = format!("(ns x)\n(defn f [{{{} [a]}}] (inc a))", directive);
+            let refs =
+                local_references_at(&src, pos_of(&src, "(inc a)", 0, 5), "a").expect("local");
+            assert!(refs.destructured_key, "{} binding: {:?}", directive, refs);
+        }
     }
 
     #[test]
