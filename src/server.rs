@@ -1733,7 +1733,9 @@ impl Backend {
         position: Option<Position>,
     ) -> Option<String> {
         let uri = text_document?.uri;
-        let word = self.documents.word_at(&uri, position?)?;
+        // A cursor on a reader prefix (`@x`, `#'x`) asks about the symbol.
+        let position = self.documents.symbol_position(&uri, position?);
+        let word = self.documents.word_at(&uri, position)?;
         let path = crate::uri::to_index_path(&uri)?;
         let current_ns = self.index.file_ns(&path).unwrap_or_default();
         let dialect = crate::index::Dialect::of_path(&path);

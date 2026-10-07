@@ -19,6 +19,8 @@ pub fn references(
     let uri = params.text_document_position.text_document.uri;
     let pos = params.text_document_position.position;
 
+    // A cursor on a reader prefix (`@x`, `#'x`, `` `x ``, `~x`) asks about the symbol.
+    let pos = documents.symbol_position(&uri, pos);
     // Local bindings (let/fn/loop/…) shadow vars and are never recorded as
     // occurrences, so resolve their usages structurally, before the fqn path.
     // When the cursor is on a local, this is authoritative — don't fall through.
@@ -563,6 +565,8 @@ pub fn prepare_rename(
     uri: &Url,
     pos: Position,
 ) -> Result<PrepareRenameResponse> {
+    // A cursor on a reader prefix (`@x`, `#'x`, `` `x ``, `~x`) asks about the symbol.
+    let pos = documents.symbol_position(uri, pos);
     let range = match rename_target(index, documents, uri, pos)? {
         RenameTarget::Local { refs, .. } => std::iter::once(refs.declaration)
             .chain(refs.usages.iter().copied())
@@ -658,6 +662,8 @@ pub fn rename(
     let uri = params.text_document_position.text_document.uri;
     let pos = params.text_document_position.position;
     let new_name = params.new_name;
+    // A cursor on a reader prefix (`@x`, `#'x`, `` `x ``, `~x`) asks about the symbol.
+    let pos = documents.symbol_position(&uri, pos);
 
     let target = rename_target(index, documents, &uri, pos)?;
 

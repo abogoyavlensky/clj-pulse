@@ -17,6 +17,8 @@ pub fn document_highlight(
 ) -> Result<Option<Vec<DocumentHighlight>>> {
     let uri = params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
+    // A cursor on a reader prefix (`@x`, `#'x`, `` `x ``, `~x`) asks about the symbol.
+    let pos = documents.symbol_position(&uri, pos);
 
     // Locals shadow vars and are never recorded as occurrences, so resolve
     // them structurally first. As in `references`, this branch is

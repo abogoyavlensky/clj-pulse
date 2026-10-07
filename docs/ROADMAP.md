@@ -453,6 +453,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
   got, where to look, how to verify):
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
+- 2026-10-07 [A var-quote of a shadowed name is not recorded as the
+  var](backlog/2026-10-07-shadowed-var-quote-is-not-the-var.md):
+  `(let [x 2] #'x)` names the global `x`, but no occurrence is recorded, so
+  definition, references and a var rename all miss it.
 - 2026-09-28 **Keywords in non-Integrant `.edn` files under source paths.**
   clj-kondo lints every `.edn` file under the source roots
   (`config.types.edn`, `test-regression/**/findings.edn` on its own corpus),

@@ -15,6 +15,8 @@ pub fn handle(
 ) -> Result<Option<Hover>> {
     let uri = params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
+    // A cursor on a reader prefix (`@x`, `#'x`, `` `x ``, `~x`) asks about the symbol.
+    let pos = documents.symbol_position(&uri, pos);
 
     let word = match documents.word_at(&uri, pos) {
         Some(w) => w,
