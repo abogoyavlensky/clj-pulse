@@ -220,8 +220,8 @@ there.
   cannot tell a save from the edit just before it.
 - Rename resolves locals structurally (`extractor::local_references_at`)
   *before* the fqn path, so a param shadowing a global only ever edits itself;
-  a `:keys`/`:strs`/`:syms`-destructured binding is rejected, since its name is
-  also the key being read.
+  a `:keys`/`:strs`/`:syms`-destructured binding (`!` forms included) is
+  rejected, since its name is also the key being read.
 - Child processes (`clj-kondo`, the classpath shell) get PATH plus the
   well-known install directories in `tools::well_known_dirs` (mise shims,
   Homebrew, `~/.cargo/bin`, …), appended after the user's entries, so a
@@ -405,7 +405,26 @@ there.
   rename *started* on `f` is refused by `rename_target` (so `prepareRename`
   refuses alike). The map's value `f` records nothing.
   `(:refer-clojure :rename …)` keys are not recorded: a core var is never
-  renamed. `CACHE_FORMAT_VERSION` 22.
+  renamed.
+- Clojure 1.13 map destructuring is read structurally. A key directive is
+  told by its name part through `extractor::key_directive` — `keys`, `syms`,
+  `strs`, each with or without the checked `!`, in any namespace — by every
+  reader: `collect_qualified`, `record_destructuring_keys`,
+  `is_destructured_key` and both walkers' binding collectors. Its vector
+  binds only the entries before `&` (`split_key_entries`); the literal keys
+  after it bind nothing, and a keyword among them is an occurrence taken
+  verbatim whatever the directive reads, as is a keyword key of `:or`
+  (`:or {::a 1}`). `:select`, `:all`, `:excess`, `:missing` and `:defaults`
+  bind their symbol through the generic keyword-key path, like `:as`.
+  `(selector {…})` (`is_core_selector`: qualified to core, or bare and not a
+  local, not excluded, and not `:refer`red anywhere but core — a
+  `:refer-clojure :rename` counts; a file defining its own `selector` without
+  excluding core's is read as core when called with a literal map) binds
+  nothing: the occurrence walker records its head under core, its keys and
+  its `:or` values and drops the names; the locals walker binds the
+  pattern's names for a cursor inside the pattern alone, outside an `:or`
+  value, so they shadow an outer local of the same name. `CACHE_FORMAT_VERSION`
+  23.
 - A `Defmethod` symbol is for the outline alone and never takes an index slot
   (`insert_file` / `insert_lib_file` skip it via `takes_slot`): its fqn is the
   multimethod's own, so it would displace the `defmulti` among equals and

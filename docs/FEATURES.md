@@ -48,7 +48,12 @@ Language features:
   A var referred under another name (`[a :refer [foo] :rename {foo f}]`)
   keeps that name: renaming `foo` rewrites the `:refer` entry and the
   `:rename` key and leaves `f` and its calls, and a rename started on `f` is
-  refused.
+  refused. Clojure 1.13 destructuring reads the same way: a checked
+  `{:keys! [k]}` (or `:syms!`, `:strs!`) entry is refused like `:keys`, the
+  names after `:select`, `:all`, `:excess`, `:missing` and `:defaults` are
+  ordinary locals, the keys after `&` in `{:keys [a & :b]}` bind nothing, and
+  a `(selector {:keys [a] :select s})` pattern binds nothing either, so
+  renaming an outer local `a` leaves the key the selector reads alone.
 - **Keyword rename** - rename a qualified keyword across the project. Each site
   keeps the notation it was written in, because only the name at the end of the
   token is replaced: `::db`, `::alias/db` and `:my.app/db` all become `::store`,
@@ -56,7 +61,9 @@ Language features:
   with the sources, and so are keywords inside quoted data (`'{:my.app/db …}`,
   `(quote […])`) and an `ns` form's attr-map. Unqualified keywords, keywords of a library namespace, and
   keywords read through `{::keys [db]}` destructuring (where the name is also the
-  binding) are refused rather than half-renamed.
+  binding) are refused rather than half-renamed. The literal keys after `&`
+  in a destructuring directive (`{:keys [a & ::db]}`) and the keyword keys of
+  an `:or` map (`:or {::db nil}`) are sites like any other.
 - **Keyword navigation** - go to definition and find references on namespaced
   keywords, including Integrant component keys: jump from `:my.app/db` in a
   `config.edn` system map (or an `#ig/ref`) to its `(defmethod ig/init-key ::db ...)`.

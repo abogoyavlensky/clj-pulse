@@ -23,7 +23,10 @@ use super::{NsMeta, Symbol};
 /// 21: a declare-only name is its first `Declare` symbol alone, not also an
 ///     occurrence; a repeated declare is a usage of that first one.
 /// 22: the keys of a `:refer … :rename {a b}` map are occurrences of the var.
-pub const CACHE_FORMAT_VERSION: u32 = 22;
+/// 23: Clojure 1.13 destructuring: `:keys!` entries, the literal keys after
+///     `&` and keyword keys of `:or` are keyword occurrences; a `selector`
+///     pattern records its keys and no symbol usages.
+pub const CACHE_FORMAT_VERSION: u32 = 23;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

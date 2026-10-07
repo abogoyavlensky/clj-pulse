@@ -490,6 +490,28 @@ definition 19 ms cold and 18 ms warm against 17 / 18 ms in the table above,
 warm first navigation 528 ms, 756 ms to diagnostics, RSS settled 129 / 90
 MiB — all within the recorded spread.
 
+### After Clojure 1.13 destructuring (2026-10-07)
+
+Same corpus and container, clj-kondo v2026.08.04, against a run of master
+(`50c019d`) the same day: every row matches, 5248 probes, 4921 agree, 216
+diverge, 62 known, 49 null. The corpus predates 1.13 and kondo's analysis
+does not yet know the new keyword sites (clj-kondo #2942), so the gate shows
+no regression rather than the new behavior; the extractor and e2e tests
+cover that. A first branch run read 5242 probes, the six missing all in the
+library var-usage buckets: it ran on a fresh corpus checkout, before
+`bb bench` had rebuilt `.clj-kondo/.cache`, so kondo classified fewer
+library usages. Compare runs on the same cache state.
+
+`bb bench clj-kondo` (`CLJ_PULSE_BENCH_RUNS` 1), master then the branch
+twice: definition 17 / 17 ms cold / warm on master, 22 / 26 and 19 / 20 on
+the branch; keystroke to diagnostics 771 / 776 against 905 / 797 and
+852 / 792; warm first definition 540 against 695 and 638; RSS settled 127 /
+95 against 119 / 86 and 131 / 93 MiB. Most branch rows sit a little above
+master's, but the two branch runs differ from each other by as much, and the
+second lands within the recorded spread (17–19 ms definition, 756 ms to
+diagnostics in the 2026-09-30 note); the change adds one keyword check per
+map-pattern key and per list head on the locals spine.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,
