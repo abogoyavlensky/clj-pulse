@@ -264,7 +264,7 @@ These pass today; they pin the behavior the later tasks must keep.
 
 **Files:** `src/index/extractor.rs`, `tests/test_extractor.rs`
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - `tests/test_extractor.rs`: in
     `(ns my.ns)\n(def dflt 1)\n(defn f [a] (selector {::keys! [a] ::keys [z] :or {::z dflt} :select s}) a)`
     (every fixture here is valid 1.13: a selector names at least one of
@@ -285,11 +285,13 @@ These pass today; they pin the behavior the later tasks must keep.
     token's range and `destructured_key: true`; a cursor in an `:or` value,
     `(defn f [a] (selector {:keys [b] :or {b a} :select s}))` on the last `a`,
     resolves to the param.
-- [ ] **Step 2:** `cargo test --lib extractor && cargo test --test test_extractor` — FAIL.
-- [ ] **Step 3: Implement** `Scope::is_bound`, `is_core_selector` and the two
+- [x] **Step 2:** `cargo test --lib extractor && cargo test --test test_extractor` — FAIL.
+- [x] **Step 3: Implement** `Scope::is_bound`, `is_core_selector` and the two
   arms (Design point 4). Comment in each arm that it mirrors the other.
-- [ ] **Step 4:** Both commands — PASS.
-- [ ] **Step 5:** `git commit -m "extractor: selector reads a pattern that binds nothing"`
+- [x] **Step 4:** Both commands — PASS.
+- [x] **Step 5:** `git commit -m "extractor: selector reads a pattern that binds nothing"`
+
+> Deviation: the head occurrence is `core_ns(dialect)/selector` (`clojure.core/selector` in Clojure files), matching how `record_occurrence` places a bare core name. The plain-call fixture counts one `my.ns/x` occurrence, since `(def x 1)` is a definition rather than an occurrence.
 
 ### Task 5: Cache bump, e2e, gates
 

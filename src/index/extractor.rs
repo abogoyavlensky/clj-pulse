@@ -543,6 +543,43 @@ fn are_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
         .find(|fqn| ARE_FQNS.contains(&fqn.as_str()))
 }
 
+/// What a `:refer-clojure :rename {selector sel}` stores `sel` as.
+const SELECTOR_FQNS: &[&str] = &["clojure.core/selector", "cljs.core/selector"];
+
+/// Whether `children` is `(selector {…})` naming Clojure 1.13's
+/// `clojure.core/selector`, which reads a destructuring map and binds
+/// nothing. The head is `selector` qualified to core
+/// ([`head_resolves_to_core`]), or bare, not a local (`is_local`), and either
+/// `:refer`red to the core var (a `:refer-clojure :rename` does that) or
+/// spelled `selector`, `:refer`red nowhere else and not excluded from core.
+/// The second child must be a map literal. A file defining its own
+/// `selector` without excluding the core one is read as core here; Clojure
+/// warns on that shadowing.
+fn is_core_selector(
+    children: &[Node],
+    ns_meta: &NsMeta,
+    source: &str,
+    is_local: impl Fn(&str) -> bool,
+) -> bool {
+    let (Some(head), Some(pattern)) = (children.first(), children.get(1)) else {
+        return false;
+    };
+    if head.kind() != "sym_lit" || pattern.kind() != "map_lit" {
+        return false;
+    }
+    let name = node_text(sym_name_node(*head), source);
+    if head.child_by_field_name("namespace").is_some() {
+        return name == "selector" && head_resolves_to_core(*head, ns_meta, source);
+    }
+    if is_local(name) {
+        return false;
+    }
+    match ns_meta.refers.get(name) {
+        Some(fqn) => SELECTOR_FQNS.contains(&fqn.as_str()),
+        None => name == "selector" && !ns_meta.core_excludes.iter().any(|e| e == name),
+    }
+}
+
 /// The def-family kind a *qualified* head names through its name part alone:
 /// `mu/defn`, `s/defn`, `p/defn-`, `mu/defmethod` all define what `defn`,
 /// `defn-` and `defmethod` define, whatever library the qualifier names. Only
@@ -1991,6 +2028,13 @@ impl Scope {
         }
         false
     }
+
+    /// Whether `name` is bound in any frame, without marking it used.
+    fn is_bound(&self, name: &str) -> bool {
+        self.frames
+            .iter()
+            .any(|frame| frame.iter().any(|s| s.name == name))
+    }
 }
 
 struct OccurrenceCtx<'a> {
@@ -2124,6 +2168,22 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
                 walk_are_form(&children, ctx, scope, out);
                 return;
             }
+        }
+        // `(selector {…})`: the map is a destructuring pattern that binds
+        // nothing. Its keys are keyword sites and its `:or` values are
+        // expressions here; its symbols are neither usages nor bindings, so
+        // the names collected are dropped. Mirrors the `walk_scope` arm.
+        if is_core_selector(&children, ctx.ns_meta, ctx.source, |n| scope.is_bound(n)) {
+            out.push(Occurrence {
+                fqn: format!("{}/selector", core_ns(ctx.dialect)),
+                name_range: node_to_lsp_range(sym_name_node(*head), ctx.source),
+            });
+            let mut unbound = Vec::new();
+            collect_binding_names(children[1], ctx, scope, out, &mut unbound);
+            for child in children.iter().skip(2) {
+                walk_occurrences(*child, ctx, scope, out);
+            }
+            return;
         }
     }
 
@@ -3399,6 +3459,25 @@ fn walk_scope(node: Node, ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBind
                     && are_head_fqn(*head, ctx.ns_meta, source).is_some()
                 {
                     walk_scope_are(&children, ctx, pos, out);
+                    return;
+                }
+                // `(selector {…})` binds nothing outside its pattern, so a
+                // cursor in the pattern sees the pattern's own names, which
+                // shadow everything outside: an outer local's references skip
+                // them and a rename started there edits the pattern alone. An
+                // `:or` value is an expression of the enclosing scope. Mirrors
+                // the `walk_list` arm.
+                if is_core_selector(&children, ctx.ns_meta, source, |n| {
+                    out.iter().any(|b| b.name == n)
+                }) {
+                    let pattern = children[1];
+                    if lsp_range_contains(node_to_lsp_range(pattern, source), pos)
+                        && !pos_in_or_default(pattern, source, pos)
+                    {
+                        collect_binding_targets(pattern, source, out);
+                        return;
+                    }
+                    descend_into(node, ctx, pos, out);
                     return;
                 }
             }
@@ -4830,6 +4909,41 @@ mod tests {
                 local_references_at(&src, pos_of(&src, "(inc a)", 0, 5), "a").expect("local");
             assert!(refs.destructured_key, "{} binding: {:?}", directive, refs);
         }
+    }
+
+    #[test]
+    fn selector_pattern_binds_nothing() {
+        assert!(unused_names("(defn f [a] (selector {:keys [b] :select s}) a)").is_empty());
+    }
+
+    #[test]
+    fn selector_pattern_is_outside_an_outer_locals_references() {
+        // The selector's `a` reads the key `:a`; renaming the param must not
+        // rewrite it.
+        let src = "(ns x)\n(defn f [a] (selector {:keys [a] :select s}) a)";
+        let refs = local_references_at(src, pos_of(src, ") a)", 0, 2), "a").expect("local");
+        assert_eq!(refs.declaration.start, pos_of(src, "[a]", 0, 1));
+        assert_eq!(
+            refs.usages.len(),
+            1,
+            "the body `a` alone: {:?}",
+            refs.usages
+        );
+
+        // On the selector's own `a`: a binding of the pattern alone, which a
+        // rename refuses like any `:keys` entry.
+        let inner = pos_of(src, "[a] :select", 0, 1);
+        let refs = local_references_at(src, inner, "a").expect("pattern entry");
+        assert_eq!(refs.declaration.start, inner);
+        assert!(refs.destructured_key, "{:?}", refs);
+        assert!(refs.usages.is_empty(), "{:?}", refs.usages);
+    }
+
+    #[test]
+    fn selector_or_value_sees_the_enclosing_scope() {
+        let src = "(ns x)\n(defn f [a] (selector {:keys [b] :or {b a} :select s}))";
+        let refs = local_references_at(src, pos_of(src, "{b a}", 0, 3), "a").expect("local");
+        assert_eq!(refs.declaration.start, pos_of(src, "[a]", 0, 1));
     }
 
     #[test]

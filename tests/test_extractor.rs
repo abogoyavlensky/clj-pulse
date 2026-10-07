@@ -1005,6 +1005,77 @@ fn test_occurrence_or_keyword_keys_are_keyword_sites() {
 }
 
 #[test]
+fn test_selector_pattern_binds_nothing_and_records_its_keys() {
+    // `clojure.core/selector` (Clojure 1.13) takes a destructuring map and
+    // binds nothing: its symbols are neither usages nor bindings, its keys
+    // are keyword sites, and an `:or` value is an expression of the scope the
+    // form sits in.
+    let src = "(ns my.ns)\n(def dflt 1)\n\
+               (defn f [a] (selector {::keys! [a] ::keys [z] :or {::z dflt} :select s}) a)";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    let head = occurrences_of(&occs, "clojure.core/selector");
+    assert_eq!(head.len(), 1, "{:?}", occs);
+    let (line, start, end) = token_range(src, "selector", 0);
+    let r = head[0].name_range;
+    assert_eq!(
+        (r.start.line, r.start.character, r.end.character),
+        (line, start, end)
+    );
+    assert_eq!(occurrences_of(&occs, ":my.ns/a").len(), 1, "{:?}", occs);
+    assert_eq!(occurrences_of(&occs, ":my.ns/z").len(), 2, "{:?}", occs);
+    assert_eq!(occurrences_of(&occs, "my.ns/dflt").len(), 1, "{:?}", occs);
+    for absent in ["my.ns/s", "my.ns/selector", "my.ns/z", "my.ns/a"] {
+        assert!(
+            occurrences_of(&occs, absent).is_empty(),
+            "{}: {:?}",
+            absent,
+            occs
+        );
+    }
+}
+
+#[test]
+fn test_selector_renamed_through_refer_clojure_is_still_selector() {
+    let src = "(ns my.ns (:refer-clojure :rename {selector sel}))\n\
+               (defn f [] (sel {:keys [a] :select s}))";
+    let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+    assert_eq!(
+        occurrences_of(&occs, "clojure.core/selector").len(),
+        1,
+        "{:?}",
+        occs
+    );
+    for absent in ["my.ns/a", "my.ns/s", "my.ns/sel"] {
+        assert!(
+            occurrences_of(&occs, absent).is_empty(),
+            "{}: {:?}",
+            absent,
+            occs
+        );
+    }
+}
+
+#[test]
+fn test_selector_excluded_or_shadowed_is_a_plain_call() {
+    // Excluded from core, or bound as a local, `selector` names something
+    // else: its map is an ordinary expression.
+    let excluded = "(ns my.ns (:refer-clojure :exclude [selector]))\n\
+                    (def x 1)\n(defn selector [m] m)\n\
+                    (defn f [] (selector {:a x :select s}))";
+    let local = "(ns my.ns)\n(def x 1)\n\
+                 (defn f [] (let [selector identity] (selector {:a x :select s})))";
+    for src in [excluded, local] {
+        let (_, _, occs) = extract_full(src, Path::new("a.clj")).unwrap();
+        assert!(
+            occurrences_of(&occs, "clojure.core/selector").is_empty(),
+            "{src}: {occs:?}"
+        );
+        assert_eq!(occurrences_of(&occs, "my.ns/x").len(), 1, "{src}: {occs:?}");
+        assert_eq!(occurrences_of(&occs, "my.ns/s").len(), 1, "{src}: {occs:?}");
+    }
+}
+
+#[test]
 fn test_occurrence_keywords_recorded_in_their_own_notation() {
     // Qualified keywords (literal `:ns/name`, auto-resolved `::name`) are
     // occurrences of the namespace they resolve to; an unqualified `:plain` is
