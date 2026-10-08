@@ -386,6 +386,19 @@ fn dialect_exts(dialect: Dialect) -> &'static str {
 
 /// A divergence that is understood and accepted, for now or for good. Triage
 /// adds an entry with a dated reason; a fixed bug removes its entry.
+/// Whether the probe's token directly follows a `#'` var-quote.
+fn after_var_quote(probe: &Probe) -> bool {
+    let Ok(text) = std::fs::read_to_string(&probe.file) else {
+        return false;
+    };
+    let Some(line) = text.lines().nth(probe.line as usize) else {
+        return false;
+    };
+    let units: Vec<u16> = line.encode_utf16().collect();
+    let at = probe.character as usize;
+    at >= 2 && units.get(at - 2..at) == Some(&[u16::from(b'#'), u16::from(b'\'')][..])
+}
+
 struct Known {
     bucket_prefix: &'static str,
     matches: fn(&Probe, &Verdict) -> bool,
@@ -393,6 +406,16 @@ struct Known {
 }
 
 static KNOWN: &[Known] = &[
+    // `(let [x 2] #'x)`: Clojure's `var` form ignores locals and names the
+    // global `x`, while kondo's analysis records the `x` as a use of the
+    // local. clj-pulse answers nothing there yet (docs/backlog,
+    // 2026-10-07-shadowed-var-quote-is-not-the-var.md); any other answer is
+    // a real divergence.
+    Known {
+        bucket_prefix: "local/",
+        matches: |probe, verdict| matches!(verdict, Verdict::Null { .. }) && after_var_quote(probe),
+        reason: "a var-quote of a shadowed name is the var in Clojure; kondo reads it as the local (2026-10-07)",
+    },
     Known {
         bucket_prefix: "var-def/",
         matches: |probe, _| probe.token.starts_with(':'),

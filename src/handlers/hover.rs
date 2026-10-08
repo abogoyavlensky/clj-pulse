@@ -15,10 +15,19 @@ pub fn handle(
 ) -> Result<Option<Hover>> {
     let uri = params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
+    // A cursor on a reader prefix (`@x`, `#'x`, `` `x ``, `~x`) asks about the symbol.
+    let pos = documents.symbol_position(&uri, pos);
 
     let word = match documents.word_at(&uri, pos) {
         Some(w) => w,
         None => return Ok(None),
+    };
+
+    // `word_at` keeps a var-quote's `#'` (it stops `#'x` from naming a
+    // shadowing local), but the hover is the var's: `#'x` names `x`.
+    let word = match word.strip_prefix("#'") {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => word,
     };
 
     tracing::info!("hover: word={}", word);

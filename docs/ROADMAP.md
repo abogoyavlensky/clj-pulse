@@ -164,6 +164,10 @@ Small fixes that remove wrong answers. Each extractor change bumps
       `selector` macro). `bb compare clj-kondo` matches master row for row
       (4921 of 5248 agree); see [MEMORY.md](MEMORY.md).
   Plan: [2026-10-06-2018-clojure-1-13-destructuring.md](plans/2026-10-06-2018-clojure-1-13-destructuring.md) — done
+- [x] **Cursor on a reader prefix.** Hover, definition, references, rename
+      and highlight from the `@`, `#'`, `` ` `` or `~` before a symbol answer
+      as from the symbol; ranges stay on the name.
+  Plan: [2026-10-07-2258-cursor-on-reader-prefix.md](plans/2026-10-07-2258-cursor-on-reader-prefix.md) — done
 
 ## Milestone 2 — completion quality
 
@@ -449,6 +453,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   issue file each under `docs/backlog/` (bucket, corpus sites, expected vs
   got, where to look, how to verify):
   - [Defs nested in a wrapping macro are not definitions](backlog/2026-09-17-defs-nested-in-a-wrapping-macro.md).
+- 2026-10-07 [A var-quote of a shadowed name is not recorded as the
+  var](backlog/2026-10-07-shadowed-var-quote-is-not-the-var.md):
+  `(let [x 2] #'x)` names the global `x`, but no occurrence is recorded, so
+  definition, references and a var rename all miss it.
 - 2026-09-28 **Keywords in non-Integrant `.edn` files under source paths.**
   clj-kondo lints every `.edn` file under the source roots
   (`config.types.edn`, `test-regression/**/findings.edn` on its own corpus),

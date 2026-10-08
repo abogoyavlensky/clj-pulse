@@ -6540,6 +6540,24 @@ fn test_e2e_clojuredocs_bare_core_symbol() {
 }
 
 #[test]
+fn test_e2e_clojuredocs_from_a_reader_prefix() {
+    // A cursor on the `@` of `@map` looks up `map`, as hover does.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let f = root.join("src/docs_demo.clj");
+    std::fs::write(&f, "(ns simple.docs-demo)\n(def m @map)\n").unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize_with_options(&root, clojuredocs_options());
+    client.did_open(&f);
+
+    let msg = client.clojure_docs(json!({
+        "textDocument": { "uri": format!("file://{}", f.display()) },
+        "position": { "line": 1, "character": 7 }
+    }));
+    assert_eq!(msg["result"]["symbol"], "clojure.core/map", "{msg}");
+}
+
+#[test]
 fn test_e2e_clojuredocs_aliased_symbol() {
     // `str/join` resolves through the ns form's alias even though nothing
     // from clojure.string is indexed (no jar on this fixture's classpath).
@@ -9653,4 +9671,238 @@ fn test_e2e_new_file_under_nested_deps_path_with_metadata() {
         params["edit"]["changes"][&uri][0]["newText"],
         "(ns readx.main)\n"
     );
+}
+
+// --- a cursor on a reader prefix ---------------------------------------------
+//
+// The `@` of `@x`, the `#'` of `#'x` and the `` ` ``/`~` of syntax-quote ask
+// about the symbol they prefix; every answer's range stays on the symbol.
+
+/// A started server with `src/prefixes.clj` open and indexed, its path and text.
+fn prefixes_session() -> (tempfile::TempDir, LspClient, std::path::PathBuf, String) {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    let file = root.join("src/prefixes.clj");
+    client.did_open(&file);
+    let text = std::fs::read_to_string(&file).unwrap();
+    (project, client, file, text)
+}
+
+/// `(line, start, end)` of every location or highlight, sorted.
+fn spans(answer: &Value) -> Vec<(u64, u64, u64)> {
+    let mut out: Vec<(u64, u64, u64)> = answer
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a list: {answer}"))
+        .iter()
+        .map(|l| {
+            let r = &l["range"];
+            (
+                r["start"]["line"].as_u64().unwrap(),
+                r["start"]["character"].as_u64().unwrap(),
+                r["end"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn test_e2e_prefix_cursor_hover() {
+    let (_project, mut client, file, text) = prefixes_session();
+    let (dl, dc) = start_of(&text, "@pfx-state");
+    let (vl, vc) = start_of(&text, "#'pfx-state");
+    for (line, ch, what) in [
+        (dl, dc, "the @ of @pfx-state"),
+        (dl, dc + 1, "the name after @"),
+        (vl, vc, "the # of #'pfx-state"),
+        (vl, vc + 1, "the ' of #'pfx-state"),
+        (vl, vc + 2, "the name after #'"),
+    ] {
+        let hover = client.hover(&file, line, ch);
+        let md = hover["contents"]["value"].as_str().unwrap_or_default();
+        assert!(md.contains("pfx-state"), "{what}: {hover}");
+        assert!(md.contains("simple.prefixes"), "{what}: {hover}");
+    }
+}
+
+#[test]
+fn test_e2e_prefix_cursor_definition() {
+    let (_project, mut client, file, text) = prefixes_session();
+    let (def_line, def_col) = start_of(&text, "pfx-state (atom");
+    let (line, ch) = start_of(&text, "@pfx-state");
+    let loc = client.goto_definition(&file, line, ch);
+    assert_eq!(loc["range"]["start"]["line"], json!(def_line), "{loc}");
+    assert_eq!(loc["range"]["start"]["character"], json!(def_col), "{loc}");
+    assert_eq!(
+        loc["range"]["end"]["character"],
+        json!(def_col + "pfx-state".len() as u32),
+        "{loc}"
+    );
+}
+
+#[test]
+fn test_e2e_prefix_cursor_references() {
+    let (_project, mut client, file, text) = prefixes_session();
+    let (def_line, def_col) = start_of(&text, "pfx-state (atom");
+    let from_name = spans(&client.references(&file, def_line, def_col, true));
+    let (vl, vc) = start_of(&text, "#'pfx-state");
+    let (ql, qc) = start_of(&text, "~pfx-state");
+    let (sl, sc) = start_of(&text, "`pfx-state");
+    let (pl, pc) = start_of(&text, "~@pfx-state");
+    for (line, ch, what) in [
+        (vl, vc, "#"),
+        (vl, vc + 1, "'"),
+        (ql, qc, "~"),
+        (sl, sc, "backquote"),
+        (pl, pc, "~ of ~@"),
+        (pl, pc + 1, "@ of ~@"),
+    ] {
+        let from_prefix = spans(&client.references(&file, line, ch, true));
+        assert_eq!(from_prefix, from_name, "from the {what}");
+    }
+    for (line, col) in [(ql, qc + 1), (sl, sc + 1), (pl, pc + 2)] {
+        let site = (line as u64, col as u64, col as u64 + 9);
+        assert!(from_name.contains(&site), "{site:?} in {from_name:?}");
+    }
+    for (_, start, end) in &from_name {
+        assert_eq!(end - start, "pfx-state".len() as u64, "{from_name:?}");
+    }
+}
+
+#[test]
+fn test_e2e_prefix_cursor_highlight() {
+    let (_project, mut client, file, text) = prefixes_session();
+    let (line, ch) = start_of(&text, "@pfx-state");
+    let from_prefix = client.document_highlight(&file, line, ch);
+    let from_name = client.document_highlight(&file, line, ch + 1);
+    assert_eq!(from_prefix, from_name);
+    let (def_line, _) = start_of(&text, "pfx-state (atom");
+    for h in from_prefix.as_array().unwrap() {
+        let r = &h["range"];
+        let width =
+            r["end"]["character"].as_u64().unwrap() - r["start"]["character"].as_u64().unwrap();
+        assert_eq!(width, "pfx-state".len() as u64, "{h}");
+        let kind = if r["start"]["line"] == json!(def_line) {
+            3
+        } else {
+            2
+        };
+        assert_eq!(h["kind"], json!(kind), "{h}");
+    }
+}
+
+#[test]
+fn test_e2e_prefix_cursor_rename() {
+    let (_project, mut client, file, text) = prefixes_session();
+    let (line, ch) = start_of(&text, "@pfx-state");
+    let prepared = client.prepare_rename(&file, line, ch);
+    assert_eq!(prepared["start"]["character"], json!(ch + 1), "{prepared}");
+    assert_eq!(
+        prepared["end"]["character"],
+        json!(ch + 1 + "pfx-state".len() as u32),
+        "{prepared}"
+    );
+
+    let result = client.rename(&file, line, ch, "pfx-counter");
+    let edits = single_file_edits(&result, "/src/prefixes.clj");
+    let after = apply_edits(&text, &edits);
+    for expected in [
+        "(def pfx-counter (atom 0))",
+        "[] @pfx-counter)",
+        "(defn var-of [] #'pfx-counter)",
+        "`(deref ~pfx-counter)",
+    ] {
+        assert!(after.contains(expected), "{expected}:\n{after}");
+    }
+    // The shadowing local and quoted data are not the var.
+    assert!(after.contains("(let [pfx-state 2]"), "{after}");
+    assert!(after.contains("'simple.prefixes/pfx-state"), "{after}");
+}
+
+#[test]
+fn test_e2e_prefix_cursor_qualified_targets_the_var() {
+    // `#'c/pfx-target` from the `#` is about the var, never the alias `c`:
+    // the alias would win if the cursor landed on its half.
+    let (_project, mut client, file, text) = prefixes_session();
+    let (line, ch) = start_of(&text, "#'c/pfx-target");
+    let prepared = client.prepare_rename(&file, line, ch);
+    assert_eq!(prepared["start"]["character"], json!(ch + 4), "{prepared}");
+    assert_eq!(
+        prepared["end"]["character"],
+        json!(ch + 4 + "pfx-target".len() as u32),
+        "{prepared}"
+    );
+
+    let result = client.rename(&file, line, ch, "pfx-goal");
+    let changes = result["changes"].as_object().expect("a workspace edit");
+    assert!(
+        changes
+            .keys()
+            .any(|u| u.ends_with("/src/prefix_target.clj")),
+        "the definition is renamed: {result}"
+    );
+    let ours = changes
+        .iter()
+        .find(|(u, _)| u.ends_with("/src/prefixes.clj"))
+        .map(|(_, e)| e.as_array().unwrap().clone())
+        .unwrap_or_default();
+    let after = apply_edits(&text, &ours);
+    assert!(after.contains("#'c/pfx-goal"), "{after}");
+    assert!(after.contains("[simple.prefix-target :as c]"), "{after}");
+}
+
+#[test]
+fn test_e2e_prefix_cursor_local_deref() {
+    let (_project, mut client, file, text) = prefixes_session();
+    let (bl, bc) = start_of(&text, "pfx-a (atom");
+    let (ul, uc) = start_of(&text, "@pfx-a");
+    let refs = spans(&client.references(&file, ul, uc, true));
+    assert_eq!(
+        refs,
+        vec![
+            (bl as u64, bc as u64, bc as u64 + 5),
+            (ul as u64, uc as u64 + 1, uc as u64 + 6)
+        ]
+    );
+    let loc = client.goto_definition(&file, ul, uc);
+    assert_eq!(loc["range"]["start"]["character"], json!(bc), "{loc}");
+}
+
+#[test]
+fn test_e2e_prefix_cursor_var_quote_skips_a_shadowing_local() {
+    // `#'x` always names a var: a `let` binding of the same name is not it,
+    // from the prefix or from the name. (The walker does not yet record a
+    // shadowed `#'x` as the var's occurrence at all, so the answer is null
+    // today; see docs/backlog. What must never happen is the local.)
+    let (_project, mut client, file, text) = prefixes_session();
+    let (line, ch) = start_of(&text, "[#'pfx-state");
+    let (bl, bc) = start_of(&text, "pfx-state 2]");
+    let (bl, bc) = (bl as u64, bc as u64);
+    for col in [ch + 1, ch + 3] {
+        let loc = client.goto_definition(&file, line, col);
+        assert!(
+            !(loc["range"]["start"]["line"] == json!(bl)
+                && loc["range"]["start"]["character"] == json!(bc)),
+            "col {col} navigated to the local: {loc}"
+        );
+        let refs = client.references(&file, line, col, true);
+        assert!(
+            refs.is_null() || !spans(&refs).iter().any(|(l, c, _)| (*l, *c) == (bl, bc)),
+            "col {col} listed the local: {refs}"
+        );
+    }
+}
+
+#[test]
+fn test_e2e_prefix_cursor_quoted_symbol_resolves_nothing() {
+    let (_project, mut client, file, text) = prefixes_session();
+    let (line, ch) = start_of(&text, "'simple.prefixes/pfx-state");
+    for col in [ch, ch + 18] {
+        let loc = client.goto_definition(&file, line, col);
+        assert!(loc.is_null(), "col {col}: {loc}");
+    }
 }

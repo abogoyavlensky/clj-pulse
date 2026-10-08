@@ -15,6 +15,8 @@ pub fn handle(
 ) -> Result<Option<GotoDefinitionResponse>> {
     let uri = params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
+    // A cursor on a reader prefix (`@x`, `#'x`, `` `x ``, `~x`) asks about the symbol.
+    let pos = documents.symbol_position(&uri, pos);
 
     // Works whether the open document is a project file, a directory-library
     // file (`file:` URIs), or a JAR entry (`jar:` URIs → virtual index path) —

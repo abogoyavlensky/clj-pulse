@@ -1530,6 +1530,49 @@ pub fn node_path_at<'a>(root: Node<'a>, source: &str, pos: Position) -> Vec<Node
     path
 }
 
+/// When `pos` sits on the reader prefix of a symbol (the `@` of `@x`, the
+/// `#'` of `#'x`, the `` ` `` of `` `x ``, the `~` or `~@` of `~x` / `~@x`), the
+/// position the question is really about: the start of the symbol's name part
+/// (`@h/x` lands on `x`, not on the alias `h`, since a deref or var-quote acts
+/// on the var), or of the whole symbol when it is unqualified.
+///
+/// `None` when the innermost node at `pos` is not one of those prefix forms,
+/// when its value is not a symbol (`@(f)`), or when `pos` is not on the
+/// marker's own characters (inside the value, or on whitespace after `@`). `'x` is left alone: a quoted symbol records nothing, so neither
+/// of its characters resolves.
+pub fn prefixed_symbol_start(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    pos: Position,
+) -> Option<Position> {
+    let node = *node_path_at(tree.root_node(), source, pos).first()?;
+    if !matches!(
+        node.kind(),
+        "derefing_lit"
+            | "var_quoting_lit"
+            | "syn_quoting_lit"
+            | "unquoting_lit"
+            | "unquote_splicing_lit"
+    ) {
+        return None;
+    }
+    let value = node.child_by_field_name("value")?;
+    if value.kind() != "sym_lit" {
+        return None;
+    }
+    // On the marker's own characters only: whitespace between `@` and the
+    // symbol, or a newline's indentation before it, is not the symbol.
+    let marker = node_to_lsp_range(node.child_by_field_name("marker")?, source);
+    let at = (pos.line, pos.character);
+    if at < (marker.start.line, marker.start.character)
+        || at >= (marker.end.line, marker.end.character)
+    {
+        return None;
+    }
+    let target = value.child_by_field_name("name").unwrap_or(value);
+    Some(node_to_lsp_range(target, source).start)
+}
+
 // --- require aliases -------------------------------------------------------
 
 /// Every token in a file that spells one require alias, for renaming it. The
@@ -4844,6 +4887,62 @@ mod tests {
             .map(|n| n.kind())
             .collect();
         assert_eq!(kinds, vec!["sym_lit", "list_lit"]);
+    }
+
+    fn prefixed_at(src: &str, needle: &str, within: usize) -> Option<Position> {
+        let tree = parse(src);
+        prefixed_symbol_start(&tree, src, pos_of(src, needle, 0, within))
+    }
+
+    #[test]
+    fn prefixed_symbol_start_moves_off_every_prefix() {
+        let src = "(f @state #'other `syn ~unq ~@spl)";
+        assert_eq!(
+            prefixed_at(src, "@state", 0),
+            Some(pos_of(src, "state", 0, 0))
+        );
+        assert_eq!(
+            prefixed_at(src, "#'other", 0),
+            Some(pos_of(src, "other", 0, 0))
+        );
+        assert_eq!(
+            prefixed_at(src, "#'other", 1),
+            Some(pos_of(src, "other", 0, 0))
+        );
+        assert_eq!(prefixed_at(src, "`syn", 0), Some(pos_of(src, "syn", 0, 0)));
+        assert_eq!(prefixed_at(src, "~unq", 0), Some(pos_of(src, "unq", 0, 0)));
+        assert_eq!(prefixed_at(src, "~@spl", 0), Some(pos_of(src, "spl", 0, 0)));
+        assert_eq!(prefixed_at(src, "~@spl", 1), Some(pos_of(src, "spl", 0, 0)));
+    }
+
+    #[test]
+    fn prefixed_symbol_start_leaves_other_positions_alone() {
+        let src = "(f @state @(deref x) 'quoted)";
+        // Already on the symbol: the caller's own finders take it from here.
+        assert_eq!(prefixed_at(src, "@state", 1), None);
+        assert_eq!(prefixed_at(src, "@state", 3), None);
+        // The value is a list, not a symbol.
+        assert_eq!(prefixed_at(src, "@(deref", 0), None);
+        // A quoted symbol records nothing, so its quote does not resolve.
+        assert_eq!(prefixed_at(src, "'quoted", 0), None);
+        // Not a prefix at all.
+        assert_eq!(prefixed_at(src, "(f", 0), None);
+        // Whitespace between the marker and the symbol is not the marker.
+        let spaced = "(f @   state)\n(g @\n  other)";
+        assert_eq!(
+            prefixed_at(spaced, "@   state", 0),
+            Some(pos_of(spaced, "state", 0, 0))
+        );
+        assert_eq!(prefixed_at(spaced, "@   state", 2), None);
+        assert_eq!(prefixed_at(spaced, "  other", 1), None);
+    }
+
+    #[test]
+    fn prefixed_symbol_start_lands_on_the_name_half() {
+        // `h` is the alias; a deref or var-quote acts on the var `x`.
+        let src = "(f @h/x #'h/y)";
+        assert_eq!(prefixed_at(src, "@h/x", 0), Some(pos_of(src, "h/x", 0, 2)));
+        assert_eq!(prefixed_at(src, "#'h/y", 0), Some(pos_of(src, "h/y", 0, 2)));
     }
 
     // --- Clojure 1.13 destructuring -----------------------------------------

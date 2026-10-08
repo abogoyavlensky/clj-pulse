@@ -4,6 +4,12 @@
 
 Language features:
 
+Hover, go to definition, find references, rename and highlight work from a
+symbol's reader prefix too: a cursor on the `@` of `@state`, the `#'` of
+`#'state`, or the `` ` ``, `~` or `~@` before a symbol answers as if it were on
+`state` (on the name half of `@alias/state`). The underline and every edit stay
+on the name, so renaming `state` leaves the `@` in place.
+
 - **Go to definition** - across project source, library JARs (via `jar:` URIs),
   and source-directory deps (git deps in `~/.gitlibs`, `:local/root`).
 - **Autocomplete** - locals, project symbols, `:refer`red and alias-qualified

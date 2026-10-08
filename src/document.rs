@@ -237,6 +237,16 @@ impl DocumentStore {
         Some(chars[start..end].iter().collect())
     }
 
+    /// `pos`, moved onto the symbol when it sits on that symbol's reader prefix
+    /// (`@`, `#'`, `` ` ``, `~`, `~@`; see [`extractor::prefixed_symbol_start`]),
+    /// so a position-based request asks about what the cursor visibly points
+    /// at. `pos` unchanged otherwise, and for a document that is not open.
+    pub fn symbol_position(&self, uri: &Url, pos: Position) -> Position {
+        self.snapshot(uri)
+            .and_then(|snap| extractor::prefixed_symbol_start(&snap.tree, &snap.text, pos))
+            .unwrap_or(pos)
+    }
+
     /// Whether the identifier token under `pos` is a Clojure keyword — i.e.
     /// immediately preceded by `:` (covers `:kw`, `::kw`, `:ns/kw`, `::ns/kw`).
     /// Used by goto-definition to avoid resolving a keyword to a same-named var.
@@ -434,6 +444,31 @@ mod tests {
         let col = prefix.encode_utf16().count() as u32;
         let word = store.word_at(&uri, Position::new(0, col));
         assert_eq!(word.as_deref(), Some("f"));
+    }
+
+    /// `word_at` keeps a leading `#'` or `'`: that is what stops a var-quote
+    /// from matching a shadowing local and quoted data from resolving at all.
+    /// A caller that wants the var behind `#'x` strips it itself (hover).
+    #[test]
+    fn test_word_at_keeps_a_leading_reader_marker() {
+        let (store, uri) = store_with("(f #'state 'quoted x#)");
+        let at = |col: u32| store.word_at(&uri, Position::new(0, col));
+        assert_eq!(at(5).as_deref(), Some("#'state"));
+        assert_eq!(at(12).as_deref(), Some("'quoted"));
+        assert_eq!(at(19).as_deref(), Some("x#"));
+    }
+
+    #[test]
+    fn test_symbol_position_moves_off_a_deref() {
+        let (store, uri) = store_with("(f @state)");
+        assert_eq!(
+            store.symbol_position(&uri, Position::new(0, 3)),
+            Position::new(0, 4)
+        );
+        assert_eq!(
+            store.symbol_position(&uri, Position::new(0, 6)),
+            Position::new(0, 6)
+        );
     }
 
     #[test]
