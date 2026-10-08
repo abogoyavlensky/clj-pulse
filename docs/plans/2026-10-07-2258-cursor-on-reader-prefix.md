@@ -215,7 +215,33 @@ Unit tests for the helper in `src/index/extractor.rs` (`#[cfg(test)] mod` beside
 
 Per the CLAUDE.md gate table: `bb e2e` ran in Task 3. This change touches definition (`bb e2e-calva`), references and rename (`bb compare`), and is client-visible (`bb e2e-pulse`). `bb bench` and `bb soak` are not owed: extractor *output* is unchanged (no `CACHE_FORMAT_VERSION` bump, the helper is a read-only tree query), and the document store gains a read method without any change to how documents are opened, edited or snapshotted.
 
-- [ ] **Step 1:** `bb compare clj-kondo` — Expected: zero *new* divergences versus the tables in `docs/MEMORY.md` (`compare_simple_project` in `bb check` already covers the fixture).
-- [ ] **Step 2:** `bb e2e-calva` — Expected: green.
-- [ ] **Step 3:** `bb e2e-pulse` — Expected: green.
+- [x] **Step 1:** `bb compare clj-kondo` — Expected: zero *new* divergences versus the tables in `docs/MEMORY.md` (`compare_simple_project` in `bb check` already covers the fixture).
+- [x] **Step 2:** `bb e2e-calva` — Expected: green.
+- [x] **Step 3:** `bb e2e-pulse` — Expected: green.
   If the host lacks Xvfb or VS Code for either, say so in the final report rather than skipping silently.
+
+> Result (Task 5): `bb compare clj-kondo` matches master row for row on the same cache state (5249 probes, 4920 agree; `docs/MEMORY.md`). `bb e2e-calva` and `bb e2e-pulse` passed.
+
+---
+
+## Completion summary
+
+**Status: complete.**
+
+A cursor on the marker of `@x`, `#'x`, `` `x ``, `~x` or `~@x` now asks hover, definition, references, rename, prepareRename, documentHighlight and the ClojureDocs lookup about the symbol, on its name half for a qualified symbol. Every reported range stays on the name. `extractor::prefixed_symbol_start` finds the symbol; `DocumentStore::symbol_position` applies it at each handler's entry. Hover also strips a `#'` from its word, which fixes hover on `#'x` even from the name.
+
+Issues found on the way:
+
+- The planned `word_at` strip broke two things codex reproduced: `#'x` matched a shadowing local, and quoted data resolved. Reverted; only hover strips `#'`.
+- The first helper moved the cursor from whitespace after a marker too. Narrowed to the marker's own characters.
+- Pre-existing: the occurrence walker records nothing for `#'x` when a local `x` is in scope. Backlogged in `docs/backlog/2026-10-07-shadowed-var-quote-is-not-the-var.md`.
+- Three of the codex review files read during execution were stale outputs from earlier sessions with reused names. The scoped reviews with fresh names were the real ones.
+
+Deviations, in one place:
+
+- Task 1: tests written with the implementation, not run red first.
+- Task 2: `word_at` strip reverted; hover strips `#'` instead.
+- Task 3: qualified case moved to a new `simple.prefix-target` namespace; `shadowed` renamed `pfx-shadow`; the shadowed var-quote test asserts "never the local"; a `null`-only compare allowlist entry for kondo's local reading of a shadowed `#'x`; marker-only movement and extra coverage from review.
+- Task 4: the FEATURES.md sentence sits under "Language features:", since it covers five features.
+
+**What the plan could have specified better:** check each fixture symbol it names exists (`simple.core/blend` did not), and reason about why `word_at` included `#` and `'` before deciding to strip them; the leading marker was doing protective work no comment explained.

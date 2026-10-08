@@ -512,6 +512,16 @@ second lands within the recorded spread (17–19 ms definition, 756 ms to
 diagnostics in the 2026-09-30 note); the change adds one keyword check per
 map-pattern key and per list head on the locals spine.
 
+### After the cursor-on-a-reader-prefix change (2026-10-07)
+
+Same corpus and container, against a run of master (`a822f79`) on the same
+cache state: every row matches, 5249 probes, 4920 agree, 216 diverge, 62
+known, 51 null. The gate puts every cursor on a token's name part, never on a
+prefix, so no row was expected to move; the run confirms that the handlers'
+new position step leaves those answers alone. A first branch run on a cold
+`.clj-kondo/.cache` read 5242 probes, the same library-bucket artifact as the
+destructuring note above.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,
