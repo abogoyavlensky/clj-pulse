@@ -233,6 +233,7 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
 /// so such a map falls back to the ordinary walk.
 fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<Occurrence>) {
     static NO_LINT_AS: OnceLock<HashMap<String, DefKind>> = OnceLock::new();
+    static NO_LINT_AS_FORMS: OnceLock<HashMap<String, String>> = OnceLock::new();
     let ctx = OccurrenceCtx {
         source,
         ns_meta,
@@ -240,6 +241,7 @@ fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<
         def_names: HashSet::new(),
         declared: HashSet::new(),
         lint_as: NO_LINT_AS.get_or_init(HashMap::new),
+        lint_as_forms: NO_LINT_AS_FORMS.get_or_init(HashMap::new),
     };
     let map_ns = ns_map_prefix(node, &ctx);
     let mut cursor = node.walk();
@@ -417,6 +419,7 @@ pub fn extract_analysis_tree(
         def_names,
         declared,
         lint_as: &cfg.lint_as,
+        lint_as_forms: &cfg.lint_as_forms,
     };
     let mut occurrences = Vec::new();
     let mut scope = Scope::new();
@@ -541,6 +544,24 @@ fn are_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
     head_fqn_candidates(head, ns_meta, source)
         .into_iter()
         .find(|fqn| ARE_FQNS.contains(&fqn.as_str()))
+}
+
+/// The core binding form a `:lint-as`'d macro head stands for
+/// (`u/for-map` → `for`), resolved by fqn like every macro table. Both walkers
+/// ask it before the core-form check, so the macro binds as its target does
+/// while its head stays a usage of the macro itself.
+fn lint_as_form<'a>(
+    head: Node,
+    ns_meta: &NsMeta,
+    source: &str,
+    lint_as_forms: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    if lint_as_forms.is_empty() {
+        return None;
+    }
+    head_fqn_candidates(head, ns_meta, source)
+        .into_iter()
+        .find_map(|fqn| lint_as_forms.get(&fqn).map(String::as_str))
 }
 
 /// What a `:refer-clojure :rename {selector sel}` stores `sel` as.
@@ -1846,6 +1867,7 @@ fn discarded_keyword_starts(node: Node, source: &str, out: &mut HashSet<(u32, u3
             def_names: HashSet::new(),
             declared: HashSet::new(),
             lint_as: &lint_as,
+            lint_as_forms: &HashMap::new(),
         };
         let mut scope = Scope::new();
         let mut occurrences = Vec::new();
@@ -2096,6 +2118,8 @@ struct OccurrenceCtx<'a> {
     /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
     /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
     lint_as: &'a HashMap<String, DefKind>,
+    /// Macro fqn → core binding form, from the same config ([`lint_as_form`]).
+    lint_as_forms: &'a HashMap<String, String>,
 }
 
 static CORE_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
@@ -2237,8 +2261,10 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     // (or an alias to it) as a real binding form. Other qualified heads fall
     // through to the generic walk, which records them and every argument
     // (including keywords) as occurrences.
-    let head_text = if head.kind() == "sym_lit" && head_is_core_form(*head, ctx) {
-        Some(sym_text(*head, ctx.source))
+    // A `:lint-as`'d binding macro reads as its target first.
+    let head_text = if head.kind() == "sym_lit" {
+        lint_as_form(*head, ctx.ns_meta, ctx.source, ctx.lint_as_forms)
+            .or_else(|| head_is_core_form(*head, ctx).then(|| sym_text(*head, ctx.source)))
     } else {
         None
     };
@@ -3381,6 +3407,7 @@ pub fn locals_in_scope_at_tree(
         source,
         ns_meta: &ns_meta,
         lint_as: &cfg.lint_as,
+        lint_as_forms: &cfg.lint_as_forms,
     };
     locals_at_node(tree.root_node(), &ctx, pos)
 }
@@ -3394,6 +3421,7 @@ struct ScopeCtx<'a> {
     source: &'a str,
     ns_meta: &'a NsMeta,
     lint_as: &'a HashMap<String, DefKind>,
+    lint_as_forms: &'a HashMap<String, String>,
 }
 
 /// The ns metadata of `tree` alone: the `ns` forms at top level and in
@@ -3528,10 +3556,17 @@ fn walk_scope(node: Node, ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBind
             // `clojure.core` / `cljs.core`, directly or through an `:as` alias
             // (`cc/let`). A qualified `s/def` etc. falls through to generic
             // descent.
-            let core_form =
-                head.kind() == "sym_lit" && head_resolves_to_core(*head, ctx.ns_meta, source);
-            if core_form {
-                let head_text = sym_text(*head, source);
+            // A `:lint-as`'d binding macro reads as its target first, as in
+            // `walk_list`.
+            let head_text = if head.kind() == "sym_lit" {
+                lint_as_form(*head, ctx.ns_meta, source, ctx.lint_as_forms).or_else(|| {
+                    head_resolves_to_core(*head, ctx.ns_meta, source)
+                        .then(|| sym_text(*head, source))
+                })
+            } else {
+                None
+            };
+            if let Some(head_text) = head_text {
                 if let Some(kind) = str_to_defkind(head_text) {
                     walk_scope_def(kind, &children, ctx, pos, out);
                     return;
@@ -4057,6 +4092,7 @@ pub fn local_references_at_tree(
         source,
         ns_meta: &ns_meta,
         lint_as: &cfg.lint_as,
+        lint_as_forms: &cfg.lint_as_forms,
     };
 
     let mut occurrences = Vec::new();
@@ -4342,6 +4378,7 @@ mod tests {
         let src = "(ns x (:require [my :refer [defthing]]))\n(defthing foo 1)\n(inc foo)";
         let cfg = ExtractConfig {
             lint_as: HashMap::from([("my/defthing".to_string(), DefKind::Def)]),
+            ..Default::default()
         };
         let (_, symbols, occs) =
             extract_full_with(src, std::path::Path::new("x.clj"), &cfg).unwrap();

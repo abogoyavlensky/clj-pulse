@@ -86,6 +86,9 @@ impl DefKind {
             "clojure.test/deftest" | "clojure.test/deftest-" | "cljs.test/deftest" => {
                 Some(DefKind::Deftest)
             }
+            // `(defspec name num-tests? property)`: a var holding the
+            // property-check fn; clj-kondo files it as a def.
+            "clojure.test.check.clojure-test/defspec" => Some(DefKind::Def),
             _ => None,
         }
     }
@@ -100,6 +103,10 @@ pub struct ExtractConfig {
     /// be treated as, from a merged `:lint-as` map. Only def-like targets are
     /// kept; a lint-as'd form's defined name is then extracted as that kind.
     pub lint_as: HashMap<String, DefKind>,
+    /// Macro fqn (`metabase.util/for-map`) → the core binding form it is
+    /// `:lint-as`'d to (`for`), named as the walkers name core heads. The
+    /// macro then binds its locals the way the target does.
+    pub lint_as_forms: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

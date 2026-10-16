@@ -127,6 +127,9 @@ Clojure & project support:
   reader conditionals, and legacy prefix lists `(clojure [set :as s] string)`.
   `declare` is indexed too, so a name that is only declared still navigates,
   and so is a macro mapped to `clojure.core/declare` through `:lint-as`.
+  A macro mapped to a core binding form (`clojure.core/for`, `let`, `fn`, …)
+  binds its locals like that form, and test.check's `defspec` defines its
+  var.
 - **Project types:** `deps.edn` (resolved from the `.cpcache` classpath),
   Leiningen `project.clj`, and let-go `.lg` projects, whose lgx dependencies at `lgx.edn`
   (git and `:local/root` deps under `~/.lgx/gitlibs`) are indexed and navigable.

@@ -41,12 +41,15 @@ Notes:
   stdout line is the classpath. It is the third and last resort: clj-pulse
   scans each project's `:paths` first, then reads its `.cpcache`, and any
   failure of the command degrades to that cached result.
-- `:lint-as` maps a *defining macro's* fully-qualified name to the `def` form
-  it behaves like, exactly as clj-kondo does. clj-pulse reads
-  `.clj-kondo/config.edn` for the same key and its own file wins per macro.
-  The accepted targets are the `def` family plus `defprotocol`, `defmulti`,
-  `defrecord`, `deftype` and `declare`; a target that names no `def`-family
-  form drops the macro.
+- `:lint-as` maps a macro's fully-qualified name to the core form it behaves
+  like, exactly as clj-kondo does. clj-pulse reads `.clj-kondo/config.edn`
+  for the same key and its own file wins per macro. The accepted targets are
+  the `def` family plus `defprotocol`, `defmulti`, `defrecord`, `deftype`,
+  `declare` and clj-kondo's `clj-kondo.lint-as/def-catch-all` (which define
+  a var), and the core binding forms `let`, `loop`, `for`, `doseq`,
+  `when-let`, `if-let`, `when-some`, `if-some`, `with-open`, `dotimes`, `fn`,
+  `letfn`, `as->`, `reify`, `extend-type` and `extend-protocol` (which bind
+  locals); any other target drops the macro.
 - Live reload watches `**/.clj-pulse/config.edn` and `**/.clj-kondo/config.edn`:
   a save re-resolves classpaths, reloads `:lint-as` and re-indexes, and
   re-probes clj-kondo. No restart.
@@ -173,9 +176,12 @@ outline all resolve a name defined by `(defcomponent thing ...)`. clj-pulse merg
 the two files (with `.clj-pulse/config.edn` winning on conflicts) and watches
 them, reloading `:lint-as` when either changes, with no restart needed. A
 project that
-already configures `:lint-as` for clj-kondo works with no extra setup. Only
-mappings to `def`-family forms (`def`, `defn`, `defmethod`, `defprotocol`,
-`declare`, ...) take effect; others (such as `clojure.core/for`) are ignored.
+already configures `:lint-as` for clj-kondo works with no extra setup.
+Mappings to `def`-family forms (`def`, `defn`, `defmethod`, `defprotocol`,
+`declare`, clj-kondo's `def-catch-all`, ...) define the name; mappings to a
+core binding form (`{my.util/for-map clojure.core/for}`) make the macro bind
+its locals like the target, so references and rename on them stay local.
+Others (such as `clojure.core/->`) are ignored.
 
 `.clj-pulse/` also holds generated data (`jar-cache/`, `server.log`), so commit
 `config.edn` and gitignore the rest.

@@ -326,7 +326,8 @@ there.
   path back to `src`/`test`.
 - Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
   first, then the built-in table `DefKind::from_macro_fqn`
-  (`clojure.test/deftest` and friends), then — for a *qualified* head alone —
+  (`clojure.test/deftest` and friends, test.check's `defspec` as a `def`),
+  then — for a *qualified* head alone —
   the def form its name part names (`extractor::head_def_kind`): `mu/defn`,
   `s/defn`, `p/defn-` and `mu/defmethod` define what `defn`, `defn-` and
   `defmethod` define, whatever library the qualifier points at. `:lint-as` is
@@ -340,7 +341,13 @@ there.
   unsaved `ns` edit counts) and `:lint-as` from the `ExtractConfig` its
   `_tree` entry points take, both held in one `ScopeCtx` built once per
   question; a core form is told through the ns form's aliases in both
-  walkers (`head_resolves_to_core`), so `cc/let` binds. A `:-` marker annotates rather than binds, wherever it
+  walkers (`head_resolves_to_core`), so `cc/let` binds. A `:lint-as` target
+  that is a core binding form (`{u/for-map clojure.core/for}`) lands in
+  `ExtractConfig::lint_as_forms`, not `lint_as`, and both walkers ask it
+  (`lint_as_form`, by fqn) *before* the core check, so the macro binds as its
+  target while its head stays a usage of the macro; `settings::BINDING_FORMS`
+  lists the accepted targets, and clj-kondo's `def-catch-all` maps to `Def`.
+  A `:-` marker annotates rather than binds, wherever it
   appears: `[x :- s/Int]` binds `x` and reads `s/Int`, and a return schema
   (`(mu/defn f :- [:vector :int] [xs] …)`) is an expression, so the parameter
   vector is the one after it. `NsMeta.refer_all` records
@@ -424,7 +431,7 @@ there.
   its `:or` values and drops the names; the locals walker binds the
   pattern's names for a cursor inside the pattern alone, outside an `:or`
   value, so they shadow an outer local of the same name. `CACHE_FORMAT_VERSION`
-  23.
+  23 introduced it.
 - A `Defmethod` symbol is for the outline alone and never takes an index slot
   (`insert_file` / `insert_lib_file` skip it via `takes_slot`): its fqn is the
   multimethod's own, so it would displace the `defmulti` among equals and
