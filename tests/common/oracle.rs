@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -186,7 +187,7 @@ pub struct Analysis {
     pub locals: Vec<Local>,
     #[serde(rename = "local-usages", default)]
     pub local_usages: Vec<LocalUsage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "positioned_keywords")]
     pub keywords: Vec<Keyword>,
     #[serde(rename = "namespace-definitions", default)]
     pub namespace_definitions: Vec<NsDef>,
@@ -262,7 +263,7 @@ pub struct LocalUsage {
     pub name_col: Option<u32>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Keyword {
     pub name: String,
     pub filename: String,
@@ -270,8 +271,43 @@ pub struct Keyword {
     pub col: u32,
     pub ns: Option<String>,
     pub alias: Option<String>,
-    #[serde(rename = "keys-destructuring")]
     pub keys_destructuring: Option<bool>,
+}
+
+/// A keyword as kondo prints it. `row`/`col` are absent for one a hook
+/// synthesized (metabase's `:style/indent`, `:end-row` metadata): there is no
+/// token in the file for it, so [`positioned_keywords`] drops it.
+#[derive(Deserialize)]
+struct RawKeyword {
+    name: String,
+    filename: String,
+    row: Option<u32>,
+    col: Option<u32>,
+    ns: Option<String>,
+    alias: Option<String>,
+    #[serde(rename = "keys-destructuring")]
+    keys_destructuring: Option<bool>,
+}
+
+fn positioned_keywords<'de, D>(d: D) -> Result<Vec<Keyword>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<RawKeyword> = Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|k| {
+            Some(Keyword {
+                name: k.name,
+                filename: k.filename,
+                row: k.row?,
+                col: k.col?,
+                ns: k.ns,
+                alias: k.alias,
+                keys_destructuring: k.keys_destructuring,
+            })
+        })
+        .collect())
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -332,13 +368,14 @@ pub enum Expectation {
     /// the asking file loads.
     LibraryDefinition { ns: String, dialect: Dialect },
     /// References (`includeDeclaration: true`) must equal this multiset of
-    /// sites.
-    References(Sites),
+    /// sites. Shared: every occurrence of one keyword asks against the same
+    /// set, and a copy each is quadratic on a key used thousands of times.
+    References(Arc<Sites>),
     /// Rename must be refused: `prepareRename` or `rename` answers `invalid
     /// params`, or `null`.
     RenameRefused,
     /// Rename edits must touch exactly this multiset of sites.
-    RenameSites(Sites),
+    RenameSites(Arc<Sites>),
 }
 
 impl Expectation {
@@ -737,7 +774,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 exact.insert((PathBuf::from(&u.filename), r - 1, character));
             }
         }
-        let sites = Sites::from_exact(exact);
+        let sites = Arc::new(Sites::from_exact(exact));
         let short = def
             .defined_by
             .as_deref()
@@ -808,7 +845,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 },
             });
         }
-        let sites = Sites::from_exact(exact);
+        let sites = Arc::new(Sites::from_exact(exact));
         out.push(Probe {
             file: file.clone(),
             line,
@@ -860,8 +897,8 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         if token_starts.is_empty() {
             continue;
         }
-        let reference_sites = Sites::from_exact(token_starts);
-        let rename_sites = Sites::from_exact(name_starts);
+        let reference_sites = Arc::new(Sites::from_exact(token_starts));
+        let rename_sites = Arc::new(Sites::from_exact(name_starts));
         // All-or-nothing in clj-pulse: one destructuring entry refuses the
         // whole rename, and a keyword of a library namespace is refused by
         // `rename_target`.

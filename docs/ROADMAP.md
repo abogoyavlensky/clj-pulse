@@ -470,6 +470,14 @@ One line each, newest last. Promote or reject; never let this grow silently.
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders
   `engine`, `version` and `warming` only.
+- 2026-10-16 **`bb compare metabase` oracle noise.** About 150 of the first
+  run's answers are the oracle's, not ours: usages kondo files under
+  `clojure.test` on tokens a hook generated (`segment-id` in an
+  `mt/with-temp` binding), locals with an empty token, and `.cljc` entries
+  kondo keeps for one dialect only (`testing` from the `:cljs` branch);
+  the harness should drop or tolerate them. Also unexplained: 13 extra
+  `sql-format-quoted` sites in `semantic_search/index.clj`
+  ([MEMORY.md](MEMORY.md), "metabase, first run").
 
 ## Best effort — do when cheap or asked
 

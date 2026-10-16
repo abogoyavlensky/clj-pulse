@@ -1056,6 +1056,7 @@ mod oracle_tests {
 
 mod judge_tests {
     use super::*;
+    use std::sync::Arc;
 
     fn probe(expect: Expectation) -> Probe {
         Probe {
@@ -1072,13 +1073,13 @@ mod judge_tests {
         vec![PathBuf::from("/corpus/src")]
     }
 
-    fn sites(entries: &[(u32, u32)]) -> Sites {
-        Sites::from_exact(
+    fn sites(entries: &[(u32, u32)]) -> Arc<Sites> {
+        Arc::new(Sites::from_exact(
             entries
                 .iter()
                 .map(|(l, c)| (PathBuf::from("/corpus/src/a.clj"), *l, *c))
                 .collect(),
-        )
+        ))
     }
 
     fn locations(entries: &[(u32, u32)]) -> Value {
@@ -1297,7 +1298,7 @@ mod judge_tests {
             .into_iter()
             .collect(),
         );
-        let mut p = probe(Expectation::References(expected));
+        let mut p = probe(Expectation::References(expected.into()));
         p.file = PathBuf::from(cljs);
         let at_ = |file: &str, line: u32| json!({ "uri": format!("file://{file}"), "range": { "start": { "line": line, "character": 2 }, "end": { "line": line, "character": 3 } } });
         let judged = |extra: Vec<Value>, keep_caller: bool| {

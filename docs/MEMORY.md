@@ -522,6 +522,111 @@ new position step leaves those answers alone. A first branch run on a cold
 `.clj-kondo/.cache` read 5242 probes, the same library-bucket artifact as the
 destructuring note above.
 
+### metabase, first run (2026-10-16)
+
+`bb compare metabase` on the bench pin (`42a8e9f`), clj-kondo v2026.08.04,
+Linux container with 11 GiB of RAM: 60666 var-definitions, 905973
+var-usages, 184516 locals and 757107 keywords in the analysis of every
+`config::source_paths` root (the alias `:extra-paths` reach `enterprise/`,
+`modules/drivers/*/test`, `bin/build`, `dev`, `.clj-kondo/src`); kondo took
+5 min, the server settled in 65 s with 491 classpath entries, 8976 probes
+were answered in 10 min, 2076 files visited, 90423 unjudged tokens. 16 min
+end to end, run under an 8 GiB memory cap.
+
+Two harness fixes made it run at all. kondo prints keywords a hook
+synthesized (`:style/indent`, `:end-row` metadata in
+`metabase.lib.expression`) without `row`/`col`; the oracle now drops them
+like it drops position-less var usages. And each keyword probe carried its
+own copy of the keyword's whole site set, quadratic in group size —
+`:model/Card` has 5317 sites — which swapped the first attempt to a
+standstill; the sets are shared (`Arc<Sites>`) now.
+
+The corpus's `.clj-kondo/config.edn` loads hooks that exist only after
+`clj-kondo --copy-configs` (`hooks/methodical/macros`, `hooks/toucan2/…`);
+the bench never copies them, so the oracle is blind to what they define and
+the hook-defined class below is undercounted.
+
+| Bucket | Probes | Agree | Diverge | Known | Null |
+|---|---|---|---|---|---|
+| `keyword/alias` | 400 | 379 | 21 | 0 | 0 |
+| `keyword/keys` | 91 | 91 | 0 | 0 | 0 |
+| `keyword/qualified` | 400 | 203 | 164 | 0 | 3 |
+| `local/destructured` | 600 | 501 | 16 | 0 | 83 |
+| `local/plain` | 600 | 577 | 12 | 0 | 11 |
+| `var-def/declare` | 14 | 14 | 0 | 0 | 0 |
+| `var-def/def` | 388 | 377 | 10 | 0 | 1 |
+| `var-def/defcache` | 2 | 2 | 0 | 0 | 0 |
+| `var-def/defdataset` | 152 | 146 | 6 | 0 | 0 |
+| `var-def/defdataset-edn` | 26 | 26 | 0 | 0 | 0 |
+| `var-def/deferror` | 46 | 46 | 0 | 0 | 0 |
+| `var-def/define-premium-feature` | 114 | 10 | 104 | 0 | 0 |
+| `var-def/define-spec` | 16 | 16 | 0 | 0 | 0 |
+| `var-def/defjob` | 124 | 124 | 0 | 0 | 0 |
+| `var-def/defmacro` | 310 | 223 | 85 | 0 | 2 |
+| `var-def/defmulti` | 312 | 269 | 43 | 0 | 0 |
+| `var-def/defn` | 396 | 308 | 86 | 2 | 0 |
+| `var-def/defn-` | 400 | 398 | 2 | 0 | 0 |
+| `var-def/defonce` | 214 | 210 | 4 | 0 | 0 |
+| `var-def/defprotocol` | 252 | 64 | 18 | 170 | 0 |
+| `var-def/defprotocol+` | 158 | 39 | 29 | 90 | 0 |
+| `var-def/defrecord` | 66 | 12 | 0 | 54 | 0 |
+| `var-def/defrecord+` | 22 | 4 | 8 | 10 | 0 |
+| `var-def/defroutes` | 6 | 3 | 3 | 0 | 0 |
+| `var-def/defspec` | 58 | 29 | 29 | 0 | 0 |
+| `var-def/deftest` | 400 | 398 | 1 | 0 | 1 |
+| `var-def/deftype` | 68 | 10 | 22 | 36 | 0 |
+| `var-def/deftype+` | 26 | 2 | 18 | 6 | 0 |
+| `var-def/import-vars` | 390 | 39 | 351 | 0 | 0 |
+| `var-def/other` | 228 | 78 | 150 | 0 | 0 |
+| `var-usage/core` | 200 | 197 | 0 | 0 | 3 |
+| `var-usage/core/aliased` | 59 | 13 | 46 | 0 | 0 |
+| `var-usage/core/macro` | 200 | 178 | 0 | 0 | 22 |
+| `var-usage/core/macro/aliased` | 21 | 21 | 0 | 0 | 0 |
+| `var-usage/library` | 200 | 1 | 57 | 0 | 142 |
+| `var-usage/library/aliased` | 200 | 112 | 2 | 0 | 86 |
+| `var-usage/library/macro` | 200 | 163 | 36 | 0 | 1 |
+| `var-usage/library/macro/aliased` | 187 | 187 | 0 | 0 | 0 |
+| `var-usage/library/macro/referred` | 190 | 129 | 59 | 0 | 2 |
+| `var-usage/library/referred` | 113 | 106 | 1 | 0 | 6 |
+| `var-usage/project` | 200 | 198 | 0 | 0 | 2 |
+| `var-usage/project/aliased` | 200 | 127 | 0 | 0 | 73 |
+| `var-usage/project/macro` | 199 | 168 | 2 | 0 | 29 |
+| `var-usage/project/macro/aliased` | 200 | 62 | 0 | 0 | 138 |
+| `var-usage/project/macro/referred` | 161 | 111 | 9 | 0 | 41 |
+| `var-usage/project/referred` | 167 | 164 | 2 | 0 | 1 |
+| **total** | 8976 | 6535 | 1396 | 368 | 647 |
+
+The 2043 new answers (diverge plus null), by cause, largest first:
+
+- **`potemkin/import-vars` facades, about 900.** 124 metabase files use it,
+  and toucan2 (`t2/…`) is built on it: `mu/defn`, `mt/with-temp`,
+  `settings/defsetting` and every `t2/` call answer null, references on an
+  original miss every caller that spells it through a facade
+  (`with-native-query-testing-context`: 2 of 170), and rename at an
+  `import-vars` entry is refused. The 2026-09-30 rejection counted two uses
+  in the corpora; this is the evidence that reopened it.
+- **Names kondo hooks define, about 300.** `defsetting`,
+  `define-premium-feature`, `defenterprise`, `lib.common/defop`: rename on
+  the var is refused, references find the definition alone. The backlog's
+  kondo-analysis enrichment item.
+- **`:lint-as` to a core binding form, dozens with wrong answers.** The
+  config maps `metabase.util/for-map` and `metabase.util.performance/for` to
+  `clojure.core/for`; settings kept def-family targets only, so a
+  `{:keys [name]}` in `u/for-map` was no local and references on `name`
+  answered all 1390 `clojure.core/name` sites.
+- **Def macros we did not know, about 150.** `clojure.test.check.clojure-test/defspec`
+  and the `clj-kondo.lint-as/def-catch-all` target (`define-migration`, …):
+  rename refused, references short.
+- **`.cljc` dialect, about 100.** `testing` in a `.cljc` test where kondo's
+  entry is the `:cljs` one, and `lib.util/format`, a `#?` alias kondo files
+  under `clojure.core`; mostly the oracle's dialect tolerance.
+- **Oracle noise from hook expansions, about 150.** Usages kondo files under
+  `clojure.test` on tokens like `segment-id` (the `mt/with-temp` hook's
+  output), locals with an empty token.
+- **Unexplained, a handful.** 13 extra `sql-format-quoted` sites inside one
+  `defn` of `semantic_search/index.clj`; a few `:model/*` keyword sets that
+  differ by a line or two.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,
