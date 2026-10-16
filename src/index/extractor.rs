@@ -2894,7 +2894,16 @@ fn collect_binding_names(
                         // key whatever the directive reads.
                         record_destructuring_keys(*k, *v, ctx, out);
                         let (bound, literal) = split_key_entries(*v, ctx.source);
-                        collect_binding_names_seq(&bound, ctx, scope, out, names);
+                        // `{:keys [::db]}` binds `db` like `{:keys [db]}`; the
+                        // keyword itself is recorded above as the key it reads.
+                        let (keywords, symbols): (Vec<Node>, Vec<Node>) =
+                            bound.into_iter().partition(|n| n.kind() == "kwd_lit");
+                        names.extend(
+                            keywords
+                                .iter()
+                                .filter_map(|kw| keyword_entry_binding(*kw, ctx.source)),
+                        );
+                        collect_binding_names_seq(&symbols, ctx, scope, out, names);
                         for key in literal {
                             if key.kind() == "kwd_lit" {
                                 record_keyword_occurrence(key, ctx, out);
@@ -2993,6 +3002,16 @@ fn split_key_entries<'a>(vec: Node<'a>, source: &str) -> (Vec<Node<'a>>, Vec<Nod
     }
 }
 
+/// The local a keyword entry of a key directive vector binds: `{:keys [::db
+/// :a/b :c]}` binds `db`, `b` and `c`, each at its keyword's name part.
+fn keyword_entry_binding(kw: Node, source: &str) -> Option<LocalBinding> {
+    let name = kw.child_by_field_name("name")?;
+    Some(LocalBinding {
+        name: node_text(name, source).to_string(),
+        name_range: node_to_lsp_range(name, source),
+    })
+}
+
 /// Records the key each entry of a namespaced `:keys` destructuring vector
 /// reads. `{::keys [a]}`, `{:my.ns/keys [a]}`, `{::alias/keys [a]}` and the
 /// qualified entry of a plain `{:keys [my.ns/a]}` all read `:my.ns/a`, so the
@@ -3018,6 +3037,19 @@ fn record_destructuring_keys(
     }
     let directive_ns = destructuring_key_ns(directive, ctx);
     for entry in split_key_entries(entries, ctx.source).0 {
+        // A keyword entry (`{:keys [::db]}`) reads the key it spells, unless a
+        // qualified directive supplies the namespace: `(keyword (or
+        // directive-ns (namespace entry)) (name entry))`, as for symbols.
+        if entry.kind() == "kwd_lit" {
+            match (&directive_ns, entry.child_by_field_name("name")) {
+                (Some(ns), Some(name)) => out.push(Occurrence {
+                    fqn: format!(":{}/{}", ns, node_text(name, ctx.source)),
+                    name_range: node_to_lsp_range(entry, ctx.source),
+                }),
+                _ => record_keyword_occurrence(entry, ctx, out),
+            }
+            continue;
+        }
         if entry.kind() != "sym_lit" {
             continue;
         }
@@ -3971,7 +4003,17 @@ fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBindi
                     if key_directive(*k, source).is_some() && v.kind() == "vec_lit" {
                         // Only the entries before `&` bind; the literal keys
                         // after it do not (`collect_binding_names` twin).
-                        collect_binding_targets_seq(&split_key_entries(*v, source).0, source, out);
+                        let (keywords, symbols): (Vec<Node>, Vec<Node>) =
+                            split_key_entries(*v, source)
+                                .0
+                                .into_iter()
+                                .partition(|n| n.kind() == "kwd_lit");
+                        out.extend(
+                            keywords
+                                .iter()
+                                .filter_map(|kw| keyword_entry_binding(*kw, source)),
+                        );
+                        collect_binding_targets_seq(&symbols, source, out);
                     } else if node_text(*k, source) != ":or" {
                         // :as name, :select name, :all name, …
                         collect_binding_targets(*v, source, out);
@@ -4260,12 +4302,53 @@ fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
     directive.is_some_and(|kw| key_directive(kw, source).is_some())
 }
 
-/// The `sym_lit` whose name range is exactly `range`. Skips quoted data, like
-/// `collect_name_occurrences`.
+/// Whether the keyword token at `range` is a binding entry of a key directive
+/// vector (`{:keys [::db]}`, before any `&`): it reads the key *and* binds
+/// the local `db`, so a keyword rename that rewrote it would rename the local
+/// too and leave its usages behind.
+pub fn is_keyword_key_entry(tree: &tree_sitter::Tree, source: &str, range: Range) -> bool {
+    fn find<'a>(node: Node<'a>, source: &str, range: Range) -> Option<Node<'a>> {
+        if node.kind() == "kwd_lit" && node_to_lsp_range(node, source) == range {
+            return Some(node);
+        }
+        let r = node_to_lsp_range(node, source);
+        if !(lsp_range_contains(r, range.start)) {
+            return None;
+        }
+        all_named_children(node)
+            .into_iter()
+            .find_map(|child| find(child, source, range))
+    }
+    let Some(kw) = find(tree.root_node(), source, range) else {
+        return false;
+    };
+    let Some(name) = kw.child_by_field_name("name") else {
+        return false;
+    };
+    let declaration = node_to_lsp_range(name, source);
+    is_destructured_key(tree.root_node(), source, declaration)
+        && kw.parent().is_some_and(|vec| {
+            split_key_entries(vec, source)
+                .0
+                .iter()
+                .any(|n| n.id() == kw.id())
+        })
+}
+
+/// The `sym_lit` whose name range is exactly `range` — or the `kwd_lit`, for
+/// a keyword entry of a key directive (`{:keys [::db]}` binds at `db`). Skips
+/// quoted data, like `collect_name_occurrences`.
 fn find_binding_sym<'a>(node: Node<'a>, source: &str, range: Range) -> Option<Node<'a>> {
     match node.kind() {
         "quoting_lit" => None,
         "sym_lit" if node_to_lsp_range(sym_name_node(node), source) == range => Some(node),
+        "kwd_lit"
+            if node
+                .child_by_field_name("name")
+                .is_some_and(|n| node_to_lsp_range(n, source) == range) =>
+        {
+            Some(node)
+        }
         _ => named_children(node)
             .into_iter()
             .find_map(|child| find_binding_sym(child, source, range)),

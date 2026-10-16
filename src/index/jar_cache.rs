@@ -28,7 +28,9 @@ use super::{NsMeta, Symbol};
 ///     pattern records its keys and no symbol usages.
 /// 24: `clojure.test.check.clojure-test/defspec` defines its var, and a
 ///     `:lint-as`'d core binding form binds like its target.
-pub const CACHE_FORMAT_VERSION: u32 = 24;
+/// 25: a keyword entry of a key directive (`{:keys [::db]}`) is an
+///     occurrence of the key it reads and binds its name.
+pub const CACHE_FORMAT_VERSION: u32 = 25;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

@@ -7345,6 +7345,45 @@ fn test_e2e_rename_refuses_qualified_keys_destructuring() {
 }
 
 #[test]
+fn test_e2e_rename_refuses_keyword_keys_entry() {
+    // `{:keys [:simple.core/x]}` spells the key as a keyword and still binds
+    // the local `x`, so a keyword rename must refuse it as it refuses the
+    // symbol entry above (penpot writes `{:keys [::db]}` throughout).
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let probe = root.join("src/keyword_keys.clj");
+    std::fs::write(
+        &probe,
+        "(ns simple.keyword-keys)\n\n(defn f [{:keys [:simple.core/x]}]\n  x)\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let keywords = root.join("src/keywords.clj");
+    client.did_open(&keywords);
+
+    let text = std::fs::read_to_string(&keywords).unwrap();
+    let (line, col) = start_of(&text, ":simple.core/x");
+    let error = client.request_expect_error(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": format!("file://{}", keywords.display()) },
+            "position": { "line": line, "character": col + 3 },
+            "newName": "scoped"
+        }),
+    );
+    let msg = error["message"].as_str().unwrap();
+    assert!(
+        msg.contains("also binds") && msg.contains("keyword_keys.clj"),
+        "expected the keyword-entry refusal, got: {}",
+        msg
+    );
+}
+
+#[test]
 fn test_e2e_clojure_1_13_destructuring() {
     // Clojure 1.13: a `:keys!` local is the key it reads, so rename refuses
     // it; a key after `&` is a site of that keyword; and `selector` reads a

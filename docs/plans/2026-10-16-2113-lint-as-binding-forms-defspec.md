@@ -14,15 +14,15 @@
 
 Both walkers resolve a `sym_lit` head through `head_fqn_candidates` against that table *before* the core-form check (`lint_as_form`), and when it hits, use the target name as `head_text`. The arms already record the head through `record_occurrence`, so `u/for-map` stays a usage of `metabase.util/for-map`. `OccurrenceCtx` and `ScopeCtx` carry the table beside `lint_as`.
 
-`DefKind::from_def_symbol` maps `def-catch-all` to `Def` (kondo's semantics: the first symbol names a var; the body is not checked, which for us means its symbols are ordinary usages). `DefKind::from_macro_fqn` maps `clojure.test.check.clojure-test/defspec` to `Def`.
+`settings::merge` maps the `clj-kondo.lint-as/def-catch-all` target to `Def` (kondo's semantics: the first symbol names a var; the body is not checked, which for us means its symbols are ordinary usages). `DefKind::from_macro_fqn` maps `clojure.test.check.clojure-test/defspec` to `Def`.
 
 Extractor output changes for files using these macros, so `CACHE_FORMAT_VERSION` is bumped.
 
 ## Tasks
 
-- [ ] `ExtractConfig::lint_as_forms`, filled by `settings::merge`; settings tests for kept and dropped targets.
-- [ ] `lint_as_form` resolver; `walk_list` and `walk_scope` consult it before the core check.
-- [ ] `def-catch-all` and `defspec` def kinds.
-- [ ] Extractor tests: references, rename and unused-binding through a `:lint-as` `for` and `let`; `defspec` and a `def-catch-all` macro define their var.
-- [ ] Bump `CACHE_FORMAT_VERSION`; update CLAUDE.md invariants and docs/SETTINGS.md (`:lint-as` now honors binding-form targets).
-- [ ] `bb check`, `bb e2e`, `bb compare` (clj-kondo must not regress; metabase `var-def/defspec`, `var-def/other` and the `name` local should move).
+- [x] `ExtractConfig::lint_as_forms`, filled by `settings::merge`; settings tests for kept and dropped targets.
+- [x] `lint_as_form` resolver; `walk_list` and `walk_scope` consult it before the core check.
+- [x] `def-catch-all` and `defspec` def kinds.
+- [x] Extractor tests: references, rename and unused-binding through a `:lint-as` `for` and `let`; `defspec` and a `def-catch-all` macro define their var.
+- [x] Bump `CACHE_FORMAT_VERSION`; update CLAUDE.md invariants and docs/SETTINGS.md (`:lint-as` now honors binding-form targets).
+- [x] `bb check`, `bb e2e`, `bb compare` (clj-kondo must not regress; metabase `var-def/defspec`, `var-def/other` and the `name` local should move).

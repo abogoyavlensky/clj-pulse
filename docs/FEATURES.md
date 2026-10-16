@@ -48,7 +48,9 @@ on the name, so renaming `state` leaves the `@` in place.
   `:keys`-destructured bindings - are refused up front with a reason. The name
   half of a qualified entry (`x` in `{:keys [c/x]}`) is the local it binds,
   refused like any destructured binding, while the `c` half is the keyword
-  `:c/x` the entry reads. Renaming a `deftype`/`defrecord` rewrites the type
+  `:c/x` the entry reads. A keyword entry (`{:keys [::db]}`) binds `db` the
+  same way and is refused alike. A var whose name holds a `:`
+  (`sql:get-libraries`) renames like any other. Renaming a `deftype`/`defrecord` rewrites the type
   name inside its constructor calls too (`->Point` becomes `->Pt`), unless the
   namespace defines a `->Point` of its own, which then stays its own var.
   A var referred under another name (`[a :refer [foo] :rename {foo f}]`)
@@ -66,8 +68,8 @@ on the name, so renaming `state` leaves the `@` in place.
   `::alias/store` and `:my.app/store`. Integrant `config.edn` files are rewritten
   with the sources, and so are keywords inside quoted data (`'{:my.app/db …}`,
   `(quote […])`) and an `ns` form's attr-map. Unqualified keywords, keywords of a library namespace, and
-  keywords read through `{::keys [db]}` destructuring (where the name is also the
-  binding) are refused rather than half-renamed. The literal keys after `&`
+  keywords read through `{::keys [db]}` or `{:keys [::db]}` destructuring
+  (where the name is also the binding) are refused rather than half-renamed. The literal keys after `&`
   in a destructuring directive (`{:keys [a & ::db]}`) and the keyword keys of
   an `:or` map (`:or {::db nil}`) are sites like any other.
 - **Keyword navigation** - go to definition and find references on namespaced

@@ -66,8 +66,8 @@ there.
   can be diffed. Not a pass/fail gate; compare against the tables in
   [docs/MEMORY.md](docs/MEMORY.md).
 
-- `bb soak [metabase|clj-kondo]` — one long-lived server driven through rounds
-  of realistic churn on the same pinned corpora: buffer edits, saves, on-disk
+- `bb soak [metabase|clj-kondo|penpot]` — one long-lived server driven through rounds
+  of realistic churn on the same pinned corpora (plus penpot): buffer edits, saves, on-disk
   modifications, creations, deletions, renames, and every fifth round a
   100-file batch delivered in a *single* `didChangeWatchedFiles`, the shape a
   branch switch has. Every action carries a witness — a uniquely named var
@@ -86,8 +86,9 @@ there.
   `bb soak clj-kondo <seed>` replays a failure exactly. Defaults to clj-kondo
   and 20 rounds (about half a minute); `bb soak metabase` is the long one.
 
-- `bb compare [metabase|clj-kondo]` — differential correctness against
-  clj-kondo's analysis on the same pinned corpora: one production server, and
+- `bb compare [metabase|clj-kondo|penpot]` — differential correctness against
+  clj-kondo's analysis on the same pinned corpora plus penpot, a correctness-only
+  corpus `bb bench` skips: one production server, and
   a definition, references or rename question at every position the analysis
   knows the answer to (`tests/test_compare.rs`, oracle in
   `tests/common/oracle.rs`). A var usage must land on the var-definition's
@@ -101,7 +102,13 @@ there.
   known ones grouped by reason. Advisory: it fails only on a dead server, a
   `panicked at`, an unexpected JSON-RPC error, or kondo not running;
   `CLJ_PULSE_COMPARE_STRICT=1` fails on any new divergence too. Compare
-  against the tables in [docs/MEMORY.md](docs/MEMORY.md).
+  against the tables in [docs/MEMORY.md](docs/MEMORY.md), on the same
+  `.clj-kondo/.cache` state: the server's own kondo warm-up fills the
+  corpus's cache during a run, and a cold-cache oracle classifies library
+  usages differently. A corpus whose root only gathers `:local/root`
+  projects (penpot) lists them under `:projects` in `bb.edn`, passed as
+  `CLJ_PULSE_CORPUS_PROJECTS`; `sites::corpus_bases` reads it, so the
+  oracle lints, and the soak churns, those projects' `src`/`test`.
 
 | Gate | Run when |
 |---|---|
@@ -423,6 +430,13 @@ there.
   verbatim whatever the directive reads, as is a keyword key of `:or`
   (`:or {::a 1}`). `:select`, `:all`, `:excess`, `:missing` and `:defaults`
   bind their symbol through the generic keyword-key path, like `:as`.
+  A keyword entry before `&` (`{:keys [::db :a/b]}`) binds its name part
+  (`keyword_entry_binding`, in both walkers' collectors) and is an
+  occurrence of the key it reads, a qualified directive supplying the
+  namespace as for symbols; it is a destructured key, so a local rename
+  refuses it, and a keyword rename refuses any site that is one
+  (`extractor::is_keyword_key_entry`, checked structurally, parsing only
+  files that spell `keys`).
   `(selector {…})` (`is_core_selector`: qualified to core, or bare and not a
   local, not excluded, and not `:refer`red anywhere but core — a
   `:refer-clojure :rename` counts; a file defining its own `selector` without

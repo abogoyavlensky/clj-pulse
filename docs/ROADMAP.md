@@ -384,13 +384,24 @@ the release.
       `local/plain` is 594 of 594; the corpus's own
       `:rename {assert-submaps2 assert-submaps}` is a `known` divergence.
       Plan: [2026-09-30-2257-method-params-lint-as-locals-refer-rename.md](plans/2026-09-30-2257-method-params-lint-as-locals-refer-rename.md) — done
-- [ ] **`:lint-as` binding forms, `defspec` and `def-catch-all`.** A macro
+- [x] **`:lint-as` binding forms, `defspec` and `def-catch-all`.** A macro
       `:lint-as`'d to a core binding form (`metabase.util/for-map` →
       `clojure.core/for`) bound nothing, so references on a local it binds
       answered every `clojure.core` var of that name; `defspec` and
       `def-catch-all` macros defined no var. Found by the first
-      `bb compare metabase` run (2026-10-16).
-      Plan: [2026-10-16-2113-lint-as-binding-forms-defspec.md](plans/2026-10-16-2113-lint-as-binding-forms-defspec.md) — in progress
+      `bb compare metabase` run (2026-10-16); on metabase `var-def/defspec`
+      went from 29 to 58 of 58 and `var-def/other` from 78 to 156 of 228,
+      clj-kondo unchanged.
+      Plan: [2026-10-16-2113-lint-as-binding-forms-defspec.md](plans/2026-10-16-2113-lint-as-binding-forms-defspec.md) — done
+- [x] **penpot as a correctness corpus; `{:keys [::db]}` entries and `:` in
+      names.** `bb compare penpot` and `bb soak penpot` run on a pinned
+      penpot, the first multi-project corpus (four `:local/root` projects,
+      Integrant, `.cljc` shared by both dialects, hook-defined `mf/defc`);
+      `bb bench` stays on two corpora. Its first run found two bugs: a
+      keyword entry of a key directive bound nothing and was no site of its
+      key, and a var named with a `:` (`sql:get-libraries`) could not be
+      renamed. penpot went from 6111 to 6418 of 7518 agree.
+      Plan: [2026-10-16-2230-penpot-corpus-keyword-keys-entries.md](plans/2026-10-16-2230-penpot-corpus-keyword-keys-entries.md) — done
 - [ ] **`potemkin/import-vars` facades.** A var re-exported through
       `import-vars`, `import-fn`, `import-def` or `import-macro` (or a macro
       `:lint-as`'d to one) has no definition from its facade spelling
@@ -429,6 +440,9 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-05 **clj-kondo analysis as an optional enrichment source.** Names
   defined through kondo hooks (`:analysis` output) could feed the index without
   running hook code. Pairs with "Custom macros beyond `:lint-as`" below.
+  Measured 2026-10-16: about 300 of metabase's compare answers
+  (`defsetting`, `define-premium-feature`, `defenterprise`) and about 200 of
+  penpot's (`mf/defc` components and their props).
 - 2026-09-05 **Add missing import** (Java classes) as a code action; `:import`
   is already parsed. Belongs with the refactor set.
 - 2026-09-05 **clj-kondo `--copy-configs`** for JAR-exported lint configs.
@@ -493,9 +507,11 @@ One line each, newest last. Promote or reject; never let this grow silently.
   `clojure.test` on tokens a hook generated (`segment-id` in an
   `mt/with-temp` binding), locals with an empty token, and `.cljc` entries
   kondo keeps for one dialect only (`testing` from the `:cljs` branch);
-  the harness should drop or tolerate them. Also unexplained: 13 extra
-  `sql-format-quoted` sites in `semantic_search/index.clj`
-  ([MEMORY.md](MEMORY.md), "metabase, first run").
+  the harness should drop or tolerate them. penpot adds about 230 of the
+  `.cljc` kind (`cljs.core/filter` where we answer the Clojure half). Also
+  unexplained: 13 extra `sql-format-quoted` sites in
+  `semantic_search/index.clj` ([MEMORY.md](MEMORY.md), "metabase, first
+  run" and "Compare on penpot").
 
 ## Best effort — do when cheap or asked
 

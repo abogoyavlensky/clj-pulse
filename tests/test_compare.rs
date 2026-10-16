@@ -16,7 +16,7 @@ use common::diff::{brief, brief_set, Divergence};
 use common::oracle::{self, Analysis, Expectation, Probe, Sites};
 use common::session::{settle, Session, REQUEST_TIMEOUT};
 use common::setup_project;
-use common::sites::{definition_uris, landing, Dialect, Expect, Landing};
+use common::sites::{corpus_bases, definition_uris, landing, Dialect, Expect, Landing};
 use common::LspClient;
 
 // ---------------------------------------------------------------------------
@@ -1495,11 +1495,16 @@ fn compare_corpus() {
     // What clj-pulse indexes as the root project's own source (deps.edn
     // `:paths`, alias `:extra-paths`, `src`/`test`), and nothing else: the
     // oracle reads what the server reads. clj-kondo's `corpus/` of deliberately
-    // broken samples stays out on both sides.
-    let roots: Vec<PathBuf> = clj_pulse::config::source_paths(&root)
-        .into_iter()
+    // broken samples stays out on both sides. A monorepo whose root only
+    // gathers `:local/root` projects (penpot) lints each listed project's
+    // source roots instead (`corpus_bases`).
+    let mut roots: Vec<PathBuf> = corpus_bases(&root)
+        .iter()
+        .flat_map(|dir| clj_pulse::config::source_paths(dir))
         .filter(|p| p.is_dir())
         .collect();
+    roots.sort();
+    roots.dedup();
     let paths: Vec<String> = roots
         .iter()
         .map(|p| {

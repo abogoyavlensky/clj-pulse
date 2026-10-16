@@ -627,6 +627,119 @@ The 2043 new answers (diverge plus null), by cause, largest first:
   `defn` of `semantic_search/index.clj`; a few `:model/*` keyword sets that
   differ by a line or two.
 
+### metabase after `:lint-as` binding forms, `defspec` and `:keys` keyword entries (2026-10-16)
+
+Same pin, kondo and container, the same day. Read this table, not the first
+run's, as the metabase baseline: the first run's oracle linted on a cold
+`.clj-kondo/.cache`, and the server's own clj-kondo warm-up wrote toucan2's
+analysis into that cache during the run (20:57). On the rerun kondo follows
+toucan2's `import-vars`, so 148 `mt/with-temp` usages and the `t2/` macros
+became library probes that answer null — the import-vars class, now visible
+— and `var-usage/library/macro/aliased` went from 187 probes, all agreeing,
+to 200 with 174 null. Compare on the same cache state. 8969 probes, 2118
+files visited; kondo 5 min, server settled in 54 s, answered in 22 min. The
+rows that moved:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `local/destructured` | 600 | 508 | 11 | 0 | 81 | 501 | 16 | 83 |
+| `local/plain` | 600 | 583 | 8 | 0 | 9 | 577 | 12 | 11 |
+| `var-def/defn` | 396 | 319 | 75 | 2 | 0 | 308 | 86 | 0 |
+| `var-def/defspec` | 58 | 58 | 0 | 0 | 0 | 29 | 29 | 0 |
+| `var-def/other` | 228 | 156 | 72 | 0 | 0 | 78 | 150 | 0 |
+| `var-usage/library/macro/aliased` | 200 | 21 | 5 | 0 | 174 | 187 | 0 | 0 |
+| `var-usage/library/macro/referred` | 193 | 115 | 78 | 0 | 0 | 129 | 59 | 2 |
+| **total** | 8969 | 6463 | 1297 | 368 | 811 | 6535 | 1396 | 647 |
+
+`defspec` now defines its var, `def-catch-all` macros (`define-migration`)
+theirs — most of the `var-def/other` gain — and locals bound by
+`u/for-map` and other `:lint-as`'d binding macros are locals. The clj-kondo
+corpus matched its table row for row after each change (5249 / 4920 / 216 /
+62 / 51).
+
+## Compare on penpot (2026-10-16)
+
+`bb compare penpot`, the third corpus and the first multi-project one: the
+pin is `main` `da1791b`, and the root `deps.edn` only gathers `backend`,
+`common`, `frontend` and `exporter` through `:local/root`, so the oracle
+lints those projects' source roots (`CLJ_PULSE_CORPUS_PROJECTS`, set from
+`bb.edn`; 15 roots, test dirs included — the corpus's `:exclude-files`
+patterns are anchored to relative paths and match nothing the oracle passes).
+clj-kondo v2026.08.04, same container: 24401 var-definitions, 365589
+var-usages, 115312 locals, 243874 keywords; kondo 97 s, the server settled
+in 15 s with 206 classpath entries, 7518 probes answered in 224 s, 1008 files
+visited, 19977 unjudged tokens.
+
+The first run (7517 probes) read 6111 agree, 685 diverge, 364 known, 357
+null and found two server bugs, fixed the same day: a keyword entry of a key
+directive (`{:keys [::db ::mtx/metrics]}`, penpot's Integrant style) bound
+nothing and was no site of its key (`keyword/alias` 125 diverge, references
+on `::mtx/metrics` missed 10 of 53), and a var whose name holds a `:`
+(`sql:get-libraries`, `schema:strategy`) refused every rename (`var-def/def`
+55 diverge). After both:
+
+| Bucket | Probes | Agree | Diverge | Known | Null |
+|---|---|---|---|---|---|
+| `keyword/alias` | 394 | 389 | 5 | 0 | 0 |
+| `keyword/keys` | 180 | 180 | 0 | 0 | 0 |
+| `keyword/qualified` | 400 | 372 | 21 | 0 | 7 |
+| `local/destructured` | 599 | 475 | 37 | 0 | 87 |
+| `local/plain` | 600 | 583 | 14 | 0 | 3 |
+| `var-def/declare` | 280 | 278 | 2 | 0 | 0 |
+| `var-def/def` | 396 | 394 | 1 | 0 | 1 |
+| `var-def/defmacro` | 212 | 190 | 22 | 0 | 0 |
+| `var-def/defmulti` | 90 | 88 | 2 | 0 | 0 |
+| `var-def/defn` | 394 | 362 | 31 | 0 | 1 |
+| `var-def/defn-` | 378 | 373 | 4 | 0 | 1 |
+| `var-def/defonce` | 328 | 326 | 2 | 0 | 0 |
+| `var-def/defprotocol` | 390 | 88 | 0 | 302 | 0 |
+| `var-def/defrecord` | 88 | 16 | 14 | 58 | 0 |
+| `var-def/deftest` | 390 | 390 | 0 | 0 | 0 |
+| `var-def/deftype` | 48 | 28 | 16 | 4 | 0 |
+| `var-def/goog-define` | 2 | 1 | 1 | 0 | 0 |
+| `var-usage/core` | 200 | 199 | 0 | 0 | 1 |
+| `var-usage/core/aliased` | 111 | 67 | 3 | 0 | 41 |
+| `var-usage/core/macro` | 200 | 194 | 0 | 0 | 6 |
+| `var-usage/library` | 200 | 128 | 72 | 0 | 0 |
+| `var-usage/library/aliased` | 200 | 187 | 2 | 0 | 11 |
+| `var-usage/library/macro` | 200 | 139 | 54 | 0 | 7 |
+| `var-usage/library/macro/aliased` | 200 | 126 | 74 | 0 | 0 |
+| `var-usage/library/macro/referred` | 16 | 16 | 0 | 0 | 0 |
+| `var-usage/library/referred` | 82 | 35 | 1 | 0 | 46 |
+| `var-usage/project` | 200 | 182 | 0 | 0 | 18 |
+| `var-usage/project/aliased` | 200 | 192 | 0 | 0 | 8 |
+| `var-usage/project/macro` | 147 | 147 | 0 | 0 | 0 |
+| `var-usage/project/macro/aliased` | 197 | 196 | 0 | 0 | 1 |
+| `var-usage/project/macro/referred` | 15 | 15 | 0 | 0 | 0 |
+| `var-usage/project/referred` | 181 | 62 | 0 | 0 | 119 |
+| `total` | 7518 | 6418 | 378 | 364 | 358 |
+
+What is left, by cause:
+
+- **`.cljc` dialect in the oracle, about 230.** kondo keeps a `:cljs` entry
+  for a `.cljc` usage (`cljs.core/filter`, `cljs.test/deftest`), and our
+  answer is the Clojure half (`var-usage/library`, `library/macro`,
+  `library/macro/aliased`); the harness's `.cljc` tolerance does not cover
+  a namespace that differs by dialect.
+- **Names kondo hooks define, about 200.** `mf/defc` components referred by
+  name (`var-usage/project/referred` 119 null) and the props their
+  `[{:keys […]}]` binds (most of `local/destructured`'s 85 null). A
+  `:lint-as {rumext.v2/defc clojure.core/defn}` covers the latter for a user;
+  the backlog's kondo-enrichment item covers both.
+- **JS interop, about 90.** `node:crypto`, `goog.events`, `app.util.globals`
+  (a `.js` namespace), `c/-nth` on `cljs.core` internals: ClojureScript, best
+  effort.
+- **The rest** are small: `deftype`/`defrecord` sites under a custom
+  `app.common.record/defrecord` hook, `defmacro` references from `.cljs`
+  `:require-macros`, a few keyword sets.
+
+`bb soak penpot` the same day (default 20 rounds, seed
+17735688386792036511): no divergence at any checkpoint, every witness
+converged (a 100-file batch in 0.9 s), RSS at the checkpoints 190–201 MiB,
+the corpus restored to its pin. The soak churns `backend/src` and the other
+three projects' `src` (`corpus_bases`) and creates its files under
+`backend/src`.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,

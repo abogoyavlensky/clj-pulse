@@ -3329,3 +3329,89 @@ mod refer_rename {
         );
     }
 }
+
+// --- keyword entries of a key directive bind -----------------------------------
+
+/// `{:keys [::db :a/b c]}` binds `db`, `b` and `c`; the keyword entries read
+/// the keys they spell (penpot's Integrant code is written this way).
+mod keyword_key_entries {
+    use clj_pulse::index::extractor::{
+        extract_full, is_keyword_key_entry, local_references_at, locals_in_scope_at, parse_tree,
+    };
+    use tower_lsp::lsp_types::{Position, Range};
+
+    fn pos(src: &str, needle: &str, offset: u32) -> Position {
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in {src:?}"));
+        let line = src[..at].matches('\n').count() as u32;
+        let line_start = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        Position::new(line, (at - line_start) as u32 + offset)
+    }
+
+    const SRC: &str = "(ns app.http (:require [app.metrics :as mtx]))\n\
+                       (defn f [{:keys [::db ::mtx/metrics :x/b c & :lit]}] (g db metrics b c))\n";
+
+    #[test]
+    fn keyword_entries_bind_their_name() {
+        let mut names: Vec<String> = locals_in_scope_at(SRC, pos(SRC, "(g db", 1))
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["b", "c", "db", "metrics"]);
+
+        let refs = local_references_at(SRC, pos(SRC, "db metrics b", 0), "db").expect("a local");
+        assert_eq!(refs.declaration.start, pos(SRC, "db ::mtx", 0));
+        assert_eq!(refs.usages.len(), 1);
+        assert!(
+            refs.destructured_key,
+            "renaming it would change the key read"
+        );
+    }
+
+    #[test]
+    fn keyword_entries_are_sites_of_the_key_they_read() {
+        let (_, _, occs) = extract_full(SRC, std::path::Path::new("app/http.clj")).unwrap();
+        let fqns: Vec<&str> = occs.iter().map(|o| o.fqn.as_str()).collect();
+        assert!(fqns.contains(&":app.http/db"), "{fqns:?}");
+        assert!(fqns.contains(&":app.metrics/metrics"), "{fqns:?}");
+        assert!(fqns.contains(&":x/b"), "{fqns:?}");
+        assert!(
+            fqns.contains(&":lit"),
+            "a literal key after & is still a key: {fqns:?}"
+        );
+        // The locals are locals, never vars.
+        assert!(
+            !fqns
+                .iter()
+                .any(|f| f.ends_with("/db") && !f.starts_with(':')),
+            "{fqns:?}"
+        );
+
+        // A qualified directive supplies the namespace.
+        let src = "(ns a)\n(defn f [{:my.ns/keys [:z]}] z)\n";
+        let (_, _, occs) = extract_full(src, std::path::Path::new("a.clj")).unwrap();
+        assert!(occs.iter().any(|o| o.fqn == ":my.ns/z"));
+    }
+
+    #[test]
+    fn only_bound_keyword_entries_are_key_entries() {
+        let tree = parse_tree(SRC).unwrap();
+        let token = |needle: &str, len: u32| {
+            let start = pos(SRC, needle, 0);
+            Range::new(start, Position::new(start.line, start.character + len))
+        };
+        assert!(is_keyword_key_entry(&tree, SRC, token("::db", 4)));
+        assert!(is_keyword_key_entry(&tree, SRC, token("::mtx/metrics", 13)));
+        assert!(
+            !is_keyword_key_entry(&tree, SRC, token(":lit", 4)),
+            "after &"
+        );
+        let plain = "(ns a)\n(def m {::db 1})\n";
+        let tree = parse_tree(plain).unwrap();
+        let start = pos(plain, "::db", 0);
+        let range = Range::new(start, Position::new(start.line, start.character + 4));
+        assert!(!is_keyword_key_entry(&tree, plain, range));
+    }
+}

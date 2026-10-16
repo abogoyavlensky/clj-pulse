@@ -14,7 +14,15 @@
             {"metabase" {:url "https://github.com/metabase/metabase"
                          :sha "42a8e9f77d330c90c5a4d71927fed2823897f949"}
              "clj-kondo" {:url "https://github.com/clj-kondo/clj-kondo"
-                          :sha "13a32d1caf6278b7e4a8c4ad4936d4fc33db6cf2"}})
+                          :sha "13a32d1caf6278b7e4a8c4ad4936d4fc33db6cf2"}
+             ;; Correctness only (`bb compare penpot`, `bb soak penpot`): not in
+             ;; `bench-order`, so `bb bench` stays on the two timed corpora. The
+             ;; root deps.edn only gathers `:local/root` projects, so compare
+             ;; lints, and soak churns, the source roots of the ones listed
+             ;; here (CLJ_PULSE_CORPUS_PROJECTS).
+             "penpot" {:url "https://github.com/penpot/penpot"
+                       :sha "da1791bf007ed84f0c75e62c7511da8afe8c8c31"
+                       :projects ["backend" "common" "frontend" "exporter"]}})
 
           (defn bench-git
             "Runs git in `dir`, returning trimmed stdout, or nil when it fails."
@@ -166,7 +174,7 @@
                                           (assoc "CLJ_PULSE_BENCH_RUNS" (System/getenv "CLJ_PULSE_BENCH_RUNS")))}
                             "cargo test --release --test test_bench -- --ignored --nocapture"))))}
 
-  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
+  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, `bb soak penpot`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
         ;; One corpus, not both: a soak is long enough that running both by
         ;; default is a mistake. clj-kondo is the default because a checkpoint
         ;; there costs seconds rather than a minute.
@@ -178,16 +186,22 @@
                 ;; what the run covers in an hour.
                 (shell {:extra-env (cond-> {"CLJ_PULSE_SOAK_ROOT" (str dir)
                                             "CLJ_PULSE_SOAK_CORPUS" name}
-                                     seed (assoc "CLJ_PULSE_SOAK_SEED" (str seed)))}
+                                     seed (assoc "CLJ_PULSE_SOAK_SEED" (str seed))
+                                     (get-in bench-corpora [name :projects])
+                                     (assoc "CLJ_PULSE_CORPUS_PROJECTS"
+                                            (str/join "," (get-in bench-corpora [name :projects]))))}
                        "cargo test --release --test test_soak -- --ignored --nocapture"))}
 
-  compare {:doc "Compare clj-pulse against clj-kondo's analysis on a pinned real repo: `bb compare` (clj-kondo), `bb compare metabase`. Advisory: prints divergences by construct; CLJ_PULSE_COMPARE_STRICT=1 fails on any new one"
+  compare {:doc "Compare clj-pulse against clj-kondo's analysis on a pinned real repo: `bb compare` (clj-kondo), `bb compare metabase`, `bb compare penpot`. Advisory: prints divergences by construct; CLJ_PULSE_COMPARE_STRICT=1 fails on any new one"
            :task (let [[name] *command-line-args*
                        name (or name "clj-kondo")
-                       dir (bench-corpus! name)]
+                       dir (bench-corpus! name)
+                       projects (get-in bench-corpora [name :projects])]
                    (bench-prepare! dir)
-                   (shell {:extra-env {"CLJ_PULSE_COMPARE_ROOT" (str dir)
-                                       "CLJ_PULSE_COMPARE_CORPUS" name}}
+                   (shell {:extra-env (cond-> {"CLJ_PULSE_COMPARE_ROOT" (str dir)
+                                               "CLJ_PULSE_COMPARE_CORPUS" name}
+                                        projects (assoc "CLJ_PULSE_CORPUS_PROJECTS"
+                                                        (str/join "," projects)))}
                           "cargo test --release --test test_compare -- --ignored --nocapture"))}
 
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
