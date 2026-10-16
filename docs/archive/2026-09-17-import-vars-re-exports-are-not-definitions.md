@@ -2,7 +2,10 @@
 
 - **Found:** 2026-09-17, first `bb compare` run on the clj-kondo corpus
   (`docs/MEMORY.md`, "Compare against clj-kondo analysis"); buckets `var-def/import-vars`, `var-usage/project/aliased`, `var-def/defmacro`.
-- **Status:** rejected 2026-09-30 (will not do; reason in ROADMAP *Not planned*); archived. Sites were `file:line[:col]` in the pinned checkout under
+- **Status:** rejected 2026-09-30 (reason: a two-site pattern in the corpora);
+  reopened 2026-10-16 after `bb compare metabase` found it in 124 files and
+  toucan2 — ROADMAP Milestone 5, plan
+  [2026-10-16-2140-import-vars-facades.md](../plans/2026-10-16-2140-import-vars-facades.md). Sites were `file:line[:col]` in the pinned checkout under
   `.tmp/bench/clj-kondo/`; `bb compare` reprints them.
 
 ## Symptom

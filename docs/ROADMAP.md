@@ -384,6 +384,24 @@ the release.
       `local/plain` is 594 of 594; the corpus's own
       `:rename {assert-submaps2 assert-submaps}` is a `known` divergence.
       Plan: [2026-09-30-2257-method-params-lint-as-locals-refer-rename.md](plans/2026-09-30-2257-method-params-lint-as-locals-refer-rename.md) — done
+- [ ] **`:lint-as` binding forms, `defspec` and `def-catch-all`.** A macro
+      `:lint-as`'d to a core binding form (`metabase.util/for-map` →
+      `clojure.core/for`) bound nothing, so references on a local it binds
+      answered every `clojure.core` var of that name; `defspec` and
+      `def-catch-all` macros defined no var. Found by the first
+      `bb compare metabase` run (2026-10-16).
+      Plan: [2026-10-16-2113-lint-as-binding-forms-defspec.md](plans/2026-10-16-2113-lint-as-binding-forms-defspec.md) — in progress
+- [ ] **`potemkin/import-vars` facades.** A var re-exported through
+      `import-vars`, `import-fn`, `import-def` or `import-macro` (or a macro
+      `:lint-as`'d to one) has no definition from its facade spelling
+      (`mu/defn`, `t2/select`, `mt/with-temp` answer null), and references on
+      the original miss every caller that went through a facade. Rejected on
+      2026-09-30 as a two-site pattern
+      ([archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md));
+      reopened 2026-10-16 by the first `bb compare metabase` run: 124
+      `import-vars` forms plus 77 `import-fn`/`import-def` ones, toucan2
+      built on it, and about 900 of 2043 new answers.
+      Plan: [2026-10-16-2140-import-vars-facades.md](plans/2026-10-16-2140-import-vars-facades.md) — planned, not started
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -522,9 +540,3 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - `.lsp/config.edn` compatibility; `.clj-pulse/config.edn` plus read-only
   clj-kondo config is enough.
 - Embedding clj-kondo or reimplementing its linters natively.
-- `potemkin/import-vars` re-exports as definitions of the facade namespace
-  (rejected 2026-09-30, [archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md)).
-  It would teach the extractor one library macro's semantics — a namespace
-  defining vars it does not own — for a facade pattern the corpora use in
-  two places; the originals still resolve, and the `var-def/import-vars`
-  and `defprotocol+` rows of `bb compare` stay visible as the record of it.
