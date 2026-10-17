@@ -3458,6 +3458,19 @@ mod cljc_split {
         assert_eq!(alias(src, "x").as_deref(), Some("a"));
     }
 
+    /// `refer_all` is searched in order, so the Clojure branch leads it.
+    #[test]
+    fn test_cljc_split_refer_all_puts_clojure_first() {
+        let src = "(ns t (:require #?(:clj [clojure.test :refer :all] :default [cljs.test :refer :all])))\n(deftest example (is true))\n";
+        let (meta, _, occs) = extract_full(src, Path::new("t.cljc")).unwrap();
+        assert_eq!(
+            meta.refer_all.first().map(String::as_str),
+            Some("clojure.test")
+        );
+        assert_eq!(occurrences_of(&occs, "clojure.test/deftest").len(), 1);
+        assert!(occurrences_of(&occs, "cljs.test/deftest").is_empty());
+    }
+
     #[test]
     fn test_cljc_split_ns_forms_take_the_clj_branch() {
         let src = "#?(:clj (ns t (:require [a :as h])) :cljs (ns t (:require [b :as h])))";

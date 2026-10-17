@@ -445,9 +445,9 @@ fn process_reader_conditional(
     symbols: &mut Vec<Symbol>,
     cfg: &ExtractConfig,
 ) {
-    // `ns` branches first, the Clojure one last so its aliases win; every
-    // other branch in source order, so the outline keeps document order.
-    for form in reader_branches_clojure_last(node, source) {
+    // `ns` branches first, ordered so the Clojure one wins; every other
+    // branch in source order, so the outline keeps document order.
+    for form in reader_branches_clojure_wins(node, source) {
         if form.kind() == "list_lit" && is_ns_form(form, source) {
             process_top_level_list(form, source, file, ns_meta, symbols, cfg);
         }
@@ -461,10 +461,14 @@ fn process_reader_conditional(
     }
 }
 
-/// The branch forms of a reader conditional, the one the Clojure reader takes
-/// (the first `:clj` or `:default` branch) last, so it wins every slot the
-/// branches share; the others still record what only they bind.
-fn reader_branches_clojure_last<'a>(node: Node<'a>, source: &str) -> Vec<Node<'a>> {
+/// The branch forms of a reader conditional for the ns readers, the one the
+/// Clojure reader takes (the first `:clj` or `:default` branch) both first and
+/// last: last so it wins every map slot the branches share (`aliases`,
+/// `refers`), first so it leads every de-duplicated list that is searched in
+/// order (`refer_all`). The others still record what only they bind; reading
+/// a branch twice changes nothing, since every list the ns readers fill is
+/// de-duplicated.
+fn reader_branches_clojure_wins<'a>(node: Node<'a>, source: &str) -> Vec<Node<'a>> {
     let mut branches = Vec::new();
     let mut clojure = None;
     // Alternating `:dialect form` pairs.
@@ -480,7 +484,10 @@ fn reader_branches_clojure_last<'a>(node: Node<'a>, source: &str) -> Vec<Node<'a
             branches.push(*form);
         }
     }
-    branches.extend(clojure);
+    if let Some(form) = clojure {
+        branches.insert(0, form);
+        branches.push(form);
+    }
     branches
 }
 
@@ -845,12 +852,12 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
                 }
             }
         }
-        // Reader conditional: descend into each branch's form, the Clojure
-        // branch last so a `.cljc` alias split per platform resolves as
-        // Clojure. Reader conditionals nested inside a prefix list are out of
+        // Reader conditional: descend into each branch's form, ordered so a
+        // `.cljc` alias split per platform resolves as Clojure. Reader
+        // conditionals nested inside a prefix list are out of
         // scope and record nothing.
         "read_cond_lit" | "splicing_read_cond_lit" => {
-            for form in reader_branches_clojure_last(spec, source) {
+            for form in reader_branches_clojure_wins(spec, source) {
                 process_require_spec(form, source, ns_meta);
             }
         }
@@ -3512,9 +3519,9 @@ fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
     for child in named_children(tree.root_node()) {
         match child.kind() {
             "list_lit" => read_ns(child),
-            // The Clojure branch last, as `process_reader_conditional`.
+            // The Clojure branch wins, as in `process_reader_conditional`.
             "read_cond_lit" => {
-                for form in reader_branches_clojure_last(child, source) {
+                for form in reader_branches_clojure_wins(child, source) {
                     read_ns(form);
                 }
             }
