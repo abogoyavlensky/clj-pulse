@@ -402,17 +402,6 @@ the release.
       key, and a var named with a `:` (`sql:get-libraries`) could not be
       renamed. penpot went from 6111 to 6418 of 7518 agree.
       Plan: [2026-10-16-2230-penpot-corpus-keyword-keys-entries.md](plans/2026-10-16-2230-penpot-corpus-keyword-keys-entries.md) — done
-- [ ] **`potemkin/import-vars` facades.** A var re-exported through
-      `import-vars`, `import-fn`, `import-def` or `import-macro` (or a macro
-      `:lint-as`'d to one) has no definition from its facade spelling
-      (`mu/defn`, `t2/select`, `mt/with-temp` answer null), and references on
-      the original miss every caller that went through a facade. Rejected on
-      2026-09-30 as a two-site pattern
-      ([archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md));
-      reopened 2026-10-16 by the first `bb compare metabase` run: 124
-      `import-vars` forms plus 77 `import-fn`/`import-def` ones, toucan2
-      built on it, and about 900 of 2043 new answers.
-      Plan: [2026-10-16-2140-import-vars-facades.md](plans/2026-10-16-2140-import-vars-facades.md) — planned, not started
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -561,3 +550,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - `.lsp/config.edn` compatibility; `.clj-pulse/config.edn` plus read-only
   clj-kondo config is enough.
 - Embedding clj-kondo or reimplementing its linters natively.
+- `potemkin/import-vars` re-exports as definitions of the facade namespace
+  (rejected 2026-09-30, again 2026-10-17;
+  [archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md)).
+  clj-pulse is a generic tool: following one library macro's semantics — a
+  namespace defining vars it does not own — is a codebase's custom macro,
+  however widely metabase and toucan2 use it (about 900 `bb compare metabase`
+  answers). The originals still resolve; the `var-def/import-vars`,
+  `defprotocol+` and `*/aliased` null rows of `bb compare` stay visible as
+  the record of it.
