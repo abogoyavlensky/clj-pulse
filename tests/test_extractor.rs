@@ -3501,3 +3501,82 @@ mod cljc_split {
         assert_eq!(names, vec!["x"]);
     }
 }
+
+/// A prefix list written as a vector (`[a.b [c :as x]]`): Clojure's
+/// `load-libs` reads any vector whose second element is not a keyword as one.
+mod prefix_vectors {
+    use clj_pulse::index::extractor::{alias_sites_tree, extract, extract_full_tree, parse_tree};
+    use clj_pulse::index::ExtractConfig;
+    use std::path::Path;
+
+    fn meta(src: &str) -> clj_pulse::index::NsMeta {
+        extract(src, Path::new("t.clj")).unwrap().0
+    }
+
+    #[test]
+    fn test_prefix_vector_binds_joined_aliases() {
+        let m = meta(
+            "(ns t (:require [clj-kondo.impl.rewrite-clj.node [protocols :as node] [seq :as s] utils]))",
+        );
+        let p = "clj-kondo.impl.rewrite-clj.node";
+        assert_eq!(
+            m.aliases.get("node").cloned(),
+            Some(format!("{p}.protocols"))
+        );
+        assert_eq!(m.aliases.get("s").cloned(), Some(format!("{p}.seq")));
+        for sub in ["protocols", "seq", "utils"] {
+            assert!(
+                m.requires.contains(&format!("{p}.{sub}")),
+                "{:?}",
+                m.requires
+            );
+        }
+        assert!(!m.requires.contains(&p.to_string()), "{:?}", m.requires);
+    }
+
+    #[test]
+    fn test_prefix_vector_refers() {
+        let m = meta("(ns t (:require [a.b [c :refer [f]]]))");
+        assert_eq!(m.refers.get("f").map(String::as_str), Some("a.b.c/f"));
+    }
+
+    #[test]
+    fn test_libspec_vectors_unchanged() {
+        let m = meta("(ns t (:require [a.b :as x] [c.d] [e.f :refer [g]]))");
+        assert_eq!(m.aliases.get("x").map(String::as_str), Some("a.b"));
+        assert_eq!(m.refers.get("g").map(String::as_str), Some("e.f/g"));
+        for ns in ["a.b", "c.d", "e.f"] {
+            assert!(m.requires.contains(&ns.to_string()), "{:?}", m.requires);
+        }
+    }
+
+    #[test]
+    fn test_use_prefix_vector() {
+        let m = meta("(ns t (:use [a.b c [d :only [f]]]))");
+        assert!(
+            m.refer_all.contains(&"a.b.c".to_string()),
+            "{:?}",
+            m.refer_all
+        );
+        assert!(
+            m.refer_all.contains(&"a.b.d".to_string()),
+            "{:?}",
+            m.refer_all
+        );
+        assert!(
+            !m.refer_all.contains(&"a.b".to_string()),
+            "{:?}",
+            m.refer_all
+        );
+    }
+
+    #[test]
+    fn test_alias_sites_in_prefix_vector() {
+        let src = "(ns t (:require [a.b [protocols :as node]]))\n(node/string 1)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("t.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "node", &occs);
+        assert_eq!(sites.declarations.len(), 1, "{:?}", sites.declarations);
+    }
+}
