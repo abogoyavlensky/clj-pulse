@@ -50,15 +50,18 @@ at its pinned commit and a freshly started server is asked the same questions:
 if the two disagree about a definition, a reference, a document symbol or a
 workspace symbol, the run fails and prints both answers. Memory is sampled at
 each checkpoint in the same quiesced, nothing-open state. Unlike `bb bench` it
-is a pass/fail gate. `bb soak metabase` is the long one, and the seed printed on
-every run replays a failure exactly: `bb soak clj-kondo <seed>`.
+is a pass/fail gate. `bb soak metabase` is the long one, run before a release,
+and the seed printed on every run replays a failure exactly:
+`bb soak clj-kondo <seed>`.
 
 `bb compare` asks one production server a definition, references or rename
 question at every position clj-kondo's analysis of the same corpus knows the
 answer to, and reports every disagreement by language construct - an oracle
 that is not our own extractor. It is advisory (the report is the product;
-`CLJ_PULSE_COMPARE_STRICT=1` makes any new divergence fail it), and the first
-run's table with what it found is in [MEMORY.md](MEMORY.md).
+`CLJ_PULSE_COMPARE_STRICT=1` makes any new divergence fail it), and the
+tables with what each run found are in [MEMORY.md](MEMORY.md). Without an
+argument it runs clj-kondo, then penpot (about 9 minutes);
+`bb compare metabase` takes about 28 and runs before a release.
 
 > [!NOTE]
 > To run `bb outdated` you need to have `cargo-outdated` installed. You can install it with `cargo install cargo-outdated`.

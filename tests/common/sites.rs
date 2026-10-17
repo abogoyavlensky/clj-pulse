@@ -67,18 +67,39 @@ pub fn source_files(root: &Path) -> Vec<(u64, PathBuf)> {
     out
 }
 
+/// The directories whose top-level `src` and `test` are the corpus's own
+/// source: the root, or — for a monorepo whose root only gathers
+/// `:local/root` projects (penpot) — the project dirs named in
+/// `CLJ_PULSE_CORPUS_PROJECTS` (comma-separated, relative to the root).
+/// `bb compare` and `bb soak` set it from the corpus entry in `bb.edn`.
+pub fn corpus_bases(root: &Path) -> Vec<PathBuf> {
+    match std::env::var("CLJ_PULSE_CORPUS_PROJECTS") {
+        Ok(list) if !list.trim().is_empty() => {
+            list.split(',').map(|p| root.join(p.trim())).collect()
+        }
+        _ => vec![root.to_path_buf()],
+    }
+}
+
+/// `path` relative to its source root (`src`, `test`) under one of
+/// [`corpus_bases`], or `None` when it sits under none.
+fn under_source_root<'a>(path: &'a Path, root: &Path) -> Option<&'a Path> {
+    corpus_bases(root).iter().find_map(|base| {
+        let mut components = path.strip_prefix(base).ok()?.components();
+        let first = components.next()?;
+        matches!(first.as_os_str().to_str(), Some("src") | Some("test"))
+            .then(|| components.as_path())
+    })
+}
+
 /// Whether a path sits under the corpus's own top-level `src` or `test` — the
 /// only files a definition probe is taken from or points at. It has to be the
-/// *first* component: clj-kondo's `corpus/` holds deliberately broken sample
-/// projects, `src` directories and all, which are on no server's source path,
-/// so a definition into one would never resolve and the probe would burn the
-/// whole ceiling waiting for it.
+/// *first* component under a base: clj-kondo's `corpus/` holds deliberately
+/// broken sample projects, `src` directories and all, which are on no
+/// server's source path, so a definition into one would never resolve and the
+/// probe would burn the whole ceiling waiting for it.
 pub fn is_source_ish(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .next()
-        .is_some_and(|c| matches!(c.as_os_str().to_str(), Some("src") | Some("test")))
+    under_source_root(path, root).is_some()
 }
 
 /// The first `alias/name` usage in `text` whose alias names a namespace that
@@ -251,14 +272,10 @@ fn namespace_paths<'a>(
 ) -> impl Iterator<Item = &'a PathBuf> + 'a {
     let rel = ns.replace('-', "_").replace('.', "/");
     paths.iter().filter(move |p| {
-        let Ok(from_root) = p.strip_prefix(root) else {
+        let Some(under_root) = under_source_root(p, root) else {
             return false;
         };
-        let mut components = from_root.components();
-        // The source root itself (`src`, `test`); `is_source_ish` has
-        // already established that it is one.
-        components.next();
-        let under_root = components.as_path().to_string_lossy().to_string();
+        let under_root = under_root.to_string_lossy().to_string();
         under_root == format!("{rel}.clj") || under_root == format!("{rel}.cljc")
     })
 }

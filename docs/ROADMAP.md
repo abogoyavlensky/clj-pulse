@@ -384,6 +384,24 @@ the release.
       `local/plain` is 594 of 594; the corpus's own
       `:rename {assert-submaps2 assert-submaps}` is a `known` divergence.
       Plan: [2026-09-30-2257-method-params-lint-as-locals-refer-rename.md](plans/2026-09-30-2257-method-params-lint-as-locals-refer-rename.md) — done
+- [x] **`:lint-as` binding forms, `defspec` and `def-catch-all`.** A macro
+      `:lint-as`'d to a core binding form (`metabase.util/for-map` →
+      `clojure.core/for`) bound nothing, so references on a local it binds
+      answered every `clojure.core` var of that name; `defspec` and
+      `def-catch-all` macros defined no var. Found by the first
+      `bb compare metabase` run (2026-10-16); on metabase `var-def/defspec`
+      went from 29 to 58 of 58 and `var-def/other` from 78 to 156 of 228,
+      clj-kondo unchanged.
+      Plan: [2026-10-16-2113-lint-as-binding-forms-defspec.md](plans/2026-10-16-2113-lint-as-binding-forms-defspec.md) — done
+- [x] **penpot as a correctness corpus; `{:keys [::db]}` entries and `:` in
+      names.** `bb compare penpot` and `bb soak penpot` run on a pinned
+      penpot, the first multi-project corpus (four `:local/root` projects,
+      Integrant, `.cljc` shared by both dialects, hook-defined `mf/defc`);
+      `bb bench` stays on two corpora. Its first run found two bugs: a
+      keyword entry of a key directive bound nothing and was no site of its
+      key, and a var named with a `:` (`sql:get-libraries`) could not be
+      renamed. penpot went from 6111 to 6418 of 7518 agree.
+      Plan: [2026-10-16-2230-penpot-corpus-keyword-keys-entries.md](plans/2026-10-16-2230-penpot-corpus-keyword-keys-entries.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -411,11 +429,19 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-05 **clj-kondo analysis as an optional enrichment source.** Names
   defined through kondo hooks (`:analysis` output) could feed the index without
   running hook code. Pairs with "Custom macros beyond `:lint-as`" below.
+  Measured 2026-10-16: about 300 of metabase's compare answers
+  (`defsetting`, `define-premium-feature`, `defenterprise`) and about 200 of
+  penpot's (`mf/defc` components and their props).
 - 2026-09-05 **Add missing import** (Java classes) as a code action; `:import`
   is already parsed. Belongs with the refactor set.
 - 2026-09-05 **clj-kondo `--copy-configs`** for JAR-exported lint configs.
   Deferred because it writes into the user's working tree; would need an
   explicit opt-in.
+  2026-10-17: `bb compare metabase` shows what it costs: with toucan2's
+  copied `with-temp` hook kondo binds `mt/with-temp` vectors as locals and
+  we do not (about 50 `local/plain` answers, [MEMORY.md](MEMORY.md),
+  "metabase on a canonical kondo state"). Copying would fix diagnostics,
+  not navigation; navigation needs the enrichment item above.
 - 2026-09-08 **`textDocument/foldingRange`.** Dropped from Milestone 3: VS Code
   folds Clojure correctly by indentation when no server range exists, and
   Neovim and Zed fold from tree-sitter. A server would only add semantic kinds
@@ -470,6 +496,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders
   `engine`, `version` and `warming` only.
+- 2026-10-16 **`bb compare` leftovers.** The oracle noise is set aside
+  since 2026-10-17 ([MEMORY.md](MEMORY.md), "Compare after oracle triage").
+  Still unexplained: 13 extra `sql-format-quoted` sites in metabase's
+  `semantic_search/index.clj`, and penpot's 80 `c/array?`-style nulls under
+  a `#?(:clj clojure.core :cljs cljs.core)` alias, which kondo files under
+  `clojure.core`.
 
 ## Best effort — do when cheap or asked
 
@@ -515,8 +547,11 @@ One line each, newest last. Promote or reject; never let this grow silently.
   clj-kondo config is enough.
 - Embedding clj-kondo or reimplementing its linters natively.
 - `potemkin/import-vars` re-exports as definitions of the facade namespace
-  (rejected 2026-09-30, [archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md)).
-  It would teach the extractor one library macro's semantics — a namespace
-  defining vars it does not own — for a facade pattern the corpora use in
-  two places; the originals still resolve, and the `var-def/import-vars`
-  and `defprotocol+` rows of `bb compare` stay visible as the record of it.
+  (rejected 2026-09-30, again 2026-10-17;
+  [archived issue](archive/2026-09-17-import-vars-re-exports-are-not-definitions.md)).
+  clj-pulse is a generic tool: following one library macro's semantics — a
+  namespace defining vars it does not own — is a codebase's custom macro,
+  however widely metabase and toucan2 use it (about 900 `bb compare metabase`
+  answers). The originals still resolve; the `var-def/import-vars`,
+  `defprotocol+` and `*/aliased` null rows of `bb compare` stay visible as
+  the record of it.

@@ -700,6 +700,7 @@ mod tests {
                 "my/defthing".to_string(),
                 crate::index::DefKind::Defn,
             )]),
+            ..Default::default()
         };
         let src = "(ns x (:require [my :refer [defthing]]))\n(defthing foo [p] 1)\n";
         let found: Vec<_> = compute(src, Path::new("x.clj"), &cfg)
@@ -708,6 +709,26 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 1, "diagnostics: {:?}", found);
         assert!(found[0].message.contains('p'), "{}", found[0].message);
+    }
+
+    #[test]
+    fn lint_as_binding_form_bindings_are_linted() {
+        // A macro `:lint-as`'d to `clojure.core/for` binds like `for`: a used
+        // binding is no unresolved name, an unused one is reported.
+        let cfg = ExtractConfig {
+            lint_as_forms: std::collections::HashMap::from([(
+                "my/for-map".to_string(),
+                "for".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let src = "(ns x (:require [my :as u]))\n(u/for-map [{:keys [a b]} xs] [a 1])\n";
+        let found: Vec<_> = compute(src, Path::new("x.clj"), &cfg)
+            .into_iter()
+            .filter(|d| d.code == Some(NumberOrString::String("unused-binding".to_string())))
+            .collect();
+        assert_eq!(found.len(), 1, "diagnostics: {:?}", found);
+        assert!(found[0].message.contains('b'), "{}", found[0].message);
     }
 
     #[test]

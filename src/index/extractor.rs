@@ -233,6 +233,7 @@ fn collect_edn_keywords(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Ve
 /// so such a map falls back to the ordinary walk.
 fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<Occurrence>) {
     static NO_LINT_AS: OnceLock<HashMap<String, DefKind>> = OnceLock::new();
+    static NO_LINT_AS_FORMS: OnceLock<HashMap<String, String>> = OnceLock::new();
     let ctx = OccurrenceCtx {
         source,
         ns_meta,
@@ -240,6 +241,7 @@ fn collect_edn_ns_map(node: Node, source: &str, ns_meta: &NsMeta, out: &mut Vec<
         def_names: HashSet::new(),
         declared: HashSet::new(),
         lint_as: NO_LINT_AS.get_or_init(HashMap::new),
+        lint_as_forms: NO_LINT_AS_FORMS.get_or_init(HashMap::new),
     };
     let map_ns = ns_map_prefix(node, &ctx);
     let mut cursor = node.walk();
@@ -417,6 +419,7 @@ pub fn extract_analysis_tree(
         def_names,
         declared,
         lint_as: &cfg.lint_as,
+        lint_as_forms: &cfg.lint_as_forms,
     };
     let mut occurrences = Vec::new();
     let mut scope = Scope::new();
@@ -541,6 +544,24 @@ fn are_head_fqn(head: Node, ns_meta: &NsMeta, source: &str) -> Option<String> {
     head_fqn_candidates(head, ns_meta, source)
         .into_iter()
         .find(|fqn| ARE_FQNS.contains(&fqn.as_str()))
+}
+
+/// The core binding form a `:lint-as`'d macro head stands for
+/// (`u/for-map` → `for`), resolved by fqn like every macro table. Both walkers
+/// ask it before the core-form check, so the macro binds as its target does
+/// while its head stays a usage of the macro itself.
+fn lint_as_form<'a>(
+    head: Node,
+    ns_meta: &NsMeta,
+    source: &str,
+    lint_as_forms: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    if lint_as_forms.is_empty() {
+        return None;
+    }
+    head_fqn_candidates(head, ns_meta, source)
+        .into_iter()
+        .find_map(|fqn| lint_as_forms.get(&fqn).map(String::as_str))
 }
 
 /// What a `:refer-clojure :rename {selector sel}` stores `sel` as.
@@ -1846,6 +1867,7 @@ fn discarded_keyword_starts(node: Node, source: &str, out: &mut HashSet<(u32, u3
             def_names: HashSet::new(),
             declared: HashSet::new(),
             lint_as: &lint_as,
+            lint_as_forms: &HashMap::new(),
         };
         let mut scope = Scope::new();
         let mut occurrences = Vec::new();
@@ -2096,6 +2118,8 @@ struct OccurrenceCtx<'a> {
     /// Macro fqn → `def`-family kind, from the merged `:lint-as` config. Read by
     /// `walk_list` to treat a lint-as'd form as a definition. Empty by default.
     lint_as: &'a HashMap<String, DefKind>,
+    /// Macro fqn → core binding form, from the same config ([`lint_as_form`]).
+    lint_as_forms: &'a HashMap<String, String>,
 }
 
 static CORE_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
@@ -2237,8 +2261,10 @@ fn walk_list(node: Node, ctx: &OccurrenceCtx, scope: &mut Scope, out: &mut Vec<O
     // (or an alias to it) as a real binding form. Other qualified heads fall
     // through to the generic walk, which records them and every argument
     // (including keywords) as occurrences.
-    let head_text = if head.kind() == "sym_lit" && head_is_core_form(*head, ctx) {
-        Some(sym_text(*head, ctx.source))
+    // A `:lint-as`'d binding macro reads as its target first.
+    let head_text = if head.kind() == "sym_lit" {
+        lint_as_form(*head, ctx.ns_meta, ctx.source, ctx.lint_as_forms)
+            .or_else(|| head_is_core_form(*head, ctx).then(|| sym_text(*head, ctx.source)))
     } else {
         None
     };
@@ -2868,7 +2894,16 @@ fn collect_binding_names(
                         // key whatever the directive reads.
                         record_destructuring_keys(*k, *v, ctx, out);
                         let (bound, literal) = split_key_entries(*v, ctx.source);
-                        collect_binding_names_seq(&bound, ctx, scope, out, names);
+                        // `{:keys [::db]}` binds `db` like `{:keys [db]}`; the
+                        // keyword itself is recorded above as the key it reads.
+                        let (keywords, symbols): (Vec<Node>, Vec<Node>) =
+                            bound.into_iter().partition(|n| n.kind() == "kwd_lit");
+                        names.extend(
+                            keywords
+                                .iter()
+                                .filter_map(|kw| keyword_entry_binding(*kw, ctx.source)),
+                        );
+                        collect_binding_names_seq(&symbols, ctx, scope, out, names);
                         for key in literal {
                             if key.kind() == "kwd_lit" {
                                 record_keyword_occurrence(key, ctx, out);
@@ -2967,6 +3002,16 @@ fn split_key_entries<'a>(vec: Node<'a>, source: &str) -> (Vec<Node<'a>>, Vec<Nod
     }
 }
 
+/// The local a keyword entry of a key directive vector binds: `{:keys [::db
+/// :a/b :c]}` binds `db`, `b` and `c`, each at its keyword's name part.
+fn keyword_entry_binding(kw: Node, source: &str) -> Option<LocalBinding> {
+    let name = kw.child_by_field_name("name")?;
+    Some(LocalBinding {
+        name: node_text(name, source).to_string(),
+        name_range: node_to_lsp_range(name, source),
+    })
+}
+
 /// Records the key each entry of a namespaced `:keys` destructuring vector
 /// reads. `{::keys [a]}`, `{:my.ns/keys [a]}`, `{::alias/keys [a]}` and the
 /// qualified entry of a plain `{:keys [my.ns/a]}` all read `:my.ns/a`, so the
@@ -2992,6 +3037,19 @@ fn record_destructuring_keys(
     }
     let directive_ns = destructuring_key_ns(directive, ctx);
     for entry in split_key_entries(entries, ctx.source).0 {
+        // A keyword entry (`{:keys [::db]}`) reads the key it spells, unless a
+        // qualified directive supplies the namespace: `(keyword (or
+        // directive-ns (namespace entry)) (name entry))`, as for symbols.
+        if entry.kind() == "kwd_lit" {
+            match (&directive_ns, entry.child_by_field_name("name")) {
+                (Some(ns), Some(name)) => out.push(Occurrence {
+                    fqn: format!(":{}/{}", ns, node_text(name, ctx.source)),
+                    name_range: node_to_lsp_range(entry, ctx.source),
+                }),
+                _ => record_keyword_occurrence(entry, ctx, out),
+            }
+            continue;
+        }
         if entry.kind() != "sym_lit" {
             continue;
         }
@@ -3381,6 +3439,7 @@ pub fn locals_in_scope_at_tree(
         source,
         ns_meta: &ns_meta,
         lint_as: &cfg.lint_as,
+        lint_as_forms: &cfg.lint_as_forms,
     };
     locals_at_node(tree.root_node(), &ctx, pos)
 }
@@ -3394,6 +3453,7 @@ struct ScopeCtx<'a> {
     source: &'a str,
     ns_meta: &'a NsMeta,
     lint_as: &'a HashMap<String, DefKind>,
+    lint_as_forms: &'a HashMap<String, String>,
 }
 
 /// The ns metadata of `tree` alone: the `ns` forms at top level and in
@@ -3528,10 +3588,17 @@ fn walk_scope(node: Node, ctx: &ScopeCtx, pos: Position, out: &mut Vec<LocalBind
             // `clojure.core` / `cljs.core`, directly or through an `:as` alias
             // (`cc/let`). A qualified `s/def` etc. falls through to generic
             // descent.
-            let core_form =
-                head.kind() == "sym_lit" && head_resolves_to_core(*head, ctx.ns_meta, source);
-            if core_form {
-                let head_text = sym_text(*head, source);
+            // A `:lint-as`'d binding macro reads as its target first, as in
+            // `walk_list`.
+            let head_text = if head.kind() == "sym_lit" {
+                lint_as_form(*head, ctx.ns_meta, source, ctx.lint_as_forms).or_else(|| {
+                    head_resolves_to_core(*head, ctx.ns_meta, source)
+                        .then(|| sym_text(*head, source))
+                })
+            } else {
+                None
+            };
+            if let Some(head_text) = head_text {
                 if let Some(kind) = str_to_defkind(head_text) {
                     walk_scope_def(kind, &children, ctx, pos, out);
                     return;
@@ -3936,7 +4003,17 @@ fn collect_binding_targets(pattern: Node, source: &str, out: &mut Vec<LocalBindi
                     if key_directive(*k, source).is_some() && v.kind() == "vec_lit" {
                         // Only the entries before `&` bind; the literal keys
                         // after it do not (`collect_binding_names` twin).
-                        collect_binding_targets_seq(&split_key_entries(*v, source).0, source, out);
+                        let (keywords, symbols): (Vec<Node>, Vec<Node>) =
+                            split_key_entries(*v, source)
+                                .0
+                                .into_iter()
+                                .partition(|n| n.kind() == "kwd_lit");
+                        out.extend(
+                            keywords
+                                .iter()
+                                .filter_map(|kw| keyword_entry_binding(*kw, source)),
+                        );
+                        collect_binding_targets_seq(&symbols, source, out);
                     } else if node_text(*k, source) != ":or" {
                         // :as name, :select name, :all name, …
                         collect_binding_targets(*v, source, out);
@@ -4057,6 +4134,7 @@ pub fn local_references_at_tree(
         source,
         ns_meta: &ns_meta,
         lint_as: &cfg.lint_as,
+        lint_as_forms: &cfg.lint_as_forms,
     };
 
     let mut occurrences = Vec::new();
@@ -4224,12 +4302,53 @@ fn is_destructured_key(root: Node, source: &str, declaration: Range) -> bool {
     directive.is_some_and(|kw| key_directive(kw, source).is_some())
 }
 
-/// The `sym_lit` whose name range is exactly `range`. Skips quoted data, like
-/// `collect_name_occurrences`.
+/// Whether the keyword token at `range` is a binding entry of a key directive
+/// vector (`{:keys [::db]}`, before any `&`): it reads the key *and* binds
+/// the local `db`, so a keyword rename that rewrote it would rename the local
+/// too and leave its usages behind.
+pub fn is_keyword_key_entry(tree: &tree_sitter::Tree, source: &str, range: Range) -> bool {
+    fn find<'a>(node: Node<'a>, source: &str, range: Range) -> Option<Node<'a>> {
+        if node.kind() == "kwd_lit" && node_to_lsp_range(node, source) == range {
+            return Some(node);
+        }
+        let r = node_to_lsp_range(node, source);
+        if !(lsp_range_contains(r, range.start)) {
+            return None;
+        }
+        all_named_children(node)
+            .into_iter()
+            .find_map(|child| find(child, source, range))
+    }
+    let Some(kw) = find(tree.root_node(), source, range) else {
+        return false;
+    };
+    let Some(name) = kw.child_by_field_name("name") else {
+        return false;
+    };
+    let declaration = node_to_lsp_range(name, source);
+    is_destructured_key(tree.root_node(), source, declaration)
+        && kw.parent().is_some_and(|vec| {
+            split_key_entries(vec, source)
+                .0
+                .iter()
+                .any(|n| n.id() == kw.id())
+        })
+}
+
+/// The `sym_lit` whose name range is exactly `range` — or the `kwd_lit`, for
+/// a keyword entry of a key directive (`{:keys [::db]}` binds at `db`). Skips
+/// quoted data, like `collect_name_occurrences`.
 fn find_binding_sym<'a>(node: Node<'a>, source: &str, range: Range) -> Option<Node<'a>> {
     match node.kind() {
         "quoting_lit" => None,
         "sym_lit" if node_to_lsp_range(sym_name_node(node), source) == range => Some(node),
+        "kwd_lit"
+            if node
+                .child_by_field_name("name")
+                .is_some_and(|n| node_to_lsp_range(n, source) == range) =>
+        {
+            Some(node)
+        }
         _ => named_children(node)
             .into_iter()
             .find_map(|child| find_binding_sym(child, source, range)),
@@ -4342,6 +4461,7 @@ mod tests {
         let src = "(ns x (:require [my :refer [defthing]]))\n(defthing foo 1)\n(inc foo)";
         let cfg = ExtractConfig {
             lint_as: HashMap::from([("my/defthing".to_string(), DefKind::Def)]),
+            ..Default::default()
         };
         let (_, symbols, occs) =
             extract_full_with(src, std::path::Path::new("x.clj"), &cfg).unwrap();

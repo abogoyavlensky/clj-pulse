@@ -429,6 +429,9 @@ fn keyword_target(index: &Index, documents: &DocumentStore, fqn: String) -> Resu
     }
 
     let mut sites: Vec<KeywordSite> = Vec::new();
+    // Parsed once per file, and only for a file that spells a key directive:
+    // the check below is structural, and most sites are plain keywords.
+    let mut trees: HashMap<PathBuf, Option<tree_sitter::Tree>> = HashMap::new();
     for (path, token) in candidates {
         // Library files are read-only even when the user has one open, and an
         // open `jar:` buffer contributes occurrences like any other file.
@@ -446,7 +449,8 @@ fn keyword_target(index: &Index, documents: &DocumentStore, fqn: String) -> Resu
             .ok_or_else(|| {
                 anyhow::anyhow!("cannot rename {}: {} is unreadable", fqn, path.display())
             })?;
-        let text = token_at(&text, token).unwrap_or_default();
+        let full = text;
+        let text = token_at(&full, token).unwrap_or_default();
         let Some(name_range) = name_suffix_range(token, &text, &name) else {
             // All-or-nothing: rewriting the sites that do conform would leave
             // this one reading the old key, which is worse than refusing.
@@ -471,6 +475,29 @@ fn keyword_target(index: &Index, documents: &DocumentStore, fqn: String) -> Resu
                 name
             );
         };
+        // `{:keys [::db]}` spells the key as a keyword and still binds the
+        // local `db`: rewriting it would rename the local and strand its
+        // usages, the same trap as the `{::keys [db]}` symbol entry above.
+        if full.contains("keys") {
+            let tree = trees
+                .entry(path.clone())
+                .or_insert_with(|| extractor::parse_tree(&full));
+            if tree
+                .as_ref()
+                .is_some_and(|tree| extractor::is_keyword_key_entry(tree, &full, token))
+            {
+                anyhow::bail!(
+                    "cannot rename {}: the {{:keys [{}]}} destructuring at {}:{} also binds                      the local '{}'; rewrite it as {{{} {}}} first",
+                    fqn,
+                    text,
+                    path.display(),
+                    token.start.line + 1,
+                    name,
+                    name,
+                    fqn
+                );
+            }
+        }
         if sites
             .iter()
             .any(|site| site.uri == uri && site.name == name_range)
@@ -807,12 +834,17 @@ fn spells(text: Option<&str>, range: Range, name: &str) -> bool {
     }
 }
 
+/// A name the reader takes as one unqualified symbol. A `:` is allowed
+/// inside it (`sql:get-libraries`, `schema:strategy`), as the reader allows,
+/// but not at either end and never doubled.
 fn is_valid_symbol_name(name: &str) -> bool {
     !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && !name.starts_with(|c: char| c.is_ascii_digit() || c == ':')
+        && !name.ends_with(':')
+        && !name.contains("::")
         && name
             .chars()
-            .all(|c| crate::document::is_clj_ident_char(c) && c != '/')
+            .all(|c| (crate::document::is_clj_ident_char(c) || c == ':') && c != '/')
 }
 
 /// Resolves the symbol under the cursor to an fqn:
@@ -1094,6 +1126,18 @@ pub fn occurrences_for(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_colon_inside_a_symbol_name_is_valid() {
+        use super::is_valid_symbol_name as ok;
+        assert!(ok("sql:get-libraries"));
+        assert!(ok("schema:strategy"));
+        assert!(!ok(":x"));
+        assert!(!ok("x:"));
+        assert!(!ok("a::b"));
+        assert!(!ok("a/b"));
+        assert!(!ok("1x"));
+    }
+
     use super::*;
 
     fn at(line: u32, start: u32, end: u32) -> Range {

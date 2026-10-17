@@ -26,7 +26,11 @@ use super::{NsMeta, Symbol};
 /// 23: Clojure 1.13 destructuring: `:keys!` entries, the literal keys after
 ///     `&` and keyword keys of `:or` are keyword occurrences; a `selector`
 ///     pattern records its keys and no symbol usages.
-pub const CACHE_FORMAT_VERSION: u32 = 23;
+/// 24: `clojure.test.check.clojure-test/defspec` defines its var, and a
+///     `:lint-as`'d core binding form binds like its target.
+/// 25: a keyword entry of a key directive (`{:keys [::db]}`) is an
+///     occurrence of the key it reads and binds its name.
+pub const CACHE_FORMAT_VERSION: u32 = 25;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {

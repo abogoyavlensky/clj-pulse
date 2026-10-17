@@ -66,8 +66,8 @@ there.
   can be diffed. Not a pass/fail gate; compare against the tables in
   [docs/MEMORY.md](docs/MEMORY.md).
 
-- `bb soak [metabase|clj-kondo]` — one long-lived server driven through rounds
-  of realistic churn on the same pinned corpora: buffer edits, saves, on-disk
+- `bb soak [metabase|clj-kondo|penpot]` — one long-lived server driven through rounds
+  of realistic churn on the same pinned corpora (plus penpot): buffer edits, saves, on-disk
   modifications, creations, deletions, renames, and every fifth round a
   100-file batch delivered in a *single* `didChangeWatchedFiles`, the shape a
   branch switch has. Every action carries a witness — a uniquely named var
@@ -84,10 +84,14 @@ there.
   `CLJ_PULSE_SOAK_RSS_GROWTH` (1.5x) — a gate, unlike `bb bench`. Each
   checkpoint prints a `SOAK_JSON` line, and the seed is printed on every run:
   `bb soak clj-kondo <seed>` replays a failure exactly. Defaults to clj-kondo
-  and 20 rounds (about half a minute); `bb soak metabase` is the long one.
+  and 20 rounds (about half a minute); `bb soak metabase` is the long one
+  and runs before a release only.
 
-- `bb compare [metabase|clj-kondo]` — differential correctness against
-  clj-kondo's analysis on the same pinned corpora: one production server, and
+- `bb compare [clj-kondo|penpot|metabase]` — differential correctness against
+  clj-kondo's analysis on the same pinned corpora plus penpot, a correctness-only
+  corpus `bb bench` skips. Without an argument it runs clj-kondo then penpot
+  (`compare-order` in `bb.edn`, about 9 minutes); metabase takes about 28
+  and runs before a release. Per corpus: one production server, and
   a definition, references or rename question at every position the analysis
   knows the answer to (`tests/test_compare.rs`, oracle in
   `tests/common/oracle.rs`). A var usage must land on the var-definition's
@@ -101,7 +105,17 @@ there.
   known ones grouped by reason. Advisory: it fails only on a dead server, a
   `panicked at`, an unexpected JSON-RPC error, or kondo not running;
   `CLJ_PULSE_COMPARE_STRICT=1` fails on any new divergence too. Compare
-  against the tables in [docs/MEMORY.md](docs/MEMORY.md).
+  against the tables in [docs/MEMORY.md](docs/MEMORY.md). A cold-cache
+  oracle classifies library usages differently, and the server's own kondo
+  warm-up fills the corpus's `.clj-kondo/.cache` during a run, and library
+  configs that clojure-lsp copies into `.clj-kondo/` on its `bb bench` start
+  (toucan2's `with-temp` hook) change which locals kondo sees, so the task
+  first runs `kondo-warm!` — `--dependencies --copy-configs` over each
+  project's `clojure -A:dev:test -Spath` — and every run asks on that one
+  state. A corpus whose root only gathers `:local/root`
+  projects (penpot) lists them under `:projects` in `bb.edn`, passed as
+  `CLJ_PULSE_CORPUS_PROJECTS`; `sites::corpus_bases` reads it, so the
+  oracle lints, and the soak churns, those projects' `src`/`test`.
 
 | Gate | Run when |
 |---|---|
@@ -110,8 +124,10 @@ there.
 | `bb e2e-calva` | definition, `jar:`, or location-shape changes |
 | `bb e2e-nvim` | new capabilities or protocol changes |
 | `bb bench` | before a release, and after index or extractor changes |
-| `bb soak` | before a release, and after index, watcher, or document-store changes |
-| `bb compare` | after extractor, resolver, references or rename changes |
+| `bb soak` | after index, watcher, or document-store changes (clj-kondo; penpot for multi-project or watcher work) |
+| `bb soak metabase` | before a release |
+| `bb compare` | after extractor, resolver, references or rename changes (clj-kondo and penpot) |
+| `bb compare metabase` | before a release |
 
 ## Testing notes
 
@@ -153,8 +169,18 @@ there.
   with the corpus's `.clj-kondo` config and `:skip-comments true`; answer sites
   outside those roots are dropped before judging. `KNOWN` in
   `test_compare.rs` is the allowlist: a divergence it matches counts as
-  `known` under its reason; triage adds an entry with a dated reason, a fixed
-  bug removes its entry. The same pipeline runs on `simple_project` in
+  `known` under its reason (a known null too, so the columns add up to
+  `probes`); triage adds an entry with a dated reason, a fixed
+  bug removes its entry. A probe carries a `Tag` the oracle reads off
+  kondo's own data for the entries that read structure: `Facade` when a
+  usage's alias names another namespace than kondo resolves it into, or the
+  probe is a potemkin re-export entry (`import-vars` is *Not planned*);
+  `FacadeCallers` for an original whose missing lines are all such callers;
+  `CljsHalf` for a `.cljc` usage kondo read as ClojureScript alone. Entries
+  no question is asked at are counted and sampled under "not asked": the
+  ClojureScript twin of a `.cljc` entry kondo also reports as Clojure, and an
+  entry whose token does not spell its name (`oracle::spells`: hook output,
+  a `case` at a macro's bracket). The same pipeline runs on `simple_project` in
   `bb check` (`compare_simple_project`, kill switches on, library probes left
   out), which must stay at zero new divergences; it skips when the host has
   no clj-kondo.
@@ -326,7 +352,8 @@ there.
   path back to `src`/`test`.
 - Defining macros resolve by fqn, never by bare name: the user's `:lint-as` map
   first, then the built-in table `DefKind::from_macro_fqn`
-  (`clojure.test/deftest` and friends), then — for a *qualified* head alone —
+  (`clojure.test/deftest` and friends, test.check's `defspec` as a `def`),
+  then — for a *qualified* head alone —
   the def form its name part names (`extractor::head_def_kind`): `mu/defn`,
   `s/defn`, `p/defn-` and `mu/defmethod` define what `defn`, `defn-` and
   `defmethod` define, whatever library the qualifier points at. `:lint-as` is
@@ -340,7 +367,13 @@ there.
   unsaved `ns` edit counts) and `:lint-as` from the `ExtractConfig` its
   `_tree` entry points take, both held in one `ScopeCtx` built once per
   question; a core form is told through the ns form's aliases in both
-  walkers (`head_resolves_to_core`), so `cc/let` binds. A `:-` marker annotates rather than binds, wherever it
+  walkers (`head_resolves_to_core`), so `cc/let` binds. A `:lint-as` target
+  that is a core binding form (`{u/for-map clojure.core/for}`) lands in
+  `ExtractConfig::lint_as_forms`, not `lint_as`, and both walkers ask it
+  (`lint_as_form`, by fqn) *before* the core check, so the macro binds as its
+  target while its head stays a usage of the macro; `settings::BINDING_FORMS`
+  lists the accepted targets, and clj-kondo's `def-catch-all` maps to `Def`.
+  A `:-` marker annotates rather than binds, wherever it
   appears: `[x :- s/Int]` binds `x` and reads `s/Int`, and a return schema
   (`(mu/defn f :- [:vector :int] [xs] …)`) is an expression, so the parameter
   vector is the one after it. `NsMeta.refer_all` records
@@ -416,6 +449,13 @@ there.
   verbatim whatever the directive reads, as is a keyword key of `:or`
   (`:or {::a 1}`). `:select`, `:all`, `:excess`, `:missing` and `:defaults`
   bind their symbol through the generic keyword-key path, like `:as`.
+  A keyword entry before `&` (`{:keys [::db :a/b]}`) binds its name part
+  (`keyword_entry_binding`, in both walkers' collectors) and is an
+  occurrence of the key it reads, a qualified directive supplying the
+  namespace as for symbols; it is a destructured key, so a local rename
+  refuses it, and a keyword rename refuses any site that is one
+  (`extractor::is_keyword_key_entry`, checked structurally, parsing only
+  files that spell `keys`).
   `(selector {…})` (`is_core_selector`: qualified to core, or bare and not a
   local, not excluded, and not `:refer`red anywhere but core — a
   `:refer-clojure :rename` counts; a file defining its own `selector` without
@@ -424,7 +464,7 @@ there.
   its `:or` values and drops the names; the locals walker binds the
   pattern's names for a cursor inside the pattern alone, outside an `:or`
   value, so they shadow an outer local of the same name. `CACHE_FORMAT_VERSION`
-  23.
+  23 introduced it.
 - A `Defmethod` symbol is for the outline alone and never takes an index slot
   (`insert_file` / `insert_lib_file` skip it via `takes_slot`): its fqn is the
   multimethod's own, so it would displace the `defmulti` among equals and

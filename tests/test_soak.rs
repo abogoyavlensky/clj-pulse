@@ -25,7 +25,8 @@ use common::diff::{brief, brief_set, locations, symbol_set, Divergence};
 use common::sampling::{has_children, median, quiet_for, rss_kib, QUIET};
 use common::session::{settle, Session, REQUEST_TIMEOUT};
 use common::sites::{
-    answers, definition, is_source_ish, landing, project_sites, source_files, Landing, Site,
+    answers, corpus_bases, definition, is_source_ish, landing, project_sites, source_files,
+    Landing, Site,
 };
 use common::{LspClient, FILE_CHANGED, FILE_CREATED, FILE_DELETED};
 
@@ -235,7 +236,9 @@ impl Churn {
     fn new(root: &Path, seed: u64) -> Self {
         let tag = format!("{seed:x}");
         Self {
-            soak_dir: root.join("src").join(format!("soak_{tag}")),
+            soak_dir: corpus_bases(root)[0]
+                .join("src")
+                .join(format!("soak_{tag}")),
             tag,
             tracked: churn_candidates(root),
             created: Vec::new(),
@@ -613,16 +616,16 @@ fn notify_watched(client: &mut LspClient, changes: &[(PathBuf, u8)]) {
     client.did_change_watched_files(&borrowed);
 }
 
-/// The corpus files a round may churn: `.clj`/`.cljc` under the corpus's own
-/// top-level `src`, which both pinned corpora carry in their deps.edn
-/// `:paths`. The restriction matters for the oracle, not for realism — a file
-/// outside `:paths` is indexed when it is *opened*, so churning one would
-/// leave the churned server holding symbols a freshly started reference server
-/// has never seen, and every checkpoint would report that as a divergence.
+/// The corpus files a round may churn: `.clj`/`.cljc` under the top-level
+/// `src` of each [`corpus_bases`] dir, which every pinned corpus carries in
+/// its deps.edn `:paths`. The restriction matters for the oracle, not for
+/// realism — a file outside `:paths` is indexed when it is *opened*, so
+/// churning one would leave the churned server holding symbols a freshly
+/// started reference server has never seen, and every checkpoint would report
+/// that as a divergence.
 fn churn_candidates(root: &Path) -> Vec<PathBuf> {
-    let src = root.join("src");
     let mut out = Vec::new();
-    let mut stack = vec![src];
+    let mut stack: Vec<PathBuf> = corpus_bases(root).iter().map(|b| b.join("src")).collect();
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;

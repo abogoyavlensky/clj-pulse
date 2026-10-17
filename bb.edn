@@ -10,11 +10,25 @@
   :init (do
           (def bench-order ["metabase" "clj-kondo"])
 
+          ;; What `bb compare` runs without an argument: the per-change gate.
+          ;; metabase takes about 28 minutes, against 2 and 7 for these, and
+          ;; adds no construct penpot lacks; `bb compare metabase` runs
+          ;; before a release.
+          (def compare-order ["clj-kondo" "penpot"])
+
           (def bench-corpora
             {"metabase" {:url "https://github.com/metabase/metabase"
                          :sha "42a8e9f77d330c90c5a4d71927fed2823897f949"}
              "clj-kondo" {:url "https://github.com/clj-kondo/clj-kondo"
-                          :sha "13a32d1caf6278b7e4a8c4ad4936d4fc33db6cf2"}})
+                          :sha "13a32d1caf6278b7e4a8c4ad4936d4fc33db6cf2"}
+             ;; Correctness only (`bb compare penpot`, `bb soak penpot`): not in
+             ;; `bench-order`, so `bb bench` stays on the two timed corpora. The
+             ;; root deps.edn only gathers `:local/root` projects, so compare
+             ;; lints, and soak churns, the source roots of the ones listed
+             ;; here (CLJ_PULSE_CORPUS_PROJECTS).
+             "penpot" {:url "https://github.com/penpot/penpot"
+                       :sha "da1791bf007ed84f0c75e62c7511da8afe8c8c31"
+                       :projects ["backend" "common" "frontend" "exporter"]}})
 
           (defn bench-git
             "Runs git in `dir`, returning trimmed stdout, or nil when it fails."
@@ -69,6 +83,49 @@
                     (println "WARNING: preparing the classpath failed:" (str/trim (str err)))))
                 (catch Exception e
                   (println "WARNING: could not run the clojure CLI:" (ex-message e))))))
+
+          (defn kondo-warm!
+            "Fills the corpus's `.clj-kondo/.cache` from every project's
+             classpath *before* `bb compare` asks the oracle, the way the
+             server's own warm-up (`kondo::warm`) fills it during a run. A
+             cold-cache oracle classifies library usages differently, so
+             without this the table depends on whether some earlier run left a
+             warm cache behind. `--copy-configs` imports the configs libraries
+             export (toucan2's `with-temp` hook) the way clojure-lsp does on its
+             own start, which `bb bench` runs: kondo auto-loads them, so whether
+             they exist changes which locals the oracle sees. kondo skips a JAR
+             it has already linted, so a warm corpus costs seconds. Runs from this repo's directory with
+             absolute paths, so a version-manager shim resolves; a failure is a
+             warning, like `bench-prepare!`."
+            [dir projects]
+            (let [kondo-dir (fs/path dir ".clj-kondo")]
+              (when (fs/directory? kondo-dir)
+                (println "Warming clj-kondo's cache from the corpus classpath ...")
+                (try
+                  (doseq [base (if (seq projects) (cons "." projects) ["."])
+                          :let [base-dir (fs/normalize (fs/absolutize (fs/path dir base)))]
+                          :when (fs/exists? (fs/path base-dir "deps.edn"))]
+                    (let [{:keys [exit out err]} (shell {:dir (str base-dir) :out :string
+                                                         :err :string :continue true}
+                                                        "clojure -A:dev:test -Spath")
+                          entries (->> (str/split (str/trim (str out))
+                                                  (re-pattern java.io.File/pathSeparator))
+                                       (remove str/blank?)
+                                       (map (fn [entry] (str (fs/absolutize (fs/path base-dir entry)))))
+                                       (filter fs/exists?))]
+                      (if (or (not (zero? exit)) (empty? entries))
+                        (println "WARNING: no classpath for" (str base-dir) (str/trim (str err)))
+                        (let [{:keys [exit err]}
+                              (shell {:out :string :err :string :continue true}
+                                     "clj-kondo" "--lint" (str/join java.io.File/pathSeparator entries)
+                                     "--dependencies" "--copy-configs" "--parallel"
+                                     "--config-dir" (str kondo-dir)
+                                     "--cache-dir" (str (fs/path kondo-dir ".cache")))]
+                          (when-not (zero? exit)
+                            (println "WARNING: warming the cache failed for" (str base-dir)
+                                     (str/trim (str err))))))))
+                  (catch Exception e
+                    (println "WARNING: could not warm clj-kondo's cache:" (ex-message e)))))))
 
           ;; --- the server we compare against ---------------------------------
           (def clojure-lsp-version "2026.07.06-14.34.19")
@@ -166,7 +223,7 @@
                                           (assoc "CLJ_PULSE_BENCH_RUNS" (System/getenv "CLJ_PULSE_BENCH_RUNS")))}
                             "cargo test --release --test test_bench -- --ignored --nocapture"))))}
 
-  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
+  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak penpot`, `bb soak metabase` (before a release), optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
         ;; One corpus, not both: a soak is long enough that running both by
         ;; default is a mistake. clj-kondo is the default because a checkpoint
         ;; there costs seconds rather than a minute.
@@ -178,17 +235,24 @@
                 ;; what the run covers in an hour.
                 (shell {:extra-env (cond-> {"CLJ_PULSE_SOAK_ROOT" (str dir)
                                             "CLJ_PULSE_SOAK_CORPUS" name}
-                                     seed (assoc "CLJ_PULSE_SOAK_SEED" (str seed)))}
+                                     seed (assoc "CLJ_PULSE_SOAK_SEED" (str seed))
+                                     (get-in bench-corpora [name :projects])
+                                     (assoc "CLJ_PULSE_CORPUS_PROJECTS"
+                                            (str/join "," (get-in bench-corpora [name :projects]))))}
                        "cargo test --release --test test_soak -- --ignored --nocapture"))}
 
-  compare {:doc "Compare clj-pulse against clj-kondo's analysis on a pinned real repo: `bb compare` (clj-kondo), `bb compare metabase`. Advisory: prints divergences by construct; CLJ_PULSE_COMPARE_STRICT=1 fails on any new one"
-           :task (let [[name] *command-line-args*
-                       name (or name "clj-kondo")
-                       dir (bench-corpus! name)]
-                   (bench-prepare! dir)
-                   (shell {:extra-env {"CLJ_PULSE_COMPARE_ROOT" (str dir)
-                                       "CLJ_PULSE_COMPARE_CORPUS" name}}
-                          "cargo test --release --test test_compare -- --ignored --nocapture"))}
+  compare {:doc "Compare clj-pulse against clj-kondo's analysis on pinned real repos: `bb compare` (clj-kondo, then penpot), `bb compare clj-kondo`, `bb compare penpot`, `bb compare metabase` (before a release). Advisory: prints divergences by construct; CLJ_PULSE_COMPARE_STRICT=1 fails on any new one"
+           :task (let [[name] *command-line-args*]
+                   (doseq [name (if name [name] compare-order)
+                           :let [dir (bench-corpus! name)
+                                 projects (get-in bench-corpora [name :projects])]]
+                     (bench-prepare! dir)
+                     (kondo-warm! dir projects)
+                     (shell {:extra-env (cond-> {"CLJ_PULSE_COMPARE_ROOT" (str dir)
+                                                 "CLJ_PULSE_COMPARE_CORPUS" name}
+                                          projects (assoc "CLJ_PULSE_CORPUS_PROJECTS"
+                                                          (str/join "," projects)))}
+                            "cargo test --release --test test_compare -- --ignored --nocapture")))}
 
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}

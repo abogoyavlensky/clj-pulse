@@ -126,6 +126,28 @@ predate the ClojureScript and quoted-keyword changes, so the step is not
 this change's alone; the change itself drops symbols (`defmethod`) and
 occurrences (declare-only names) rather than adding any.
 
+An A/B on 2026-10-17, after `:lint-as` binding forms, `defspec` and `:keys`
+keyword entries: clj-pulse alone (no `CLJ_PULSE_BENCH_CLOJURE_LSP`), the
+branch then master `2ea7c39` (0.5.6) back to back, one run each, same
+container. Every row of the branch sits within master's run-to-run spread:
+
+| Metric | metabase branch | metabase master | clj-kondo branch | clj-kondo master |
+|---|---|---|---|---|
+| First navigation, cold / warm | 6.5 / 5.1 s | 5.5 / 5.5 s | 643 / 522 ms | 527 / 527 ms |
+| All dependencies, cold / warm | 9.4 / 5.8 s | 8.2 / 6.2 s | 1.3 s / 624 ms | 1.6 s / 632 ms |
+| clj-kondo finished, cold / warm | 71 / 60 s | 72 / 51 s | 11.5 / 2.2 s | 13.4 / 2.6 s |
+| RSS settled, cold / warm | 467 / 454 MiB | 459 / 454 MiB | 119 / 92 MiB | 120 / 90 MiB |
+| Definition, warm | 28 ms | 26 ms | 23 ms | 28 ms |
+| didChange → diagnostics, warm | 415 / 1010 ms | 380 / 864 ms | 824 ms | 818 ms |
+| Symbols indexed | 51 082 | 50 349 | 2 252 | 2 252 |
+
+The 733 extra metabase symbols are `defspec` and `def-catch-all` vars. RSS
+on metabase reads 454 MiB on master as well, so the step from the 363 MiB
+table above came in with earlier releases, not this branch. The full
+`bb bench` before the A/B lost clojure-lsp's warm metabase run to a
+`timed out waiting for response to initialize` (its cold run had settled at
+2 388 MiB), and the task stops at the first failing corpus.
+
 ### macOS (2026-09-22)
 
 The same `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the maintainer's 2021 MacBook
@@ -521,6 +543,307 @@ prefix, so no row was expected to move; the run confirms that the handlers'
 new position step leaves those answers alone. A first branch run on a cold
 `.clj-kondo/.cache` read 5242 probes, the same library-bucket artifact as the
 destructuring note above.
+
+### metabase, first run (2026-10-16)
+
+`bb compare metabase` on the bench pin (`42a8e9f`), clj-kondo v2026.08.04,
+Linux container with 11 GiB of RAM: 60666 var-definitions, 905973
+var-usages, 184516 locals and 757107 keywords in the analysis of every
+`config::source_paths` root (the alias `:extra-paths` reach `enterprise/`,
+`modules/drivers/*/test`, `bin/build`, `dev`, `.clj-kondo/src`); kondo took
+5 min, the server settled in 65 s with 491 classpath entries, 8976 probes
+were answered in 10 min, 2076 files visited, 90423 unjudged tokens. 16 min
+end to end, run under an 8 GiB memory cap.
+
+Two harness fixes made it run at all. kondo prints keywords a hook
+synthesized (`:style/indent`, `:end-row` metadata in
+`metabase.lib.expression`) without `row`/`col`; the oracle now drops them
+like it drops position-less var usages. And each keyword probe carried its
+own copy of the keyword's whole site set, quadratic in group size —
+`:model/Card` has 5317 sites — which swapped the first attempt to a
+standstill; the sets are shared (`Arc<Sites>`) now.
+
+The corpus's `.clj-kondo/config.edn` loads hooks that exist only after
+`clj-kondo --copy-configs` (`hooks/methodical/macros`, `hooks/toucan2/…`);
+the bench never copies them, so the oracle is blind to what they define and
+the hook-defined class below is undercounted.
+
+| Bucket | Probes | Agree | Diverge | Known | Null |
+|---|---|---|---|---|---|
+| `keyword/alias` | 400 | 379 | 21 | 0 | 0 |
+| `keyword/keys` | 91 | 91 | 0 | 0 | 0 |
+| `keyword/qualified` | 400 | 203 | 164 | 0 | 3 |
+| `local/destructured` | 600 | 501 | 16 | 0 | 83 |
+| `local/plain` | 600 | 577 | 12 | 0 | 11 |
+| `var-def/declare` | 14 | 14 | 0 | 0 | 0 |
+| `var-def/def` | 388 | 377 | 10 | 0 | 1 |
+| `var-def/defcache` | 2 | 2 | 0 | 0 | 0 |
+| `var-def/defdataset` | 152 | 146 | 6 | 0 | 0 |
+| `var-def/defdataset-edn` | 26 | 26 | 0 | 0 | 0 |
+| `var-def/deferror` | 46 | 46 | 0 | 0 | 0 |
+| `var-def/define-premium-feature` | 114 | 10 | 104 | 0 | 0 |
+| `var-def/define-spec` | 16 | 16 | 0 | 0 | 0 |
+| `var-def/defjob` | 124 | 124 | 0 | 0 | 0 |
+| `var-def/defmacro` | 310 | 223 | 85 | 0 | 2 |
+| `var-def/defmulti` | 312 | 269 | 43 | 0 | 0 |
+| `var-def/defn` | 396 | 308 | 86 | 2 | 0 |
+| `var-def/defn-` | 400 | 398 | 2 | 0 | 0 |
+| `var-def/defonce` | 214 | 210 | 4 | 0 | 0 |
+| `var-def/defprotocol` | 252 | 64 | 18 | 170 | 0 |
+| `var-def/defprotocol+` | 158 | 39 | 29 | 90 | 0 |
+| `var-def/defrecord` | 66 | 12 | 0 | 54 | 0 |
+| `var-def/defrecord+` | 22 | 4 | 8 | 10 | 0 |
+| `var-def/defroutes` | 6 | 3 | 3 | 0 | 0 |
+| `var-def/defspec` | 58 | 29 | 29 | 0 | 0 |
+| `var-def/deftest` | 400 | 398 | 1 | 0 | 1 |
+| `var-def/deftype` | 68 | 10 | 22 | 36 | 0 |
+| `var-def/deftype+` | 26 | 2 | 18 | 6 | 0 |
+| `var-def/import-vars` | 390 | 39 | 351 | 0 | 0 |
+| `var-def/other` | 228 | 78 | 150 | 0 | 0 |
+| `var-usage/core` | 200 | 197 | 0 | 0 | 3 |
+| `var-usage/core/aliased` | 59 | 13 | 46 | 0 | 0 |
+| `var-usage/core/macro` | 200 | 178 | 0 | 0 | 22 |
+| `var-usage/core/macro/aliased` | 21 | 21 | 0 | 0 | 0 |
+| `var-usage/library` | 200 | 1 | 57 | 0 | 142 |
+| `var-usage/library/aliased` | 200 | 112 | 2 | 0 | 86 |
+| `var-usage/library/macro` | 200 | 163 | 36 | 0 | 1 |
+| `var-usage/library/macro/aliased` | 187 | 187 | 0 | 0 | 0 |
+| `var-usage/library/macro/referred` | 190 | 129 | 59 | 0 | 2 |
+| `var-usage/library/referred` | 113 | 106 | 1 | 0 | 6 |
+| `var-usage/project` | 200 | 198 | 0 | 0 | 2 |
+| `var-usage/project/aliased` | 200 | 127 | 0 | 0 | 73 |
+| `var-usage/project/macro` | 199 | 168 | 2 | 0 | 29 |
+| `var-usage/project/macro/aliased` | 200 | 62 | 0 | 0 | 138 |
+| `var-usage/project/macro/referred` | 161 | 111 | 9 | 0 | 41 |
+| `var-usage/project/referred` | 167 | 164 | 2 | 0 | 1 |
+| **total** | 8976 | 6535 | 1396 | 368 | 647 |
+
+The 2043 new answers (diverge plus null), by cause, largest first:
+
+- **`potemkin/import-vars` facades, about 900.** 124 metabase files use it,
+  and toucan2 (`t2/…`) is built on it: `mu/defn`, `mt/with-temp`,
+  `settings/defsetting` and every `t2/` call answer null, references on an
+  original miss every caller that spells it through a facade
+  (`with-native-query-testing-context`: 2 of 170), and rename at an
+  `import-vars` entry is refused. The 2026-09-30 rejection counted two uses
+  in the corpora; this is the evidence that reopened it.
+- **Names kondo hooks define, about 300.** `defsetting`,
+  `define-premium-feature`, `defenterprise`, `lib.common/defop`: rename on
+  the var is refused, references find the definition alone. The backlog's
+  kondo-analysis enrichment item.
+- **`:lint-as` to a core binding form, dozens with wrong answers.** The
+  config maps `metabase.util/for-map` and `metabase.util.performance/for` to
+  `clojure.core/for`; settings kept def-family targets only, so a
+  `{:keys [name]}` in `u/for-map` was no local and references on `name`
+  answered all 1390 `clojure.core/name` sites.
+- **Def macros we did not know, about 150.** `clojure.test.check.clojure-test/defspec`
+  and the `clj-kondo.lint-as/def-catch-all` target (`define-migration`, …):
+  rename refused, references short.
+- **`.cljc` dialect, about 100.** `testing` in a `.cljc` test where kondo's
+  entry is the `:cljs` one, and `lib.util/format`, a `#?` alias kondo files
+  under `clojure.core`; mostly the oracle's dialect tolerance.
+- **Oracle noise from hook expansions, about 150.** Usages kondo files under
+  `clojure.test` on tokens like `segment-id` (the `mt/with-temp` hook's
+  output), locals with an empty token.
+- **Unexplained, a handful.** 13 extra `sql-format-quoted` sites inside one
+  `defn` of `semantic_search/index.clj`; a few `:model/*` keyword sets that
+  differ by a line or two.
+
+### metabase after `:lint-as` binding forms, `defspec` and `:keys` keyword entries (2026-10-16)
+
+Same pin, kondo and container, the same day. Read this table, not the first
+run's, as the metabase baseline: the first run's oracle linted on a cold
+`.clj-kondo/.cache`, and the server's own clj-kondo warm-up wrote toucan2's
+analysis into that cache during the run (20:57). On the rerun kondo follows
+toucan2's `import-vars`, so 148 `mt/with-temp` usages and the `t2/` macros
+became library probes that answer null — the import-vars class, now visible
+— and `var-usage/library/macro/aliased` went from 187 probes, all agreeing,
+to 200 with 174 null. Compare on the same cache state. 8969 probes, 2118
+files visited; kondo 5 min, server settled in 54 s, answered in 22 min. The
+rows that moved:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `local/destructured` | 600 | 508 | 11 | 0 | 81 | 501 | 16 | 83 |
+| `local/plain` | 600 | 583 | 8 | 0 | 9 | 577 | 12 | 11 |
+| `var-def/defn` | 396 | 319 | 75 | 2 | 0 | 308 | 86 | 0 |
+| `var-def/defspec` | 58 | 58 | 0 | 0 | 0 | 29 | 29 | 0 |
+| `var-def/other` | 228 | 156 | 72 | 0 | 0 | 78 | 150 | 0 |
+| `var-usage/library/macro/aliased` | 200 | 21 | 5 | 0 | 174 | 187 | 0 | 0 |
+| `var-usage/library/macro/referred` | 193 | 115 | 78 | 0 | 0 | 129 | 59 | 2 |
+| **total** | 8969 | 6463 | 1297 | 368 | 811 | 6535 | 1396 | 647 |
+
+`defspec` now defines its var, `def-catch-all` macros (`define-migration`)
+theirs — most of the `var-def/other` gain — and locals bound by
+`u/for-map` and other `:lint-as`'d binding macros are locals. The clj-kondo
+corpus matched its table row for row after each change (5249 / 4920 / 216 /
+62 / 51).
+
+### metabase on a canonical kondo state (2026-10-17)
+
+Two states outside our code moved the table between runs: kondo's
+`.clj-kondo/.cache` (cold or warmed by an earlier server run) and the
+library configs clojure-lsp copies into `.clj-kondo/` (`babashka`,
+`methodical`, `potemkin`, `com.github.camsaul/toucan2`, …) when `bb bench`
+starts it — kondo auto-loads those. `bb compare` now sets both first
+(`kondo-warm!` in `bb.edn`: `--dependencies --copy-configs` over each
+project's `clojure -A:dev:test -Spath`). Two runs, the first from a cold
+cache with the configs present, the second with cache, copied configs and
+`inline-configs` all moved aside, matched row for row and in kondo's counts
+(60678 var-definitions, 880935 var-usages, 202995 locals). This is the
+metabase baseline from now on:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `local/plain` | 600 | 529 | 46 | 0 | 25 | 583 | 8 | 9 |
+| `local/destructured` | 595 | 495 | 9 | 0 | 91 | 508 | 11 | 81 |
+| `keyword/qualified` | 400 | 197 | 183 | 0 | 2 | 203 | 164 | 3 |
+| `var-usage/library` | 200 | 5 | 144 | 0 | 51 | 0 | 63 | 137 |
+| `var-usage/project/aliased` | 200 | 138 | 0 | 0 | 62 | 132 | 0 | 68 |
+| **total** | 8975 | 6407 | 1439 | 368 | 743 | 6463 | 1297 | 811 |
+
+"Before" is the 2026-10-16 table above (warm cache, no copied configs);
+the other rows moved by ten probes or fewer. The server is the same build. The
+`local/*` loss is toucan2's exported `with-temp` hook: kondo now binds
+`{card-id :id}` inside `mt/with-temp […]` as a local, and we read the
+binding vector as data, so references on `card-id` answer every `card-id`
+in the file (13 against 3) and rename refuses. A clojure-lsp user, whose
+server copies configs on start, gets the local; that is a real gap, of the
+hook-defined-names class.
+
+## Compare on penpot (2026-10-16)
+
+`bb compare penpot`, the third corpus and the first multi-project one: the
+pin is `main` `da1791b`, and the root `deps.edn` only gathers `backend`,
+`common`, `frontend` and `exporter` through `:local/root`, so the oracle
+lints those projects' source roots (`CLJ_PULSE_CORPUS_PROJECTS`, set from
+`bb.edn`; 15 roots, test dirs included — the corpus's `:exclude-files`
+patterns are anchored to relative paths and match nothing the oracle passes).
+clj-kondo v2026.08.04, same container: 24401 var-definitions, 365589
+var-usages, 115312 locals, 243874 keywords; kondo 97 s, the server settled
+in 15 s with 206 classpath entries, 7518 probes answered in 224 s, 1008 files
+visited, 19977 unjudged tokens.
+
+The first run (7517 probes) read 6111 agree, 685 diverge, 364 known, 357
+null and found two server bugs, fixed the same day: a keyword entry of a key
+directive (`{:keys [::db ::mtx/metrics]}`, penpot's Integrant style) bound
+nothing and was no site of its key (`keyword/alias` 125 diverge, references
+on `::mtx/metrics` missed 10 of 53), and a var whose name holds a `:`
+(`sql:get-libraries`, `schema:strategy`) refused every rename (`var-def/def`
+55 diverge). After both:
+
+| Bucket | Probes | Agree | Diverge | Known | Null |
+|---|---|---|---|---|---|
+| `keyword/alias` | 394 | 389 | 5 | 0 | 0 |
+| `keyword/keys` | 180 | 180 | 0 | 0 | 0 |
+| `keyword/qualified` | 400 | 372 | 21 | 0 | 7 |
+| `local/destructured` | 599 | 475 | 37 | 0 | 87 |
+| `local/plain` | 600 | 583 | 14 | 0 | 3 |
+| `var-def/declare` | 280 | 278 | 2 | 0 | 0 |
+| `var-def/def` | 396 | 394 | 1 | 0 | 1 |
+| `var-def/defmacro` | 212 | 190 | 22 | 0 | 0 |
+| `var-def/defmulti` | 90 | 88 | 2 | 0 | 0 |
+| `var-def/defn` | 394 | 362 | 31 | 0 | 1 |
+| `var-def/defn-` | 378 | 373 | 4 | 0 | 1 |
+| `var-def/defonce` | 328 | 326 | 2 | 0 | 0 |
+| `var-def/defprotocol` | 390 | 88 | 0 | 302 | 0 |
+| `var-def/defrecord` | 88 | 16 | 14 | 58 | 0 |
+| `var-def/deftest` | 390 | 390 | 0 | 0 | 0 |
+| `var-def/deftype` | 48 | 28 | 16 | 4 | 0 |
+| `var-def/goog-define` | 2 | 1 | 1 | 0 | 0 |
+| `var-usage/core` | 200 | 199 | 0 | 0 | 1 |
+| `var-usage/core/aliased` | 111 | 67 | 3 | 0 | 41 |
+| `var-usage/core/macro` | 200 | 194 | 0 | 0 | 6 |
+| `var-usage/library` | 200 | 128 | 72 | 0 | 0 |
+| `var-usage/library/aliased` | 200 | 187 | 2 | 0 | 11 |
+| `var-usage/library/macro` | 200 | 139 | 54 | 0 | 7 |
+| `var-usage/library/macro/aliased` | 200 | 126 | 74 | 0 | 0 |
+| `var-usage/library/macro/referred` | 16 | 16 | 0 | 0 | 0 |
+| `var-usage/library/referred` | 82 | 35 | 1 | 0 | 46 |
+| `var-usage/project` | 200 | 182 | 0 | 0 | 18 |
+| `var-usage/project/aliased` | 200 | 192 | 0 | 0 | 8 |
+| `var-usage/project/macro` | 147 | 147 | 0 | 0 | 0 |
+| `var-usage/project/macro/aliased` | 197 | 196 | 0 | 0 | 1 |
+| `var-usage/project/macro/referred` | 15 | 15 | 0 | 0 | 0 |
+| `var-usage/project/referred` | 181 | 62 | 0 | 0 | 119 |
+| `total` | 7518 | 6418 | 378 | 364 | 358 |
+
+What is left, by cause:
+
+- **`.cljc` dialect in the oracle, about 230.** kondo keeps a `:cljs` entry
+  for a `.cljc` usage (`cljs.core/filter`, `cljs.test/deftest`), and our
+  answer is the Clojure half (`var-usage/library`, `library/macro`,
+  `library/macro/aliased`); the harness's `.cljc` tolerance does not cover
+  a namespace that differs by dialect.
+- **Names kondo hooks define, about 200.** `mf/defc` components referred by
+  name (`var-usage/project/referred` 119 null) and the props their
+  `[{:keys […]}]` binds (most of `local/destructured`'s 85 null). A
+  `:lint-as {rumext.v2/defc clojure.core/defn}` covers the latter for a user;
+  the backlog's kondo-enrichment item covers both.
+- **JS interop, about 90.** `node:crypto`, `goog.events`, `app.util.globals`
+  (a `.js` namespace), `c/-nth` on `cljs.core` internals: ClojureScript, best
+  effort.
+- **The rest** are small: `deftype`/`defrecord` sites under a custom
+  `app.common.record/defrecord` hook, `defmacro` references from `.cljs`
+  `:require-macros`, a few keyword sets.
+
+`bb soak penpot` the same day (default 20 rounds, seed
+17735688386792036511): no divergence at any checkpoint, every witness
+converged (a 100-file batch in 0.9 s), RSS at the checkpoints 190–201 MiB,
+the corpus restored to its pin. The soak churns `backend/src` and the other
+three projects' `src` (`corpus_bases`) and creates its files under
+`backend/src`.
+
+## Compare after oracle triage (2026-10-17)
+
+The three corpora on one build, after the harness learned to set aside what
+is the oracle's and what is *Not planned*:
+
+- **`import-vars`** (ROADMAP *Not planned*, 2026-10-17): a usage whose
+  alias names another namespace than kondo resolves it into
+  (`mt/with-temp` → `toucan2.tools.with-temp`), a question at a re-export
+  entry, and an original's references missing only such callers are
+  `known`.
+- **`.cljc` twins**: kondo reports a token outside `#?` once per dialect;
+  the ClojureScript entry is not asked (103 282 on metabase, 89 670 on
+  penpot). A ClojureScript-only usage that lands on the Clojure var is
+  `known`, since clj-pulse asks `.cljc` as Clojure.
+- **Tokens not spelling the name**: entries a hook or macro placed on
+  another token (`assert-submaps2` on `assert-submaps`, `case` at the
+  bracket of clj-kondo's `one-of`, metabase's `with-temp` output) are not
+  asked — 146 on clj-kondo, 3 106 on penpot, 21 785 on metabase. A `:keys`
+  keyword entry, a `T.` call and a name ending in `'` count as spelling it.
+- A known null now counts as known alone; before, a probe could sit in
+  both columns.
+
+| Corpus | Probes | Agree | Diverge | Known | Null | Soft | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|---|
+| clj-kondo | 5246 | 4921 | 141 | 141 | 43 | 0 | 4920 | 216 | 51 |
+| penpot | 7609 | 6642 | 219 | 367 | 381 | 0 | 6418 | 378 | 358 |
+| metabase | 8969 | 6589 | 830 | 1216 | 316 | 18 | 6407 | 1439 | 743 |
+
+"Before" is each corpus's last table. Same build, so no row moved through
+the server. metabase's before is the canonical-state run, so its delta is the
+triage plus resampling: skipped entries change each bucket's population, and
+the 200-per-bucket sample with it (`local/destructured` 495 → 558 agree,
+`var-usage/project/referred` 164 → 149 on 167 → 153 probes). penpot's before
+predates the canonical kondo state, so its rows also carry the copied
+configs (rumext's among them); `local/destructured` went 475 → 458. What is
+left, by class:
+
+- **Names kondo hooks define**, the bulk of penpot's nulls:
+  `var-usage/project/referred` (119 null, `mf/defc` components such as
+  `recovery-request-page*`), `local/destructured` (100 null, their props),
+  and metabase's `defsetting` / `defenterprise` rows. The kondo-analysis
+  enrichment item.
+- **Protocol and record rows** (`var-def/defprotocol` 302 known on penpot):
+  extra implementation sites, known by design.
+- **penpot `var-usage/core/aliased`**, 80 null: `c/array?`,
+  `c/IEditableCollection` in `.cljc` files whose `c` alias is
+  `#?(:clj clojure.core :cljs cljs.core)`; kondo files them under
+  `clojure.core`, where no such var exists. Oracle-side, not yet tolerated.
+- **metabase `local/plain`**, 42 diverge: toucan2's `with-temp` hook binds
+  its vector as locals (see "metabase on a canonical kondo state").
 
 ## Soak: memory over a long session (2026-09-11)
 

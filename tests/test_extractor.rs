@@ -1586,6 +1586,7 @@ fn test_lint_as_overrides_builtin_deftest() {
 
     let cfg = ExtractConfig {
         lint_as: HashMap::from([("clojure.test/deftest".to_string(), DefKind::Def)]),
+        ..Default::default()
     };
     let (_, syms, _) = clj_pulse::index::extractor::extract_full_with(
         "(ns x (:require [clojure.test :refer [deftest]]))\n(deftest foo 1)\n",
@@ -2477,7 +2478,10 @@ fn test_lint_as_outranks_the_name_part_fallback() {
     // to `clojure.core/def` makes `f` a plain `def`.
     let mut lint_as = std::collections::HashMap::new();
     lint_as.insert("malli.util/defn".to_string(), DefKind::Def);
-    let cfg = clj_pulse::index::ExtractConfig { lint_as };
+    let cfg = clj_pulse::index::ExtractConfig {
+        lint_as,
+        ..Default::default()
+    };
     let (_, syms, _) = clj_pulse::index::extractor::extract_full_with(
         include_str!("fixtures/snippets/qualified_defs.clj"),
         Path::new("qualified_defs.clj"),
@@ -2907,6 +2911,7 @@ fn test_lint_as_declare_declares_each_name() {
             "conch/programs".to_string(),
             DefKind::Declare,
         )]),
+        ..Default::default()
     };
     let src = "(ns t (:require [conch :refer [programs]]))\n(programs rm mv)\n(defn go [] (rm \"-rf\"))\n";
     let (_, syms, occs) =
@@ -2938,6 +2943,7 @@ fn test_lint_as_defprotocol_indexes_methods_and_callers() {
             "pot/defprotocol+".to_string(),
             DefKind::Defprotocol,
         )]),
+        ..Default::default()
     };
     let src = "(ns t (:require [pot]))\n\
                (pot/defprotocol+ Node (tag [_]) (sexpr [_]))\n\
@@ -3100,6 +3106,7 @@ mod scope_heads {
     fn lint_as(fqn: &str, kind: DefKind) -> ExtractConfig {
         ExtractConfig {
             lint_as: HashMap::from([(fqn.to_string(), kind)]),
+            ..Default::default()
         }
     }
 
@@ -3202,6 +3209,72 @@ mod scope_heads {
         assert_eq!(refs.usages.len(), 1, "{refs:?}");
         assert_eq!(refs.usages[0].start, pos(src, "([x] 0)", 2));
     }
+
+    fn forms(fqn: &str, target: &str) -> ExtractConfig {
+        ExtractConfig {
+            lint_as_forms: HashMap::from([(fqn.to_string(), target.to_string())]),
+            ..Default::default()
+        }
+    }
+
+    /// metabase's shape: `metabase.util/for-map` is `:lint-as`'d to
+    /// `clojure.core/for`, so a `{:keys [name]}` in its bindings is a local,
+    /// never `clojure.core/name`.
+    #[test]
+    fn a_lint_as_for_binds_like_for() {
+        let src = "(ns app (:require [metabase.util :as u]))\n\
+                   (defn f [fields] (u/for-map [{:keys [name base_type]} fields] [name base_type]))\n";
+        let body = pos(src, "[name base_type])", 1);
+        let cfg = forms("metabase.util/for-map", "for");
+        let mut in_scope = names_with(src, body, &cfg);
+        in_scope.sort();
+        assert_eq!(in_scope, vec!["base_type", "fields", "name"]);
+        assert_eq!(names(src, body), vec!["fields"], "without the config");
+
+        let tree = parse_tree(src).unwrap();
+        let refs = local_references_at_tree(&tree, src, body, "name", &cfg).expect("a local");
+        assert_eq!(refs.declaration.start, pos(src, "name base_type]}", 0));
+        assert_eq!(refs.usages.len(), 1);
+
+        let (_, _, occs) = clj_pulse::index::extractor::extract_full_with(
+            src,
+            std::path::Path::new("app.clj"),
+            &cfg,
+        )
+        .unwrap();
+        let fqns: Vec<&str> = occs.iter().map(|o| o.fqn.as_str()).collect();
+        assert!(fqns.contains(&"metabase.util/for-map"), "{fqns:?}");
+        assert!(!fqns.contains(&"clojure.core/name"), "{fqns:?}");
+    }
+
+    #[test]
+    fn a_lint_as_let_and_fn_bind_like_their_targets() {
+        let src = "(ns app (:require [p :refer [plet pfn]]))\n(plet [a 1] (pfn [b] (+ a b)))\n";
+        let body = pos(src, "(+ a b)", 3);
+        let cfg = ExtractConfig {
+            lint_as_forms: HashMap::from([
+                ("p/plet".to_string(), "let".to_string()),
+                ("p/pfn".to_string(), "fn".to_string()),
+            ]),
+            ..Default::default()
+        };
+        let mut in_scope = names_with(src, body, &cfg);
+        in_scope.sort();
+        assert_eq!(in_scope, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn defspec_defines_its_var() {
+        let src = "(ns app (:require [clojure.test.check.clojure-test :refer [defspec]]))\n\
+                   (defspec round-trip 100 (prop))\n";
+        let (_, syms, _) = clj_pulse::index::extractor::extract_full_with(
+            src,
+            std::path::Path::new("app.clj"),
+            &ExtractConfig::default(),
+        )
+        .unwrap();
+        assert!(syms.iter().any(|s| s.fqn == "app/round-trip"), "{syms:?}");
+    }
 }
 
 // --- `:rename` keys in a require are occurrences of the var ------------------
@@ -3254,5 +3327,91 @@ mod refer_rename {
             starts(src, "a/m"),
             vec![col(src, 0, "m]"), col(src, 0, "m mm}"), Position::new(1, 1)]
         );
+    }
+}
+
+// --- keyword entries of a key directive bind -----------------------------------
+
+/// `{:keys [::db :a/b c]}` binds `db`, `b` and `c`; the keyword entries read
+/// the keys they spell (penpot's Integrant code is written this way).
+mod keyword_key_entries {
+    use clj_pulse::index::extractor::{
+        extract_full, is_keyword_key_entry, local_references_at, locals_in_scope_at, parse_tree,
+    };
+    use tower_lsp::lsp_types::{Position, Range};
+
+    fn pos(src: &str, needle: &str, offset: u32) -> Position {
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in {src:?}"));
+        let line = src[..at].matches('\n').count() as u32;
+        let line_start = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        Position::new(line, (at - line_start) as u32 + offset)
+    }
+
+    const SRC: &str = "(ns app.http (:require [app.metrics :as mtx]))\n\
+                       (defn f [{:keys [::db ::mtx/metrics :x/b c & :lit]}] (g db metrics b c))\n";
+
+    #[test]
+    fn keyword_entries_bind_their_name() {
+        let mut names: Vec<String> = locals_in_scope_at(SRC, pos(SRC, "(g db", 1))
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["b", "c", "db", "metrics"]);
+
+        let refs = local_references_at(SRC, pos(SRC, "db metrics b", 0), "db").expect("a local");
+        assert_eq!(refs.declaration.start, pos(SRC, "db ::mtx", 0));
+        assert_eq!(refs.usages.len(), 1);
+        assert!(
+            refs.destructured_key,
+            "renaming it would change the key read"
+        );
+    }
+
+    #[test]
+    fn keyword_entries_are_sites_of_the_key_they_read() {
+        let (_, _, occs) = extract_full(SRC, std::path::Path::new("app/http.clj")).unwrap();
+        let fqns: Vec<&str> = occs.iter().map(|o| o.fqn.as_str()).collect();
+        assert!(fqns.contains(&":app.http/db"), "{fqns:?}");
+        assert!(fqns.contains(&":app.metrics/metrics"), "{fqns:?}");
+        assert!(fqns.contains(&":x/b"), "{fqns:?}");
+        assert!(
+            fqns.contains(&":lit"),
+            "a literal key after & is still a key: {fqns:?}"
+        );
+        // The locals are locals, never vars.
+        assert!(
+            !fqns
+                .iter()
+                .any(|f| f.ends_with("/db") && !f.starts_with(':')),
+            "{fqns:?}"
+        );
+
+        // A qualified directive supplies the namespace.
+        let src = "(ns a)\n(defn f [{:my.ns/keys [:z]}] z)\n";
+        let (_, _, occs) = extract_full(src, std::path::Path::new("a.clj")).unwrap();
+        assert!(occs.iter().any(|o| o.fqn == ":my.ns/z"));
+    }
+
+    #[test]
+    fn only_bound_keyword_entries_are_key_entries() {
+        let tree = parse_tree(SRC).unwrap();
+        let token = |needle: &str, len: u32| {
+            let start = pos(SRC, needle, 0);
+            Range::new(start, Position::new(start.line, start.character + len))
+        };
+        assert!(is_keyword_key_entry(&tree, SRC, token("::db", 4)));
+        assert!(is_keyword_key_entry(&tree, SRC, token("::mtx/metrics", 13)));
+        assert!(
+            !is_keyword_key_entry(&tree, SRC, token(":lit", 4)),
+            "after &"
+        );
+        let plain = "(ns a)\n(def m {::db 1})\n";
+        let tree = parse_tree(plain).unwrap();
+        let start = pos(plain, "::db", 0);
+        let range = Range::new(start, Position::new(start.line, start.character + 4));
+        assert!(!is_keyword_key_entry(&tree, plain, range));
     }
 }

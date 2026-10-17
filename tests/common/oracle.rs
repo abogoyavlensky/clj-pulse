@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -186,7 +187,7 @@ pub struct Analysis {
     pub locals: Vec<Local>,
     #[serde(rename = "local-usages", default)]
     pub local_usages: Vec<LocalUsage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "positioned_keywords")]
     pub keywords: Vec<Keyword>,
     #[serde(rename = "namespace-definitions", default)]
     pub namespace_definitions: Vec<NsDef>,
@@ -207,6 +208,10 @@ pub struct VarDef {
     pub name_col: Option<u32>,
     #[serde(rename = "defined-by")]
     pub defined_by: Option<String>,
+    /// The `:lint-as` target of `defined_by`, when the corpus maps one
+    /// (`metabase.util.namespaces/import-fns` → `potemkin/import-vars`).
+    #[serde(rename = "defined-by->lint-as")]
+    pub defined_by_lint_as: Option<String>,
 }
 
 fn unknown_ns() -> String {
@@ -234,6 +239,9 @@ pub struct VarUsage {
     pub is_macro: Option<bool>,
     pub refer: Option<bool>,
     pub alias: Option<String>,
+    /// `clj` or `cljs` in a `.cljc` file, which kondo analyzes once per
+    /// dialect; absent elsewhere.
+    pub lang: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -246,6 +254,7 @@ pub struct Local {
     /// Non-null for a binding kondo synthesized rather than read.
     #[serde(rename = "derived-location")]
     pub derived_location: Option<serde_json::Value>,
+    pub lang: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -262,7 +271,7 @@ pub struct LocalUsage {
     pub name_col: Option<u32>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Keyword {
     pub name: String,
     pub filename: String,
@@ -270,8 +279,43 @@ pub struct Keyword {
     pub col: u32,
     pub ns: Option<String>,
     pub alias: Option<String>,
-    #[serde(rename = "keys-destructuring")]
     pub keys_destructuring: Option<bool>,
+}
+
+/// A keyword as kondo prints it. `row`/`col` are absent for one a hook
+/// synthesized (metabase's `:style/indent`, `:end-row` metadata): there is no
+/// token in the file for it, so [`positioned_keywords`] drops it.
+#[derive(Deserialize)]
+struct RawKeyword {
+    name: String,
+    filename: String,
+    row: Option<u32>,
+    col: Option<u32>,
+    ns: Option<String>,
+    alias: Option<String>,
+    #[serde(rename = "keys-destructuring")]
+    keys_destructuring: Option<bool>,
+}
+
+fn positioned_keywords<'de, D>(d: D) -> Result<Vec<Keyword>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<RawKeyword> = Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|k| {
+            Some(Keyword {
+                name: k.name,
+                filename: k.filename,
+                row: k.row?,
+                col: k.col?,
+                ns: k.ns,
+                alias: k.alias,
+                keys_destructuring: k.keys_destructuring,
+            })
+        })
+        .collect())
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -301,6 +345,7 @@ pub struct NsUsage {
     pub alias_row: Option<u32>,
     #[serde(rename = "alias-col")]
     pub alias_col: Option<u32>,
+    pub alias: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +366,89 @@ pub struct Probe {
     /// `var-usage/project/aliased`, `local/plain`, `keyword/keys`, …
     pub bucket: String,
     pub expect: Expectation,
+    /// What makes kondo's answer one clj-pulse does not give by design, when
+    /// the probe is of such a kind; `KNOWN` in `test_compare.rs` reads it.
+    pub tag: Tag,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum Tag {
+    #[default]
+    None,
+    /// The token reaches its var through a potemkin-style re-export, or is
+    /// the re-export entry itself: kondo follows `import-vars`, clj-pulse
+    /// does not (ROADMAP *Not planned*).
+    Facade,
+    /// A var's references and rename, whose callers on these `(file, line)`s
+    /// spell it through a re-export.
+    FacadeCallers(Arc<BTreeSet<(PathBuf, u32)>>),
+    /// A `.cljc` usage kondo analyzed as ClojureScript alone (a `#?(:cljs …)`
+    /// branch): clj-pulse asks a `.cljc` file as Clojure.
+    CljsHalf,
+}
+
+/// Oracle entries no probe is made from, by reason, so the report says what
+/// was left out.
+pub type Skipped = BTreeMap<&'static str, Skip>;
+
+/// How many entries one reason left out, and the first few as
+/// ``file:row:col `token` (name)``.
+#[derive(Debug, Default)]
+pub struct Skip {
+    pub count: usize,
+    pub samples: Vec<String>,
+}
+
+fn skip(
+    skipped: &mut Skipped,
+    reason: &'static str,
+    at: (&str, u32, u32),
+    token: &str,
+    name: &str,
+) {
+    let entry = skipped.entry(reason).or_default();
+    entry.count += 1;
+    if entry.samples.len() < 12 {
+        let (file, row, col) = at;
+        entry
+            .samples
+            .push(format!("{file}:{row}:{col} `{token}` ({name})"));
+    }
+}
+
+/// The facade macros: potemkin's `import-vars`, `import-fn`, `import-def` and
+/// `import-macro`, under either namespace potemkin publishes them in.
+fn is_import_macro(fqn: &str) -> bool {
+    fqn.split_once('/').is_some_and(|(ns, name)| {
+        matches!(ns, "potemkin" | "potemkin.namespaces") && name.starts_with("import-")
+    })
+}
+
+/// Whether a definition is a re-export: made by an import macro, directly or
+/// through `:lint-as`.
+fn is_facade_def(d: &VarDef) -> bool {
+    d.defined_by.as_deref().is_some_and(is_import_macro)
+        || d.defined_by_lint_as.as_deref().is_some_and(is_import_macro)
+}
+
+/// Whether a token names `name`: the token itself or its name part, as a
+/// cursor on it would ask. kondo places some entries a hook produced on
+/// another token (`segment-id` for a `clojure.test/is` the `with-temp` hook
+/// emits) or on none (an empty token at a bracket); no editor question is
+/// asked there. A `:keys` keyword entry (`:type`) names its local, a
+/// constructor call (`T.`) its type, and the token reader stops at a `'`, so
+/// `some'` reads `some`.
+fn spells(token: &str, name: &str) -> bool {
+    let token = token.trim_start_matches(':');
+    let part = token
+        .rsplit_once('/')
+        .map_or(token, |(_, n)| if n.is_empty() { "/" } else { n });
+    !part.is_empty()
+        && (part == name
+            || part.strip_suffix('.') == Some(name)
+            || name
+                .strip_prefix(part)
+                .is_some_and(|rest| rest.starts_with('\'')))
 }
 
 #[derive(Debug)]
@@ -332,13 +460,14 @@ pub enum Expectation {
     /// the asking file loads.
     LibraryDefinition { ns: String, dialect: Dialect },
     /// References (`includeDeclaration: true`) must equal this multiset of
-    /// sites.
-    References(Sites),
+    /// sites. Shared: every occurrence of one keyword asks against the same
+    /// set, and a copy each is quadratic on a key used thousands of times.
+    References(Arc<Sites>),
     /// Rename must be refused: `prepareRename` or `rename` answers `invalid
     /// params`, or `null`.
     RenameRefused,
     /// Rename edits must touch exactly this multiset of sites.
-    RenameSites(Sites),
+    RenameSites(Arc<Sites>),
 }
 
 impl Expectation {
@@ -600,8 +729,14 @@ fn node_at<'t>(
 /// Every probe the analysis supports, in a fixed order: by file, line,
 /// character, then request, so a limit takes the same ones on every run.
 pub fn probes(analysis: &Analysis) -> Vec<Probe> {
+    probes_and_skipped(analysis).0
+}
+
+/// The probes, and how many oracle entries were left out of them, by reason.
+pub fn probes_and_skipped(analysis: &Analysis) -> (Vec<Probe>, Skipped) {
     let mut texts = Texts::with_locals(analysis);
     let mut out = Vec::new();
+    let mut skipped = Skipped::new();
 
     // --- var definitions -------------------------------------------------
     // The primary definition of each fqn: the non-`declare` one, or the first
@@ -647,12 +782,56 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             .push(u);
     }
 
+    // `(file, alias)` → every namespace the file's ns forms bind it to; a
+    // `.cljc` `#?` alias binds one per dialect.
+    let mut alias_targets: BTreeMap<(&str, &str), BTreeSet<&str>> = BTreeMap::new();
+    for n in &analysis.namespace_usages {
+        if let Some(alias) = &n.alias {
+            alias_targets
+                .entry((n.filename.as_str(), alias.as_str()))
+                .or_default()
+                .insert(n.to.as_str());
+        }
+    }
+    // A usage reaches its var through a re-export when kondo resolves it into
+    // a namespace its alias does not name (`mt/with-temp` →
+    // `toucan2.tools.with-temp`), or lands on a re-export entry.
+    let via_facade = |u: &VarUsage| {
+        u.alias.as_deref().is_some_and(|a| {
+            alias_targets
+                .get(&(u.filename.as_str(), a))
+                .is_some_and(|nss| !nss.contains(u.to.as_str()))
+        }) || primary
+            .get(&(u.to.as_str(), u.name.as_str()))
+            .is_some_and(|d| is_facade_def(d))
+    };
+    // kondo analyzes a `.cljc` file once per dialect: a token outside any
+    // `#?` has a Clojure entry where its ClojureScript one sits, and the
+    // Clojure one is the question clj-pulse answers there.
+    let clj_usage_at: BTreeSet<(&str, u32, u32)> = analysis
+        .var_usages
+        .iter()
+        .filter(|u| u.lang.as_deref() == Some("clj"))
+        .filter_map(|u| Some((u.filename.as_str(), u.name_row?, u.name_col?)))
+        .collect();
+
     // --- var usages: definition ----------------------------------------------
     for u in &analysis.var_usages {
         let (Some(row), Some(col)) = (u.name_row, u.name_col) else {
             // A synthesized usage (`fn*` behind `#(…)`) has no token of its own.
             continue;
         };
+        let cljs_half = u.lang.as_deref() == Some("cljs");
+        if cljs_half && clj_usage_at.contains(&(u.filename.as_str(), row, col)) {
+            skip(
+                &mut skipped,
+                ".cljc ClojureScript twin of a Clojure entry",
+                (&u.filename, row, col),
+                "",
+                &u.name,
+            );
+            continue;
+        }
         if u.to == UNKNOWN_NS
             || (matches!(u.to.as_str(), "clojure.core" | "cljs.core")
                 && SPECIAL_FORMS.contains(&u.name.as_str()))
@@ -663,6 +842,18 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         let file = PathBuf::from(&u.filename);
         let line = row - 1;
         let character = texts.name_part(&file, line, col - 1);
+        let token = texts.token_at(&file, line, character);
+        // A renamed refer (`:rename {foo f}`) spells its local name.
+        if u.refer != Some(true) && !spells(&token, &u.name) {
+            skip(
+                &mut skipped,
+                "var usage on a token not spelling it",
+                (&u.filename, row, col),
+                &token,
+                &u.name,
+            );
+            continue;
+        }
         let expect = match primary.get(&(u.to.as_str(), u.name.as_str())) {
             Some(def) => {
                 let Some(def_row) = def.name_row else {
@@ -700,13 +891,21 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         } else if u.alias.is_some() {
             bucket.push_str("/aliased");
         }
+        let tag = if via_facade(u) {
+            Tag::Facade
+        } else if cljs_half {
+            Tag::CljsHalf
+        } else {
+            Tag::None
+        };
         out.push(Probe {
-            token: texts.token_at(&file, line, character),
+            token,
             file,
             line,
             character,
             bucket,
             expect,
+            tag,
         });
     }
 
@@ -737,13 +936,29 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 exact.insert((PathBuf::from(&u.filename), r - 1, character));
             }
         }
-        let sites = Sites::from_exact(exact);
+        let sites = Arc::new(Sites::from_exact(exact));
         let short = def
             .defined_by
             .as_deref()
             .and_then(|d| d.rsplit('/').next())
             .unwrap_or("other");
         let bucket = format!("var-def/{short}");
+        let tag = if is_facade_def(def) {
+            Tag::Facade
+        } else {
+            let callers: BTreeSet<(PathBuf, u32)> = usages_by_fqn
+                .get(fqn)
+                .into_iter()
+                .flatten()
+                .filter(|u| via_facade(u))
+                .filter_map(|u| Some((PathBuf::from(&u.filename), u.name_row? - 1)))
+                .collect();
+            if callers.is_empty() {
+                Tag::None
+            } else {
+                Tag::FacadeCallers(Arc::new(callers))
+            }
+        };
         out.push(Probe {
             file: file.clone(),
             line,
@@ -751,6 +966,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             token: token.clone(),
             bucket: bucket.clone(),
             expect: Expectation::References(sites.clone()),
+            tag: tag.clone(),
         });
         out.push(Probe {
             file,
@@ -759,6 +975,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             token,
             bucket,
             expect: Expectation::RenameSites(sites),
+            tag,
         });
     }
 
@@ -769,15 +986,44 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             usages_by_id.entry(id).or_default().push(u);
         }
     }
+    let clj_local_at: BTreeSet<(&str, u32, u32)> = analysis
+        .locals
+        .iter()
+        .filter(|l| l.lang.as_deref() == Some("clj"))
+        .map(|l| (l.filename.as_str(), l.row, l.col))
+        .collect();
     for local in &analysis.locals {
         if local.name == "_" {
             // A discard by convention: no editor question is asked at it.
+            continue;
+        }
+        if local.lang.as_deref() == Some("cljs")
+            && clj_local_at.contains(&(local.filename.as_str(), local.row, local.col))
+        {
+            skip(
+                &mut skipped,
+                ".cljc ClojureScript twin of a Clojure entry",
+                (&local.filename, local.row, local.col),
+                "",
+                &local.name,
+            );
             continue;
         }
         let file = PathBuf::from(&local.filename);
         let line = local.row - 1;
         // `{:keys [c/x]}` binds `x`; the binding's name part is the site.
         let character = texts.name_part(&file, line, local.col - 1);
+        let token = texts.token_at(&file, line, character);
+        if !spells(&token, &local.name) {
+            skip(
+                &mut skipped,
+                "local on a token not spelling it",
+                (&local.filename, local.row, local.col),
+                &token,
+                &local.name,
+            );
+            continue;
+        }
         let destructured =
             local.derived_location.is_some() || texts.destructured_at(&file, line, character);
         let bucket = if destructured {
@@ -785,7 +1031,6 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         } else {
             "local/plain"
         };
-        let token = texts.token_at(&file, line, character);
         let mut exact = BTreeSet::new();
         exact.insert((file.clone(), line, character));
         for u in usages_by_id.get(&local.id).into_iter().flatten() {
@@ -795,20 +1040,32 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             };
             let uline = r - 1;
             let uchar = texts.name_part(Path::new(&u.filename), uline, c - 1);
+            let utoken = texts.token_at(Path::new(&u.filename), uline, uchar);
+            if !spells(&utoken, u.name.as_deref().unwrap_or(&local.name)) {
+                skip(
+                    &mut skipped,
+                    "local usage on a token not spelling it",
+                    (&u.filename, r, c),
+                    &utoken,
+                    &local.name,
+                );
+                continue;
+            }
             exact.insert((PathBuf::from(&u.filename), uline, uchar));
             out.push(Probe {
                 file: PathBuf::from(&u.filename),
                 line: uline,
                 character: uchar,
-                token: texts.token_at(Path::new(&u.filename), uline, uchar),
+                token: utoken,
                 bucket: bucket.to_string(),
                 expect: Expectation::Definition {
                     file: file.clone(),
                     line,
                 },
+                tag: Tag::None,
             });
         }
-        let sites = Sites::from_exact(exact);
+        let sites = Arc::new(Sites::from_exact(exact));
         out.push(Probe {
             file: file.clone(),
             line,
@@ -816,6 +1073,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             token: token.clone(),
             bucket: bucket.to_string(),
             expect: Expectation::References(sites.clone()),
+            tag: Tag::None,
         });
         out.push(Probe {
             file,
@@ -828,6 +1086,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             } else {
                 Expectation::RenameSites(sites)
             },
+            tag: Tag::None,
         });
     }
 
@@ -860,8 +1119,8 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
         if token_starts.is_empty() {
             continue;
         }
-        let reference_sites = Sites::from_exact(token_starts);
-        let rename_sites = Sites::from_exact(name_starts);
+        let reference_sites = Arc::new(Sites::from_exact(token_starts));
+        let rename_sites = Arc::new(Sites::from_exact(name_starts));
         // All-or-nothing in clj-pulse: one destructuring entry refuses the
         // whole rename, and a keyword of a library namespace is refused by
         // `rename_target`.
@@ -888,6 +1147,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                     token,
                     bucket: "keyword/keys".to_string(),
                     expect: Expectation::RenameRefused,
+                    tag: Tag::None,
                 });
                 continue;
             }
@@ -903,6 +1163,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 token: token.clone(),
                 bucket: bucket.to_string(),
                 expect: Expectation::References(reference_sites.clone()),
+                tag: Tag::None,
             });
             out.push(Probe {
                 file,
@@ -915,6 +1176,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
                 } else {
                     Expectation::RenameSites(rename_sites.clone())
                 },
+                tag: Tag::None,
             });
         }
     }
@@ -928,7 +1190,7 @@ pub fn probes(analysis: &Analysis) -> Vec<Probe> {
             &b.bucket,
         ))
     });
-    out
+    (out, skipped)
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,4 +1282,29 @@ pub fn unjudged(text: &str, covered: &BTreeSet<(u32, u32)>) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spells;
+
+    #[test]
+    fn a_token_spells_its_name_in_every_notation() {
+        for (token, name) in [
+            ("f", "f"),
+            ("core/add", "add"),
+            ("clojure.core//", "/"),
+            ("..", ".."),
+            (":type", "type"),
+            ("::db", "db"),
+            ("StringReader.", "StringReader"),
+            ("some", "some'"),
+            ("c/x", "x"),
+        ] {
+            assert!(spells(token, name), "{token} should spell {name}");
+        }
+        for (token, name) in [("segment-id", "is"), ("", "let"), ("some", "something")] {
+            assert!(!spells(token, name), "{token} should not spell {name}");
+        }
+    }
 }
