@@ -135,11 +135,11 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
 
 ### Task 0: Open the ROADMAP item
 
-- [ ] **Step 1:** Add a Milestone 5 item to `docs/ROADMAP.md` (beside the
+- [x] **Step 1:** Add a Milestone 5 item to `docs/ROADMAP.md` (beside the
   2026-10-16 compare items): "**`.cljc` split aliases and vector prefix
   lists**", one line of evidence, and
   `Plan: [2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md](plans/2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md) — in progress`.
-- [ ] **Step 2: Commit** with the plan: `git commit -m "roadmap: plan .cljc split aliases and vector prefix lists"`
+- [x] **Step 2: Commit** with the plan: `git commit -m "roadmap: plan .cljc split aliases and vector prefix lists"`
 
 ### Task 1: Clojure branch wins in a `.cljc` ns form
 
@@ -147,7 +147,7 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing extractor tests** next to the existing `#?@` require
+- [x] **Step 1: Write failing extractor tests** next to the existing `#?@` require
   tests (search for `#?@(:clj [[e :as h]]`): in a `t.cljc` file,
   - `(ns t (:require #?(:clj [clojure.core :as c] :cljs [cljs.core :as c])))` →
     `ns_meta.aliases["c"] == "clojure.core"`;
@@ -163,15 +163,20 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
     for the locals walker's ns metadata; if none, assert through a local that
     binds via a `c/let` head under the split alias).
   Run: `cargo test --test test_extractor cljc` — Expected: the new tests FAIL.
-- [ ] **Step 2: Add `reader_branches_clojure_last`** (signature in Design §1) and
+- [x] **Step 2: Add `reader_branches_clojure_last`** (signature in Design §1) and
   use it in `process_require_spec`, `process_reader_conditional` and
   `ns_meta_of_tree`. A branch's key is the `kwd_lit` before it; the Clojure branch
   is the first whose key is `:clj` or `:default`.
-- [ ] **Step 3: Run** `cargo test --test test_extractor` — Expected: PASS.
-- [ ] **Step 4: Bump** `CACHE_FORMAT_VERSION` to 26 in `src/index/jar_cache.rs`
+- [x] **Step 3: Run** `cargo test --test test_extractor` — Expected: PASS.
+- [x] **Step 4: Bump** `CACHE_FORMAT_VERSION` to 26 in `src/index/jar_cache.rs`
   with a doc line: "26: a `.cljc` reader conditional in an ns form resolves
   through its Clojure branch".
-- [ ] **Step 5: Commit** `git commit -m "extractor: a .cljc split alias resolves through its Clojure branch"`
+- [x] **Step 5: Commit** `git commit -m "extractor: a .cljc split alias resolves through its Clojure branch"`
+
+> Deviation: the helper is `reader_branches_clojure_wins` and yields the Clojure branch both first and last: codex found that last alone reversed `refer_all`, which is searched first-to-last (`:clj clojure.test :refer :all` / `:default cljs.test …` made `deftest` resolve to `cljs.test`). Every list the ns readers fill is de-duplicated, so reading the branch twice is idempotent.
+> Deviation: `process_reader_conditional` orders only the `ns` branches that way; def branches stay in source order, since documentSymbol is unsorted and reordering them would shuffle the outline.
+> Deviation: `test_deftest_occurrences` pinned the old last-branch-wins behavior (`t/deftest` → `cljs.test`); updated to `clojure.test`.
+
 
 ### Task 2: Vector prefix lists
 
