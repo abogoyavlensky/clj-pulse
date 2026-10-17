@@ -230,22 +230,22 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
 **Files:**
 - Modify: `tests/common/oracle.rs`, `tests/test_compare.rs`
 
-- [ ] **Step 1: `is_declare`** accepts `cljs.core/declare` too.
-- [ ] **Step 2: `extra_lines`.** Add the field to `Verdict::Diverge`, fill it in
+- [x] **Step 1: `is_declare`** accepts `cljs.core/declare` too.
+- [x] **Step 2: `extra_lines`.** Add the field to `Verdict::Diverge`, fill it in
   `judge_sites` (mirror of `missing_lines`), `BTreeSet::new()` elsewhere.
-- [ ] **Step 3: `comment_lines`.** In `oracle.rs`, `pub fn comment_lines(file:
+- [x] **Step 3: `comment_lines`.** In `oracle.rs`, `pub fn comment_lines(file:
   &Path) -> Vec<(u32, u32)>`: 0-based inclusive line spans of every `list_lit`
   whose first named child is the symbol `comment`, at any depth.
-- [ ] **Step 4: `KNOWN` entry** (Design §4), with bucket prefix `""` and the
+- [x] **Step 4: `KNOWN` entry** (Design §4), with bucket prefix `""` and the
   bucket filter inside the matcher (`var-def/`, `local/`, `keyword/`).
-- [ ] **Step 5: Unit tests** in `test_compare.rs`'s test module: a minimal
+- [x] **Step 5: Unit tests** in `test_compare.rs`'s test module: a minimal
   `Analysis` with a `cljs.core/declare` var-definition and a later `defn` of the
   same fqn yields a usage probe expecting the `defn`'s line; a references
   probe whose only extra line falls in a `(comment …)` of a temp file is known;
   an extra line outside it is new; a missing line keeps it new. A test for
   `comment_lines` on a nested comment.
   Run: `cargo test --release --test test_compare` — Expected: PASS.
-- [ ] **Step 6: Commit** `git commit -m "compare: cljs.core/declare is a declare; sites in (comment …) are known"`
+- [x] **Step 6: Commit** `git commit -m "compare: cljs.core/declare is a declare; sites in (comment …) are known"`
 
 ### Task 5: Gates, records, docs
 

@@ -748,7 +748,12 @@ pub fn probes_and_skipped(analysis: &Analysis) -> (Vec<Probe>, Skipped) {
             .or_default()
             .push(d);
     }
-    let is_declare = |d: &VarDef| d.defined_by.as_deref() == Some("clojure.core/declare");
+    let is_declare = |d: &VarDef| {
+        matches!(
+            d.defined_by.as_deref(),
+            Some("clojure.core/declare" | "cljs.core/declare")
+        )
+    };
     let primary: BTreeMap<(&str, &str), &VarDef> = defs_by_fqn
         .iter()
         .filter_map(|(fqn, defs)| {
@@ -1282,6 +1287,42 @@ pub fn unjudged(text: &str, covered: &BTreeSet<(u32, u32)>) -> usize {
         }
     }
     count
+}
+
+/// The 0-based, inclusive line spans of every `(comment …)` form in `file`,
+/// nested ones included. The oracle runs kondo with `:skip-comments true`, so
+/// nothing inside one is a site of the oracle's.
+pub fn comment_lines(file: &Path) -> Vec<(u32, u32)> {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    let Some(tree) = clj_pulse::index::extractor::parse_tree(&text) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "list_lit" {
+            let head = node
+                .named_children(&mut cursor)
+                .find(|n| !matches!(n.kind(), "comment" | "dis_expr"));
+            let is_comment = head.is_some_and(|h| {
+                h.kind() == "sym_lit" && h.utf8_text(text.as_bytes()) == Ok("comment")
+            });
+            if is_comment {
+                out.push((
+                    node.start_position().row as u32,
+                    node.end_position().row as u32,
+                ));
+            }
+        }
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 #[cfg(test)]

@@ -131,6 +131,9 @@ enum Verdict {
         /// The `(file, line)`s the answer counts fewer times than the oracle;
         /// empty for a single-site answer.
         missing_lines: BTreeSet<(PathBuf, u32)>,
+        /// The `(file, line)`s the answer counts more times than the oracle;
+        /// empty for a single-site answer.
+        extra_lines: BTreeSet<(PathBuf, u32)>,
     },
     /// An empty or `null` answer where the oracle has one: a wrong answer,
     /// reported in its own column so "resolved wrong" and "did not resolve"
@@ -268,6 +271,12 @@ fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
                 .filter(|(key, n)| **n > got.per_line.get(*key).copied().unwrap_or(0))
                 .map(|(key, _)| key.clone())
                 .collect(),
+            extra_lines: got
+                .per_line
+                .iter()
+                .filter(|(key, n)| **n > expected.per_line.get(*key).copied().unwrap_or(0))
+                .map(|(key, _)| key.clone())
+                .collect(),
         };
     }
     if expected.exact != got.exact {
@@ -301,6 +310,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                     missing: 1,
                     extra_files: BTreeSet::new(),
                     missing_lines: BTreeSet::new(),
+                    extra_lines: BTreeSet::new(),
                     expected,
                     got: match uri_path(first) {
                         Some(p) => format!(
@@ -329,6 +339,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                         missing: 1,
                         extra_files: BTreeSet::new(),
                         missing_lines: BTreeSet::new(),
+                        extra_lines: BTreeSet::new(),
                     }
                 }
                 Landing::Miss => {}
@@ -353,6 +364,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                     missing: 1,
                     extra_files: BTreeSet::new(),
                     missing_lines: BTreeSet::new(),
+                    extra_lines: BTreeSet::new(),
                 }
             }
         }
@@ -368,6 +380,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
             missing: sites.exact.len(),
             extra_files: BTreeSet::new(),
             missing_lines: BTreeSet::new(),
+            extra_lines: BTreeSet::new(),
         },
         (Expectation::RenameRefused, Answer::Refused) => Verdict::Agree,
         (Expectation::RenameRefused, Answer::Edit(edit)) => Verdict::Diverge {
@@ -376,6 +389,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
             missing: 0,
             extra_files: BTreeSet::new(),
             missing_lines: BTreeSet::new(),
+            extra_lines: BTreeSet::new(),
         },
         (_, Answer::Error(err)) => Verdict::Null {
             expected: format!("an answer, not {}", brief(&json!(err))),
@@ -538,7 +552,34 @@ static KNOWN: &[Known] = &[
         },
         reason: "a `:refer … :rename {foo f}` key is a site of `foo` and its `f` calls are not rename sites in clj-pulse; kondo lists the calls and not the key (2026-09-30)",
     },
+    // A usage inside `(comment …)` is a site in clj-pulse — references list
+    // it, and a rename that skipped it would leave the rich comment calling
+    // the old name — while the oracle runs kondo with `:skip-comments true`.
+    // Only extra lines, every one inside a comment form of its file.
+    Known {
+        bucket_prefix: "",
+        matches: |probe, verdict| {
+            ["var-def/", "local/", "keyword/"]
+                .iter()
+                .any(|b| probe.bucket.starts_with(b))
+                && matches!(verdict, Verdict::Diverge { missing: 0, extra_lines, .. }
+                    if !extra_lines.is_empty() && all_in_comments(extra_lines))
+        },
+        reason: "a site inside `(comment …)`: clj-pulse lists it and a rename must rewrite it; the oracle runs kondo with `:skip-comments true` (2026-10-17)",
+    },
 ];
+
+/// Whether every `(file, line)` lies inside a `(comment …)` form of its file.
+fn all_in_comments(lines: &BTreeSet<(PathBuf, u32)>) -> bool {
+    let mut spans: BTreeMap<&Path, Vec<(u32, u32)>> = BTreeMap::new();
+    lines.iter().all(|(file, line)| {
+        spans
+            .entry(file.as_path())
+            .or_insert_with(|| oracle::comment_lines(file))
+            .iter()
+            .any(|(start, end)| (*start..=*end).contains(line))
+    })
+}
 
 /// Whether `file` refers `name` under another name: its text holds a
 /// `:rename {name …` map entry.
@@ -1446,6 +1487,101 @@ mod judge_tests {
         assert!(known_reason(&p, &elsewhere).is_some());
         let null = judge(&p, &Answer::Result(Value::Null), root, &roots());
         assert_eq!(known_reason(&p, &null), None);
+    }
+
+    /// kondo files a `.cljs` declare under `cljs.core/declare`; it is still
+    /// a declare, so a usage expects the real definition.
+    #[test]
+    fn a_cljs_declare_is_a_declare() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("e.cljs");
+        std::fs::write(
+            &file,
+            "(ns e)\n(declare macros)\n(defn use-it [] (macros))\n(defn macros [] 1)\n",
+        )
+        .unwrap();
+        let f = file.display().to_string();
+        let analysis: Analysis = serde_json::from_value(json!({
+            "namespace-definitions": [
+                { "name": "e", "filename": f, "row": 1, "col": 1, "name-row": 1, "name-col": 5 }
+            ],
+            "var-definitions": [
+                { "ns": "e", "name": "macros", "filename": f, "row": 2, "col": 1,
+                  "name-row": 2, "name-col": 10, "defined-by": "cljs.core/declare" },
+                { "ns": "e", "name": "use-it", "filename": f, "row": 3, "col": 1,
+                  "name-row": 3, "name-col": 7, "defined-by": "cljs.core/defn" },
+                { "ns": "e", "name": "macros", "filename": f, "row": 4, "col": 1,
+                  "name-row": 4, "name-col": 7, "defined-by": "cljs.core/defn" }
+            ],
+            "var-usages": [
+                { "from": "e", "to": "e", "name": "macros", "filename": f, "row": 3, "col": 17,
+                  "name-row": 3, "name-col": 18 }
+            ]
+        }))
+        .unwrap();
+        let probes = oracle::probes(&analysis);
+        let usage: Vec<&Probe> = probes
+            .iter()
+            .filter(|p| p.line == 2 && p.character == 17)
+            .collect();
+        assert_eq!(usage.len(), 1, "{probes:?}");
+        match &usage[0].expect {
+            Expectation::Definition { line, .. } => assert_eq!(*line, 3, "the defn's line"),
+            other => panic!("expected Definition, got {other:?}"),
+        }
+    }
+
+    fn file_sites(file: &Path, lines: &[u32]) -> Sites {
+        Sites::from_exact(lines.iter().map(|l| (file.to_path_buf(), *l, 1)).collect())
+    }
+
+    /// A references verdict for a probe in `file`, the oracle expecting
+    /// `expected` lines and the answer holding `got`.
+    fn comment_verdict(file: &Path, expected: &[u32], got: &[u32]) -> (Probe, Verdict) {
+        let p = Probe {
+            file: file.to_path_buf(),
+            ..probe(Expectation::References(Arc::new(file_sites(
+                file, expected,
+            ))))
+        };
+        let v = judge_sites(
+            &file_sites(file, expected),
+            &file_sites(file, got),
+            Path::new("/"),
+        );
+        (p, v)
+    }
+
+    #[test]
+    fn extra_sites_inside_comment_forms_are_known() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.clj");
+        // Lines 0-1 code, 2-5 a comment form, 6 code.
+        std::fs::write(
+            &file,
+            "(ns a)\n(defn f [] 1)\n(comment\n  (f)\n  (f))\n\n(f)\n",
+        )
+        .unwrap();
+        let (p, inside) = comment_verdict(&file, &[1, 6], &[1, 3, 4, 6]);
+        assert!(known_reason(&p, &inside).is_some(), "{inside:?}");
+        // An extra line outside the comment keeps it new.
+        let (p, outside) = comment_verdict(&file, &[1], &[1, 3, 6]);
+        assert_eq!(known_reason(&p, &outside), None, "{outside:?}");
+        // A missing line keeps it new too.
+        let (p, missing) = comment_verdict(&file, &[1, 6], &[1, 3]);
+        assert_eq!(known_reason(&p, &missing), None, "{missing:?}");
+    }
+
+    #[test]
+    fn comment_lines_finds_nested_comment_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.clj");
+        std::fs::write(
+            &file,
+            "(ns a)\n(defn f []\n  (comment\n    1))\n(comment\n  (comment 2)\n  3)\n(comments 4)\n",
+        )
+        .unwrap();
+        assert_eq!(oracle::comment_lines(&file), vec![(2, 3), (4, 6), (5, 5)]);
     }
 }
 
