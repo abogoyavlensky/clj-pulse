@@ -184,7 +184,7 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
 - Modify: `src/index/extractor.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing extractor tests**:
+- [x] **Step 1: Write failing extractor tests**:
   - `(ns t (:require [clj-kondo.impl.rewrite-clj.node [protocols :as node] [seq :as s] utils]))`
     → aliases `node` → `clj-kondo.impl.rewrite-clj.node.protocols`, `s` →
     `…node.seq`; requires hold `…node.protocols`, `…node.seq`, `…node.utils` and
@@ -194,16 +194,16 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
   - `(:use [a.b c [d :only [f]]])` → refer-all `a.b.c`, `a.b.d`;
   - `alias_sites_tree` finds the `node` declaration inside the vector prefix list.
   Run: `cargo test --test test_extractor prefix` — Expected: the new tests FAIL.
-- [ ] **Step 2: Implement.** Add `fn is_prefix_vector(items: &[Node]) -> bool`
+- [x] **Step 2: Implement.** Add `fn is_prefix_vector(items: &[Node]) -> bool`
   (first `sym_lit`, second present and `sym_lit` or `vec_lit`). In each of the
   three readers, route a `vec_lit` that `is_prefix_vector` accepts to the same
   code the `list_lit` arm runs, extracting that body into a shared function per
   reader where it is not one already.
-- [ ] **Step 3: Run** `cargo test --test test_extractor` and
+- [x] **Step 3: Run** `cargo test --test test_extractor` and
   `cargo test --lib` (diagnostics' `prefix_list_binds_the_joined_name_only` and
   code-action tests) — Expected: PASS. Add a vector case to
   `prefix_list_binds_the_joined_name_only` in `src/diagnostics.rs`.
-- [ ] **Step 4: Commit** `git commit -m "extractor: a vector prefix list binds like a list prefix list"`
+- [x] **Step 4: Commit** `git commit -m "extractor: a vector prefix list binds like a list prefix list"`
   (Task 1 already bumped the cache version; one bump covers both.)
 
 ### Task 3: E2E on a `.cljc` split alias

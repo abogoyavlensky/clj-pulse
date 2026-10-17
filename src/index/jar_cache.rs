@@ -31,7 +31,8 @@ use super::{NsMeta, Symbol};
 /// 25: a keyword entry of a key directive (`{:keys [::db]}`) is an
 ///     occurrence of the key it reads and binds its name.
 /// 26: a `.cljc` reader conditional in an ns form resolves through its
-///     Clojure branch.
+///     Clojure branch, and a vector prefix list (`[a.b [c :as x]]`) binds
+///     like a list one.
 pub const CACHE_FORMAT_VERSION: u32 = 26;
 
 #[derive(Serialize, Deserialize)]
