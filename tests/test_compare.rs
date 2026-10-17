@@ -466,6 +466,21 @@ static KNOWN: &[Known] = &[
         },
         reason: FACADE_REASON,
     },
+    // A protocol method's references both ways at once: extra lines are its
+    // implementations (the `var-def/defprotocol` entry below) and every
+    // missing line is a facade caller (the entry above). A vector prefix
+    // list (`[a.b [protocols :as node]]`) is what lets the implementations
+    // through on clj-kondo's own `defprotocol+`.
+    Known {
+        bucket_prefix: "var-def/defprotocol",
+        matches: |probe, verdict| match (&probe.tag, verdict) {
+            (Tag::FacadeCallers(callers), Verdict::Diverge { missing_lines, .. }) => {
+                !missing_lines.is_empty() && missing_lines.is_subset(callers)
+            }
+            _ => false,
+        },
+        reason: FACADE_REASON,
+    },
     // kondo analyzes a `.cljc` file in both dialects, and a token only one
     // `#?(:cljs …)` branch holds has a ClojureScript entry alone; clj-pulse
     // asks a `.cljc` file as Clojure (AGENTS.md), so it lands on the
@@ -1472,6 +1487,25 @@ mod judge_tests {
         p.tag = Tag::FacadeCallers(Arc::new([(PathBuf::from("/corpus/src/a.clj"), 9)].into()));
         let lacks_more = judge(&p, &Answer::Result(locations(&[(3, 2)])), root, &roots());
         assert_eq!(known_reason(&p, &lacks_more), None);
+    }
+
+    /// A protocol method missing facade callers while listing its
+    /// implementations is known; the same shape on a plain `defn` is not.
+    #[test]
+    fn protocol_extras_with_missing_facade_callers_are_known() {
+        let root = Path::new("/corpus");
+        let file = PathBuf::from("/corpus/src/a.clj");
+        let mut p = probe(Expectation::References(sites(&[(3, 2), (9, 4)])));
+        p.tag = Tag::FacadeCallers(Arc::new([(file, 9)].into()));
+        let both = judge(
+            &p,
+            &Answer::Result(locations(&[(3, 2), (20, 4)])),
+            root,
+            &roots(),
+        );
+        assert_eq!(known_reason(&p, &both), None, "a defn: {both:?}");
+        p.bucket = "var-def/defprotocol+".into();
+        assert_eq!(known_reason(&p, &both), Some(FACADE_REASON), "{both:?}");
     }
 
     #[test]
