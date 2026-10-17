@@ -445,16 +445,43 @@ fn process_reader_conditional(
     symbols: &mut Vec<Symbol>,
     cfg: &ExtractConfig,
 ) {
-    let children: Vec<Node> = named_children(node);
-    // read_cond_lit contains alternating kwd_lit and form pairs
-    let mut i = 0;
-    while i + 1 < children.len() {
-        let form = &children[i + 1];
-        if form.kind() == "list_lit" {
-            process_top_level_list(*form, source, file, ns_meta, symbols, cfg);
+    // `ns` branches first, the Clojure one last so its aliases win; every
+    // other branch in source order, so the outline keeps document order.
+    for form in reader_branches_clojure_last(node, source) {
+        if form.kind() == "list_lit" && is_ns_form(form, source) {
+            process_top_level_list(form, source, file, ns_meta, symbols, cfg);
         }
-        i += 2;
     }
+    for pair in named_children(node).chunks(2) {
+        if let [_, form] = pair {
+            if form.kind() == "list_lit" && !is_ns_form(*form, source) {
+                process_top_level_list(*form, source, file, ns_meta, symbols, cfg);
+            }
+        }
+    }
+}
+
+/// The branch forms of a reader conditional, the one the Clojure reader takes
+/// (the first `:clj` or `:default` branch) last, so it wins every slot the
+/// branches share; the others still record what only they bind.
+fn reader_branches_clojure_last<'a>(node: Node<'a>, source: &str) -> Vec<Node<'a>> {
+    let mut branches = Vec::new();
+    let mut clojure = None;
+    // Alternating `:dialect form` pairs.
+    for pair in named_children(node).chunks(2) {
+        let [key, form] = pair else {
+            continue;
+        };
+        let is_clojure =
+            key.kind() == "kwd_lit" && matches!(node_text(*key, source), ":clj" | ":default");
+        if is_clojure && clojure.is_none() {
+            clojure = Some(*form);
+        } else {
+            branches.push(*form);
+        }
+    }
+    branches.extend(clojure);
+    branches
 }
 
 /// Resolves a list-head `sym_lit` to the fully-qualified name clj-kondo would
@@ -818,14 +845,13 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
                 }
             }
         }
-        // Reader conditional: descend into each branch's form (skip platform
-        // keywords). Reader conditionals nested inside a prefix list are out
-        // of scope and record nothing.
+        // Reader conditional: descend into each branch's form, the Clojure
+        // branch last so a `.cljc` alias split per platform resolves as
+        // Clojure. Reader conditionals nested inside a prefix list are out of
+        // scope and record nothing.
         "read_cond_lit" | "splicing_read_cond_lit" => {
-            for child in named_children(spec) {
-                if child.kind() != "kwd_lit" {
-                    process_require_spec(child, source, ns_meta);
-                }
+            for form in reader_branches_clojure_last(spec, source) {
+                process_require_spec(form, source, ns_meta);
             }
         }
         _ => {}
@@ -3486,9 +3512,9 @@ fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
     for child in named_children(tree.root_node()) {
         match child.kind() {
             "list_lit" => read_ns(child),
-            // Alternating `:dialect form` pairs, as `process_reader_conditional`.
+            // The Clojure branch last, as `process_reader_conditional`.
             "read_cond_lit" => {
-                for form in named_children(child).into_iter().skip(1).step_by(2) {
+                for form in reader_branches_clojure_last(child, source) {
                     read_ns(form);
                 }
             }
