@@ -1290,8 +1290,11 @@ pub fn unjudged(text: &str, covered: &BTreeSet<(u32, u32)>) -> usize {
 }
 
 /// The 0-based, inclusive line spans of every `(comment …)` form in `file`,
-/// nested ones included. The oracle runs kondo with `:skip-comments true`, so
-/// nothing inside one is a site of the oracle's.
+/// nested ones included, headed by `comment` or a core-qualified
+/// `clojure.core/comment` / `cljs.core/comment`. The oracle runs kondo with
+/// `:skip-comments true`, so nothing inside one is a site of the oracle's.
+/// Quoted data (`'(comment …)`, `` `… ``, `(quote …)`) is data, not a form, and
+/// is not entered. A local named `comment` is not told apart.
 pub fn comment_lines(file: &Path) -> Vec<(u32, u32)> {
     let Ok(text) = std::fs::read_to_string(file) else {
         return Vec::new();
@@ -1303,13 +1306,22 @@ pub fn comment_lines(file: &Path) -> Vec<(u32, u32)> {
     let mut cursor = tree.walk();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "quoting_lit" | "syn_quoting_lit") {
+            continue;
+        }
         if node.kind() == "list_lit" {
             let head = node
                 .named_children(&mut cursor)
-                .find(|n| !matches!(n.kind(), "comment" | "dis_expr"));
-            let is_comment = head.is_some_and(|h| {
-                h.kind() == "sym_lit" && h.utf8_text(text.as_bytes()) == Ok("comment")
-            });
+                .find(|n| !matches!(n.kind(), "comment" | "dis_expr"))
+                .filter(|h| h.kind() == "sym_lit")
+                .and_then(|h| h.utf8_text(text.as_bytes()).ok());
+            if head == Some("quote") {
+                continue;
+            }
+            let is_comment = matches!(
+                head,
+                Some("comment" | "clojure.core/comment" | "cljs.core/comment")
+            );
             if is_comment {
                 out.push((
                     node.start_position().row as u32,

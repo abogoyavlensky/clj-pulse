@@ -1578,10 +1578,13 @@ mod judge_tests {
         let file = tmp.path().join("a.clj");
         std::fs::write(
             &file,
-            "(ns a)\n(defn f []\n  (comment\n    1))\n(comment\n  (comment 2)\n  3)\n(comments 4)\n",
+            "(ns a)\n(defn f []\n  (comment\n    1))\n(comment\n  (comment 2)\n  3)\n(comments 4)\n(clojure.core/comment 5)\n'(comment 6)\n(quote (comment 7))\n`(comment 8)\n",
         )
         .unwrap();
-        assert_eq!(oracle::comment_lines(&file), vec![(2, 3), (4, 6), (5, 5)]);
+        assert_eq!(
+            oracle::comment_lines(&file),
+            vec![(2, 3), (4, 6), (5, 5), (8, 8)]
+        );
     }
 }
 
