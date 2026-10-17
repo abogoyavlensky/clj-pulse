@@ -1565,6 +1565,52 @@ mod judge_tests {
         }
     }
 
+    /// A bare name inside the namespace that re-exports it is a facade
+    /// caller of the original: clj-pulse does not follow `import-vars`.
+    #[test]
+    fn a_bare_name_in_its_facade_namespace_is_a_facade_caller() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (p, f) = (tmp.path().join("p.clj"), tmp.path().join("f.clj"));
+        std::fs::write(&p, "(ns p)\n(defn tag [n] n)\n").unwrap();
+        std::fs::write(
+            &f,
+            "(ns f (:require p [potemkin :refer [import-vars]]))\n(import-vars [p tag])\n(tag 1)\n",
+        )
+        .unwrap();
+        let (p, f) = (p.display().to_string(), f.display().to_string());
+        let analysis: Analysis = serde_json::from_value(json!({
+            "var-definitions": [
+                { "ns": "p", "name": "tag", "filename": p, "row": 2, "col": 1,
+                  "name-row": 2, "name-col": 7, "defined-by": "clojure.core/defn" },
+                { "ns": "f", "name": "tag", "filename": f, "row": 2, "col": 1,
+                  "name-row": 2, "name-col": 18, "defined-by": "potemkin/import-vars" }
+            ],
+            "var-usages": [
+                { "from": "f", "to": "p", "name": "tag", "filename": f, "row": 3, "col": 1,
+                  "name-row": 3, "name-col": 2 }
+            ]
+        }))
+        .unwrap();
+        let probes = oracle::probes(&analysis);
+        let original = probes
+            .iter()
+            .find(|pr| {
+                pr.file.ends_with("p.clj") && matches!(pr.expect, Expectation::References(_))
+            })
+            .expect("a references probe on the original");
+        match &original.tag {
+            Tag::FacadeCallers(callers) => {
+                assert!(
+                    callers
+                        .iter()
+                        .any(|(file, line)| file.ends_with("f.clj") && *line == 2),
+                    "{callers:?}"
+                )
+            }
+            other => panic!("expected FacadeCallers, got {other:?}"),
+        }
+    }
+
     fn file_sites(file: &Path, lines: &[u32]) -> Sites {
         Sites::from_exact(lines.iter().map(|l| (file.to_path_buf(), *l, 1)).collect())
     }

@@ -800,15 +800,24 @@ pub fn probes_and_skipped(analysis: &Analysis) -> (Vec<Probe>, Skipped) {
     }
     // A usage reaches its var through a re-export when kondo resolves it into
     // a namespace its alias does not name (`mt/with-temp` →
-    // `toucan2.tools.with-temp`), or lands on a re-export entry.
+    // `toucan2.tools.with-temp`), lands on a re-export entry, or is a bare
+    // name inside the namespace that re-exports it (`tag` in the facade
+    // namespace whose `import-vars` brings `tag` in).
     let via_facade = |u: &VarUsage| {
+        let reexported = |ns: &str| {
+            primary
+                .get(&(ns, u.name.as_str()))
+                .is_some_and(|d| is_facade_def(d))
+        };
         u.alias.as_deref().is_some_and(|a| {
             alias_targets
                 .get(&(u.filename.as_str(), a))
                 .is_some_and(|nss| !nss.contains(u.to.as_str()))
-        }) || primary
-            .get(&(u.to.as_str(), u.name.as_str()))
-            .is_some_and(|d| is_facade_def(d))
+        }) || reexported(u.to.as_str())
+            || (u.alias.is_none()
+                && u.from
+                    .as_deref()
+                    .is_some_and(|from| from != u.to && reexported(from)))
     };
     // kondo analyzes a `.cljc` file once per dialect: a token outside any
     // `#?` has a Clojure entry where its ClojureScript one sits, and the
