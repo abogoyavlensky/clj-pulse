@@ -102,10 +102,14 @@ there.
   known ones grouped by reason. Advisory: it fails only on a dead server, a
   `panicked at`, an unexpected JSON-RPC error, or kondo not running;
   `CLJ_PULSE_COMPARE_STRICT=1` fails on any new divergence too. Compare
-  against the tables in [docs/MEMORY.md](docs/MEMORY.md), on the same
-  `.clj-kondo/.cache` state: the server's own kondo warm-up fills the
-  corpus's cache during a run, and a cold-cache oracle classifies library
-  usages differently. A corpus whose root only gathers `:local/root`
+  against the tables in [docs/MEMORY.md](docs/MEMORY.md). A cold-cache
+  oracle classifies library usages differently, and the server's own kondo
+  warm-up fills the corpus's `.clj-kondo/.cache` during a run, and library
+  configs that clojure-lsp copies into `.clj-kondo/` on its `bb bench` start
+  (toucan2's `with-temp` hook) change which locals kondo sees, so the task
+  first runs `kondo-warm!` — `--dependencies --copy-configs` over each
+  project's `clojure -A:dev:test -Spath` — and every run asks on that one
+  state. A corpus whose root only gathers `:local/root`
   projects (penpot) lists them under `:projects` in `bb.edn`, passed as
   `CLJ_PULSE_CORPUS_PROJECTS`; `sites::corpus_bases` reads it, so the
   oracle lints, and the soak churns, those projects' `src`/`test`.

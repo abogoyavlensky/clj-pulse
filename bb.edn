@@ -78,6 +78,49 @@
                 (catch Exception e
                   (println "WARNING: could not run the clojure CLI:" (ex-message e))))))
 
+          (defn kondo-warm!
+            "Fills the corpus's `.clj-kondo/.cache` from every project's
+             classpath *before* `bb compare` asks the oracle, the way the
+             server's own warm-up (`kondo::warm`) fills it during a run. A
+             cold-cache oracle classifies library usages differently, so
+             without this the table depends on whether some earlier run left a
+             warm cache behind. `--copy-configs` imports the configs libraries
+             export (toucan2's `with-temp` hook) the way clojure-lsp does on its
+             own start, which `bb bench` runs: kondo auto-loads them, so whether
+             they exist changes which locals the oracle sees. kondo skips a JAR
+             it has already linted, so a warm corpus costs seconds. Runs from this repo's directory with
+             absolute paths, so a version-manager shim resolves; a failure is a
+             warning, like `bench-prepare!`."
+            [dir projects]
+            (let [kondo-dir (fs/path dir ".clj-kondo")]
+              (when (fs/directory? kondo-dir)
+                (println "Warming clj-kondo's cache from the corpus classpath ...")
+                (try
+                  (doseq [base (if (seq projects) (cons "." projects) ["."])
+                          :let [base-dir (fs/normalize (fs/absolutize (fs/path dir base)))]
+                          :when (fs/exists? (fs/path base-dir "deps.edn"))]
+                    (let [{:keys [exit out err]} (shell {:dir (str base-dir) :out :string
+                                                         :err :string :continue true}
+                                                        "clojure -A:dev:test -Spath")
+                          entries (->> (str/split (str/trim (str out))
+                                                  (re-pattern java.io.File/pathSeparator))
+                                       (remove str/blank?)
+                                       (map (fn [entry] (str (fs/absolutize (fs/path base-dir entry)))))
+                                       (filter fs/exists?))]
+                      (if (or (not (zero? exit)) (empty? entries))
+                        (println "WARNING: no classpath for" (str base-dir) (str/trim (str err)))
+                        (let [{:keys [exit err]}
+                              (shell {:out :string :err :string :continue true}
+                                     "clj-kondo" "--lint" (str/join java.io.File/pathSeparator entries)
+                                     "--dependencies" "--copy-configs" "--parallel"
+                                     "--config-dir" (str kondo-dir)
+                                     "--cache-dir" (str (fs/path kondo-dir ".cache")))]
+                          (when-not (zero? exit)
+                            (println "WARNING: warming the cache failed for" (str base-dir)
+                                     (str/trim (str err))))))))
+                  (catch Exception e
+                    (println "WARNING: could not warm clj-kondo's cache:" (ex-message e)))))))
+
           ;; --- the server we compare against ---------------------------------
           (def clojure-lsp-version "2026.07.06-14.34.19")
 
@@ -198,6 +241,7 @@
                        dir (bench-corpus! name)
                        projects (get-in bench-corpora [name :projects])]
                    (bench-prepare! dir)
+                   (kondo-warm! dir projects)
                    (shell {:extra-env (cond-> {"CLJ_PULSE_COMPARE_ROOT" (str dir)
                                                "CLJ_PULSE_COMPARE_CORPUS" name}
                                         projects (assoc "CLJ_PULSE_CORPUS_PROJECTS"

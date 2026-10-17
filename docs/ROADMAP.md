@@ -448,6 +448,11 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - 2026-09-05 **clj-kondo `--copy-configs`** for JAR-exported lint configs.
   Deferred because it writes into the user's working tree; would need an
   explicit opt-in.
+  2026-10-17: `bb compare metabase` shows what it costs: with toucan2's
+  copied `with-temp` hook kondo binds `mt/with-temp` vectors as locals and
+  we do not (about 50 `local/plain` answers, [MEMORY.md](MEMORY.md),
+  "metabase on a canonical kondo state"). Copying would fix diagnostics,
+  not navigation; navigation needs the enrichment item above.
 - 2026-09-08 **`textDocument/foldingRange`.** Dropped from Milestone 3: VS Code
   folds Clojure correctly by indentation when no server range exists, and
   Neovim and Zed fold from tree-sitter. A server would only add semantic kinds

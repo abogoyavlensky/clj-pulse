@@ -126,6 +126,28 @@ predate the ClojureScript and quoted-keyword changes, so the step is not
 this change's alone; the change itself drops symbols (`defmethod`) and
 occurrences (declare-only names) rather than adding any.
 
+An A/B on 2026-10-17, after `:lint-as` binding forms, `defspec` and `:keys`
+keyword entries: clj-pulse alone (no `CLJ_PULSE_BENCH_CLOJURE_LSP`), the
+branch then master `2ea7c39` (0.5.6) back to back, one run each, same
+container. Every row of the branch sits within master's run-to-run spread:
+
+| Metric | metabase branch | metabase master | clj-kondo branch | clj-kondo master |
+|---|---|---|---|---|
+| First navigation, cold / warm | 6.5 / 5.1 s | 5.5 / 5.5 s | 643 / 522 ms | 527 / 527 ms |
+| All dependencies, cold / warm | 9.4 / 5.8 s | 8.2 / 6.2 s | 1.3 s / 624 ms | 1.6 s / 632 ms |
+| clj-kondo finished, cold / warm | 71 / 60 s | 72 / 51 s | 11.5 / 2.2 s | 13.4 / 2.6 s |
+| RSS settled, cold / warm | 467 / 454 MiB | 459 / 454 MiB | 119 / 92 MiB | 120 / 90 MiB |
+| Definition, warm | 28 ms | 26 ms | 23 ms | 28 ms |
+| didChange → diagnostics, warm | 415 / 1010 ms | 380 / 864 ms | 824 ms | 818 ms |
+| Symbols indexed | 51 082 | 50 349 | 2 252 | 2 252 |
+
+The 733 extra metabase symbols are `defspec` and `def-catch-all` vars. RSS
+on metabase reads 454 MiB on master as well, so the step from the 363 MiB
+table above came in with earlier releases, not this branch. The full
+`bb bench` before the A/B lost clojure-lsp's warm metabase run to a
+`timed out waiting for response to initialize` (its cold run had settled at
+2 388 MiB), and the task stops at the first failing corpus.
+
 ### macOS (2026-09-22)
 
 The same `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the maintainer's 2021 MacBook
@@ -656,6 +678,38 @@ theirs — most of the `var-def/other` gain — and locals bound by
 `u/for-map` and other `:lint-as`'d binding macros are locals. The clj-kondo
 corpus matched its table row for row after each change (5249 / 4920 / 216 /
 62 / 51).
+
+### metabase on a canonical kondo state (2026-10-17)
+
+Two states outside our code moved the table between runs: kondo's
+`.clj-kondo/.cache` (cold or warmed by an earlier server run) and the
+library configs clojure-lsp copies into `.clj-kondo/` (`babashka`,
+`methodical`, `potemkin`, `com.github.camsaul/toucan2`, …) when `bb bench`
+starts it — kondo auto-loads those. `bb compare` now sets both first
+(`kondo-warm!` in `bb.edn`: `--dependencies --copy-configs` over each
+project's `clojure -A:dev:test -Spath`). Two runs, the first from a cold
+cache with the configs present, the second with cache, copied configs and
+`inline-configs` all moved aside, matched row for row and in kondo's counts
+(60678 var-definitions, 880935 var-usages, 202995 locals). This is the
+metabase baseline from now on:
+
+| Bucket | Probes | Agree | Diverge | Known | Null | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|
+| `local/plain` | 600 | 529 | 46 | 0 | 25 | 583 | 8 | 9 |
+| `local/destructured` | 595 | 495 | 9 | 0 | 91 | 508 | 11 | 81 |
+| `keyword/qualified` | 400 | 197 | 183 | 0 | 2 | 203 | 164 | 3 |
+| `var-usage/library` | 200 | 5 | 144 | 0 | 51 | 0 | 63 | 137 |
+| `var-usage/project/aliased` | 200 | 138 | 0 | 0 | 62 | 132 | 0 | 68 |
+| **total** | 8975 | 6407 | 1439 | 368 | 743 | 6463 | 1297 | 811 |
+
+"Before" is the 2026-10-16 table above (warm cache, no copied configs);
+the other rows moved by ten probes or fewer. The server is the same build. The
+`local/*` loss is toucan2's exported `with-temp` hook: kondo now binds
+`{card-id :id}` inside `mt/with-temp […]` as a local, and we read the
+binding vector as data, so references on `card-id` answer every `card-id`
+in the file (13 against 3) and rename refuses. A clojure-lsp user, whose
+server copies configs on start, gets the local; that is a real gap, of the
+hook-defined-names class.
 
 ## Compare on penpot (2026-10-16)
 
