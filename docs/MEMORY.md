@@ -794,6 +794,57 @@ the corpus restored to its pin. The soak churns `backend/src` and the other
 three projects' `src` (`corpus_bases`) and creates its files under
 `backend/src`.
 
+## Compare after oracle triage (2026-10-17)
+
+The three corpora on one build, after the harness learned to set aside what
+is the oracle's and what is *Not planned*:
+
+- **`import-vars`** (ROADMAP *Not planned*, 2026-10-17): a usage whose
+  alias names another namespace than kondo resolves it into
+  (`mt/with-temp` → `toucan2.tools.with-temp`), a question at a re-export
+  entry, and an original's references missing only such callers are
+  `known`.
+- **`.cljc` twins**: kondo reports a token outside `#?` once per dialect;
+  the ClojureScript entry is not asked (103 282 on metabase, 89 670 on
+  penpot). A ClojureScript-only usage that lands on the Clojure var is
+  `known`, since clj-pulse asks `.cljc` as Clojure.
+- **Tokens not spelling the name**: entries a hook or macro placed on
+  another token (`assert-submaps2` on `assert-submaps`, `case` at the
+  bracket of clj-kondo's `one-of`, metabase's `with-temp` output) are not
+  asked — 146 on clj-kondo, 3 106 on penpot, 21 785 on metabase. A `:keys`
+  keyword entry, a `T.` call and a name ending in `'` count as spelling it.
+- A known null now counts as known alone; before, a probe could sit in
+  both columns.
+
+| Corpus | Probes | Agree | Diverge | Known | Null | Soft | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|---|
+| clj-kondo | 5246 | 4921 | 141 | 141 | 43 | 0 | 4920 | 216 | 51 |
+| penpot | 7609 | 6642 | 219 | 367 | 381 | 0 | 6418 | 378 | 358 |
+| metabase | 8969 | 6589 | 830 | 1216 | 316 | 18 | 6407 | 1439 | 743 |
+
+"Before" is each corpus's last table. Same build, so no row moved through
+the server. metabase's before is the canonical-state run, so its delta is the
+triage plus resampling: skipped entries change each bucket's population, and
+the 200-per-bucket sample with it (`local/destructured` 495 → 558 agree,
+`var-usage/project/referred` 164 → 149 on 167 → 153 probes). penpot's before
+predates the canonical kondo state, so its rows also carry the copied
+configs (rumext's among them); `local/destructured` went 475 → 458. What is
+left, by class:
+
+- **Names kondo hooks define**, the bulk of penpot's nulls:
+  `var-usage/project/referred` (119 null, `mf/defc` components such as
+  `recovery-request-page*`), `local/destructured` (100 null, their props),
+  and metabase's `defsetting` / `defenterprise` rows. The kondo-analysis
+  enrichment item.
+- **Protocol and record rows** (`var-def/defprotocol` 302 known on penpot):
+  extra implementation sites, known by design.
+- **penpot `var-usage/core/aliased`**, 80 null: `c/array?`,
+  `c/IEditableCollection` in `.cljc` files whose `c` alias is
+  `#?(:clj clojure.core :cljs cljs.core)`; kondo files them under
+  `clojure.core`, where no such var exists. Oracle-side, not yet tolerated.
+- **metabase `local/plain`**, 42 diverge: toucan2's `with-temp` hook binds
+  its vector as locals (see "metabase on a canonical kondo state").
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,

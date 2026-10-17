@@ -164,8 +164,18 @@ there.
   with the corpus's `.clj-kondo` config and `:skip-comments true`; answer sites
   outside those roots are dropped before judging. `KNOWN` in
   `test_compare.rs` is the allowlist: a divergence it matches counts as
-  `known` under its reason; triage adds an entry with a dated reason, a fixed
-  bug removes its entry. The same pipeline runs on `simple_project` in
+  `known` under its reason (a known null too, so the columns add up to
+  `probes`); triage adds an entry with a dated reason, a fixed
+  bug removes its entry. A probe carries a `Tag` the oracle reads off
+  kondo's own data for the entries that read structure: `Facade` when a
+  usage's alias names another namespace than kondo resolves it into, or the
+  probe is a potemkin re-export entry (`import-vars` is *Not planned*);
+  `FacadeCallers` for an original whose missing lines are all such callers;
+  `CljsHalf` for a `.cljc` usage kondo read as ClojureScript alone. Entries
+  no question is asked at are counted and sampled under "not asked": the
+  ClojureScript twin of a `.cljc` entry kondo also reports as Clojure, and an
+  entry whose token does not spell its name (`oracle::spells`: hook output,
+  a `case` at a macro's bracket). The same pipeline runs on `simple_project` in
   `bb check` (`compare_simple_project`, kill switches on, library probes left
   out), which must stay at zero new divergences; it skips when the host has
   no clj-kondo.

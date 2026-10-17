@@ -13,7 +13,7 @@ use std::time::Instant;
 use serde_json::{json, Value};
 
 use common::diff::{brief, brief_set, Divergence};
-use common::oracle::{self, Analysis, Expectation, Probe, Sites};
+use common::oracle::{self, Analysis, Expectation, Probe, Sites, Tag};
 use common::session::{settle, Session, REQUEST_TIMEOUT};
 use common::setup_project;
 use common::sites::{corpus_bases, definition_uris, landing, Dialect, Expect, Landing};
@@ -128,6 +128,9 @@ enum Verdict {
         got: String,
         missing: usize,
         extra_files: BTreeSet<PathBuf>,
+        /// The `(file, line)`s the answer counts fewer times than the oracle;
+        /// empty for a single-site answer.
+        missing_lines: BTreeSet<(PathBuf, u32)>,
     },
     /// An empty or `null` answer where the oracle has one: a wrong answer,
     /// reported in its own column so "resolved wrong" and "did not resolve"
@@ -259,6 +262,12 @@ fn judge_sites(expected: &Sites, got: &Sites, root: &Path) -> Verdict {
                 .filter(|(key, n)| **n > expected.per_line.get(*key).copied().unwrap_or(0))
                 .map(|((file, _), _)| file.clone())
                 .collect(),
+            missing_lines: expected
+                .per_line
+                .iter()
+                .filter(|(key, n)| **n > got.per_line.get(*key).copied().unwrap_or(0))
+                .map(|(key, _)| key.clone())
+                .collect(),
         };
     }
     if expected.exact != got.exact {
@@ -291,6 +300,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                 Verdict::Diverge {
                     missing: 1,
                     extra_files: BTreeSet::new(),
+                    missing_lines: BTreeSet::new(),
                     expected,
                     got: match uri_path(first) {
                         Some(p) => format!(
@@ -318,6 +328,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                         got: format!("wrong dialect: {}", uris.join(", ")),
                         missing: 1,
                         extra_files: BTreeSet::new(),
+                        missing_lines: BTreeSet::new(),
                     }
                 }
                 Landing::Miss => {}
@@ -341,6 +352,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
                     got: uris.join(", "),
                     missing: 1,
                     extra_files: BTreeSet::new(),
+                    missing_lines: BTreeSet::new(),
                 }
             }
         }
@@ -355,6 +367,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
             got: "refused".into(),
             missing: sites.exact.len(),
             extra_files: BTreeSet::new(),
+            missing_lines: BTreeSet::new(),
         },
         (Expectation::RenameRefused, Answer::Refused) => Verdict::Agree,
         (Expectation::RenameRefused, Answer::Edit(edit)) => Verdict::Diverge {
@@ -362,6 +375,7 @@ fn judge(probe: &Probe, answer: &Answer, root: &Path, roots: &[PathBuf]) -> Verd
             got: format!("edit of {:?}", site_keys(&edit_sites(edit), root)),
             missing: 0,
             extra_files: BTreeSet::new(),
+            missing_lines: BTreeSet::new(),
         },
         (_, Answer::Error(err)) => Verdict::Null {
             expected: format!("an answer, not {}", brief(&json!(err))),
@@ -405,7 +419,50 @@ struct Known {
     reason: &'static str,
 }
 
+const FACADE_REASON: &str = "a var spelled through a potemkin `import-vars` re-export: kondo follows it, clj-pulse does not (Not planned, 2026-10-17)";
+
 static KNOWN: &[Known] = &[
+    // kondo follows `import-vars`, `import-fn`, … and macros `:lint-as`'d to
+    // them; clj-pulse is a generic tool and does not (ROADMAP *Not
+    // planned*). A usage spelled through a facade, or a question at the
+    // re-export entry, is that difference whatever the answer.
+    Known {
+        bucket_prefix: "",
+        matches: |probe, _| matches!(probe.tag, Tag::Facade),
+        reason: FACADE_REASON,
+    },
+    // An original's references and rename, when every line the answer lacks
+    // is a caller that spelled it through a facade.
+    Known {
+        bucket_prefix: "var-def/",
+        matches: |probe, verdict| match (&probe.tag, verdict) {
+            (
+                Tag::FacadeCallers(callers),
+                Verdict::Diverge {
+                    missing_lines,
+                    extra_files,
+                    ..
+                },
+            ) => {
+                !missing_lines.is_empty()
+                    && extra_files.is_empty()
+                    && missing_lines.is_subset(callers)
+            }
+            _ => false,
+        },
+        reason: FACADE_REASON,
+    },
+    // kondo analyzes a `.cljc` file in both dialects, and a token only one
+    // `#?(:cljs …)` branch holds has a ClojureScript entry alone; clj-pulse
+    // asks a `.cljc` file as Clojure (AGENTS.md), so it lands on the
+    // Clojure var of that name. A null is still a divergence.
+    Known {
+        bucket_prefix: "var-usage/",
+        matches: |probe, verdict| {
+            matches!(probe.tag, Tag::CljsHalf) && matches!(verdict, Verdict::Diverge { .. })
+        },
+        reason: "a `.cljc` token kondo read as ClojureScript alone; clj-pulse asks `.cljc` as Clojure (2026-10-17)",
+    },
     // `(let [x 2] #'x)`: Clojure's `var` form ignores locals and names the
     // global `x`, while kondo's analysis records the `x` as a use of the
     // local. clj-pulse answers nothing there yet (docs/backlog,
@@ -555,10 +612,7 @@ impl Report {
                 row.soft += 1;
                 return;
             }
-            Verdict::Null { ref expected } => {
-                row.null += 1;
-                (expected.clone(), "null".to_string())
-            }
+            Verdict::Null { ref expected } => (expected.clone(), "null".to_string()),
             Verdict::Diverge {
                 ref expected,
                 ref got,
@@ -576,9 +630,12 @@ impl Report {
                 row.known += 1;
                 self.known.entry(reason).or_default().push(divergence);
             }
+            // A known null is known alone, so the columns add up to `probes`.
             None => {
                 if matches!(verdict, Verdict::Diverge { .. }) {
                     row.diverge += 1;
+                } else {
+                    row.null += 1;
                 }
                 self.new_divergences.push(divergence);
             }
@@ -1066,6 +1123,7 @@ mod judge_tests {
             token: "f".into(),
             bucket: "var-def/defn".into(),
             expect,
+            tag: Tag::None,
         }
     }
 
@@ -1360,6 +1418,35 @@ mod judge_tests {
         assert_eq!(report.rows["var-def/defn"].known, 1);
         assert_eq!(report.known.len(), 1);
     }
+
+    #[test]
+    fn references_missing_only_facade_callers_are_known() {
+        let root = Path::new("/corpus");
+        let file = PathBuf::from("/corpus/src/a.clj");
+        let mut p = probe(Expectation::References(sites(&[(3, 2), (9, 4), (12, 4)])));
+        p.tag = Tag::FacadeCallers(Arc::new([(file.clone(), 9), (file, 12)].into()));
+        let lacks_callers = judge(&p, &Answer::Result(locations(&[(3, 2)])), root, &roots());
+        assert_eq!(known_reason(&p, &lacks_callers), Some(FACADE_REASON));
+        // A missing line no facade caller sits on is a real divergence.
+        p.tag = Tag::FacadeCallers(Arc::new([(PathBuf::from("/corpus/src/a.clj"), 9)].into()));
+        let lacks_more = judge(&p, &Answer::Result(locations(&[(3, 2)])), root, &roots());
+        assert_eq!(known_reason(&p, &lacks_more), None);
+    }
+
+    #[test]
+    fn a_cljs_half_is_known_when_it_lands_and_new_when_null() {
+        let root = Path::new("/corpus");
+        let mut p = probe(Expectation::Definition {
+            file: PathBuf::from("/corpus/src/b.cljc"),
+            line: 1,
+        });
+        p.bucket = "var-usage/project".into();
+        p.tag = Tag::CljsHalf;
+        let elsewhere = judge(&p, &Answer::Result(locations(&[(7, 0)])), root, &roots());
+        assert!(known_reason(&p, &elsewhere).is_some());
+        let null = judge(&p, &Answer::Result(Value::Null), root, &roots());
+        assert_eq!(known_reason(&p, &null), None);
+    }
 }
 
 const FIXTURE_LINT_AS: &str = "{:lint-as {malli.util/defn clojure.core/defn}}";
@@ -1517,7 +1604,7 @@ fn compare_corpus() {
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     println!("linting {}", paths.join(" "));
     let analysis = oracle::run(&root, &path_refs, "").expect("clj-kondo runs");
-    let all = oracle::probes(&analysis);
+    let (all, skipped) = oracle::probes_and_skipped(&analysis);
     let probes = sample(all, limit, files);
     println!(
         "analysis in {:?}: {} var-definitions, {} var-usages, {} locals, {} keywords; {} probes after sampling (limit {limit} per bucket and request{})",
@@ -1529,6 +1616,13 @@ fn compare_corpus() {
         probes.len(),
         files.map(|f| format!(", {f} files")).unwrap_or_default()
     );
+    for (reason, skip) in &skipped {
+        println!("  not asked: {} oracle entries, {reason}", skip.count);
+        for sample in &skip.samples {
+            let prefix = format!("{}/", root.display());
+            println!("    {}", sample.strip_prefix(&prefix).unwrap_or(sample));
+        }
+    }
 
     let mut session = Session::production(&root);
     let started = Instant::now();

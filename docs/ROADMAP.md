@@ -496,16 +496,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
   server now sends a per-pass failure reason as `detail` on
   `clojurePulse/lintStatus`; the extension's status-bar lint line renders
   `engine`, `version` and `warming` only.
-- 2026-10-16 **`bb compare metabase` oracle noise.** About 150 of the first
-  run's answers are the oracle's, not ours: usages kondo files under
-  `clojure.test` on tokens a hook generated (`segment-id` in an
-  `mt/with-temp` binding), locals with an empty token, and `.cljc` entries
-  kondo keeps for one dialect only (`testing` from the `:cljs` branch);
-  the harness should drop or tolerate them. penpot adds about 230 of the
-  `.cljc` kind (`cljs.core/filter` where we answer the Clojure half). Also
-  unexplained: 13 extra `sql-format-quoted` sites in
-  `semantic_search/index.clj` ([MEMORY.md](MEMORY.md), "metabase, first
-  run" and "Compare on penpot").
+- 2026-10-16 **`bb compare` leftovers.** The oracle noise is set aside
+  since 2026-10-17 ([MEMORY.md](MEMORY.md), "Compare after oracle triage").
+  Still unexplained: 13 extra `sql-format-quoted` sites in metabase's
+  `semantic_search/index.clj`, and penpot's 80 `c/array?`-style nulls under
+  a `#?(:clj clojure.core :cljs cljs.core)` alias, which kondo files under
+  `clojure.core`.
 
 ## Best effort — do when cheap or asked
 
