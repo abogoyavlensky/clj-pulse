@@ -84,11 +84,14 @@ there.
   `CLJ_PULSE_SOAK_RSS_GROWTH` (1.5x) — a gate, unlike `bb bench`. Each
   checkpoint prints a `SOAK_JSON` line, and the seed is printed on every run:
   `bb soak clj-kondo <seed>` replays a failure exactly. Defaults to clj-kondo
-  and 20 rounds (about half a minute); `bb soak metabase` is the long one.
+  and 20 rounds (about half a minute); `bb soak metabase` is the long one
+  and runs before a release only.
 
-- `bb compare [metabase|clj-kondo|penpot]` — differential correctness against
+- `bb compare [clj-kondo|penpot|metabase]` — differential correctness against
   clj-kondo's analysis on the same pinned corpora plus penpot, a correctness-only
-  corpus `bb bench` skips: one production server, and
+  corpus `bb bench` skips. Without an argument it runs clj-kondo then penpot
+  (`compare-order` in `bb.edn`, about 9 minutes); metabase takes about 28
+  and runs before a release. Per corpus: one production server, and
   a definition, references or rename question at every position the analysis
   knows the answer to (`tests/test_compare.rs`, oracle in
   `tests/common/oracle.rs`). A var usage must land on the var-definition's
@@ -121,8 +124,10 @@ there.
 | `bb e2e-calva` | definition, `jar:`, or location-shape changes |
 | `bb e2e-nvim` | new capabilities or protocol changes |
 | `bb bench` | before a release, and after index or extractor changes |
-| `bb soak` | before a release, and after index, watcher, or document-store changes |
-| `bb compare` | after extractor, resolver, references or rename changes |
+| `bb soak` | after index, watcher, or document-store changes (clj-kondo; penpot for multi-project or watcher work) |
+| `bb soak metabase` | before a release |
+| `bb compare` | after extractor, resolver, references or rename changes (clj-kondo and penpot) |
+| `bb compare metabase` | before a release |
 
 ## Testing notes
 

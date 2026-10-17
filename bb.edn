@@ -10,6 +10,12 @@
   :init (do
           (def bench-order ["metabase" "clj-kondo"])
 
+          ;; What `bb compare` runs without an argument: the per-change gate.
+          ;; metabase takes about 28 minutes, against 2 and 7 for these, and
+          ;; adds no construct penpot lacks; `bb compare metabase` runs
+          ;; before a release.
+          (def compare-order ["clj-kondo" "penpot"])
+
           (def bench-corpora
             {"metabase" {:url "https://github.com/metabase/metabase"
                          :sha "42a8e9f77d330c90c5a4d71927fed2823897f949"}
@@ -217,7 +223,7 @@
                                           (assoc "CLJ_PULSE_BENCH_RUNS" (System/getenv "CLJ_PULSE_BENCH_RUNS")))}
                             "cargo test --release --test test_bench -- --ignored --nocapture"))))}
 
-  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak metabase`, `bb soak penpot`, optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
+  soak {:doc "Soak one long-lived server through rounds of file churn on a pinned real repo, checked at every checkpoint against a freshly started server: `bb soak` (clj-kondo), `bb soak penpot`, `bb soak metabase` (before a release), optionally a seed to replay a failing run (`bb soak clj-kondo 12345`)"
         ;; One corpus, not both: a soak is long enough that running both by
         ;; default is a mistake. clj-kondo is the default because a checkpoint
         ;; there costs seconds rather than a minute.
@@ -235,18 +241,18 @@
                                             (str/join "," (get-in bench-corpora [name :projects]))))}
                        "cargo test --release --test test_soak -- --ignored --nocapture"))}
 
-  compare {:doc "Compare clj-pulse against clj-kondo's analysis on a pinned real repo: `bb compare` (clj-kondo), `bb compare metabase`, `bb compare penpot`. Advisory: prints divergences by construct; CLJ_PULSE_COMPARE_STRICT=1 fails on any new one"
-           :task (let [[name] *command-line-args*
-                       name (or name "clj-kondo")
-                       dir (bench-corpus! name)
-                       projects (get-in bench-corpora [name :projects])]
-                   (bench-prepare! dir)
-                   (kondo-warm! dir projects)
-                   (shell {:extra-env (cond-> {"CLJ_PULSE_COMPARE_ROOT" (str dir)
-                                               "CLJ_PULSE_COMPARE_CORPUS" name}
-                                        projects (assoc "CLJ_PULSE_CORPUS_PROJECTS"
-                                                        (str/join "," projects)))}
-                          "cargo test --release --test test_compare -- --ignored --nocapture"))}
+  compare {:doc "Compare clj-pulse against clj-kondo's analysis on pinned real repos: `bb compare` (clj-kondo, then penpot), `bb compare clj-kondo`, `bb compare penpot`, `bb compare metabase` (before a release). Advisory: prints divergences by construct; CLJ_PULSE_COMPARE_STRICT=1 fails on any new one"
+           :task (let [[name] *command-line-args*]
+                   (doseq [name (if name [name] compare-order)
+                           :let [dir (bench-corpus! name)
+                                 projects (get-in bench-corpora [name :projects])]]
+                     (bench-prepare! dir)
+                     (kondo-warm! dir projects)
+                     (shell {:extra-env (cond-> {"CLJ_PULSE_COMPARE_ROOT" (str dir)
+                                                 "CLJ_PULSE_COMPARE_CORPUS" name}
+                                          projects (assoc "CLJ_PULSE_CORPUS_PROJECTS"
+                                                          (str/join "," projects)))}
+                            "cargo test --release --test test_compare -- --ignored --nocapture")))}
 
   e2e-real {:doc "E2E against a real Maven classpath (needs clojure CLI + network)"
             :task (shell "cargo test --test test_e2e -- --ignored")}

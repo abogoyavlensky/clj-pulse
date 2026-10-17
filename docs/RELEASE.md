@@ -28,7 +28,11 @@ truth**. The release CI refuses to publish if the tag and `Cargo.toml` disagree.
      and keeps the date, versions, environment, and caveats beside the numbers.
 
    Commit any corrections before tagging.
-3. **Verify** locally: `bb check` (fmt check + clippy `-D warnings` + tests).
+3. **Verify** locally: `bb check` (fmt check + clippy `-D warnings` + tests),
+   then the release-only gates: `bb bench`, `bb soak metabase` and
+   `bb compare metabase` (about 28 minutes; compare its table with the last
+   one in [MEMORY.md](MEMORY.md)). The per-change gates run clj-kondo and
+   penpot only.
 4. **Tag and push:**
 
    ```sh
