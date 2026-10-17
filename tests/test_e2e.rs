@@ -2244,6 +2244,31 @@ fn test_e2e_definition_on_require_alias_and_namespace() {
     );
 }
 
+/// A `.cljc` alias split by a reader conditional resolves through its `:clj`
+/// branch: `x/split-f` lands in the Clojure namespace's file.
+#[test]
+fn test_e2e_definition_through_cljc_split_alias() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let file = root.join("src/split_alias.cljc");
+    client.did_open(&file);
+
+    let (line, ch) = position_of(&file, "split-f)");
+    let result = client.goto_definition(&file, line, ch);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/src/split_jvm.clj"),
+        "the :clj branch's namespace, got {}",
+        uri
+    );
+    assert_eq!(result["range"]["start"]["line"], json!(2));
+}
+
 #[test]
 fn test_e2e_definition_on_core_builtin_navigates_into_clojure_jar() {
     // `defn`, `or`, `cond`… are ordinary definitions inside the clojure JAR;

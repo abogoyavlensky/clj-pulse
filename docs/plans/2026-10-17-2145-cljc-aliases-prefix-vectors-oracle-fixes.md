@@ -213,15 +213,17 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
   fixture's existing source dir — check `tests/fixtures/simple_project`)
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the fixture and test.** The `.cljc` file requires
+- [x] **Step 1: Write the fixture and test.** The `.cljc` file requires
   `#?(:clj [<a project ns> :as x] :cljs [<another project ns> :as x])`, both
   defining `f`, and calls `(x/f)`. The test opens it, asks definition on `f` in
   `x/f`, and asserts the location is the `:clj` namespace's file. Model it on an
   existing definition e2e test in `tests/test_e2e.rs`. Check that adding a file to
   the fixture does not change other tests' expectations (symbol counts,
   workspace/symbol lists); adjust only those that count fixture files.
-- [ ] **Step 2: Run** `bb e2e` — Expected: PASS, the new test included.
-- [ ] **Step 3: Commit** `git commit -m "e2e: definition through a .cljc split alias"`
+- [x] **Step 2: Run** `bb e2e` — Expected: PASS, the new test included.
+- [x] **Step 3: Commit** `git commit -m "e2e: definition through a .cljc split alias"`
+
+> Deviation: the `:cljs` branch names `goog.object`, not a second project namespace. With a project `simple.split-js`, `compare_simple_project` reported two new divergences: kondo also reads the `.cljc` as ClojureScript, and we read only its Clojure half. The e2e still separates old from new behavior (the old one answered null).
 
 ### Task 4: Oracle fixes
 
