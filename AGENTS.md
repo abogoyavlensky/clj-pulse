@@ -176,7 +176,10 @@ there.
   usage's alias names another namespace than kondo resolves it into, or the
   probe is a potemkin re-export entry (`import-vars` is *Not planned*);
   `FacadeCallers` for an original whose missing lines are all such callers;
-  `CljsHalf` for a `.cljc` usage kondo read as ClojureScript alone. Entries
+  `CljsHalf` for a `.cljc` usage kondo read as ClojureScript alone. Since
+  `:skip-comments true` hides every site inside `(comment …)`, a
+  references or rename answer whose only extra lines all fall in comment
+  forms (`oracle::comment_lines`, quoted data left out) is `known`. Entries
   no question is asked at are counted and sampled under "not asked": the
   ClojureScript twin of a `.cljc` entry kondo also reports as Clojure, and an
   entry whose token does not spell its name (`oracle::spells`: hook output,
@@ -317,12 +320,21 @@ there.
   walker records a bare core name, and a `clojure.core/x` usage, under it,
   `head_is_core_form` and the locals walker accept either core, and a
   `:refer-clojure :rename` refers into it. `.cljc` asks as Clojure and stays
-  on `clojure.core`. The definition `Core` arm looks in `core_ns(dialect)`
+  on `clojure.core`, and an ns form's reader conditional resolves through
+  its Clojure branch (`reader_branches_clojure_wins`): the first `:clj` or
+  `:default` branch is read first and again last, so it wins every alias
+  and refer the branches share and leads `refer_all`, while a `:cljs`-only
+  alias stays bound. Rename's alias sites still read every branch. The definition `Core` arm looks in `core_ns(dialect)`
   first and falls back to `clojure.core` for a `.cljs` file when no
   ClojureScript JAR is indexed; `resolve_symbol` asks `cljs.core` in the
   index for a `.cljs` bare name the static list lacks (`IMeta`,
   `not-native`), after that list, so hover keeps the curated `clojure.core`
   doc for shared names.
+- A prefix list is a list or a vector (`[a.b [c :as x] d]`, Clojure's
+  `libspec?`: a vector whose second item is a symbol or vector,
+  `is_prefix_vector`) in `:require`, `:use` and rename's alias
+  declarations; clean-ns and the unused-namespace lint read the vector
+  spelling as a plain libspec of the prefix, which they never flag.
 - `(:require-macros …)` is read like `:require` (aliases, refers, prefix
   lists, reader conditionals), `:refer-macros [m]` inside any libspec refers
   like `:refer`, and `:include-macros true` binds nothing. `requires` is

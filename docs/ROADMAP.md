@@ -402,12 +402,12 @@ the release.
       key, and a var named with a `:` (`sql:get-libraries`) could not be
       renamed. penpot went from 6111 to 6418 of 7518 agree.
       Plan: [2026-10-16-2230-penpot-corpus-keyword-keys-entries.md](plans/2026-10-16-2230-penpot-corpus-keyword-keys-entries.md) — done
-- [ ] **`.cljc` split aliases and vector prefix lists.** A `.cljc` alias
+- [x] **`.cljc` split aliases and vector prefix lists.** A `.cljc` alias
       split by a reader conditional (`#?(:clj [clojure.core :as c] :cljs
       [cljs.core :as c])`) resolved through its `:cljs` branch (penpot, about
       87 answers), and a vector prefix list (`[a.b [c :as x]]`) bound nothing
       (clj-kondo, about 40); two oracle differences rode along.
-      Plan: [2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md](plans/2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md) — in progress
+      Plan: [2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md](plans/2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
@@ -504,10 +504,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   `engine`, `version` and `warming` only.
 - 2026-10-16 **`bb compare` leftovers.** The oracle noise is set aside
   since 2026-10-17 ([MEMORY.md](MEMORY.md), "Compare after oracle triage").
-  Still unexplained: 13 extra `sql-format-quoted` sites in metabase's
-  `semantic_search/index.clj`, and penpot's 80 `c/array?`-style nulls under
-  a `#?(:clj clojure.core :cljs cljs.core)` alias, which kondo files under
-  `clojure.core`.
+  Still open: penpot's 80 `c/array?`-style nulls under a
+  `#?(:clj clojure.core :cljs cljs.core)` alias, which kondo files under
+  `clojure.core` where no such var exists (oracle-side; clj-pulse now reads
+  the `:clj` branch too, so it answers null as well).
 
 ## Best effort — do when cheap or asked
 

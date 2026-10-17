@@ -1,5 +1,7 @@
 # `.cljc` Split Aliases, Vector Prefix Lists and Two Oracle Fixes Implementation Plan
 
+**Status: completed 2026-10-17.**
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A `.cljc` ns form whose alias is split by a reader conditional resolves through its Clojure branch; a prefix list written as a vector (`[a.b [c :as x]]`) binds like the list form; and `bb compare` stops reporting two oracle-side differences as new divergences.
@@ -249,18 +251,18 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
 
 ### Task 5: Gates, records, docs
 
-- [ ] **Step 1:** `bb check` — Expected: green.
-- [ ] **Step 2:** `bb e2e`, `bb e2e-pulse` and `bb e2e-calva` (definition
+- [x] **Step 1:** `bb check` — Expected: green.
+- [x] **Step 2:** `bb e2e`, `bb e2e-pulse` and `bb e2e-calva` (definition
   answers change) — Expected: green.
-- [ ] **Step 3:** `bb compare` (clj-kondo, then penpot). Expected: penpot
+- [x] **Step 3:** `bb compare` (clj-kondo, then penpot). Expected: penpot
   `var-usage/core/aliased` and `var-usage/library/macro/aliased` divergences drop;
   clj-kondo `var-usage/project/aliased` and `project/macro/aliased` nulls drop,
   `var-def/defprotocol+` moves to known; the `edn.cljs` declare probes agree.
   Record both tables in `docs/MEMORY.md` under a new dated section, and check
   `agree` did not fall in any row beyond resampling.
-- [ ] **Step 4:** `bb bench` (extractor change). Compare with the 2026-10-17 A/B
+- [x] **Step 4:** `bb bench` (extractor change). Compare with the 2026-10-17 A/B
   in `docs/MEMORY.md`; record a one-line note.
-- [ ] **Step 5: Docs.** AGENTS.md: the `.cljc` invariant gains "an ns form's
+- [x] **Step 5: Docs.** AGENTS.md: the `.cljc` invariant gains "an ns form's
   reader conditional resolves through its Clojure branch
   (`reader_branches_clojure_last`)", and the prefix-list sentence names vector
   prefix lists; the compare testing notes mention the comment-sites entry.
@@ -268,4 +270,43 @@ non-Integrant `.edn`, defs nested in wrapping forms, and names kondo hooks defin
   described. README: check its support-boundaries lines against the change
   (likely no edit). `docs/ROADMAP.md`: tick the item, status `done`, and trim
   the "bb compare leftovers" line (the `sql-format-quoted` sites are explained).
-- [ ] **Step 6: Commit** `git commit -m "docs: .cljc split aliases, vector prefix lists, compare records"`
+- [x] **Step 6: Commit** `git commit -m "docs: .cljc split aliases, vector prefix lists, compare records"`
+
+> Deviation: `bb compare` showed clj-kondo's `defprotocol+` rows staying new after the vector fix: once the implementations showed up as extras, each row was both "extra implementations" and "missing facade callers", and no single `KNOWN` entry matched. Two harness additions: a `var-def/defprotocol` entry for that combination, and `via_facade` counting a bare, unqualified name inside the namespace that `import-vars` it (`tag` in `node.clj`); codex had the unqualified check added. 26 → 6 diverge.
+> Deviation: `comment_lines` skips quoted data (`'…`, `` `… ``, `(quote …)`) and accepts `clojure.core/comment` / `cljs.core/comment` heads (codex review). A local named `comment` is not told apart.
+> Deviation: the `agree` check ran against master `203353d` in a temporary worktree on the same kondo state, since MEMORY.md held totals alone for the 2026-10-17 run.
+
+## Summary
+
+Implemented as planned: a `.cljc` ns form's reader conditional resolves
+through its Clojure branch (`reader_branches_clojure_wins`, in
+`process_require_spec`, `process_reader_conditional` and `ns_meta_of_tree`);
+a vector prefix list binds like a list one in `:require`, `:use` and
+rename's alias declarations; `CACHE_FORMAT_VERSION` 26; an e2e on a `.cljc`
+split alias; the oracle reads `cljs.core/declare` as a declare and treats
+extra sites inside `(comment …)` as known.
+
+Issues: processing the Clojure branch last reversed `refer_all`, which is
+searched first-to-last (codex), so the branch is read both first and last.
+A pinned extractor test (`test_deftest_occurrences`) encoded the old
+last-branch-wins behavior. A `.cljc` fixture with two project namespaces
+broke `compare_simple_project`, since kondo also reads the ClojureScript half.
+
+Gates: `bb check`, `bb e2e`, `bb e2e-pulse`, `bb e2e-calva` green; `bb compare`
+clj-kondo 141 → 46 diverge and 43 → 20 null, penpot 219 → 198 diverge (MEMORY.md
+"After `.cljc` split aliases and vector prefix lists"); `bb bench` within
+spread.
+
+Deviations, all above: `reader_branches_clojure_wins` (first and last) instead
+of `_last`; def branches of a top-level conditional stay in source order; the
+deftest test updated; the e2e's `:cljs` branch is `goog.object`; two extra
+`KNOWN`/facade harness rules for `defprotocol+`; `comment_lines` hardening; a
+master baseline worktree for the agree check.
+
+**What the plan could have specified better:** the expected compare movements
+were stated without checking how they would classify. `defprotocol+` needed the
+facade rule as well as the protocol one, and penpot's 80 `core/aliased` nulls
+were never this change's to fix (kondo expects `clojure.core/array?`, which
+does not exist). The plan should also have named the per-bucket baseline the
+"agree did not fall" check needed.
+
