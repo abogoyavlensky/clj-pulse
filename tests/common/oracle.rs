@@ -431,6 +431,36 @@ fn is_facade_def(d: &VarDef) -> bool {
         || d.defined_by_lint_as.as_deref().is_some_and(is_import_macro)
 }
 
+/// Whether the token at 1-based `row`/`col` of `file` is an unqualified
+/// symbol: `tag`, not `p/tag`. Reads the file; only asked of the rare usage
+/// that could be a facade namespace's own bare call.
+fn is_bare_token(file: &Path, row: Option<u32>, col: Option<u32>) -> bool {
+    let (Some(row), Some(col)) = (row, col) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let Some(line) = text.lines().nth(row as usize - 1) else {
+        return false;
+    };
+    // kondo counts UTF-16 units; walk them to the byte where the token starts.
+    let mut units = 0;
+    let Some((start, _)) = line.char_indices().find(|(_, c)| {
+        let here = units;
+        units += c.len_utf16();
+        here == col as usize - 1
+    }) else {
+        return false;
+    };
+    let token: String = line[start..]
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !"()[]{}\"".contains(*c))
+        .collect();
+    // A leading `/` is the division var, not a qualifier.
+    !token.is_empty() && !token[1..].contains('/')
+}
+
 /// Whether a token names `name`: the token itself or its name part, as a
 /// cursor on it would ask. kondo places some entries a hook produced on
 /// another token (`segment-id` for a `clojure.test/is` the `with-temp` hook
@@ -817,7 +847,8 @@ pub fn probes_and_skipped(analysis: &Analysis) -> (Vec<Probe>, Skipped) {
             || (u.alias.is_none()
                 && u.from
                     .as_deref()
-                    .is_some_and(|from| from != u.to && reexported(from)))
+                    .is_some_and(|from| from != u.to && reexported(from))
+                && is_bare_token(Path::new(&u.filename), u.name_row, u.name_col))
     };
     // kondo analyzes a `.cljc` file once per dialect: a token outside any
     // `#?` has a Clojure entry where its ClojureScript one sits, and the

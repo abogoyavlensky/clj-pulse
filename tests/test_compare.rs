@@ -1574,7 +1574,7 @@ mod judge_tests {
         std::fs::write(&p, "(ns p)\n(defn tag [n] n)\n").unwrap();
         std::fs::write(
             &f,
-            "(ns f (:require p [potemkin :refer [import-vars]]))\n(import-vars [p tag])\n(tag 1)\n",
+            "(ns f (:require p [potemkin :refer [import-vars]]))\n(import-vars [p tag])\n(tag 1)\n(p/tag 2)\n",
         )
         .unwrap();
         let (p, f) = (p.display().to_string(), f.display().to_string());
@@ -1587,7 +1587,9 @@ mod judge_tests {
             ],
             "var-usages": [
                 { "from": "f", "to": "p", "name": "tag", "filename": f, "row": 3, "col": 1,
-                  "name-row": 3, "name-col": 2 }
+                  "name-row": 3, "name-col": 2 },
+                { "from": "f", "to": "p", "name": "tag", "filename": f, "row": 4, "col": 1,
+                  "name-row": 4, "name-col": 2 }
             ]
         }))
         .unwrap();
@@ -1600,12 +1602,14 @@ mod judge_tests {
             .expect("a references probe on the original");
         match &original.tag {
             Tag::FacadeCallers(callers) => {
-                assert!(
-                    callers
-                        .iter()
-                        .any(|(file, line)| file.ends_with("f.clj") && *line == 2),
-                    "{callers:?}"
-                )
+                // The bare `tag` is a facade caller; the qualified `p/tag`
+                // names the original and is not.
+                let in_f: Vec<u32> = callers
+                    .iter()
+                    .filter(|(file, _)| file.ends_with("f.clj"))
+                    .map(|(_, line)| *line)
+                    .collect();
+                assert_eq!(in_f, vec![2], "{callers:?}")
             }
             other => panic!("expected FacadeCallers, got {other:?}"),
         }
