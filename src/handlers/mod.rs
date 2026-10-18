@@ -106,18 +106,10 @@ pub fn resolve_symbol(
         // in a test file that pulled clojure.test in wholesale. Tried after the
         // current namespace, which shadows them just as it does in Clojure.
         if let Some(meta) = &ns_meta {
-            for ns in &meta.refer_all {
-                // Private vars are indexed for jar navigation but are not
-                // referred, so a bare name never names one.
-                if let Some(sym) = lookup_in_ns(ns, word).filter(|s| s.kind != DefKind::DefnPrivate)
-                {
-                    return Some(ResolvedSymbol::Project(sym));
-                }
-                // A record/type constructor is referred like any other public
-                // var, but is generated rather than indexed.
-                if let Some(sym) = resolve_factory(index, ns, word, dialect) {
-                    return Some(ResolvedSymbol::Project(sym));
-                }
+            if let Some((_, sym)) =
+                refer_all_target(index, current_ns, &meta.refer_all, word, dialect)
+            {
+                return Some(ResolvedSymbol::Project(sym));
             }
         }
 
@@ -189,6 +181,37 @@ pub fn resolve_symbol(
     }
 
     None
+}
+
+/// The var a bare `name` reaches through `refer_all` in a file of namespace
+/// `file_ns`: none when `file_ns` defines `name` itself (or builds it as a
+/// record constructor), else the first `refer_all` namespace holding a public
+/// var or constructor of that name, in order, with that namespace's symbol.
+/// The rule [`resolve_symbol`] applies, and the one references and rename
+/// read a bare call through, so they cannot disagree.
+pub(crate) fn refer_all_target(
+    index: &Index,
+    file_ns: &str,
+    refer_all: &[String],
+    name: &str,
+    dialect: Dialect,
+) -> Option<(String, Symbol)> {
+    if refer_all.is_empty()
+        || lookup_in_ns_for(index, file_ns, name, dialect).is_some()
+        || resolve_factory(index, file_ns, name, dialect).is_some()
+    {
+        return None;
+    }
+    refer_all.iter().find_map(|ns| {
+        // Private vars are indexed for jar navigation but are not referred,
+        // so a bare name never names one.
+        lookup_in_ns_for(index, ns, name, dialect)
+            .filter(|s| s.kind != DefKind::DefnPrivate)
+            // A record/type constructor is referred like any other public
+            // var, but is generated rather than indexed.
+            .or_else(|| resolve_factory(index, ns, name, dialect))
+            .map(|sym| (ns.clone(), sym))
+    })
 }
 
 /// The three shapes of a generated `deftype`/`defrecord` constructor.
@@ -481,6 +504,68 @@ mod tests {
             Some(ResolvedSymbol::Project(s)) => assert_eq!(s.fqn, "app/public-fn"),
             other => panic!("current ns did not shadow refer-all: {:?}", other),
         }
+    }
+
+    fn bare_meta(name: &str, refer_all: &[&str]) -> NsMeta {
+        NsMeta {
+            name: name.to_string(),
+            file: PathBuf::from(format!("{}.clj", name)),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: refer_all.iter().map(|s| s.to_string()).collect(),
+            imports: HashMap::new(),
+            refer_all: refer_all.iter().map(|s| s.to_string()).collect(),
+            as_aliases: vec![],
+            core_excludes: vec![],
+        }
+    }
+
+    #[test]
+    fn refer_all_target_names_the_first_public_var_the_file_does_not_define() {
+        let index = Index::new();
+        index.insert_file(
+            bare_meta("a", &[]),
+            vec![
+                sym("f", "a", DefKind::Defn),
+                sym("secret", "a", DefKind::DefnPrivate),
+                sym("R", "a", DefKind::Defrecord),
+            ],
+            vec![],
+        );
+        index.insert_file(
+            bare_meta("b", &[]),
+            vec![sym("f", "b", DefKind::Defn), sym("g", "b", DefKind::Defn)],
+            vec![],
+        );
+        index.insert_file(
+            bare_meta("app", &["a", "b"]),
+            vec![
+                sym("own", "app", DefKind::Defn),
+                sym("g", "app", DefKind::Defn),
+            ],
+            vec![],
+        );
+        let refer_all = vec!["a".to_string(), "b".to_string()];
+        let target = |name: &str| {
+            refer_all_target(&index, "app", &refer_all, name, Dialect::Clj)
+                .map(|(ns, sym)| (ns, sym.fqn))
+        };
+
+        // The first namespace holding the name wins.
+        assert_eq!(target("f"), Some(("a".to_string(), "a/f".to_string())));
+        // A generated constructor reaches its record.
+        assert_eq!(target("->R"), Some(("a".to_string(), "a/R".to_string())));
+        assert_eq!(target("map->R"), Some(("a".to_string(), "a/R".to_string())));
+        // The file's own namespace shadows a referred name.
+        assert_eq!(target("g"), None);
+        assert_eq!(target("own"), None);
+        // A private var is never referred.
+        assert_eq!(target("secret"), None);
+        assert_eq!(target("missing"), None);
+        assert_eq!(
+            refer_all_target(&index, "app", &[], "f", Dialect::Clj).map(|t| t.0),
+            None
+        );
     }
 
     fn core_entry(name: &str) -> CoreSymbol {
