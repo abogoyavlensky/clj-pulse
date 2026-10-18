@@ -1548,26 +1548,25 @@ fn test_deftest_occurrences() {
     .unwrap();
 
     // Every head records a usage of the macro fqn it resolved to, so `deftest`
-    // navigates in each style. The two bare (refer-all) heads and the fully
-    // qualified one land on `clojure.test`.
+    // navigates in each style. The two bare (refer-all) heads, the fully
+    // qualified one and the aliased one land on `clojure.test`.
     let heads: Vec<u32> = occs
         .iter()
         .filter(|o| o.fqn == "clojure.test/deftest")
         .map(|o| o.name_range.start.line)
         .collect();
-    assert_eq!(heads, vec![6, 10, 14], "deftest head lines: {:?}", occs);
+    assert_eq!(heads, vec![6, 8, 10, 14], "deftest head lines: {:?}", occs);
     assert!(
         occs.iter().any(|o| o.fqn == "clojure.test/deftest-"),
         "deftest- head occurrence missing: {:?}",
         occs
     );
     // The alias `t` is written by both branches of the reader conditional and
-    // the last one wins, so `t/deftest` resolves to `cljs.test` — still a
-    // known defining macro, and still recorded as a usage of what it matched.
+    // a `.cljc` file reads the Clojure one, so `t/deftest` resolves to
+    // `clojure.test`, never `cljs.test`.
     assert!(
-        occs.iter()
-            .any(|o| o.fqn == "cljs.test/deftest" && o.name_range.start.line == 8),
-        "aliased head occurrence missing: {:?}",
+        !occs.iter().any(|o| o.fqn == "cljs.test/deftest"),
+        "aliased head read through the :cljs branch: {:?}",
         occs
     );
 
@@ -3413,5 +3412,171 @@ mod keyword_key_entries {
         let start = pos(plain, "::db", 0);
         let range = Range::new(start, Position::new(start.line, start.character + 4));
         assert!(!is_keyword_key_entry(&tree, plain, range));
+    }
+}
+
+/// A `.cljc` ns form whose reader conditional binds one alias per platform
+/// resolves through the branch the Clojure reader takes.
+mod cljc_split {
+    use super::occurrences_of;
+    use clj_pulse::index::extractor::{extract, extract_full, locals_in_scope_at};
+    use std::path::Path;
+    use tower_lsp::lsp_types::Position;
+
+    fn alias(src: &str, name: &str) -> Option<String> {
+        let (meta, _) = extract(src, Path::new("t.cljc")).unwrap();
+        meta.aliases.get(name).cloned()
+    }
+
+    #[test]
+    fn test_cljc_split_alias_takes_the_clj_branch() {
+        let src = "(ns t (:require #?(:clj [clojure.core :as c] :cljs [cljs.core :as c])))";
+        assert_eq!(alias(src, "c").as_deref(), Some("clojure.core"));
+    }
+
+    #[test]
+    fn test_cljc_split_alias_cljs_first_still_takes_clj() {
+        let src = "(ns t (:require #?(:cljs [cljs.core :as c] :clj [clojure.core :as c])))";
+        assert_eq!(alias(src, "c").as_deref(), Some("clojure.core"));
+    }
+
+    #[test]
+    fn test_cljc_cljs_only_alias_stays_bound() {
+        let src = "(ns t (:require #?(:cljs [goog.object :as gobj])))";
+        assert_eq!(alias(src, "gobj").as_deref(), Some("goog.object"));
+    }
+
+    #[test]
+    fn test_cljc_default_branch_counts_as_clojure() {
+        let src = "(ns t (:require #?(:default [a :as x] :cljs [b :as x])))";
+        assert_eq!(alias(src, "x").as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_cljc_first_of_clj_and_default_wins() {
+        let src = "(ns t (:require #?(:default [a :as x] :clj [b :as x])))";
+        assert_eq!(alias(src, "x").as_deref(), Some("a"));
+    }
+
+    /// `refer_all` is searched in order, so the Clojure branch leads it.
+    #[test]
+    fn test_cljc_split_refer_all_puts_clojure_first() {
+        let src = "(ns t (:require #?(:clj [clojure.test :refer :all] :default [cljs.test :refer :all])))\n(deftest example (is true))\n";
+        let (meta, _, occs) = extract_full(src, Path::new("t.cljc")).unwrap();
+        assert_eq!(
+            meta.refer_all.first().map(String::as_str),
+            Some("clojure.test")
+        );
+        assert_eq!(occurrences_of(&occs, "clojure.test/deftest").len(), 1);
+        assert!(occurrences_of(&occs, "cljs.test/deftest").is_empty());
+    }
+
+    #[test]
+    fn test_cljc_split_ns_forms_take_the_clj_branch() {
+        let src = "#?(:clj (ns t (:require [a :as h])) :cljs (ns t (:require [b :as h])))";
+        assert_eq!(alias(src, "h").as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_cljc_split_alias_occurrence_under_clojure_core() {
+        let src = "(ns t (:require #?(:clj [clojure.core :as c] :cljs [cljs.core :as c])))\n(c/get {} :a)\n";
+        let (_, _, occs) = extract_full(src, Path::new("t.cljc")).unwrap();
+        assert_eq!(
+            occurrences_of(&occs, "clojure.core/get").len(),
+            1,
+            "occurrences: {occs:?}"
+        );
+        assert!(occurrences_of(&occs, "cljs.core/get").is_empty());
+    }
+
+    /// The locals walker reads its own copy of the ns metadata: `c/let`
+    /// binds only when `c` resolves to a core through the Clojure branch.
+    #[test]
+    fn test_cljc_split_alias_in_locals_walker() {
+        let src = "(ns t (:require #?(:clj [clojure.core :as c] :cljs [other.lib :as c])))\n(c/let [x 1] x)\n";
+        let names: Vec<String> = locals_in_scope_at(src, Position::new(1, 13))
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert_eq!(names, vec!["x"]);
+    }
+}
+
+/// A prefix list written as a vector (`[a.b [c :as x]]`): Clojure's
+/// `load-libs` reads any vector whose second element is not a keyword as one.
+mod prefix_vectors {
+    use clj_pulse::index::extractor::{alias_sites_tree, extract, extract_full_tree, parse_tree};
+    use clj_pulse::index::ExtractConfig;
+    use std::path::Path;
+
+    fn meta(src: &str) -> clj_pulse::index::NsMeta {
+        extract(src, Path::new("t.clj")).unwrap().0
+    }
+
+    #[test]
+    fn test_prefix_vector_binds_joined_aliases() {
+        let m = meta(
+            "(ns t (:require [clj-kondo.impl.rewrite-clj.node [protocols :as node] [seq :as s] utils]))",
+        );
+        let p = "clj-kondo.impl.rewrite-clj.node";
+        assert_eq!(
+            m.aliases.get("node").cloned(),
+            Some(format!("{p}.protocols"))
+        );
+        assert_eq!(m.aliases.get("s").cloned(), Some(format!("{p}.seq")));
+        for sub in ["protocols", "seq", "utils"] {
+            assert!(
+                m.requires.contains(&format!("{p}.{sub}")),
+                "{:?}",
+                m.requires
+            );
+        }
+        assert!(!m.requires.contains(&p.to_string()), "{:?}", m.requires);
+    }
+
+    #[test]
+    fn test_prefix_vector_refers() {
+        let m = meta("(ns t (:require [a.b [c :refer [f]]]))");
+        assert_eq!(m.refers.get("f").map(String::as_str), Some("a.b.c/f"));
+    }
+
+    #[test]
+    fn test_libspec_vectors_unchanged() {
+        let m = meta("(ns t (:require [a.b :as x] [c.d] [e.f :refer [g]]))");
+        assert_eq!(m.aliases.get("x").map(String::as_str), Some("a.b"));
+        assert_eq!(m.refers.get("g").map(String::as_str), Some("e.f/g"));
+        for ns in ["a.b", "c.d", "e.f"] {
+            assert!(m.requires.contains(&ns.to_string()), "{:?}", m.requires);
+        }
+    }
+
+    #[test]
+    fn test_use_prefix_vector() {
+        let m = meta("(ns t (:use [a.b c [d :only [f]]]))");
+        assert!(
+            m.refer_all.contains(&"a.b.c".to_string()),
+            "{:?}",
+            m.refer_all
+        );
+        assert!(
+            m.refer_all.contains(&"a.b.d".to_string()),
+            "{:?}",
+            m.refer_all
+        );
+        assert!(
+            !m.refer_all.contains(&"a.b".to_string()),
+            "{:?}",
+            m.refer_all
+        );
+    }
+
+    #[test]
+    fn test_alias_sites_in_prefix_vector() {
+        let src = "(ns t (:require [a.b [protocols :as node]]))\n(node/string 1)\n";
+        let tree = parse_tree(src).unwrap();
+        let (_, _, occs) =
+            extract_full_tree(&tree, src, Path::new("t.clj"), &ExtractConfig::default()).unwrap();
+        let sites = alias_sites_tree(&tree, src, "node", &occs);
+        assert_eq!(sites.declarations.len(), 1, "{:?}", sites.declarations);
     }
 }

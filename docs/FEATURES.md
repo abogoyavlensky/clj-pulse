@@ -126,7 +126,11 @@ Clojure & project support:
 - **ns forms:** `:as`, `:as-alias`, `:refer` (including `:refer :all` and
   `(:use ns)`), `:rename`, `:refer-clojure :exclude` / `:rename`, `:import`,
   ClojureScript's `:require-macros`, `:refer-macros` and `:include-macros`,
-  reader conditionals, and legacy prefix lists `(clojure [set :as s] string)`.
+  reader conditionals, and legacy prefix lists `(clojure [set :as s] string)`,
+  vector spelling `[clojure [set :as s] string]` included. In a `.cljc` file
+  an alias split by a reader conditional (`#?(:clj [clojure.core :as c]
+  :cljs [cljs.core :as c])`) resolves through its `:clj` (or `:default`)
+  branch, the same half the rest of the file is read as.
   `declare` is indexed too, so a name that is only declared still navigates,
   and so is a macro mapped to `clojure.core/declare` through `:lint-as`.
   A macro mapped to a core binding form (`clojure.core/for`, `let`, `fn`, …)

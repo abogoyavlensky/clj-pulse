@@ -431,6 +431,36 @@ fn is_facade_def(d: &VarDef) -> bool {
         || d.defined_by_lint_as.as_deref().is_some_and(is_import_macro)
 }
 
+/// Whether the token at 1-based `row`/`col` of `file` is an unqualified
+/// symbol: `tag`, not `p/tag`. Reads the file; only asked of the rare usage
+/// that could be a facade namespace's own bare call.
+fn is_bare_token(file: &Path, row: Option<u32>, col: Option<u32>) -> bool {
+    let (Some(row), Some(col)) = (row, col) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let Some(line) = text.lines().nth(row as usize - 1) else {
+        return false;
+    };
+    // kondo counts UTF-16 units; walk them to the byte where the token starts.
+    let mut units = 0;
+    let Some((start, _)) = line.char_indices().find(|(_, c)| {
+        let here = units;
+        units += c.len_utf16();
+        here == col as usize - 1
+    }) else {
+        return false;
+    };
+    let token: String = line[start..]
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !"()[]{}\"".contains(*c))
+        .collect();
+    // A leading `/` is the division var, not a qualifier.
+    !token.is_empty() && !token[1..].contains('/')
+}
+
 /// Whether a token names `name`: the token itself or its name part, as a
 /// cursor on it would ask. kondo places some entries a hook produced on
 /// another token (`segment-id` for a `clojure.test/is` the `with-temp` hook
@@ -748,7 +778,12 @@ pub fn probes_and_skipped(analysis: &Analysis) -> (Vec<Probe>, Skipped) {
             .or_default()
             .push(d);
     }
-    let is_declare = |d: &VarDef| d.defined_by.as_deref() == Some("clojure.core/declare");
+    let is_declare = |d: &VarDef| {
+        matches!(
+            d.defined_by.as_deref(),
+            Some("clojure.core/declare" | "cljs.core/declare")
+        )
+    };
     let primary: BTreeMap<(&str, &str), &VarDef> = defs_by_fqn
         .iter()
         .filter_map(|(fqn, defs)| {
@@ -795,15 +830,25 @@ pub fn probes_and_skipped(analysis: &Analysis) -> (Vec<Probe>, Skipped) {
     }
     // A usage reaches its var through a re-export when kondo resolves it into
     // a namespace its alias does not name (`mt/with-temp` →
-    // `toucan2.tools.with-temp`), or lands on a re-export entry.
+    // `toucan2.tools.with-temp`), lands on a re-export entry, or is a bare
+    // name inside the namespace that re-exports it (`tag` in the facade
+    // namespace whose `import-vars` brings `tag` in).
     let via_facade = |u: &VarUsage| {
+        let reexported = |ns: &str| {
+            primary
+                .get(&(ns, u.name.as_str()))
+                .is_some_and(|d| is_facade_def(d))
+        };
         u.alias.as_deref().is_some_and(|a| {
             alias_targets
                 .get(&(u.filename.as_str(), a))
                 .is_some_and(|nss| !nss.contains(u.to.as_str()))
-        }) || primary
-            .get(&(u.to.as_str(), u.name.as_str()))
-            .is_some_and(|d| is_facade_def(d))
+        }) || reexported(u.to.as_str())
+            || (u.alias.is_none()
+                && u.from
+                    .as_deref()
+                    .is_some_and(|from| from != u.to && reexported(from))
+                && is_bare_token(Path::new(&u.filename), u.name_row, u.name_col))
     };
     // kondo analyzes a `.cljc` file once per dialect: a token outside any
     // `#?` has a Clojure entry where its ClojureScript one sits, and the
@@ -1282,6 +1327,54 @@ pub fn unjudged(text: &str, covered: &BTreeSet<(u32, u32)>) -> usize {
         }
     }
     count
+}
+
+/// The 0-based, inclusive line spans of every `(comment …)` form in `file`,
+/// nested ones included, headed by `comment` or a core-qualified
+/// `clojure.core/comment` / `cljs.core/comment`. The oracle runs kondo with
+/// `:skip-comments true`, so nothing inside one is a site of the oracle's.
+/// Quoted data (`'(comment …)`, `` `… ``, `(quote …)`) is data, not a form, and
+/// is not entered. A local named `comment` is not told apart.
+pub fn comment_lines(file: &Path) -> Vec<(u32, u32)> {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    let Some(tree) = clj_pulse::index::extractor::parse_tree(&text) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "quoting_lit" | "syn_quoting_lit") {
+            continue;
+        }
+        if node.kind() == "list_lit" {
+            let head = node
+                .named_children(&mut cursor)
+                .find(|n| !matches!(n.kind(), "comment" | "dis_expr"))
+                .filter(|h| h.kind() == "sym_lit")
+                .and_then(|h| h.utf8_text(text.as_bytes()).ok());
+            if head == Some("quote") {
+                continue;
+            }
+            let is_comment = matches!(
+                head,
+                Some("comment" | "clojure.core/comment" | "cljs.core/comment")
+            );
+            if is_comment {
+                out.push((
+                    node.start_position().row as u32,
+                    node.end_position().row as u32,
+                ));
+            }
+        }
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 #[cfg(test)]

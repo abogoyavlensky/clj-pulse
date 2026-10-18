@@ -845,6 +845,56 @@ left, by class:
 - **metabase `local/plain`**, 42 diverge: toucan2's `with-temp` hook binds
   its vector as locals (see "metabase on a canonical kondo state").
 
+### After `.cljc` split aliases and vector prefix lists (2026-10-17)
+
+The branch against master `203353d`, both run back to back on one kondo
+state (master reproduces the "oracle triage" table exactly). Server side: a
+`.cljc` ns form's reader conditional resolves through its Clojure branch,
+and a vector prefix list (`[a.b [c :as x]]`) binds like a list one. Harness
+side: kondo's `cljs.core/declare` is a declare, an answer whose only extra
+lines sit inside `(comment …)` is `known`, a protocol method missing only
+facade callers while listing its implementations is `known`, and a bare
+name inside the namespace that `import-vars` it is a facade caller.
+
+| Corpus | Probes | Agree | Diverge | Known | Null | Soft | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|---|
+| clj-kondo | 5032 | 4744 | 46 | 222 | 20 | 0 | 4921 | 141 | 43 |
+| penpot | 7353 | 6409 | 198 | 367 | 379 | 0 | 6642 | 219 | 381 |
+
+Agree falls because the population did, not because a row got worse:
+
+- **Declares.** A `.cljs` declare whose fqn has a real definition is no
+  longer that var's primary definition, so it gets no probe of its own
+  (`var-def/declare` 280 → 16 on penpot, 28 → 0 on clj-kondo). The defs it
+  yields to push clj-kondo's `var-def/def` from 200 to 204 entries per
+  request, past the 200 cap, so the stride doubles: 400 → 204 probes,
+  394 → 202 agree, 6 → 0 diverge.
+- **Rows the change moves:** clj-kondo `var-usage/project/aliased` 10 → 1
+  null, `project/macro/aliased` 6 → 0, `project/referred` 5 → 0,
+  `var-def/defn` 43 → 16 diverge, `defprotocol` 10 → 0, `defprotocol+`
+  26 → 6; penpot `var-usage/core/aliased` 7 → 0 diverge, `var-def/defn`
+  31 → 25, `var-usage/project` 4 → 0.
+- **Comment sites** account for 38 known probes on clj-kondo
+  (`keyword/qualified` 22, `var-def/defn` and friends).
+- **One honest loss**: penpot `var-usage/project/referred` 59 → 58 agree.
+  `shape-wrapper` is `(declare …)` then `(mf/defc shape-wrapper …)`; the
+  oracle now expects the hook-defined `mf/defc`, which clj-pulse cannot
+  see, so the definition lands on the declare. It belongs to the
+  hook-defined names below.
+
+What is left: penpot `var-usage/core/aliased` keeps its 80 nulls
+(`c/array?` under `#?(:clj clojure.core :cljs cljs.core)`; kondo files them
+under `clojure.core`, where no such var exists, and clj-pulse now reads the
+same branch); penpot `library/macro/aliased` 30 diverge are `ptk/reify` in
+`.cljs` files landing in potok's `.clj` macro file, where kondo expects the
+`.cljs`/`.cljc` half; clj-kondo's six `defprotocol+` rows miss a direct
+caller (`protocols.clj:56`, `coerce.clj:10`) as well as facade ones.
+
+`bb bench` on the branch sits within the 2026-10-17 A/B spread: metabase
+warm first navigation 4.7 s, all dependencies 5.3 s, kondo finished 50 s,
+466 MiB, definition 28 ms; clj-kondo warm 528 / 528 ms, 2.5 s, 87 MiB,
+definition 29 ms.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,

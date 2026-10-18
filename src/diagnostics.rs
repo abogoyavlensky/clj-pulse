@@ -390,6 +390,12 @@ mod tests {
         assert!(diags(full).is_empty(), "{:?}", diags(full));
         let aliased = "(ns my.app\n  (:require (clojure [set :as s])))\n(s/union #{} #{})\n";
         assert!(diags(aliased).is_empty(), "{:?}", diags(aliased));
+
+        // The vector spelling `[clojure [set :as s]]` is a prefix list too.
+        let vector = "(ns my.app\n  (:require [clojure [set :as s]]))\n(s/union #{} #{})\n";
+        assert!(diags(vector).is_empty(), "{:?}", diags(vector));
+        let vector_prefix = "(ns my.app\n  (:require [clojure set]))\n(set/union #{} #{})\n";
+        assert_eq!(codes(vector_prefix), vec!["unresolved-namespace"]);
     }
 
     #[test]

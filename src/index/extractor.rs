@@ -445,16 +445,50 @@ fn process_reader_conditional(
     symbols: &mut Vec<Symbol>,
     cfg: &ExtractConfig,
 ) {
-    let children: Vec<Node> = named_children(node);
-    // read_cond_lit contains alternating kwd_lit and form pairs
-    let mut i = 0;
-    while i + 1 < children.len() {
-        let form = &children[i + 1];
-        if form.kind() == "list_lit" {
-            process_top_level_list(*form, source, file, ns_meta, symbols, cfg);
+    // `ns` branches first, ordered so the Clojure one wins; every other
+    // branch in source order, so the outline keeps document order.
+    for form in reader_branches_clojure_wins(node, source) {
+        if form.kind() == "list_lit" && is_ns_form(form, source) {
+            process_top_level_list(form, source, file, ns_meta, symbols, cfg);
         }
-        i += 2;
     }
+    for pair in named_children(node).chunks(2) {
+        if let [_, form] = pair {
+            if form.kind() == "list_lit" && !is_ns_form(*form, source) {
+                process_top_level_list(*form, source, file, ns_meta, symbols, cfg);
+            }
+        }
+    }
+}
+
+/// The branch forms of a reader conditional for the ns readers, the one the
+/// Clojure reader takes (the first `:clj` or `:default` branch) both first and
+/// last: last so it wins every map slot the branches share (`aliases`,
+/// `refers`), first so it leads every de-duplicated list that is searched in
+/// order (`refer_all`). The others still record what only they bind; reading
+/// a branch twice changes nothing, since every list the ns readers fill is
+/// de-duplicated.
+fn reader_branches_clojure_wins<'a>(node: Node<'a>, source: &str) -> Vec<Node<'a>> {
+    let mut branches = Vec::new();
+    let mut clojure = None;
+    // Alternating `:dialect form` pairs.
+    for pair in named_children(node).chunks(2) {
+        let [key, form] = pair else {
+            continue;
+        };
+        let is_clojure =
+            key.kind() == "kwd_lit" && matches!(node_text(*key, source), ":clj" | ":default");
+        if is_clojure && clojure.is_none() {
+            clojure = Some(*form);
+        } else {
+            branches.push(*form);
+        }
+    }
+    if let Some(form) = clojure {
+        branches.insert(0, form);
+        branches.push(form);
+    }
+    branches
 }
 
 /// Resolves a list-head `sym_lit` to the fully-qualified name clj-kondo would
@@ -772,6 +806,10 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
         "vec_lit" => {
             let items = named_children(spec);
             match items.first().map(|n| n.kind()) {
+                // [a.b [c :as x]] — a prefix list written as a vector.
+                Some("sym_lit") if is_prefix_vector(&items) => {
+                    process_prefix_list(&items, source, ns_meta)
+                }
                 // [a.b :as x] — a single libspec.
                 Some("sym_lit") => parse_require_vector(spec, source, ns_meta),
                 // [[a.b :as x] [c.d]] — a vector of specs spliced by #?@.
@@ -784,51 +822,59 @@ fn process_require_spec(spec: Node, source: &str, ns_meta: &mut NsMeta) {
             }
         }
         "sym_lit" => record_require(ns_meta, sym_text(spec, source).to_string()),
-        // Legacy prefix list `(clojure [set :as s] string)`: each entry is a
-        // libspec whose namespace is the prefix joined by a dot. The prefix
-        // itself binds nothing, so `set/union` stays unresolved — only
-        // `clojure.set/union` and the alias `s` resolve, as in Clojure.
-        "list_lit" => {
-            let items = named_children(spec);
-            let Some(prefix_node) = items.first() else {
-                return;
-            };
-            let is_prefix_list = prefix_node.kind() == "sym_lit"
-                && items.len() > 1
-                && items[1..]
-                    .iter()
-                    .all(|n| matches!(n.kind(), "sym_lit" | "vec_lit"));
-            if !is_prefix_list {
-                return;
-            }
-            let prefix = sym_text(*prefix_node, source).to_string();
-            for item in &items[1..] {
-                match item.kind() {
-                    "sym_lit" => {
-                        record_require(ns_meta, format!("{}.{}", prefix, sym_text(*item, source)))
-                    }
-                    "vec_lit" => {
-                        let sub = named_children(*item);
-                        if sub.first().map(|n| n.kind()) == Some("sym_lit") {
-                            let ns_name = format!("{}.{}", prefix, sym_text(sub[0], source));
-                            parse_libspec_items(&sub, ns_name, source, ns_meta);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // Reader conditional: descend into each branch's form (skip platform
-        // keywords). Reader conditionals nested inside a prefix list are out
-        // of scope and record nothing.
+        "list_lit" => process_prefix_list(&named_children(spec), source, ns_meta),
+        // Reader conditional: descend into each branch's form, ordered so a
+        // `.cljc` alias split per platform resolves as Clojure. Reader
+        // conditionals nested inside a prefix list are out of
+        // scope and record nothing.
         "read_cond_lit" | "splicing_read_cond_lit" => {
-            for child in named_children(spec) {
-                if child.kind() != "kwd_lit" {
-                    process_require_spec(child, source, ns_meta);
-                }
+            for form in reader_branches_clojure_wins(spec, source) {
+                process_require_spec(form, source, ns_meta);
             }
         }
         _ => {}
+    }
+}
+
+/// Whether a vector spec is a prefix list (`[clojure [set :as s] string]`):
+/// Clojure's `libspec?` takes a vector only when its second element is absent
+/// or a keyword, and reads any other as a prefix list.
+fn is_prefix_vector(items: &[Node]) -> bool {
+    items.first().is_some_and(|n| n.kind() == "sym_lit")
+        && items
+            .get(1)
+            .is_some_and(|n| matches!(n.kind(), "sym_lit" | "vec_lit"))
+}
+
+/// Legacy prefix list `(clojure [set :as s] string)`, or its vector spelling:
+/// each entry is a libspec whose namespace is the prefix joined by a dot. The
+/// prefix itself binds nothing, so `set/union` stays unresolved — only
+/// `clojure.set/union` and the alias `s` resolve, as in Clojure.
+fn process_prefix_list(items: &[Node], source: &str, ns_meta: &mut NsMeta) {
+    let Some(prefix_node) = items.first() else {
+        return;
+    };
+    let is_prefix_list = prefix_node.kind() == "sym_lit"
+        && items.len() > 1
+        && items[1..]
+            .iter()
+            .all(|n| matches!(n.kind(), "sym_lit" | "vec_lit"));
+    if !is_prefix_list {
+        return;
+    }
+    let prefix = sym_text(*prefix_node, source).to_string();
+    for item in &items[1..] {
+        match item.kind() {
+            "sym_lit" => record_require(ns_meta, format!("{}.{}", prefix, sym_text(*item, source))),
+            "vec_lit" => {
+                let sub = named_children(*item);
+                if sub.first().map(|n| n.kind()) == Some("sym_lit") {
+                    let ns_name = format!("{}.{}", prefix, sym_text(sub[0], source));
+                    parse_libspec_items(&sub, ns_name, source, ns_meta);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -845,6 +891,9 @@ fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
         "vec_lit" => {
             let items = named_children(spec);
             match items.first().map(|n| n.kind()) {
+                Some("sym_lit") if is_prefix_vector(&items) => {
+                    collect_use_prefix_list(&items, source, out)
+                }
                 Some("sym_lit") => out.push(sym_text(items[0], source).to_string()),
                 Some("vec_lit") => {
                     for item in items {
@@ -854,29 +903,7 @@ fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
                 _ => {}
             }
         }
-        "list_lit" => {
-            let items = named_children(spec);
-            let Some(prefix_node) = items.first() else {
-                return;
-            };
-            if prefix_node.kind() != "sym_lit" || items.len() < 2 {
-                return;
-            }
-            let prefix = sym_text(*prefix_node, source);
-            for item in &items[1..] {
-                let name = match item.kind() {
-                    "sym_lit" => Some(sym_text(*item, source)),
-                    "vec_lit" => named_children(*item)
-                        .first()
-                        .filter(|n| n.kind() == "sym_lit")
-                        .map(|n| sym_text(*n, source)),
-                    _ => None,
-                };
-                if let Some(name) = name {
-                    out.push(format!("{}.{}", prefix, name));
-                }
-            }
-        }
+        "list_lit" => collect_use_prefix_list(&named_children(spec), source, out),
         "read_cond_lit" | "splicing_read_cond_lit" => {
             for child in named_children(spec) {
                 if child.kind() != "kwd_lit" {
@@ -885,6 +912,30 @@ fn collect_use_namespaces(spec: Node, source: &str, out: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// The namespaces of a `(:use …)` prefix list, list or vector spelling.
+fn collect_use_prefix_list(items: &[Node], source: &str, out: &mut Vec<String>) {
+    let Some(prefix_node) = items.first() else {
+        return;
+    };
+    if prefix_node.kind() != "sym_lit" || items.len() < 2 {
+        return;
+    }
+    let prefix = sym_text(*prefix_node, source);
+    for item in &items[1..] {
+        let name = match item.kind() {
+            "sym_lit" => Some(sym_text(*item, source)),
+            "vec_lit" => named_children(*item)
+                .first()
+                .filter(|n| n.kind() == "sym_lit")
+                .map(|n| sym_text(*n, source)),
+            _ => None,
+        };
+        if let Some(name) = name {
+            out.push(format!("{}.{}", prefix, name));
+        }
     }
 }
 
@@ -1785,6 +1836,9 @@ fn collect_alias_declarations_in_spec<'a>(spec: Node<'a>, source: &str, out: &mu
         "vec_lit" => {
             let items = named_children(spec);
             match items.first().map(|n| n.kind()) {
+                Some("sym_lit") if is_prefix_vector(&items) => {
+                    collect_alias_declarations_in_prefix_list(&items, source, out)
+                }
                 Some("sym_lit") => collect_alias_declarations_in_libspec(&items, source, out),
                 Some("vec_lit") => {
                     for item in items {
@@ -1794,20 +1848,7 @@ fn collect_alias_declarations_in_spec<'a>(spec: Node<'a>, source: &str, out: &mu
                 _ => {}
             }
         }
-        "list_lit" => {
-            let items = named_children(spec);
-            if items.first().map(|n| n.kind()) != Some("sym_lit") {
-                return;
-            }
-            for item in &items[1..] {
-                if item.kind() == "vec_lit" {
-                    let sub = named_children(*item);
-                    if sub.first().map(|n| n.kind()) == Some("sym_lit") {
-                        collect_alias_declarations_in_libspec(&sub, source, out);
-                    }
-                }
-            }
-        }
+        "list_lit" => collect_alias_declarations_in_prefix_list(&named_children(spec), source, out),
         "read_cond_lit" | "splicing_read_cond_lit" => {
             for child in named_children(spec) {
                 if child.kind() != "kwd_lit" {
@@ -1816,6 +1857,26 @@ fn collect_alias_declarations_in_spec<'a>(spec: Node<'a>, source: &str, out: &mu
             }
         }
         _ => {}
+    }
+}
+
+/// The `:as` / `:as-alias` values of a prefix list's libspecs, list or vector
+/// spelling.
+fn collect_alias_declarations_in_prefix_list<'a>(
+    items: &[Node<'a>],
+    source: &str,
+    out: &mut Vec<Node<'a>>,
+) {
+    if items.first().map(|n| n.kind()) != Some("sym_lit") {
+        return;
+    }
+    for item in &items[1..] {
+        if item.kind() == "vec_lit" {
+            let sub = named_children(*item);
+            if sub.first().map(|n| n.kind()) == Some("sym_lit") {
+                collect_alias_declarations_in_libspec(&sub, source, out);
+            }
+        }
     }
 }
 
@@ -3486,9 +3547,9 @@ fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
     for child in named_children(tree.root_node()) {
         match child.kind() {
             "list_lit" => read_ns(child),
-            // Alternating `:dialect form` pairs, as `process_reader_conditional`.
+            // The Clojure branch wins, as in `process_reader_conditional`.
             "read_cond_lit" => {
-                for form in named_children(child).into_iter().skip(1).step_by(2) {
+                for form in reader_branches_clojure_wins(child, source) {
                     read_ns(form);
                 }
             }
