@@ -65,6 +65,7 @@ pub fn document_highlight(
             &occs,
             &snapshot.text,
             Dialect::of_path(&path),
+            &syms,
         )
         .unwrap_or(occs);
         // A type's constructor calls count, narrowed to the type name.

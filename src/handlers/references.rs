@@ -635,13 +635,24 @@ fn occurrence_range_at(
 ) -> Option<Range> {
     let path = crate::uri::to_index_path(uri)?;
     let snapshot = documents.snapshot(uri)?;
-    let (_, syms, occs) = extractor::extract_full_tree(
+    let (meta, syms, occs) = extractor::extract_full_tree(
         &snapshot.tree,
         &snapshot.text,
         &path,
         &index.extract_config(),
     )
     .ok()?;
+    // A bare call through `:refer :all` is a site of the var it reaches.
+    let occs = with_referred_fqns(
+        index,
+        &meta.name,
+        &meta.refer_all,
+        &occs,
+        &snapshot.text,
+        Dialect::of_path(&path),
+        &syms,
+    )
+    .unwrap_or(occs);
     let line = snapshot
         .text
         .lines()
@@ -907,18 +918,16 @@ pub fn resolve_fqn_at(
             if range_contains(&occ.name_range, pos) {
                 // A bare call through `:refer :all` / `(:use …)` is filed
                 // under this namespace; ask about the var it reaches.
-                let fqn = is_bare(&snapshot.text, occ.name_range)
-                    .then(|| {
-                        referred_fqn(
-                            index,
-                            &meta.name,
-                            &meta.refer_all,
-                            &occ.fqn,
-                            Dialect::of_path(&path),
-                        )
-                    })
-                    .flatten()
-                    .unwrap_or_else(|| occ.fqn.clone());
+                let fqn = with_referred_fqns(
+                    index,
+                    &meta.name,
+                    &meta.refer_all,
+                    std::slice::from_ref(occ),
+                    &snapshot.text,
+                    Dialect::of_path(&path),
+                    &syms,
+                )
+                .map_or_else(|| occ.fqn.clone(), |mut occs| occs.remove(0).fqn);
                 return Some(canonical_type_fqn(index, fqn));
             }
         }
@@ -964,22 +973,34 @@ pub(crate) fn referred_fqn(
     Some(format!("{}/{}", ns, name))
 }
 
-/// Whether the token at `range` in `text` is unqualified: the character
-/// before it is not the `/` of a namespace half.
-fn is_bare(text: &str, range: Range) -> bool {
-    let Some(line) = text.lines().nth(range.start.line as usize) else {
-        return false;
-    };
-    let start = range.start.character as usize;
+/// Whether the token starting at UTF-16 column `start` of `line` is
+/// unqualified: the character before it is not the `/` of a namespace half.
+fn is_bare(line: &str, start: u32) -> bool {
+    let start = start as usize;
     let units: Vec<u16> = line.encode_utf16().take(start).collect();
     units.len() == start && units.last() != Some(&(b'/' as u16))
 }
 
+/// Whether `defined`, a file's live definitions, defines `name` in `file_ns`
+/// or builds it as a constructor there: an unsaved `(defn f …)` shadows a
+/// referred `f` before the index knows about it.
+fn defines(defined: &[Symbol], file_ns: &str, name: &str) -> bool {
+    let factory = factory_target(name);
+    defined.iter().any(|s| {
+        s.kind != DefKind::Defmethod
+            && s.ns == file_ns
+            && (s.name == name
+                || factory
+                    .is_some_and(|(target, shape)| s.name == target && builds(&s.kind, shape)))
+    })
+}
+
 /// `occs` of one file of namespace `file_ns`, read from `text`, with every
 /// bare occurrence's fqn replaced by the `refer_all` var it names
-/// ([`referred_fqn`]); `None` when nothing changed. Rewritten before
-/// matching, so a bare `->R` becomes `lib/->R` and is then found as a
-/// constructor call of `lib/R`.
+/// ([`referred_fqn`]); `None` when nothing changed. `defined` is the file's
+/// live definitions when it is an open buffer (the index covers a saved
+/// file). Rewritten before matching, so a bare `->R` becomes `lib/->R` and is
+/// then found as a constructor call of `lib/R`.
 pub(crate) fn with_referred_fqns(
     index: &Index,
     file_ns: &str,
@@ -987,30 +1008,46 @@ pub(crate) fn with_referred_fqns(
     occs: &[Occurrence],
     text: &str,
     dialect: Dialect,
+    defined: &[Symbol],
 ) -> Option<Vec<Occurrence>> {
-    if refer_all.is_empty() {
+    if refer_all.is_empty() || file_ns.is_empty() {
         return None;
     }
-    let mut changed = false;
-    let out = occs
-        .iter()
-        .map(|occ| {
-            let fqn = is_bare(text, occ.name_range)
-                .then(|| referred_fqn(index, file_ns, refer_all, &occ.fqn, dialect))
-                .flatten();
-            match fqn {
-                Some(fqn) => {
-                    changed = true;
-                    Occurrence {
-                        fqn,
-                        name_range: occ.name_range,
-                    }
+    // Each name is resolved once, and the text split into lines only when a
+    // candidate needs its token checked.
+    let mut targets: HashMap<&str, Option<String>> = HashMap::new();
+    let mut lines: Option<Vec<&str>> = None;
+    let mut out: Option<Vec<Occurrence>> = None;
+    for (i, occ) in occs.iter().enumerate() {
+        let Some(name) = occ
+            .fqn
+            .strip_prefix(file_ns)
+            .and_then(|rest| rest.strip_prefix('/'))
+        else {
+            continue;
+        };
+        let target = targets
+            .entry(name)
+            .or_insert_with(|| {
+                if defines(defined, file_ns, name) {
+                    None
+                } else {
+                    referred_fqn(index, file_ns, refer_all, &occ.fqn, dialect)
                 }
-                None => occ.clone(),
-            }
-        })
-        .collect();
-    changed.then_some(out)
+            })
+            .clone();
+        let Some(target) = target else {
+            continue;
+        };
+        let lines = lines.get_or_insert_with(|| text.lines().collect());
+        let bare = lines
+            .get(occ.name_range.start.line as usize)
+            .is_some_and(|line| is_bare(line, occ.name_range.start.character));
+        if bare {
+            out.get_or_insert_with(|| occs.to_vec())[i].fqn = target;
+        }
+    }
+    out
 }
 
 fn range_contains(range: &Range, pos: Position) -> bool {
@@ -1218,6 +1255,16 @@ pub fn occurrences_for(
         );
         let meta = extractor::ns_meta_of_tree(&snapshot.tree, &snapshot.text);
         let occs = if may_refer(&meta.name, &meta.refer_all, &occs) {
+            // The buffer's own definitions shadow a referred name before
+            // the index sees them.
+            let defined = extractor::extract_full_tree(
+                &snapshot.tree,
+                &snapshot.text,
+                &path,
+                &index.extract_config(),
+            )
+            .map(|(_, syms, _)| syms)
+            .unwrap_or_default();
             with_referred_fqns(
                 index,
                 &meta.name,
@@ -1225,6 +1272,7 @@ pub fn occurrences_for(
                 &occs,
                 &snapshot.text,
                 Dialect::of_path(&path),
+                &defined,
             )
             .unwrap_or(occs)
         } else {
@@ -1257,6 +1305,7 @@ pub fn occurrences_for(
                     entry.value(),
                     text,
                     Dialect::of_path(entry.key()),
+                    &[],
                 )
             });
         let occs = rewritten.as_deref().unwrap_or(entry.value());
@@ -1476,12 +1525,39 @@ mod tests {
             &occs,
             text,
             Dialect::Clj,
+            &[],
         )
         .expect("bare calls rewritten");
         let fqns: Vec<&str> = out.iter().map(|o| o.fqn.as_str()).collect();
         assert_eq!(fqns, ["lib/f", "app/f", "lib/->R", "app/g"]);
         // Nothing to rewrite without a wholesale refer.
-        assert!(with_referred_fqns(&index, "app", &[], &occs, text, Dialect::Clj).is_none());
+        assert!(with_referred_fqns(&index, "app", &[], &occs, text, Dialect::Clj, &[]).is_none());
+        // A live definition the index has not seen yet shadows the referred
+        // name, and a live record its constructor.
+        let live = |name: &str, kind: DefKind| Symbol {
+            name: name.to_string(),
+            fqn: format!("app/{}", name),
+            ns: "app".to_string(),
+            kind,
+            params: vec![],
+            doc: None,
+            file: PathBuf::from("app.clj"),
+            source: SymbolSource::Project,
+            range: Range::default(),
+            name_range: Range::default(),
+            private: false,
+        };
+        let defined = [live("f", DefKind::Defn), live("R", DefKind::Defrecord)];
+        assert!(with_referred_fqns(
+            &index,
+            "app",
+            &["lib".to_string()],
+            &occs,
+            text,
+            Dialect::Clj,
+            &defined,
+        )
+        .is_none());
     }
 
     #[test]
