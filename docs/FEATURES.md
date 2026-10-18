@@ -39,7 +39,9 @@ on the name, so renaming `state` leaves the `@` in place.
 - **Find references** - locate every usage of a symbol across the project. A
   `defmulti` lists its own line with every `defmethod`, and a `deftype` or
   `defrecord` lists the calls that build it: `(Point. …)`, `->Point` and
-  `map->Point`.
+  `map->Point`. A bare call that reaches a var through `[ns :refer :all]` or
+  `(:use ns)` is one of its usages, for references, rename and highlight
+  alike, unless the calling namespace defines that name itself.
 - **Rename** - rename a project symbol and all of its references, or a local
   binding (params, `let`/`loop`/`for` bindings, destructured names, the
   parameters of a method in a `deftype`, `defrecord`, `extend-protocol`,

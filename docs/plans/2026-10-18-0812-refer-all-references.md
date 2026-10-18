@@ -1,5 +1,7 @@
 # References and Rename Through `:refer :all` / `(:use …)` Implementation Plan
 
+**Status: completed 2026-10-18**
+
 > **For agentic workers:** Use executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A bare call that reaches a var through `[ns :refer :all]` or `(:use ns)` is a site of that var for references, rename, document highlight and `prepareRename`, as it already is for definition and hover.
@@ -164,32 +166,32 @@ Unchanged on purpose:
 
 ### Task 0: Open the ROADMAP item
 
-- [ ] **Step 1:** Add a Milestone 5 item to `docs/ROADMAP.md`, beside the
+- [x] **Step 1:** Add a Milestone 5 item to `docs/ROADMAP.md`, beside the
   2026-10-17 compare items: "**References and rename through `:refer :all` /
   `(:use …)`**", one line of evidence (`read-past`, 1 of 6), and
   `Plan: [2026-10-18-0812-refer-all-references.md](plans/2026-10-18-0812-refer-all-references.md) — in progress`.
-- [ ] **Step 2: Commit** the plan and the item: `git commit -m "roadmap: plan references through :refer :all"`
+- [x] **Step 2: Commit** the plan and the item: `git commit -m "roadmap: plan references through :refer :all"`
 
 ### Task 1: One `refer_all` rule
 
 **Files:**
 - Modify: `src/handlers/mod.rs`
 
-- [ ] **Step 1: Write failing unit tests** for `refer_all_target` next to
+- [x] **Step 1: Write failing unit tests** for `refer_all_target` next to
   `resolve_symbol_falls_back_to_refer_all_namespaces` (reuse its index-building
   helpers): maps `f` to `lib`; `None` when `app` defines `f`; `None` for a
   `DefnPrivate` in `lib`; with `refer_all = ["a", "b"]` both defining `f`, `a`
   wins; `->R` maps when `lib` defines record `R`.
   Run: `cargo test --lib refer_all_target` — Expected: FAIL (function missing).
-- [ ] **Step 2: Implement** `refer_all_target` (signature in Design) by lifting
+- [x] **Step 2: Implement** `refer_all_target` (signature in Design) by lifting
   the body of `resolve_symbol`'s `refer_all` loop, plus the "file_ns defines it"
   guard (`lookup_in_ns_for(index, file_ns, name, dialect)` or
   `resolve_factory(index, file_ns, name, dialect)` → `None`). Replace the loop in
   `resolve_symbol` with a call; that path has already tried the current
   namespace, so the guard changes nothing there.
-- [ ] **Step 3: Run** `cargo test --lib` — Expected: PASS, the existing
+- [x] **Step 3: Run** `cargo test --lib` — Expected: PASS, the existing
   `resolve_symbol` tests included.
-- [ ] **Step 4: Commit** `git commit -m "handlers: one refer_all resolution rule"`
+- [x] **Step 4: Commit** `git commit -m "handlers: one refer_all resolution rule"`
 
 ### Task 2: References, rename and highlight read it
 
@@ -197,56 +199,61 @@ Unchanged on purpose:
 - Modify: `src/handlers/references.rs`, `src/handlers/highlight.rs`,
   `src/index/mod.rs`, `src/index/extractor.rs`
 
-- [ ] **Step 1: Write failing unit tests** for `referred_fqn`: `app/f` in an
+- [x] **Step 1: Write failing unit tests** for `referred_fqn`: `app/f` in an
   `app` file referring `lib` wholesale → `lib/f`; `app/g` that `app` defines →
   `None`; empty `refer_all` → `None`; `lib2/f` (not filed under `file_ns`) →
   `None`.
-- [ ] **Step 2: Implement** `referred_fqn` (signature in Design), splitting the
+- [x] **Step 2: Implement** `referred_fqn` (signature in Design), splitting the
   fqn at the `/` after `file_ns` so a name containing `/` (`clojure.core//`) is
   handled.
-- [ ] **Step 3: `Index::file_refer_all`** — from `files`, `None` when the
+- [x] **Step 3: `Index::file_refer_all`** — from `files`, `None` when the
   record's `refer_all` is empty. Make `extractor::ns_meta_of_tree` `pub`.
-- [ ] **Step 4: `resolve_fqn_at`** — map the occurrence found under the cursor
+- [x] **Step 4: `resolve_fqn_at`** — map the occurrence found under the cursor
   through `referred_fqn` with the buffer's `NsMeta`, before
   `canonical_type_fqn`.
-- [ ] **Step 5: `with_referred_fqns`** (signature in Design): rewrites only
+- [x] **Step 5: `with_referred_fqns`** (signature in Design): rewrites only
   occurrences whose token is bare (character before the name range is not `/`);
   unit test with an explicit `app/f` that must stay `app/f` and a bare `->R`
   that becomes `lib/->R`.
-- [ ] **Step 6: `occurrences_for`** — for each indexed file with
+- [x] **Step 6: `occurrences_for`** — for each indexed file with
   `file_refer_all` containing the target's namespace and an occurrence filed
   under its own namespace with the target's name or a constructor name of it,
   read the file, run `with_referred_fqns`, and match on the result instead of
   the stored list; open buffers the same with their live `NsMeta` and text.
-- [ ] **Step 7: `highlight`** — run `with_referred_fqns` on the buffer's
+- [x] **Step 7: `highlight`** — run `with_referred_fqns` on the buffer's
   occurrences before `matching_occurrences`.
-- [ ] **Step 8: Run** `cargo test --lib` — Expected: PASS.
-- [ ] **Step 9: Commit** `git commit -m "references: bare calls through :refer :all are sites of the referred var"`
+- [x] **Step 8: Run** `cargo test --lib` — Expected: PASS.
+- [x] **Step 9: Commit** `git commit -m "references: bare calls through :refer :all are sites of the referred var"`
+
+> Deviation: `occurrence_range_at` (rename's `:rename` check and `prepareRename`'s range) matched raw occurrences too, so `prepareRename` on a bare referred call answered "nothing to rename here"; it now runs `with_referred_fqns` like the others.
+> Deviation (codex): `with_referred_fqns` takes the file's live definitions (`defined: &[Symbol]`, empty for a saved file), so an unsaved `(defn f …)` shadows a referred `f`; `resolve_fqn_at` calls it on the one occurrence instead of `referred_fqn` directly. It resolves each name once and splits the text into lines only when a candidate needs its token checked (codex measured the first version as quadratic).
 
 ### Task 3: E2E
 
 **Files:**
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the test** described in Design → Testing, modeled on an
+- [x] **Step 1: Write the test** described in Design → Testing, modeled on an
   existing references/rename e2e test (e.g. `test_e2e_references_find_usage_in_unopened_alias_test_dir`)
   that writes extra files into the temp project before `initialize`. Assert on
   `textDocument/references` from the definition and from a call, on
   `textDocument/rename` edits (three tokens, the self-defining file untouched),
   and on `textDocument/documentHighlight` at the call.
-- [ ] **Step 2: Run** `cargo test --test test_e2e refer_all` — Expected: PASS.
-- [ ] **Step 3: Commit** `git commit -m "e2e: references and rename through :refer :all"`
+- [x] **Step 2: Run** `cargo test --test test_e2e refer_all` — Expected: PASS.
+- [x] **Step 3: Commit** `git commit -m "e2e: references and rename through :refer :all"`
+
+> Deviation: a question started on a call needs that buffer open (`resolve_fqn_at` reads the live document, as for every handler), so the test opens `app` first. It also checks `prepareRename` on the call and an unsaved shadowing definition.
 
 ### Task 4: Gates, records, docs
 
-- [ ] **Step 1:** `bb check` — Expected: green.
-- [ ] **Step 2:** `bb e2e` and `bb e2e-pulse` — Expected: green.
-- [ ] **Step 3:** `bb compare` — Expected: clj-kondo `var-def/defn` references
+- [x] **Step 1:** `bb check` — Expected: green.
+- [x] **Step 2:** `bb e2e` and `bb e2e-pulse` — Expected: green.
+- [x] **Step 3:** `bb compare` — Expected: clj-kondo `var-def/defn` references
   and rename rows gain agreements (`read-past`, `throwing-reader`, …); no row of
   either corpus loses agreement beyond resampling. Record both tables in
   `docs/MEMORY.md` under a dated section.
-- [ ] **Step 4:** `bb soak` — Expected: pass.
-- [ ] **Step 5: Docs.** AGENTS.md: the `NsMeta.refer_all` sentence ("head
+- [x] **Step 4:** `bb soak` — Expected: pass.
+- [x] **Step 5: Docs.** AGENTS.md: the `NsMeta.refer_all` sentence ("head
   resolution, completion and `resolve_symbol` all consult it") gains references,
   rename and highlight through `references::referred_fqn` /
   `handlers::refer_all_target`, resolved at query time because the walker files
@@ -254,4 +261,30 @@ Unchanged on purpose:
   rename list calls through `:refer :all` / `:use`. README: update it in the
   same change if its feature or support-boundary lines mention references or
   `:refer :all`; otherwise leave it. `docs/ROADMAP.md`: tick the item, status `done`.
-- [ ] **Step 6: Commit** `git commit -m "docs: references through :refer :all"`
+- [x] **Step 6: Commit** `git commit -m "docs: references through :refer :all"`
+
+> Deviation: the plan expected about 22 agreements per references/rename row; the gain is 10 in all (`var-def/defn` 16 → 6 diverge), because the 2026-10-17 `.cljc` change had already moved that row from 43 to 16. README is unchanged, since it does not mention `:refer :all`.
+
+## Completion summary
+
+Implemented `handlers::refer_all_target` (the one `:refer :all` rule, now
+also behind `resolve_symbol`), `references::referred_fqn` and
+`with_referred_fqns`, `Index::file_refer_all`, and a public
+`extractor::ns_meta_of_tree`. `resolve_fqn_at`, `occurrences_for`,
+`occurrence_range_at` and `highlight` read bare refer-all calls as sites of
+the referred var. One e2e test covers references from both ends, rename,
+prepareRename, highlight, constructor calls, a qualified token, an unsaved
+refer removal and an unsaved shadowing definition.
+
+Gates: `bb check`, `bb e2e`, `bb e2e-pulse`, `bb soak` green; `bb compare`
+clj-kondo 4744 → 4754 agree, penpot unchanged.
+
+Deviations:
+- `occurrence_range_at` needed the rewrite too; without it, `prepareRename` on a bare call refused.
+- Following codex: `with_referred_fqns` takes the buffer's live definitions, so an unsaved def shadows a referred name. It resolves each name once and splits lines lazily, where the first version was quadratic.
+- The e2e test opens the calling buffer before asking from it.
+- The compare gain was smaller than estimated (10, not ~44), because an earlier change had already fixed part of that row.
+
+What the plan could have specified better: list every caller of the raw
+occurrence matchers (`occurrence_range_at` was missed) and account for an
+open buffer's unsaved definitions in the shadowing rule.

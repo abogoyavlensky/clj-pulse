@@ -408,10 +408,12 @@ the release.
       87 answers), and a vector prefix list (`[a.b [c :as x]]`) bound nothing
       (clj-kondo, about 40); two oracle differences rode along.
       Plan: [2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md](plans/2026-10-17-2145-cljc-aliases-prefix-vectors-oracle-fixes.md) — done
-- [ ] **References and rename through `:refer :all` / `(:use …)`.** A bare
-      call reaching a var through a wholesale refer is no site of it:
-      references on clj-kondo's `read-past` answer 1 of 6 (2026-10-17).
-      Plan: [2026-10-18-0812-refer-all-references.md](plans/2026-10-18-0812-refer-all-references.md) — in progress
+- [x] **References and rename through `:refer :all` / `(:use …)`.** A bare
+      call reaching a var through a wholesale refer was no site of it:
+      references on clj-kondo's `read-past` answered 1 of 6 (2026-10-17).
+      Resolved at query time; clj-kondo `var-def/defn` went from 16 to 6
+      diverge, penpot unchanged.
+      Plan: [2026-10-18-0812-refer-all-references.md](plans/2026-10-18-0812-refer-all-references.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then
