@@ -895,6 +895,24 @@ warm first navigation 4.7 s, all dependencies 5.3 s, kondo finished 50 s,
 466 MiB, definition 28 ms; clj-kondo warm 528 / 528 ms, 2.5 s, 87 MiB,
 definition 29 ms.
 
+### After references through `:refer :all` (2026-10-18)
+
+The branch against master `1bd765f` (the table above), same kondo state. A
+bare call reaching a var through `[ns :refer :all]` / `(:use ns)` is now a
+site of that var for references, rename, `prepareRename` and highlight,
+resolved at query time.
+
+| Corpus | Probes | Agree | Diverge | Known | Null | Soft | Agree before | Diverge before | Null before |
+|---|---|---|---|---|---|---|---|---|---|
+| clj-kondo | 5032 | 4754 | 36 | 222 | 20 | 0 | 4744 | 46 | 20 |
+| penpot | 7353 | 6409 | 198 | 367 | 379 | 0 | 6409 | 198 | 379 |
+
+All ten are clj-kondo `var-def/defn` (16 → 6 diverge): references and
+rename on the inlined tools.reader's `impl.commons` vars (`read-past`,
+`throwing-reader`, …), whose callers refer the namespace wholesale. penpot
+does not use `:refer :all` among the sampled definitions and is unchanged
+row for row. `bb soak` (clj-kondo, 20 rounds) passes.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,

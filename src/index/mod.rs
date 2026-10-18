@@ -846,6 +846,15 @@ impl Index {
             .collect()
     }
 
+    /// The namespace and `refer_all` list of project file `path`, from its
+    /// own [`FileRecord`]; `None` when the file refers nothing wholesale, so
+    /// the common case costs one lookup.
+    pub fn file_refer_all(&self, path: &Path) -> Option<(String, Vec<String>)> {
+        let record = self.files.get(path)?;
+        (!record.meta.refer_all.is_empty())
+            .then(|| (record.meta.name.clone(), record.meta.refer_all.clone()))
+    }
+
     pub fn file_ns(&self, path: &Path) -> Option<String> {
         self.file_to_ns.get(path).map(|r| r.clone())
     }

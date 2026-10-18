@@ -9970,3 +9970,161 @@ fn test_e2e_prefix_cursor_quoted_symbol_resolves_nothing() {
         assert!(loc.is_null(), "col {col}: {loc}");
     }
 }
+
+/// `(file name, line, start character)` of every location in `result`.
+fn located(result: &Value) -> Vec<(String, u64, u64)> {
+    let mut out: Vec<(String, u64, u64)> = result
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|l| {
+            let uri = l["uri"].as_str().unwrap();
+            (
+                uri.rsplit('/').next().unwrap().to_string(),
+                l["range"]["start"]["line"].as_u64().unwrap(),
+                l["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn test_e2e_refer_all_calls_are_sites_of_the_referred_var() {
+    // A bare call through `[ns :refer :all]` or `(:use ns)` is a site of the
+    // var it reaches, for references, rename and highlight alike — unless the
+    // calling namespace defines the name itself, or the token is qualified.
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+    let dir = root.join("src/refall");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("lib.clj");
+    let app = dir.join("app.clj");
+    let user = dir.join("user.clj");
+    let own = dir.join("own.clj");
+    std::fs::write(
+        &lib,
+        "(ns refall.lib)\n\n(defn f [] 1)\n\n(defrecord R [a])\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &app,
+        "(ns refall.app\n  (:require [refall.lib :refer :all]))\n\n\
+         (defn caller [] (f) (->R 1))\n\n(defn qualified [] (refall.app/f))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &user,
+        "(ns refall.user\n  (:use refall.lib))\n\n(defn other-caller [] (f))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &own,
+        "(ns refall.own\n  (:use refall.lib))\n\n(defn f [] 2)\n\n(defn own-caller [] (f))\n",
+    )
+    .unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+    client.did_open(&lib);
+
+    let app_call = (3, 17); // `f` in `(defn caller [] (f) …)`
+    let ctor_call = (3, 21); // `->R` in `(->R 1)`
+    let expected_f = vec![
+        ("app.clj".to_string(), 3, 17),
+        ("user.clj".to_string(), 3, 23),
+    ];
+
+    // From the definition: the two bare calls, not `own`'s own `f`, and not
+    // the explicit `refall.app/f`.
+    let (line, ch) = position_of(&lib, "f []");
+    assert_eq!(
+        located(&client.references(&lib, line, ch - 1, false)),
+        expected_f
+    );
+
+    // From a call: the same var, definition included.
+    client.did_open(&app);
+    let mut with_decl = expected_f.clone();
+    with_decl.insert(0, ("lib.clj".to_string(), 2, 6));
+    with_decl.sort();
+    assert_eq!(
+        located(&client.references(&app, app_call.0, app_call.1, true)),
+        with_decl
+    );
+
+    // Highlight on the call marks it.
+    let highlights = client.document_highlight(&app, app_call.0, app_call.1);
+    let starts: Vec<(u64, u64)> = highlights
+        .as_array()
+        .expect("highlights")
+        .iter()
+        .map(|h| {
+            (
+                h["range"]["start"]["line"].as_u64().unwrap(),
+                h["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(starts, vec![(3, 17)]);
+
+    // prepareRename from the call selects the call's token.
+    let prepared = client.prepare_rename(&app, app_call.0, app_call.1);
+    assert_eq!(prepared["start"], json!({ "line": 3, "character": 17 }));
+
+    // Rename from the definition edits all three tokens, nothing in `own`.
+    let edit = client.rename(&lib, 2, 6, "g2");
+    let mut edited: Vec<(String, u64, u64)> = Vec::new();
+    for (uri, edits) in edit["changes"].as_object().expect("changes") {
+        for e in edits.as_array().unwrap() {
+            assert_eq!(e["newText"], "g2");
+            edited.push((
+                uri.rsplit('/').next().unwrap().to_string(),
+                e["range"]["start"]["line"].as_u64().unwrap(),
+                e["range"]["start"]["character"].as_u64().unwrap(),
+            ));
+        }
+    }
+    edited.sort();
+    assert_eq!(edited, with_decl);
+
+    // The record: its bare `->R` call is a site, narrowed to `R`, and a
+    // question started on the call is about the record.
+    let record = vec![
+        ("app.clj".to_string(), 3, 23),
+        ("lib.clj".to_string(), 4, 11),
+    ];
+    assert_eq!(located(&client.references(&lib, 4, 11, true)), record);
+    assert_eq!(
+        located(&client.references(&app, ctor_call.0, ctor_call.1, true)),
+        record
+    );
+
+    // An explicit `refall.app/f` names `refall.app`'s var, never `refall.lib`'s.
+    let (line, ch) = position_of_in_line(&app, "qualified", "/f");
+    let refs = located(&client.references(&app, line, ch + 1, true));
+    assert!(
+        refs.iter().all(|(file, _, _)| file == "app.clj"),
+        "qualified token resolved through :refer :all: {:?}",
+        refs
+    );
+    let refused = client.prepare_rename_error(&app, line, ch + 1);
+    assert!(refused.contains("refall.app/f"), "got: {}", refused);
+
+    // Dropping the `:refer :all` from the open buffer drops its call.
+    let text = std::fs::read_to_string(&app).unwrap();
+    let col = text.lines().nth(1).unwrap().find(" :refer :all").unwrap() as u32;
+    client.did_change_range(&app, 2, (1, col), (1, col + 12), "");
+    assert_eq!(
+        located(&client.references(&lib, 2, 6, false)),
+        vec![("user.clj".to_string(), 3, 23)]
+    );
+
+    // An unsaved definition of `f` in `user` shadows the referred one.
+    client.did_open(&user);
+    client.did_change_insert(&user, 2, 0, "(defn f [] 3)\n");
+    assert_eq!(located(&client.references(&lib, 2, 6, false)), vec![]);
+}

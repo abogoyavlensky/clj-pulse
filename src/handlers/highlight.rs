@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::document::DocumentStore;
 use crate::handlers::references;
-use crate::index::{extractor, DefKind, Index};
+use crate::index::{extractor, DefKind, Dialect, Index};
 
 pub fn document_highlight(
     index: &Index,
@@ -53,9 +53,21 @@ pub fn document_highlight(
                 highlights.push(highlight(occ.name_range, usage_kind));
             }
         }
-    } else if let Ok((_, syms, occs)) =
+    } else if let Ok((meta, syms, occs)) =
         extractor::extract_full_tree(&snapshot.tree, &snapshot.text, &path, &cfg)
     {
+        // Bare calls through `:refer :all` are sites of the var they reach,
+        // as `references` reads them.
+        let occs = references::with_referred_fqns(
+            index,
+            &meta.name,
+            &meta.refer_all,
+            &occs,
+            &snapshot.text,
+            Dialect::of_path(&path),
+            &syms,
+        )
+        .unwrap_or(occs);
         // A type's constructor calls count, narrowed to the type name.
         let forms = references::constructor_forms(index, &fqn);
         for occ in references::matching_occurrences(&occs, &fqn, &forms, Some(&snapshot.text)) {

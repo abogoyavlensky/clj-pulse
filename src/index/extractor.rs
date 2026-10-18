@@ -3520,7 +3520,7 @@ struct ScopeCtx<'a> {
 /// The ns metadata of `tree` alone: the `ns` forms at top level and in
 /// top-level reader conditionals, read by the code extraction runs
 /// ([`extract_ns`]), with no symbol or occurrence pass.
-fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
+pub fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
     let mut ns_meta = NsMeta {
         name: String::new(),
         file: PathBuf::new(),

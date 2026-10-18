@@ -391,7 +391,16 @@ there.
   vector is the one after it. `NsMeta.refer_all` records
   `:refer :all` / `(:use ns)` namespaces; head resolution, completion and
   `resolve_symbol` all consult it, so `deftest` works however `clojure.test`
-  was required.
+  was required. The occurrence walker has no index, so it files a bare call
+  through `refer_all` under the *current* namespace; references, rename,
+  `prepareRename` and highlight read it at query time
+  (`references::with_referred_fqns` over `handlers::refer_all_target`, the
+  rule `resolve_symbol` applies): a bare token filed under the file's
+  namespace that neither the index nor the buffer's live definitions define
+  there is a site of the first referred namespace's public var or
+  constructor. An explicit `app/f` is recorded the same way, so only a token
+  with no `/` before it is rewritten; an indexed file is read for that only
+  when `Index::file_refer_all` names the target's namespace.
 - `are` (`clojure.test/are`, `cljs.test/are`, the table `ARE_FQNS`) binds its
   argv in the template expression only; the values after it are usages in the
   enclosing scope. The occurrence walker (`walk_are_form`) resolves the head by
