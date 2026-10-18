@@ -9,7 +9,7 @@ use crate::index::{
     extractor, DefKind, Dialect, ExtractConfig, Index, Occurrence, Symbol, SymbolSource,
 };
 
-use super::{builds, factory_target, CtorShape};
+use super::{builds, factory_target, refer_all_target, CtorShape};
 
 pub fn references(
     index: &Index,
@@ -888,7 +888,7 @@ pub fn resolve_fqn_at(
             .map(|occ| occ.fqn);
     }
 
-    if let Ok((_, syms, occs)) =
+    if let Ok((meta, syms, occs)) =
         extractor::extract_full_tree(&snapshot.tree, &snapshot.text, &path, &cfg)
     {
         for sym in &syms {
@@ -905,7 +905,21 @@ pub fn resolve_fqn_at(
         }
         for occ in &occs {
             if range_contains(&occ.name_range, pos) {
-                return Some(canonical_type_fqn(index, occ.fqn.clone()));
+                // A bare call through `:refer :all` / `(:use …)` is filed
+                // under this namespace; ask about the var it reaches.
+                let fqn = is_bare(&snapshot.text, occ.name_range)
+                    .then(|| {
+                        referred_fqn(
+                            index,
+                            &meta.name,
+                            &meta.refer_all,
+                            &occ.fqn,
+                            Dialect::of_path(&path),
+                        )
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| occ.fqn.clone());
+                return Some(canonical_type_fqn(index, fqn));
             }
         }
     }
@@ -923,6 +937,80 @@ pub fn resolve_fqn_at(
         .and_then(|m| m.aliases.get(alias).cloned())
         .unwrap_or_else(|| alias.to_string());
     Some(canonical_type_fqn(index, format!("{}/{}", ns, name)))
+}
+
+/// `fqn` as recorded in a file of namespace `file_ns`, or the `refer_all`
+/// var it names ([`refer_all_target`]) when it is a name filed under
+/// `file_ns` that the namespace does not define. The occurrence walker has no
+/// index, so it files a bare call through `:refer :all` / `(:use …)` under
+/// the current namespace; this reads it at query time. `None` keeps `fqn`.
+/// The walker records an explicit `file_ns/f` the same way, so callers ask
+/// only about a bare token ([`is_bare`]).
+pub(crate) fn referred_fqn(
+    index: &Index,
+    file_ns: &str,
+    refer_all: &[String],
+    fqn: &str,
+    dialect: Dialect,
+) -> Option<String> {
+    if refer_all.is_empty() || file_ns.is_empty() || fqn.starts_with(':') {
+        return None;
+    }
+    let name = fqn.strip_prefix(file_ns)?.strip_prefix('/')?;
+    if name.is_empty() {
+        return None;
+    }
+    let (ns, _) = refer_all_target(index, file_ns, refer_all, name, dialect)?;
+    Some(format!("{}/{}", ns, name))
+}
+
+/// Whether the token at `range` in `text` is unqualified: the character
+/// before it is not the `/` of a namespace half.
+fn is_bare(text: &str, range: Range) -> bool {
+    let Some(line) = text.lines().nth(range.start.line as usize) else {
+        return false;
+    };
+    let start = range.start.character as usize;
+    let units: Vec<u16> = line.encode_utf16().take(start).collect();
+    units.len() == start && units.last() != Some(&(b'/' as u16))
+}
+
+/// `occs` of one file of namespace `file_ns`, read from `text`, with every
+/// bare occurrence's fqn replaced by the `refer_all` var it names
+/// ([`referred_fqn`]); `None` when nothing changed. Rewritten before
+/// matching, so a bare `->R` becomes `lib/->R` and is then found as a
+/// constructor call of `lib/R`.
+pub(crate) fn with_referred_fqns(
+    index: &Index,
+    file_ns: &str,
+    refer_all: &[String],
+    occs: &[Occurrence],
+    text: &str,
+    dialect: Dialect,
+) -> Option<Vec<Occurrence>> {
+    if refer_all.is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    let out = occs
+        .iter()
+        .map(|occ| {
+            let fqn = is_bare(text, occ.name_range)
+                .then(|| referred_fqn(index, file_ns, refer_all, &occ.fqn, dialect))
+                .flatten();
+            match fqn {
+                Some(fqn) => {
+                    changed = true;
+                    Occurrence {
+                        fqn,
+                        name_range: occ.name_range,
+                    }
+                }
+                None => occ.clone(),
+            }
+        })
+        .collect();
+    changed.then_some(out)
 }
 
 fn range_contains(range: &Range, pos: Position) -> bool {
@@ -1081,6 +1169,37 @@ pub fn occurrences_for(
     documents: &DocumentStore,
     fqn: &str,
 ) -> Vec<(PathBuf, Vec<Occurrence>)> {
+    let forms = constructor_forms(index, fqn);
+    // The names a bare call through `:refer :all` of the target's namespace
+    // spells: the target's own, and its constructors'.
+    let referred = fqn
+        .split_once('/')
+        .filter(|_| !fqn.starts_with(':'))
+        .map(|(ns, name)| {
+            let mut names = vec![name.to_string()];
+            names.extend(
+                forms
+                    .iter()
+                    .filter(|f| f.fqn.split_once('/').is_some_and(|(n, _)| n == ns))
+                    .map(|f| f.spelling.clone()),
+            );
+            (ns, names)
+        });
+    // Whether a file of `file_ns` referring `refer_all` wholesale may call
+    // the target bare: it refers the target's namespace and files one of its
+    // names under its own.
+    let may_refer = |file_ns: &str, refer_all: &[String], occs: &[Occurrence]| {
+        referred.as_ref().is_some_and(|(ns, names)| {
+            refer_all.iter().any(|r| r == ns)
+                && occs.iter().any(|o| {
+                    o.fqn
+                        .strip_prefix(file_ns)
+                        .and_then(|rest| rest.strip_prefix('/'))
+                        .is_some_and(|n| names.iter().any(|name| name == n))
+                })
+        })
+    };
+
     let mut live: HashMap<PathBuf, (Vec<Occurrence>, String)> = HashMap::new();
     for uri in documents.open_uris() {
         // Open JAR docs (`jar:` URIs) convert to their virtual index path, so a
@@ -1097,20 +1216,51 @@ pub fn occurrences_for(
             &path,
             &index.extract_config(),
         );
+        let meta = extractor::ns_meta_of_tree(&snapshot.tree, &snapshot.text);
+        let occs = if may_refer(&meta.name, &meta.refer_all, &occs) {
+            with_referred_fqns(
+                index,
+                &meta.name,
+                &meta.refer_all,
+                &occs,
+                &snapshot.text,
+                Dialect::of_path(&path),
+            )
+            .unwrap_or(occs)
+        } else {
+            occs
+        };
         live.insert(path, (occs, snapshot.text.to_string()));
     }
 
-    let forms = constructor_forms(index, fqn);
     let mut result = Vec::new();
     for entry in index.occurrences.iter() {
         if live.contains_key(entry.key()) {
             continue;
         }
-        // Only a file that calls a constructor is read, to check the spelling.
-        let text = calls_any(entry.value(), &forms)
+        let refers = index
+            .file_refer_all(entry.key())
+            .filter(|(file_ns, refer_all)| may_refer(file_ns, refer_all, entry.value()));
+        // Only a file that calls a constructor, or may call the target bare
+        // through `:refer :all`, is read: to check the spelling, and to tell
+        // a bare call from an explicit `file_ns/name`.
+        let text = (refers.is_some() || calls_any(entry.value(), &forms))
             .then(|| std::fs::read_to_string(entry.key()).ok())
             .flatten();
-        let matching = matching_occurrences(entry.value(), fqn, &forms, text.as_deref());
+        let rewritten = refers
+            .zip(text.as_deref())
+            .and_then(|((file_ns, refer_all), text)| {
+                with_referred_fqns(
+                    index,
+                    &file_ns,
+                    &refer_all,
+                    entry.value(),
+                    text,
+                    Dialect::of_path(entry.key()),
+                )
+            });
+        let occs = rewritten.as_deref().unwrap_or(entry.value());
+        let matching = matching_occurrences(occs, fqn, &forms, text.as_deref());
         if !matching.is_empty() {
             result.push((entry.key().clone(), matching));
         }
@@ -1233,6 +1383,105 @@ mod tests {
         assert!(!spells(Some(text), at(1, 1, 2), "foo"), "`f` is not `foo`");
         assert!(spells(Some(text), at(1, 5, 8), "foo"));
         assert!(spells(None, at(1, 1, 2), "foo"), "unreadable: kept");
+    }
+
+    fn referring_index() -> Index {
+        use std::collections::HashMap;
+        let meta = |name: &str, refer_all: &[&str]| crate::index::NsMeta {
+            name: name.to_string(),
+            file: PathBuf::from(format!("{}.clj", name)),
+            aliases: HashMap::new(),
+            refers: HashMap::new(),
+            requires: vec![],
+            imports: HashMap::new(),
+            refer_all: refer_all.iter().map(|s| s.to_string()).collect(),
+            as_aliases: vec![],
+            core_excludes: vec![],
+        };
+        let sym = |name: &str, ns: &str, kind: DefKind| Symbol {
+            name: name.to_string(),
+            fqn: format!("{}/{}", ns, name),
+            ns: ns.to_string(),
+            kind,
+            params: vec![],
+            doc: None,
+            file: PathBuf::from(format!("{}.clj", ns)),
+            source: SymbolSource::Project,
+            range: Range::default(),
+            name_range: Range::default(),
+            private: false,
+        };
+        let index = Index::new();
+        index.insert_file(
+            meta("lib", &[]),
+            vec![
+                sym("f", "lib", DefKind::Defn),
+                sym("R", "lib", DefKind::Defrecord),
+            ],
+            vec![],
+        );
+        index.insert_file(
+            meta("app", &["lib"]),
+            vec![sym("g", "app", DefKind::Defn)],
+            vec![],
+        );
+        index
+    }
+
+    #[test]
+    fn referred_fqn_reads_a_name_filed_under_the_file_through_refer_all() {
+        let index = referring_index();
+        let lib = vec!["lib".to_string()];
+        let referred = |fqn: &str, refer_all: &[String]| {
+            referred_fqn(&index, "app", refer_all, fqn, Dialect::Clj)
+        };
+        assert_eq!(referred("app/f", &lib).as_deref(), Some("lib/f"));
+        assert_eq!(referred("app/->R", &lib).as_deref(), Some("lib/->R"));
+        // `app` defines `g` itself.
+        assert_eq!(referred("app/g", &lib), None);
+        assert_eq!(referred("app/f", &[]), None);
+        // Filed under another namespace: not a bare call of this file.
+        assert_eq!(referred("lib2/f", &lib), None);
+        assert_eq!(referred("application/f", &lib), None);
+        assert_eq!(referred(":app/f", &lib), None);
+    }
+
+    #[test]
+    fn with_referred_fqns_rewrites_bare_tokens_alone() {
+        let index = referring_index();
+        let text = "(ns app (:use lib))\n(f) (app/f) (->R 1) (g)\n";
+        let occ = |fqn: &str, start: u32, end: u32| Occurrence {
+            fqn: fqn.to_string(),
+            name_range: Range {
+                start: Position {
+                    line: 1,
+                    character: start,
+                },
+                end: Position {
+                    line: 1,
+                    character: end,
+                },
+            },
+        };
+        let occs = vec![
+            occ("app/f", 1, 2),
+            occ("app/f", 9, 10),
+            occ("app/->R", 13, 16),
+            occ("app/g", 21, 22),
+        ];
+        let out = with_referred_fqns(
+            &index,
+            "app",
+            &["lib".to_string()],
+            &occs,
+            text,
+            Dialect::Clj,
+        )
+        .expect("bare calls rewritten");
+        let fqns: Vec<&str> = out.iter().map(|o| o.fqn.as_str()).collect();
+        assert_eq!(fqns, ["lib/f", "app/f", "lib/->R", "app/g"]);
+        // Nothing to rewrite without a wholesale refer.
+        assert!(with_referred_fqns(&index, "app", &[], &occs, text, Dialect::Clj).is_none());
     }
 
     #[test]
