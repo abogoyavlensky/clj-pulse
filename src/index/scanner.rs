@@ -62,7 +62,12 @@ pub fn build_index_scoped(roots: &[ScanRoot], cfg: &ExtractConfig) -> Result<Ind
         // `.cljs` file of one namespace are its two halves, not a collision.
         let dialect = Dialect::of_path(&meta.file);
         if let Some(existing) = index.ns_meta_for(&meta.name, dialect) {
-            if existing.file != meta.file && Dialect::of_path(&existing.file) == dialect {
+            // A file that only `(in-ns …)`s the namespace shares it on purpose.
+            if existing.file != meta.file
+                && Dialect::of_path(&existing.file) == dialect
+                && !existing.in_ns
+                && !meta.in_ns
+            {
                 tracing::warn!(
                     "namespace {} defined in both {} and {}; last one wins",
                     meta.name,

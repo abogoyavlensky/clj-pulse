@@ -170,6 +170,11 @@ pub struct NsMeta {
     /// core completion must not offer it.
     #[serde(default)]
     pub core_excludes: Vec<String>,
+    /// The file names its namespace with a top-level `(in-ns 'x)` rather than an
+    /// `ns` form — a file another one `(load …)`s. Its metadata says nothing about
+    /// the namespace's requires or aliases, so it ranks below every `ns` form.
+    #[serde(default)]
+    pub in_ns: bool,
 }
 
 impl NsMeta {
@@ -235,6 +240,11 @@ fn slot_rank(project: bool, path: &Path) -> u8 {
         3 + dialect_rank
     }
 }
+
+/// Namespace-metadata rank of a file named by `(in-ns 'x)` alone: worse than
+/// every real rank, so it holds a namespace's slot only while no `ns` form
+/// does. Not a `.cljs` rank (`6 % 3 == 0`), so it never goes to the shadow.
+const IN_NS_RANK: u8 = 6;
 
 /// Whether `rank` is a `.cljs` file's, the one rank whose loser is kept aside.
 fn is_cljs_rank(rank: u8) -> bool {
@@ -558,7 +568,13 @@ impl Index {
         }
     }
 
+    /// Rank of `meta` in its namespace's metadata slot: [`slot_rank`] of its
+    /// file, or [`IN_NS_RANK`] for a file that only `(in-ns …)`s the namespace.
+    /// Symbols keep `slot_rank`: a loaded file's `defn` is as real as any.
     fn meta_rank(&self, meta: &NsMeta) -> u8 {
+        if meta.in_ns {
+            return IN_NS_RANK;
+        }
         slot_rank(self.is_project_path(&meta.file), &meta.file)
     }
 
@@ -732,7 +748,7 @@ impl Index {
             .entry(ns_name.clone())
             .or_default()
             .push(file.clone());
-        let rank = slot_rank(true, &file);
+        let rank = self.meta_rank(&meta);
         rank_insert(
             &self.namespaces,
             &self.cljs_namespaces,
@@ -953,6 +969,19 @@ impl Index {
         });
         self.namespaces
             .retain(|ns, _| self.ns_symbols.contains_key(ns));
+        // A namespace kept for its project symbols can hold a library's
+        // metadata (a project `(in-ns 'clojure.core)` file ranks below the
+        // library's `ns` form): drop it, then refill from the project files.
+        let foreign: Vec<String> = self
+            .namespaces
+            .iter()
+            .filter(|e| !self.occurrences.contains_key(&e.value().file))
+            .map(|e| e.key().clone())
+            .collect();
+        for ns in foreign {
+            self.namespaces.remove(&ns);
+            self.refill_namespace(&ns);
+        }
         self.file_to_ns
             .retain(|_, ns| self.namespaces.contains_key(ns));
     }
@@ -976,7 +1005,7 @@ impl Index {
         let ns_owned_by_project = self
             .namespaces
             .get(&meta.name)
-            .map(|ns| self.occurrences.contains_key(&ns.file))
+            .map(|ns| !ns.in_ns && self.occurrences.contains_key(&ns.file))
             .unwrap_or(false);
         if ns_owned_by_project {
             return;
@@ -1000,12 +1029,13 @@ impl Index {
         self.extend_ns_symbols(&meta.name, &fqns);
         self.file_to_ns.insert(meta.file.clone(), meta.name.clone());
         let ns_name = meta.name.clone();
+        let meta_rank = self.meta_rank(&meta);
         rank_insert(
             &self.namespaces,
             &self.cljs_namespaces,
             ns_name,
             meta,
-            rank,
+            meta_rank,
             |old| self.meta_rank(old),
         );
     }
@@ -1066,6 +1096,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         };
 
         let index = Index::new();
@@ -1114,6 +1145,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         }
     }
 
@@ -1641,5 +1673,207 @@ mod tests {
             Dialect::of_path(Path::new("/m2/x.jar!/clojure/string.clj")),
             Dialect::Clj
         );
+    }
+
+    /// `file` as a file `(load …)`ed into `ns`: named by `(in-ns 'ns)`, no
+    /// aliases of its own.
+    fn in_ns_meta(ns: &str, file: &str) -> NsMeta {
+        NsMeta {
+            in_ns: true,
+            ..ns_meta_in(ns, file)
+        }
+    }
+
+    /// A real `ns` form that binds the alias `s`.
+    fn ns_form_meta(ns: &str, file: &str) -> NsMeta {
+        let mut meta = ns_meta_in(ns, file);
+        meta.aliases
+            .insert("s".to_string(), "clojure.string".to_string());
+        meta
+    }
+
+    const MAIN: &str = "/p/src/a/b.clj";
+    const LOADED: &str = "/p/src/a/b_extra.clj";
+
+    fn insert_main(index: &Index) {
+        index.insert_file(
+            ns_form_meta("a.b", MAIN),
+            vec![project_symbol("a.b/main", MAIN)],
+            some_occurrence(),
+        );
+    }
+
+    fn insert_loaded(index: &Index) {
+        index.insert_file(
+            in_ns_meta("a.b", LOADED),
+            vec![project_symbol("a.b/helper", LOADED)],
+            some_occurrence(),
+        );
+    }
+
+    #[test]
+    fn an_in_ns_file_never_takes_the_slot_from_an_ns_form() {
+        let forward = Index::new();
+        insert_main(&forward);
+        insert_loaded(&forward);
+        let reverse = Index::new();
+        insert_loaded(&reverse);
+        insert_main(&reverse);
+        for index in [forward, reverse] {
+            let meta = index.ns_meta("a.b").expect("namespace metadata");
+            assert_eq!(meta.file, PathBuf::from(MAIN));
+            assert!(meta.aliases.contains_key("s"), "aliases intact");
+            assert!(!meta.in_ns);
+            assert_eq!(
+                index.lookup("a.b/helper").unwrap().file,
+                PathBuf::from(LOADED)
+            );
+            assert_eq!(index.lookup("a.b/main").unwrap().file, PathBuf::from(MAIN));
+            assert_eq!(sorted_ns_symbols(&index, "a.b"), ["a.b/helper", "a.b/main"]);
+        }
+    }
+
+    #[test]
+    fn an_in_ns_file_alone_fills_the_slot() {
+        let index = Index::new();
+        insert_loaded(&index);
+        let meta = index.ns_meta("a.b").expect("namespace metadata");
+        assert_eq!(meta.file, PathBuf::from(LOADED));
+        assert!(meta.in_ns);
+        assert!(index.lookup("a.b/helper").is_some());
+    }
+
+    #[test]
+    fn removing_the_ns_form_refills_from_another_ns_form_before_an_in_ns_file() {
+        const OTHER: &str = "/p/other/a/b.clj";
+        let index = Index::new();
+        insert_main(&index);
+        insert_loaded(&index);
+        index.insert_file(ns_form_meta("a.b", OTHER), vec![], some_occurrence());
+        // Last writer among equals holds the slot.
+        assert_eq!(index.ns_meta("a.b").unwrap().file, PathBuf::from(OTHER));
+
+        index.remove_file(Path::new(OTHER));
+        assert_eq!(index.ns_meta("a.b").unwrap().file, PathBuf::from(MAIN));
+
+        index.remove_file(Path::new(MAIN));
+        let meta = index
+            .ns_meta("a.b")
+            .expect("the loaded file still holds it");
+        assert_eq!(meta.file, PathBuf::from(LOADED));
+        assert!(index.lookup("a.b/helper").is_some());
+    }
+
+    const CORE: &str = "/m2/clojure.jar!/clojure/core.clj";
+    const CORE_PRINT: &str = "/m2/clojure.jar!/clojure/core_print.clj";
+
+    fn insert_lib_core(index: &Index) {
+        index.insert_lib_file(
+            ns_form_meta("clojure.core", CORE),
+            vec![
+                lib_symbol("clojure.core/inc", CORE),
+                lib_symbol("clojure.core/bar", CORE),
+            ],
+        );
+    }
+
+    fn insert_lib_core_print(index: &Index) {
+        index.insert_lib_file(
+            in_ns_meta("clojure.core", CORE_PRINT),
+            vec![lib_symbol("clojure.core/print-method", CORE_PRINT)],
+        );
+    }
+
+    #[test]
+    fn a_library_in_ns_file_never_takes_the_slot_from_the_ns_form() {
+        let forward = Index::new();
+        insert_lib_core(&forward);
+        insert_lib_core_print(&forward);
+        let reverse = Index::new();
+        insert_lib_core_print(&reverse);
+        insert_lib_core(&reverse);
+        for index in [forward, reverse] {
+            let meta = index.ns_meta("clojure.core").expect("metadata");
+            assert_eq!(meta.file, PathBuf::from(CORE));
+            assert!(meta.aliases.contains_key("s"));
+            assert_eq!(
+                index.lookup("clojure.core/print-method").unwrap().file,
+                PathBuf::from(CORE_PRINT)
+            );
+            assert!(index.lookup("clojure.core/inc").is_some());
+        }
+    }
+
+    const PATCH: &str = "/p/src/patch.clj";
+
+    fn insert_project_patch(index: &Index) {
+        index.insert_file(
+            in_ns_meta("clojure.core", PATCH),
+            vec![
+                project_symbol("clojure.core/inc", PATCH),
+                project_symbol("clojure.core/patched", PATCH),
+            ],
+            some_occurrence(),
+        );
+    }
+
+    #[test]
+    fn a_project_in_ns_patch_of_a_library_namespace_leaves_the_library_indexed() {
+        let forward = Index::new();
+        insert_project_patch(&forward);
+        insert_lib_core(&forward);
+        let reverse = Index::new();
+        insert_lib_core(&reverse);
+        insert_project_patch(&reverse);
+        for index in [forward, reverse] {
+            let meta = index.ns_meta("clojure.core").expect("metadata");
+            assert_eq!(meta.file, PathBuf::from(CORE), "the library's ns form");
+            assert!(index.lookup("clojure.core/bar").is_some());
+            // The project's redefinition still wins its own fqn.
+            assert_eq!(
+                index.lookup("clojure.core/inc").unwrap().file,
+                PathBuf::from(PATCH)
+            );
+            assert!(index.lookup("clojure.core/patched").is_some());
+        }
+    }
+
+    #[test]
+    fn a_library_in_ns_file_never_displaces_a_project_ns_form() {
+        let index = Index::new();
+        insert_main(&index);
+        index.insert_lib_file(
+            in_ns_meta("a.b", "/m2/lib.jar!/a/b_lib.clj"),
+            vec![lib_symbol("a.b/from-lib", "/m2/lib.jar!/a/b_lib.clj")],
+        );
+        assert_eq!(index.ns_meta("a.b").unwrap().file, PathBuf::from(MAIN));
+    }
+
+    #[test]
+    fn clear_libs_restores_a_project_in_ns_files_own_metadata() {
+        for lib_first in [false, true] {
+            let index = Index::new();
+            if lib_first {
+                insert_lib_core(&index);
+                insert_project_patch(&index);
+            } else {
+                insert_project_patch(&index);
+                insert_lib_core(&index);
+            }
+            assert_eq!(
+                index.ns_meta("clojure.core").unwrap().file,
+                PathBuf::from(CORE)
+            );
+
+            index.clear_libs();
+            let meta = index.ns_meta("clojure.core").expect("project metadata");
+            assert_eq!(meta.file, PathBuf::from(PATCH));
+            assert!(meta.in_ns);
+            assert_eq!(
+                index.lookup("clojure.core/patched").unwrap().file,
+                PathBuf::from(PATCH)
+            );
+            assert!(index.lookup("clojure.core/bar").is_none());
+        }
     }
 }

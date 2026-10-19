@@ -975,6 +975,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         }
     }
 
@@ -1002,6 +1003,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         };
         let greet = Symbol {
             name: "greet".to_string(),
@@ -1031,6 +1033,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         }
     }
 

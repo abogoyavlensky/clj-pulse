@@ -414,6 +414,12 @@ the release.
       Resolved at query time; clj-kondo `var-def/defn` went from 16 to 6
       diverge, penpot unchanged.
       Plan: [2026-10-18-0812-refer-all-references.md](plans/2026-10-18-0812-refer-all-references.md) — done
+- [x] **Files loaded with `(in-ns '…)`.** A file with no `ns` form whose top
+      level switches namespace with `(in-ns 'x)` — what `(load "…")` pulls in —
+      defined its vars under bare names: `clojure.pprint/pprint` answered null
+      (`bb compare` 2026-10-17, about 35 answers across penpot and clj-kondo),
+      and `clojure.core`'s split files never navigated into the JAR.
+      Plan: [2026-10-18-1516-in-ns-loaded-files.md](plans/2026-10-18-1516-in-ns-loaded-files.md) — done
 - [ ] **Release**
   - [x] Windows build target restored in the release matrix (build-only,
         untested); proven green once on a PR-side build job that was then

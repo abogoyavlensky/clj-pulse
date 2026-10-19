@@ -93,6 +93,9 @@ and real-world feedback are welcome.
 
 - Clojure Pulse, Calva, and Neovim are the primary editor targets. Zed is
   best effort and does not yet support library JAR navigation.
+- Vars defined in files a namespace `(load …)`s and `(in-ns '…)`s are
+  navigable, including `clojure.pprint` and `clojure.core`'s split files. The
+  loading namespace's aliases are not known inside a loaded file.
 - Java support covers JDK classes, static members, and constructors.
   Instance methods, library classes, and decompilation are not supported yet.
 - Whole-document formatting is provided by the editor. Clojure Pulse uses

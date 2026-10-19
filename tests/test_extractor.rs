@@ -3580,3 +3580,127 @@ mod prefix_vectors {
         assert_eq!(sites.declarations.len(), 1, "{:?}", sites.declarations);
     }
 }
+
+// A file with no `ns` form whose top level switches namespace with
+// `(in-ns 'x)` — what `(load "…")` pulls in — defines its vars in `x`.
+mod in_ns {
+    use clj_pulse::index::extractor::{
+        extract, extract_full, extract_full_with, local_references_at_tree, ns_meta_of_tree,
+        parse_tree,
+    };
+    use clj_pulse::index::ExtractConfig;
+    use std::collections::HashMap;
+    use std::path::Path;
+    use tower_lsp::lsp_types::Position;
+
+    fn fqns(src: &str) -> Vec<String> {
+        let (_, syms) = extract(src, Path::new("loaded.clj")).unwrap();
+        syms.into_iter().map(|s| s.fqn).collect()
+    }
+
+    #[test]
+    fn a_quoted_in_ns_names_the_file_s_namespace() {
+        let src = "(in-ns 'clojure.pprint)\n(defn pprint [x] x)\n(def ^:dynamic *print-base* 10)\n";
+        let (meta, syms) = extract(src, Path::new("pprint_base.clj")).unwrap();
+        assert_eq!(meta.name, "clojure.pprint");
+        assert!(meta.in_ns);
+        let names: Vec<&str> = syms.iter().map(|s| s.fqn.as_str()).collect();
+        assert_eq!(
+            names,
+            ["clojure.pprint/pprint", "clojure.pprint/*print-base*"]
+        );
+        assert!(syms.iter().all(|s| s.ns == "clojure.pprint"));
+    }
+
+    #[test]
+    fn a_quote_form_names_it_too() {
+        let (meta, _) = extract("(in-ns (quote x.y))\n(def a 1)\n", Path::new("a.clj")).unwrap();
+        assert_eq!(meta.name, "x.y");
+        assert!(meta.in_ns);
+        assert_eq!(fqns("(in-ns (quote x.y))\n(def a 1)\n"), ["x.y/a"]);
+    }
+
+    #[test]
+    fn an_in_ns_after_an_ns_form_changes_nothing() {
+        let src = "(ns a)\n(in-ns 'b)\n(def x 1)\n";
+        let (meta, syms) = extract(src, Path::new("a.clj")).unwrap();
+        assert_eq!(meta.name, "a");
+        assert!(!meta.in_ns);
+        assert_eq!(syms[0].fqn, "a/x");
+    }
+
+    #[test]
+    fn an_ns_form_after_an_in_ns_sets_its_name_and_clears_the_flag() {
+        let src = "(in-ns 'b)\n(def x 1)\n(ns a)\n(def y 1)\n";
+        let (meta, syms) = extract(src, Path::new("a.clj")).unwrap();
+        assert_eq!(meta.name, "a");
+        assert!(!meta.in_ns);
+        assert_eq!(syms[0].fqn, "b/x");
+        assert_eq!(syms[1].fqn, "a/y");
+    }
+
+    #[test]
+    fn only_a_quoted_plain_symbol_counts() {
+        for src in [
+            "(in-ns x)\n(def a 1)\n",
+            "(in-ns 'a/b)\n(def a 1)\n",
+            "(in-ns)\n(def a 1)\n",
+            "(in-ns 'a 'b)\n(def a 1)\n",
+            "(in-ns :a)\n(def a 1)\n",
+            "(in-ns \"a\")\n(def a 1)\n",
+        ] {
+            let (meta, _) = extract(src, Path::new("a.clj")).unwrap();
+            assert_eq!(meta.name, "", "{src}");
+            assert!(!meta.in_ns, "{src}");
+        }
+    }
+
+    #[test]
+    fn a_reader_conditional_in_ns_reads_its_clojure_branch_first() {
+        let src = "#?(:cljs (in-ns 'client) :clj (in-ns 'server))\n(defn f [] 1)\n";
+        let (meta, syms) = extract(src, Path::new("a.cljc")).unwrap();
+        assert_eq!(meta.name, "server");
+        assert_eq!(syms[0].fqn, "server/f");
+        let tree = parse_tree(src).unwrap();
+        assert_eq!(ns_meta_of_tree(&tree, src).name, "server");
+    }
+
+    #[test]
+    fn a_file_with_neither_stays_nameless() {
+        let (meta, _) = extract("(def a 1)\n", Path::new("a.clj")).unwrap();
+        assert_eq!(meta.name, "");
+        assert!(!meta.in_ns);
+    }
+
+    #[test]
+    fn a_bare_name_defined_in_the_file_is_qualified_with_the_namespace() {
+        let src = "(in-ns 'x)\n(defn g [] 1)\n(defn f [] (g))\n";
+        let (_, _, occs) = extract_full(src, Path::new("loaded.clj")).unwrap();
+        assert_eq!(
+            occs.iter().filter(|o| o.fqn == "x/g").count(),
+            1,
+            "{occs:?}"
+        );
+    }
+
+    #[test]
+    fn a_lint_as_binding_macro_of_the_namespace_binds_for_both_walkers() {
+        let cfg = ExtractConfig {
+            lint_as_forms: HashMap::from([("x/my-let".to_string(), "let".to_string())]),
+            ..Default::default()
+        };
+        let src = "(in-ns 'x)\n(defn f [] (my-let [a 1] a))\n";
+        let (_, _, occs) = extract_full_with(src, Path::new("loaded.clj"), &cfg).unwrap();
+        assert!(
+            !occs.iter().any(|o| o.fqn == "x/a"),
+            "`a` is bound, not a usage of a var: {occs:?}"
+        );
+
+        let tree = parse_tree(src).unwrap();
+        let line = 1;
+        let col = src.lines().nth(line).unwrap().rfind("a)").unwrap() as u32;
+        let refs = local_references_at_tree(&tree, src, Position::new(line as u32, col), "a", &cfg)
+            .expect("`a` is a local of the loaded file");
+        assert_eq!(refs.usages.len(), 1, "{refs:?}");
+    }
+}

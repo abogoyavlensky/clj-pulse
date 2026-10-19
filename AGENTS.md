@@ -486,6 +486,24 @@ there.
   pattern's names for a cursor inside the pattern alone, outside an `:or`
   value, so they shadow an outer local of the same name. `CACHE_FORMAT_VERSION`
   23 introduced it.
+- A file with no `ns` form whose top level has `(in-ns 'x)` or
+  `(in-ns (quote x))` (a quoted plain symbol, one argument — what `(load "…")`
+  pulls in: `clojure.pprint`, `clojure.core`'s `core_print.clj`) names its
+  namespace `x` and sets `NsMeta.in_ns` (`in_ns_target`, read by
+  `process_top_level_list` and `ns_meta_of_tree` alike, and through the Clojure
+  branch of a reader conditional like an `ns` form: `names_namespace`). It only
+  applies while the name is empty: an `in-ns` after an `ns` form changes
+  nothing, and a later `ns` form takes the name and clears the flag. The file's
+  aliases and refers stay empty by design, since at run time it shares the
+  loading namespace's. An `in_ns` file's namespace-metadata rank is
+  `IN_NS_RANK` (6, `meta_rank`), worse than every real rank and not a `.cljs`
+  rank, so it fills the `namespaces` slot only while no `ns` form has and never
+  displaces one, whatever the order; its symbols keep `slot_rank`.
+  `insert_lib_file`'s project-ownership guard ignores an `in_ns` holder (a
+  project file patching `clojure.core` must not make the JAR skip indexing),
+  `clear_libs` drops metadata that is not a project file's and refills from the
+  project records, and the scanner's "defined in both" warning skips an `in_ns`
+  file. `CACHE_FORMAT_VERSION` 27 introduced it.
 - A `Defmethod` symbol is for the outline alone and never takes an index slot
   (`insert_file` / `insert_lib_file` skip it via `takes_slot`): its fqn is the
   multimethod's own, so it would displace the `defmulti` among equals and

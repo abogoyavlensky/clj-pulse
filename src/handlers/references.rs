@@ -1446,6 +1446,7 @@ mod tests {
             refer_all: refer_all.iter().map(|s| s.to_string()).collect(),
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         };
         let sym = |name: &str, ns: &str, kind: DefKind| Symbol {
             name: name.to_string(),

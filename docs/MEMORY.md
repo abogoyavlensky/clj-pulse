@@ -913,6 +913,32 @@ rename on the inlined tools.reader's `impl.commons` vars (`read-past`,
 does not use `:refer :all` among the sampled definitions and is unchanged
 row for row. `bb soak` (clj-kondo, 20 rounds) passes.
 
+### After files loaded with `(in-ns '…)` (2026-10-19)
+
+The branch against master `c2452e4` (the table above), same kondo state. A
+file with no `ns` form whose top level has `(in-ns 'x)` defines its vars in
+`x`, so `clojure.pprint/pprint` and the vars of `clojure.core`'s split files
+navigate into the clojure JAR instead of answering null.
+
+| Corpus | Probes | Agree | Diverge | Known | Null | Soft | Diverge before | Known before | Null before |
+|---|---|---|---|---|---|---|---|---|---|
+| clj-kondo | 5032 | 4754 | 36 | 231 | 11 | 0 | 36 | 222 | 20 |
+| penpot | 7353 | 6409 | 198 | 380 | 366 | 0 | 198 | 367 | 379 |
+
+Nine clj-kondo and thirteen penpot nulls became answers; none became
+agreement. Kondo files a usage of `pprint/write-option-table` under the
+namespace's main file (`clojure/pprint.clj`) and has no way to know the `defn`
+lives in `pprint/pprint_base.clj`, so the answer is a divergence by the
+oracle's path rule. It is `known` under a dated reason (`KNOWN` in
+`test_compare.rs`: an archive entry beside the main file, `<ns>/…` or
+`<ns>_…`). Nothing else moved: `agree` is unchanged row for row. `bb soak`
+(clj-kondo, 20 rounds) passes: 105 MiB to 118 MiB, 1.13x.
+
+`bb bench`, one warm run, within the 2026-10-17 A/B spread: metabase first
+navigation 5.5 s, all dependencies 6.1 s, kondo finished 56 s, 472 MiB,
+definition 37 ms, 51 082 symbols (clojure.core gains its loaded files);
+clj-kondo 634 / 635 ms, 2.7 s, 102 MiB, definition 22 ms, 2 252 symbols.
+
 ## Soak: memory over a long session (2026-09-11)
 
 `bb soak` at 300 rounds on the clj-kondo corpus, seed `17215462345791384795`,
