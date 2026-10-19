@@ -514,6 +514,31 @@ static KNOWN: &[Known] = &[
         },
         reason: "let-go core is indexed from lgx deps only",
     },
+    // `clojure.pprint` is an `ns` form plus files it `(load …)`s, each opening
+    // with `(in-ns 'clojure.pprint)`; the vars are defined there
+    // (`pprint/pprint_base.clj`, `core_print.clj`). Kondo files a usage under
+    // the namespace's main file; clj-pulse lands on the file with the `defn`,
+    // which is the better answer. Only an archive entry beside the main file.
+    Known {
+        bucket_prefix: "var-usage/",
+        matches: |probe, verdict| {
+            let (Expectation::LibraryDefinition { ns, .. }, Verdict::Diverge { got, .. }) =
+                (&probe.expect, verdict)
+            else {
+                return false;
+            };
+            let entry = ns.replace('-', "_").replace('.', "/");
+            let loaded = |u: &str| {
+                (u.starts_with("jar:") || u.starts_with("zipfile:"))
+                    && u.rsplit_once("!/").is_some_and(|(_, inner)| {
+                        inner.starts_with(&format!("{entry}/"))
+                            || inner.starts_with(&format!("{entry}_"))
+                    })
+            };
+            !got.is_empty() && got.split(", ").all(loaded)
+        },
+        reason: "a library var defined in a file its namespace `(load …)`s, under `(in-ns 'x)`; kondo files the usage under the namespace's main file (2026-10-19)",
+    },
     // A protocol method's implementations (`(deftype T [] P (m [_] …))`,
     // `extend-protocol`) are sites in clj-pulse — references show them and a
     // rename must rewrite them — while kondo's analysis lists the method's

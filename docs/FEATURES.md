@@ -12,6 +12,12 @@ on the name, so renaming `state` leaves the `@` in place.
 
 - **Go to definition** - across project source, library JARs (via `jar:` URIs),
   and source-directory deps (git deps in `~/.gitlibs`, `:local/root`).
+  A file with no `ns` form that switches namespace with `(in-ns 'x)` - what a
+  namespace pulls in with `(load "…")` - defines its vars in `x`, so
+  `clojure.pprint/pprint` and the vars of `clojure.core`'s split files
+  (`defrecord`, `print-method`) navigate into the clojure JAR. The namespace
+  itself still lands in the file with the `ns` form; aliases and refers of the
+  loading namespace are not carried over into a loaded file.
 - **Autocomplete** - locals, project symbols, `:refer`red and alias-qualified
   vars (including `:refer :all` and `:use`), namespace and alias names,
   `clojure.core`, special forms, and JDK classes. Names match fuzzily (exact,

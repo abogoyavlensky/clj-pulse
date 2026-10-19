@@ -151,30 +151,32 @@ file of a namespace.
 
 ### Task 0: Open the ROADMAP item
 
-- [ ] **Step 1:** Add a Milestone 5 item beside the 2026-10-18 `:refer :all`
+- [x] **Step 1:** Add a Milestone 5 item beside the 2026-10-18 `:refer :all`
   item: "**Files loaded with `(in-ns '…)`**", one line of evidence
   (`clojure.pprint/pprint` answers null), and
   `Plan: [2026-10-18-1516-in-ns-loaded-files.md](plans/2026-10-18-1516-in-ns-loaded-files.md) — in progress`.
-- [ ] **Step 2: Commit** `git commit -m "roadmap: plan in-ns loaded files"`
+- [x] **Step 2: Commit** `git commit -m "roadmap: plan in-ns loaded files"`
 
 ### Task 1: `NsMeta.in_ns` and its rank
 
 **Files:**
 - Modify: `src/index/mod.rs` (and every `NsMeta` literal the compiler flags)
 
-- [ ] **Step 1: Add the field** (Design) and fix every literal
+- [x] **Step 1: Add the field** (Design) and fix every literal
   (`cargo build --all-targets` lists them).
-- [ ] **Step 2: Write failing index tests** (Design → Testing, the index bullets).
+- [x] **Step 2: Write failing index tests** (Design → Testing, the index bullets).
   Run: `cargo test --lib index::tests` — Expected: the order-dependent tests FAIL.
-- [ ] **Step 3: Implement** `IN_NS_RANK`, an in-ns-aware namespace rank used by
+- [x] **Step 3: Implement** `IN_NS_RANK`, an in-ns-aware namespace rank used by
   `meta_rank`, `insert_file` and `insert_lib_file` for the namespace slot only,
   and make `insert_lib_file`'s project-ownership guard ignore an `in_ns` holder;
   in `clear_libs`, drop non-project metadata entries and `refill_namespace`
   from project records; in `scanner.rs`, skip the collision warning when either
   file is `in_ns` (unit test if the warning has one, else assert through the
   log in the e2e of Task 3).
-- [ ] **Step 4: Run** `cargo test --lib` — Expected: PASS.
-- [ ] **Step 5: Commit** `git commit -m "index: an in-ns file never takes its namespace's metadata slot from an ns form"`
+- [x] **Step 4: Run** `cargo test --lib` — Expected: PASS.
+- [x] **Step 5: Commit** `git commit -m "index: an in-ns file never takes its namespace's metadata slot from an ns form"`
+
+> Deviation: no scanner unit test (the warning has none); the skip is a two-condition guard, checked by reading. `clear_libs` leaves stale library entries of a retained namespace in `file_to_ns`, as before.
 
 ### Task 2: Extraction
 
@@ -182,18 +184,20 @@ file of a namespace.
 - Modify: `src/index/extractor.rs`, `src/index/jar_cache.rs`
 - Test: `tests/test_extractor.rs`
 
-- [ ] **Step 1: Write failing extractor tests** (Design → Testing, the extractor
+- [x] **Step 1: Write failing extractor tests** (Design → Testing, the extractor
   bullet). Run: `cargo test --test test_extractor in_ns` — Expected: FAIL.
-- [ ] **Step 2: Implement** `in_ns_target` and use it in `process_top_level_list`
+- [x] **Step 2: Implement** `in_ns_target` and use it in `process_top_level_list`
   and `ns_meta_of_tree`: head text `in-ns`, exactly one
   argument, a `quoting_lit` whose single named child is an unqualified `sym_lit`,
   or a `(quote sym)` list; only when `ns_meta.name` is empty. `extract_ns` sets
   `in_ns = false`.
-- [ ] **Step 3: Bump** `CACHE_FORMAT_VERSION` to 27: "27: a file naming its
+- [x] **Step 3: Bump** `CACHE_FORMAT_VERSION` to 27: "27: a file naming its
   namespace with `(in-ns 'x)` defines its vars in `x` (`NsMeta.in_ns`)".
-- [ ] **Step 4: Run** `cargo test --test test_extractor` and `cargo test --lib` —
+- [x] **Step 4: Run** `cargo test --test test_extractor` and `cargo test --lib` —
   Expected: PASS.
-- [ ] **Step 5: Commit** `git commit -m "extractor: a top-level in-ns names the file's namespace"`
+- [x] **Step 5: Commit** `git commit -m "extractor: a top-level in-ns names the file's namespace"`
+
+> Deviation: codex found `process_reader_conditional` read `#?(:cljs (in-ns 'a) :clj (in-ns 'b))` in source order while `ns_meta_of_tree` read the Clojure branch first. A reader-conditional `in-ns` now goes through the same Clojure-first pass as an `ns` form (`names_namespace`); fixup commit `9ea3462`, with a test.
 
 ### Task 3: E2E
 
@@ -201,29 +205,40 @@ file of a namespace.
 - Create: the three fixture files (File Structure)
 - Modify: `tests/test_e2e.rs`
 
-- [ ] **Step 1: Write the fixture and the test** (Design → Testing, E2E), modeled
+- [x] **Step 1: Write the fixture and the test** (Design → Testing, E2E), modeled
   on an existing definition-plus-references e2e test. Then run the whole e2e suite
   once to catch tests that count fixture files or symbols, and adjust only those.
-- [ ] **Step 2: Write the JAR test** (Design → Testing, JAR) beside the existing
+- [x] **Step 2: Write the JAR test** (Design → Testing, JAR) beside the existing
   `bb e2e-real` tests in `tests/test_e2e.rs`.
-- [ ] **Step 3: Run** `bb e2e` and `bb e2e-real` — Expected: PASS.
-- [ ] **Step 4: Commit** `git commit -m "e2e: definition and references into an in-ns loaded file"`
+- [x] **Step 3: Run** `bb e2e` and `bb e2e-real` — Expected: PASS.
+- [x] **Step 4: Commit** `git commit -m "e2e: definition and references into an in-ns loaded file"`
 
 ### Task 4: Gates, records, docs
 
-- [ ] **Step 1:** `bb check` — Expected: green.
-- [ ] **Step 2:** `bb e2e`, `bb e2e-calva`, `bb e2e-pulse` — Expected: green.
-- [ ] **Step 3:** `bb compare` — Expected: penpot `var-usage/library/referred`
+- [x] **Step 1:** `bb check` — Expected: green.
+- [x] **Step 2:** `bb e2e`, `bb e2e-calva`, `bb e2e-pulse` — Expected: green.
+- [x] **Step 3:** `bb compare` — Expected: penpot `var-usage/library/referred`
   (`pprint`, `print-table`) and clj-kondo `var-usage/library/macro/aliased` /
   `library/aliased` (`pprint/with-pretty-writer`, `pprint/write-option-table`,
   `pprint/*print-base*`) move to agree; no row loses agreement beyond
   resampling. Record both tables in `docs/MEMORY.md`.
-- [ ] **Step 4:** `bb bench` — compare with the 2026-10-17 A/B; note symbol count
+- [x] **Step 4:** `bb bench` — compare with the 2026-10-17 A/B; note symbol count
   and RSS for both corpora (clojure.core gains its loaded files).
-- [ ] **Step 5:** `bb soak` — Expected: pass.
-- [ ] **Step 6: Docs.** AGENTS.md: an invariant for `in-ns` files (name,
+- [x] **Step 5:** `bb soak` — Expected: pass.
+- [x] **Step 6: Docs.** AGENTS.md: an invariant for `in-ns` files (name,
   `IN_NS_RANK`, empty aliases by design). `docs/FEATURES.md`: navigation reaches
   vars defined in `load`ed files, `clojure.pprint` and `clojure.core`'s split
   files among them. README: review its support-boundaries lines in the same change
   and add the loaded-files coverage where navigation coverage is listed. `docs/ROADMAP.md`: tick the item, status `done`.
-- [ ] **Step 7: Commit** `git commit -m "docs: in-ns loaded files"`
+- [x] **Step 7: Commit** `git commit -m "docs: in-ns loaded files"`
+
+> Deviation (Step 3): the pprint answers did not move to `agree`. They moved from null to a divergence, because the oracle expects kondo's file for the namespace (`clojure/pprint.clj`) while clj-pulse lands on the file with the `defn` (`pprint/pprint_base.clj`). Added a dated `KNOWN` entry in `tests/test_compare.rs` for an archive entry beside the namespace's main file; they count as `known`. Nulls 20 → 11 (clj-kondo), 379 → 366 (penpot); diverge and agree unchanged.
+> Deviation (Step 6): the guide file is `AGENTS.md` (`CLAUDE.md` is a symlink to it).
+
+## Summary
+
+Completed 2026-10-19. A top-level `(in-ns 'x)` / `(in-ns (quote x))` in a file with no `ns` form now names the file's namespace and sets `NsMeta.in_ns` (`CACHE_FORMAT_VERSION` 27); such a file ranks `IN_NS_RANK` for the namespace-metadata slot, so it never displaces an `ns` form's metadata, in any order, for project and library files alike. `insert_lib_file`, `clear_libs`, `refill_namespace` and the scanner warning were adjusted. E2E: project navigation (definition, references, namespace) and, under `bb e2e-real`, `pprint` into `clojure/pprint/pprint_base.clj`. Gates green: `bb check`, `bb e2e`, `bb e2e-real`, `bb e2e-calva`, `bb e2e-pulse`, `bb compare` (recorded in MEMORY.md), `bb bench`, `bb soak`.
+
+Deviations: reader-conditional `in-ns` ordering (codex finding, fixed); compare nulls became `known`, not `agree`; no scanner unit test; AGENTS.md is the guide file.
+
+What the plan could have specified better: that the compare oracle keys library landings on the namespace's main file, so the `agree` expectation for the `pprint` rows could not hold without a harness change; and the reader-conditional case of `in-ns`.
