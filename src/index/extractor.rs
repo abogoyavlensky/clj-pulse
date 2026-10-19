@@ -447,16 +447,17 @@ fn process_reader_conditional(
     symbols: &mut Vec<Symbol>,
     cfg: &ExtractConfig,
 ) {
-    // `ns` branches first, ordered so the Clojure one wins; every other
-    // branch in source order, so the outline keeps document order.
+    // Branches naming the namespace (`ns`, `(in-ns 'x)`) first, ordered so the
+    // Clojure one wins; every other branch in source order, so the outline
+    // keeps document order.
     for form in reader_branches_clojure_wins(node, source) {
-        if form.kind() == "list_lit" && is_ns_form(form, source) {
+        if form.kind() == "list_lit" && names_namespace(form, source) {
             process_top_level_list(form, source, file, ns_meta, symbols, cfg);
         }
     }
     for pair in named_children(node).chunks(2) {
         if let [_, form] = pair {
-            if form.kind() == "list_lit" && !is_ns_form(*form, source) {
+            if form.kind() == "list_lit" && !names_namespace(*form, source) {
                 process_top_level_list(*form, source, file, ns_meta, symbols, cfg);
             }
         }
@@ -1832,6 +1833,12 @@ fn ns_forms<'a>(root: Node<'a>, source: &str) -> Vec<Node<'a>> {
         }
     }
     forms
+}
+
+/// Whether `list` is an `ns` form or a top-level `(in-ns 'x)`: what sets a
+/// file's namespace name.
+fn names_namespace(list: Node, source: &str) -> bool {
+    is_ns_form(list, source) || in_ns_target(&named_children(list), source).is_some()
 }
 
 fn is_ns_form(list: Node, source: &str) -> bool {

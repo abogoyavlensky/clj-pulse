@@ -3585,7 +3585,8 @@ mod prefix_vectors {
 // `(in-ns 'x)` — what `(load "…")` pulls in — defines its vars in `x`.
 mod in_ns {
     use clj_pulse::index::extractor::{
-        extract, extract_full, extract_full_with, local_references_at_tree, parse_tree,
+        extract, extract_full, extract_full_with, local_references_at_tree, ns_meta_of_tree,
+        parse_tree,
     };
     use clj_pulse::index::ExtractConfig;
     use std::collections::HashMap;
@@ -3652,6 +3653,16 @@ mod in_ns {
             assert_eq!(meta.name, "", "{src}");
             assert!(!meta.in_ns, "{src}");
         }
+    }
+
+    #[test]
+    fn a_reader_conditional_in_ns_reads_its_clojure_branch_first() {
+        let src = "#?(:cljs (in-ns 'client) :clj (in-ns 'server))\n(defn f [] 1)\n";
+        let (meta, syms) = extract(src, Path::new("a.cljc")).unwrap();
+        assert_eq!(meta.name, "server");
+        assert_eq!(syms[0].fqn, "server/f");
+        let tree = parse_tree(src).unwrap();
+        assert_eq!(ns_meta_of_tree(&tree, src).name, "server");
     }
 
     #[test]
