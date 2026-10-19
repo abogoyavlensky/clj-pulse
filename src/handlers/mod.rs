@@ -319,6 +319,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec!["update".to_string(), "map".to_string()],
+            in_ns: false,
         };
         meta.refers
             .insert("cmap".to_string(), "clojure.core/map".to_string());
@@ -347,6 +348,7 @@ mod tests {
                 refer_all: vec![],
                 as_aliases: vec![],
                 core_excludes: vec![],
+                in_ns: false,
             },
             symbols,
             vec![],
@@ -417,6 +419,7 @@ mod tests {
                 refer_all: vec![],
                 as_aliases: vec![],
                 core_excludes: vec![],
+                in_ns: false,
             },
             vec![sym("DB", "recs", DefKind::Defrecord)],
             vec![],
@@ -436,6 +439,7 @@ mod tests {
                 refer_all: vec![],
                 as_aliases: vec![],
                 core_excludes: vec![],
+                in_ns: false,
             },
             vec![],
             vec![],
@@ -464,6 +468,7 @@ mod tests {
                 refer_all: vec![],
                 as_aliases: vec![],
                 core_excludes: vec![],
+                in_ns: false,
             },
             vec![
                 sym("public-fn", "lib", DefKind::Defn),
@@ -484,6 +489,7 @@ mod tests {
                 refer_all: vec!["lib".to_string()],
                 as_aliases: vec![],
                 core_excludes: vec![],
+                in_ns: false,
             },
             vec![sym("public-fn", "app", DefKind::Defn)],
             vec![],
@@ -517,6 +523,7 @@ mod tests {
             refer_all: refer_all.iter().map(|s| s.to_string()).collect(),
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         }
     }
 
@@ -673,6 +680,7 @@ mod tests {
                 refer_all: vec![],
                 as_aliases: vec![],
                 core_excludes: vec![],
+                in_ns: false,
             };
             index.insert_file(meta, vec![helper], vec![]);
         }
@@ -690,6 +698,7 @@ mod tests {
                 refer_all: vec![],
                 as_aliases: vec![],
                 core_excludes: vec![],
+                in_ns: false,
             };
             index.insert_file(meta, vec![], vec![]);
         }
@@ -724,6 +733,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         };
         index.insert_lib_file(meta, vec![lib("not-native"), lib("map")]);
 

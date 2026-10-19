@@ -150,6 +150,7 @@ fn test_keyword_counts_track_insert_remove_merge() {
         refer_all: vec![],
         as_aliases: vec![],
         core_excludes: vec![],
+        in_ns: false,
     };
     let occ = |fqn: &str| Occurrence {
         fqn: fqn.to_string(),

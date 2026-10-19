@@ -196,6 +196,7 @@ pub fn extract_edn_tree(tree: &tree_sitter::Tree, source: &str) -> Vec<Occurrenc
         refer_all: Vec::new(),
         as_aliases: Vec::new(),
         core_excludes: Vec::new(),
+        in_ns: false,
     };
     let mut out = Vec::new();
     collect_edn_keywords(tree.root_node(), source, &empty, &mut out);
@@ -375,6 +376,7 @@ pub fn extract_analysis_tree(
         refer_all: Vec::new(),
         as_aliases: Vec::new(),
         core_excludes: Vec::new(),
+        in_ns: false,
     };
     let mut symbols = Vec::new();
 
@@ -1919,6 +1921,7 @@ fn discarded_keyword_starts(node: Node, source: &str, out: &mut HashSet<(u32, u3
             refer_all: Vec::new(),
             as_aliases: Vec::new(),
             core_excludes: Vec::new(),
+            in_ns: false,
         };
         let lint_as = HashMap::new();
         let ctx = OccurrenceCtx {
@@ -3531,6 +3534,7 @@ pub fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
         refer_all: Vec::new(),
         as_aliases: Vec::new(),
         core_excludes: Vec::new(),
+        in_ns: false,
     };
     let mut read_ns = |form: Node| {
         if form.kind() != "list_lit" {
@@ -4477,6 +4481,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         };
         keyword_fqn(kwd, &meta, source)
     }

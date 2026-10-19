@@ -984,6 +984,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         }
     }
 

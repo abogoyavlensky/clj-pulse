@@ -122,6 +122,7 @@ mod tests {
             refer_all: vec![],
             as_aliases: vec![],
             core_excludes: vec![],
+            in_ns: false,
         };
         let symbol = Symbol {
             name: "my-fn".to_string(),
