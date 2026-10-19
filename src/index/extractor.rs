@@ -718,6 +718,14 @@ fn process_top_level_list(
         return;
     }
 
+    if ns_meta.name.is_empty() {
+        if let Some(name) = in_ns_target(&children, source) {
+            ns_meta.name = name;
+            ns_meta.in_ns = true;
+            return;
+        }
+    }
+
     // A built-in def form (`defn`, `def`, …), or a `:lint-as` / well-known macro
     // mapped to one (`defcomponent` → `def`, `clojure.test/deftest` →
     // `deftest`). The mapped kind reuses the normal def extraction, so the
@@ -739,6 +747,35 @@ fn process_top_level_list(
     }
 }
 
+/// The namespace a top-level `(in-ns 'x)` or `(in-ns (quote x))` switches to:
+/// `children` is the list's forms, head included. Only a quoted plain symbol
+/// names one; `(in-ns x)` is a runtime value and `(in-ns 'a/b)` is no namespace.
+fn in_ns_target(children: &[Node], source: &str) -> Option<String> {
+    let [head, arg] = children else {
+        return None;
+    };
+    if head.kind() != "sym_lit" || node_text(*head, source) != "in-ns" {
+        return None;
+    }
+    let quoted = match arg.kind() {
+        "quoting_lit" => named_children(*arg),
+        "list_lit" => {
+            let inner = named_children(*arg);
+            let (first, rest) = inner.split_first()?;
+            if first.kind() != "sym_lit" || node_text(*first, source) != "quote" {
+                return None;
+            }
+            rest.to_vec()
+        }
+        _ => return None,
+    };
+    let [sym] = quoted.as_slice() else {
+        return None;
+    };
+    (sym.kind() == "sym_lit" && sym.child_by_field_name("namespace").is_none())
+        .then(|| sym_text(*sym, source).to_string())
+}
+
 fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
     if children.len() < 2 {
         return;
@@ -747,6 +784,7 @@ fn extract_ns(children: &[Node], source: &str, ns_meta: &mut NsMeta) {
     let name_node = children[1];
     if name_node.kind() == "sym_lit" {
         ns_meta.name = sym_text(name_node, source).to_string();
+        ns_meta.in_ns = false;
     }
 
     // Look for (:require …) and (:import …) forms
@@ -3546,6 +3584,11 @@ pub fn ns_meta_of_tree(tree: &tree_sitter::Tree, source: &str) -> NsMeta {
             .is_some_and(|h| h.kind() == "sym_lit" && node_text(*h, source) == "ns");
         if is_ns {
             extract_ns(&children, source, &mut ns_meta);
+        } else if ns_meta.name.is_empty() {
+            if let Some(name) = in_ns_target(&children, source) {
+                ns_meta.name = name;
+                ns_meta.in_ns = true;
+            }
         }
     };
     for child in named_children(tree.root_node()) {

@@ -33,7 +33,9 @@ use super::{NsMeta, Symbol};
 /// 26: a `.cljc` reader conditional in an ns form resolves through its
 ///     Clojure branch, and a vector prefix list (`[a.b [c :as x]]`) binds
 ///     like a list one.
-pub const CACHE_FORMAT_VERSION: u32 = 26;
+/// 27: a file naming its namespace with `(in-ns 'x)` defines its vars in `x`
+///     (`NsMeta.in_ns`).
+pub const CACHE_FORMAT_VERSION: u32 = 27;
 
 #[derive(Serialize, Deserialize)]
 pub struct JarCacheEntry {
