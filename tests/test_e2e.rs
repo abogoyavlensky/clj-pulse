@@ -2269,6 +2269,50 @@ fn test_e2e_definition_through_cljc_split_alias() {
     assert_eq!(result["range"]["start"]["line"], json!(2));
 }
 
+/// A file that only `(in-ns 'loaded.core)`s defines its vars in that
+/// namespace (`core_extra.clj`, what `core.clj` `load`s), and the namespace
+/// itself still lands in the file with the `ns` form.
+#[test]
+fn test_e2e_definition_and_references_into_an_in_ns_loaded_file() {
+    let project = setup_project();
+    let root = project.path().canonicalize().unwrap();
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("Indexed");
+
+    let caller = root.join("src/loaded_caller.clj");
+    client.did_open(&caller);
+
+    let (line, ch) = position_of(&caller, "helper 1");
+    let result = client.goto_definition(&caller, line, ch);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/src/loaded/core_extra.clj"),
+        "the loaded file's defn, got {}",
+        uri
+    );
+    assert_eq!(result["range"]["start"]["line"], json!(2));
+
+    let result = client.references(&caller, line, ch, true);
+    let locs = result.as_array().expect("references");
+    let mut uris: Vec<&str> = locs.iter().filter_map(|l| l["uri"].as_str()).collect();
+    uris.sort();
+    assert_eq!(locs.len(), 2, "declaration + call, got {:?}", locs);
+    assert!(uris[0].ends_with("/src/loaded/core_extra.clj"), "{uris:?}");
+    assert!(uris[1].ends_with("/src/loaded_caller.clj"), "{uris:?}");
+
+    let (line, ch) = position_of(&caller, "loaded.core");
+    let result = client.goto_definition(&caller, line, ch);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.ends_with("/src/loaded/core.clj"),
+        "the namespace is the ns form's file, got {}",
+        uri
+    );
+    assert_eq!(result["range"]["start"]["line"], json!(0));
+}
+
 #[test]
 fn test_e2e_definition_on_core_builtin_navigates_into_clojure_jar() {
     // `defn`, `or`, `cond`… are ordinary definitions inside the clojure JAR;
@@ -3981,6 +4025,54 @@ fn test_e2e_real_classpath_navigation() {
     let content = client.text_document_content(uri);
     let text = content["text"].as_str().expect("expected text");
     assert!(text.contains("(defn write-str"), "wrong JAR content");
+}
+
+/// `clojure.pprint` is `(ns clojure.pprint …)` plus `load`ed files that each
+/// start with `(in-ns 'clojure.pprint)`: `pprint` lives in `pprint_base.clj`.
+/// Requires the `clojure` CLI, so ignored by default.
+#[test]
+#[ignore = "requires clojure CLI (downloads deps on first run)"]
+fn test_e2e_real_classpath_definition_into_an_in_ns_loaded_jar_file() {
+    let project = tempfile::TempDir::new().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("deps.edn"),
+        r#"{:paths ["src"]
+ :deps {org.clojure/clojure {:mvn/version "1.11.1"}}}
+"#,
+    )
+    .unwrap();
+    let app = root.join("src/app.clj");
+    std::fs::write(
+        &app,
+        "(ns app\n  (:require [clojure.pprint :refer [pprint]]))\n\n(pprint {:a 1})\n",
+    )
+    .unwrap();
+
+    let out = std::process::Command::new("clojure")
+        .args(["-Spath"])
+        .current_dir(&root)
+        .output()
+        .expect("clojure CLI not available");
+    assert!(out.status.success(), "clojure -Spath failed");
+
+    let mut client = LspClient::start(&root);
+    client.initialize(&root);
+    client.wait_for_log("library indexing complete");
+    client.did_open(&app);
+
+    let (line, ch) = position_of(&app, "pprint {:a");
+    let result = client.goto_definition(&app, line, ch);
+    let uri = result["uri"].as_str().expect("expected Location");
+    assert!(
+        uri.starts_with("jar:file://") && uri.ends_with("!/clojure/pprint/pprint_base.clj"),
+        "unexpected URI: {}",
+        uri
+    );
+    let content = client.text_document_content(uri);
+    let text = content["text"].as_str().expect("expected text");
+    assert!(text.contains("(defn pprint"), "wrong JAR content");
 }
 
 #[test]
