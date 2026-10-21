@@ -520,6 +520,12 @@ One line each, newest last. Promote or reject; never let this grow silently.
   `#?(:clj clojure.core :cljs cljs.core)` alias, which kondo files under
   `clojure.core` where no such var exists (oracle-side; clj-pulse now reads
   the `:clj` branch too, so it answers null as well).
+- 2026-10-21 [Feature parity with clojure-lsp is not
+  measured](backlog/2026-10-21-clojure-lsp-feature-parity.md): a
+  `docs/PARITY.md` matrix scored against the daily workflow, kept current by a
+  `bb parity` drift check against the pinned clojure-lsp's `initialize`.
+  Findings: 22 daily commands, 3 covered; paredit and `thread-*`/`unwind-*`
+  are excluded.
 
 ## Best effort — do when cheap or asked
 
@@ -538,7 +544,8 @@ One line each, newest last. Promote or reject; never let this grow silently.
 - **Semantic tokens**. Calva and Zed highlight without them; lowest of the
   chrome items.
 - **Refactor set as `executeCommand`**: extract function, inline
-  symbol, thread/unthread, move-to-let, cycle privacy. Build one
+  symbol, move-to-let, cycle privacy (thread/unthread dropped 2026-10-21, not
+  needed). Build one
   "edit a form, preserve formatting" helper first.
 - **Library-wide occurrence index**. Truthful references from inside deps;
   gate behind a setting, lazy per JAR.
