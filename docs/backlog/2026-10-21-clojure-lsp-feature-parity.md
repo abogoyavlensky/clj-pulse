@@ -3,7 +3,10 @@
 - **Found:** 2026-10-21, in a discussion of how to measure parity with
   clojure-lsp.
 - **Status:** open.
-
+- **Partly done, 2026-10-27:** the matrix exists as `docs/PARITY.md`, written
+  by hand with the formatting decision below (daily, gap). What remains is the
+  `bb parity` drift check. A probe the same day found that a realistic client
+  payload returns the same 24 capabilities and 62 commands as an empty one.
 ## Problem
 
 Three gates compare clj-pulse with something else, and none of them compares

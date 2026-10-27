@@ -101,10 +101,11 @@ real-world feedback are welcome.
 
 - Clojure Pulse, Calva, and Neovim are the primary editor targets. Zed is
   best effort and does not yet support library JAR navigation.
-- Compared with clojure-lsp, the everyday navigation and editing features are
-  covered (definition, references, rename, hover, completion, symbols,
-  diagnostics, namespace quickfixes), and clj-pulse matches or beats it on
-  every benchmarked speed row. Not available yet: refactoring commands
+- Compared with clojure-lsp (the [feature matrix](docs/PARITY.md) has the
+  full list), the everyday navigation and editing features are covered
+  (definition, references, rename, hover, completion, symbols, diagnostics,
+  namespace quickfixes), and clj-pulse matches or beats it on every
+  benchmarked speed row. Not available yet: refactoring commands
   (extract function, inline symbol, introduce let, and the like), go to
   implementation, code lens, and updating references when a file is renamed.
   Paredit-style structural editing is left to the editor.
@@ -120,6 +121,7 @@ real-world feedback are welcome.
 ## Documentation
 
 - [Feature reference](docs/FEATURES.md)
+- [Feature parity with clojure-lsp](docs/PARITY.md)
 - [Installation and editor setup](docs/EDITORS.md)
 - [Settings and monorepo configuration](docs/SETTINGS.md)
 - [Linting](docs/LINTING.md)

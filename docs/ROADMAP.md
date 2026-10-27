@@ -80,7 +80,8 @@ namespace split over `.clj` and `.cljs` is indexed as two dialect slots, each
 file navigating to its own half.
 
 Not shipped: `foldingRange`, formatting, semantic tokens, code lens,
-implementation provider, `executeCommand` refactors, `willRenameFiles`.
+implementation provider, `executeCommand` refactors, `willRenameFiles`. The
+full comparison with clojure-lsp is [PARITY.md](PARITY.md).
 
 ## Milestone 0 — release gates
 
@@ -521,9 +522,10 @@ One line each, newest last. Promote or reject; never let this grow silently.
   `clojure.core` where no such var exists (oracle-side; clj-pulse now reads
   the `:clj` branch too, so it answers null as well).
 - 2026-10-21 [Feature parity with clojure-lsp is not
-  measured](backlog/2026-10-21-clojure-lsp-feature-parity.md): a
-  `docs/PARITY.md` matrix scored against the daily workflow, kept current by a
-  `bb parity` drift check against the pinned clojure-lsp's `initialize`.
+  measured](backlog/2026-10-21-clojure-lsp-feature-parity.md): the
+  [PARITY.md](PARITY.md) matrix exists (2026-10-27, kept by hand); the
+  `bb parity` drift check against the pinned clojure-lsp's `initialize` does
+  not.
   Findings: 22 daily commands, 3 covered; paredit and `thread-*`/`unwind-*`
   are excluded.
 
