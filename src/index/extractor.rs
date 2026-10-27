@@ -341,6 +341,7 @@ pub fn extract_full_tree(
 /// definitions it introduces, every resolved usage, and the local bindings that
 /// were never used (the `unused-binding` lint's input). [`extract_full_with`]
 /// is the three-tuple view for callers that don't need the lint.
+#[derive(Debug, PartialEq)]
 pub struct Analysis {
     pub ns_meta: NsMeta,
     pub symbols: Vec<Symbol>,
