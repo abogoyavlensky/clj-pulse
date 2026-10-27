@@ -4,9 +4,10 @@ A fast-starting, low-memory Clojure language server.
 
 ## Highlights
 
-- **Fast.** The project index is built within a few seconds, even for a
-  large codebase, so you navigate right away. Dependencies become navigable
-  seconds later, and warm restarts are faster still. Definition answers in
+- **Fast.** The project index is built in under a second for a typical
+  project and within a few seconds for a very large one, so you navigate right
+  away. Dependencies become navigable moments later, and warm restarts are
+  faster still. Definition answers in
   under a millisecond, and diagnostics follow an edit within a fraction of a
   second. See [Performance](#performance) for details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
