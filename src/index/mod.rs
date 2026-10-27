@@ -8,7 +8,7 @@ pub mod scanner;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -332,7 +332,7 @@ pub struct Index {
     /// Project config (currently `:lint-as`), resolved at startup and reloaded
     /// when a watched config file changes. Interior mutability because the
     /// `Arc<Index>` is shared with handlers.
-    extract_config: RwLock<ExtractConfig>,
+    extract_config: RwLock<Arc<ExtractConfig>>,
 }
 
 /// The dialect rule of [`Index::insert_file`] and [`Index::insert_lib_file`]
@@ -444,7 +444,7 @@ impl Default for Index {
             letgo_core: AtomicBool::new(false),
             letgo_native: RwLock::new(Vec::new()),
             jdk: OnceLock::new(),
-            extract_config: RwLock::new(ExtractConfig::default()),
+            extract_config: RwLock::new(Arc::new(ExtractConfig::default())),
         }
     }
 }
@@ -522,17 +522,18 @@ impl Index {
         let _ = self.jdk.set(jdk_index);
     }
 
-    /// A snapshot of the resolved project config (`:lint-as`). Cloned so callers
-    /// hold no lock; the `lint_as` map is tiny, and hot-path indexing borrows a
-    /// single snapshot across all files rather than cloning per file.
-    pub fn extract_config(&self) -> ExtractConfig {
+    /// The resolved project config (`:lint-as`), shared so callers hold no
+    /// lock. Each [`set_extract_config`](Self::set_extract_config) installs a
+    /// fresh `Arc`, so pointer identity tells a cache whether the config it
+    /// computed under is still the current one.
+    pub fn extract_config(&self) -> Arc<ExtractConfig> {
         self.extract_config.read().unwrap().clone()
     }
 
     /// Replaces the project config. Called at startup and again whenever a
     /// watched config file changes.
     pub fn set_extract_config(&self, cfg: ExtractConfig) {
-        *self.extract_config.write().unwrap() = cfg;
+        *self.extract_config.write().unwrap() = Arc::new(cfg);
     }
 
     pub fn lookup_in_ns(&self, ns: &str, name: &str) -> Option<Symbol> {
