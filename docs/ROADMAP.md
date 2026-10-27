@@ -150,6 +150,15 @@ Small fixes that remove wrong answers. Each extractor change bumps
       (`:kondo {:live-max-kb 256}`) on the didChange pass only; one publish
       per pass stays.
   Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — done
+- [ ] **Match or beat clojure-lsp on every bench speed row.** Two rows still
+      lose ([PERFORMANCE.md](PERFORMANCE.md)): definition (11 ms against 6–8 ms
+      on metabase) and keystroke → diagnostics (524–585 ms against 298–418 ms).
+      The keystroke gap is debounce policy (our 300 ms against clojure-lsp's
+      50 + 25 ms), not clj-kondo; the definition gap is per-request
+      re-extraction of the open buffer. Cache each open document's analysis per
+      revision and debounce changes by 50 ms. Promotes the 2026-09-10 backlog
+      entry "Cache the extraction per document version".
+  Plan: [2026-10-27-1800-match-clojure-lsp-speed.md](plans/2026-10-27-1800-match-clojure-lsp-speed.md) — in progress
 - [x] **`are` template arguments are locals.** `(are [x y] expr & values)`
       currently records `x` and `y` as vars of the current namespace, so
       definition, hover, completion, references, rename, documentHighlight and
@@ -472,21 +481,6 @@ One line each, newest last. Promote or reject; never let this grow silently.
   silently answer as if it required nothing, while definition — occurrence
   based — still works. Found writing the let-go Clojure Pulse fixture; keying
   namespace metadata by file would fix it.
-- 2026-09-10 **Cache the extraction per document version, not just the tree.**
-  Every position request re-walks the open buffer:
-  `references::resolve_fqn_at` calls `extractor::extract_full_tree`, which
-  rebuilds every symbol and occurrence and then scans them linearly. So
-  definition latency tracks file size — 2 ms on a 190-byte file, 27 ms on
-  metabase's 452 KiB one, against clojure-lsp's 6 ms, which reads a stored
-  analysis ([MEMORY.md](MEMORY.md)). `unused_requires` is 28 ms of the 65 ms
-  native lint pass for the same reason. Caching the `Analysis` per (uri,
-  version) would close it. **Deliberately unscheduled** (promoted to Milestone
-  4 on 2026-09-10 and returned here the same day): 27 ms is below what a user
-  can perceive, while a cache that answers from a stale entry navigates
-  confidently to the wrong place and would mask exactly the resolution bugs
-  this list already tracks. Revisit once the live-buffer path is proven under a
-  soak run, not before — `bb soak` exists now, and the live-buffer path came
-  through 20 rounds on both corpora without a divergence.
 - 2026-09-16 **References and `documentHighlight` on an alias half.** Rename
   treats a cursor on the `h` of `h/greet` as the alias, but references and
   highlight still resolve it to the var through `resolve_fqn_at`'s alias
