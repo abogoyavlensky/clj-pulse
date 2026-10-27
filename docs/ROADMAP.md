@@ -150,9 +150,10 @@ Small fixes that remove wrong answers. Each extractor change bumps
       (`:kondo {:live-max-kb 256}`) on the didChange pass only; one publish
       per pass stays.
   Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — done
-- [x] **Match or beat clojure-lsp on every bench speed row.** Two rows still
-      lose ([PERFORMANCE.md](PERFORMANCE.md)): definition (11 ms against 6–8 ms
-      on metabase) and keystroke → diagnostics (524–585 ms against 298–418 ms).
+- [x] **Match or beat clojure-lsp on every bench speed row.** Two rows lost
+      ([PERFORMANCE.md](PERFORMANCE.md), 0.5.4): definition (11 ms against
+      6–8 ms on metabase) and keystroke → diagnostics (524–585 ms against
+      298–418 ms).
       The keystroke gap is debounce policy (our 300 ms against clojure-lsp's
       50 + 25 ms), not clj-kondo; the definition gap is per-request
       re-extraction of the open buffer. Cache each open document's analysis per

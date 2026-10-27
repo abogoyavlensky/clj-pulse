@@ -4,7 +4,11 @@ A fast-starting, low-memory Clojure language server.
 
 ## Highlights
 
-- **Fast startup.** Navigate your project right away. On Metabase on an M1 Pro, every dependency is navigable after 4 seconds cold and 1.6 warm. See [Performance](#performance) for details.
+- **Fast.** The project index is built within a few seconds, even for a
+  large codebase, so you navigate right away. Dependencies become navigable
+  seconds later, and warm restarts are faster still. Definition answers in
+  under a millisecond, and diagnostics follow an edit within a fraction of a
+  second. See [Performance](#performance) for details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
   qualified keywords across indexed source and config files.
@@ -91,19 +95,26 @@ with `bb bench`.
 
 ## Support and status
 
-clj-pulse is under active development; [bug reports](https://github.com/abogoyavlensky/clj-pulse/issues)
-and real-world feedback are welcome.
+[Bug reports](https://github.com/abogoyavlensky/clj-pulse/issues) and
+real-world feedback are welcome.
 
 - Clojure Pulse, Calva, and Neovim are the primary editor targets. Zed is
   best effort and does not yet support library JAR navigation.
+- Compared with clojure-lsp, the everyday navigation and editing features are
+  covered (definition, references, rename, hover, completion, symbols,
+  diagnostics, namespace quickfixes), and clj-pulse matches or beats it on
+  every benchmarked speed row. Not available yet: refactoring commands
+  (extract function, inline symbol, introduce let, and the like), go to
+  implementation, code lens, and updating references when a file is renamed.
+  Paredit-style structural editing is left to the editor.
 - Vars defined in files a namespace `(load …)`s and `(in-ns '…)`s are
   navigable, including `clojure.pprint` and `clojure.core`'s split files. The
   loading namespace's aliases are not known inside a loaded file.
 - Java support covers JDK classes, static members, and constructors.
   Instance methods, library classes, and decompilation are not supported yet.
-- Whole-document formatting is provided by the editor. Clojure Pulse uses
-  cljfmt compiled from ClojureScript to JavaScript, bundled as a library.
-  The server provides indent-on-Enter.
+- Whole-document formatting is provided by the editor, not yet by the server.
+  Clojure Pulse uses cljfmt compiled from ClojureScript to JavaScript, bundled
+  as a library. The server provides indent-on-Enter.
 
 ## Documentation
 

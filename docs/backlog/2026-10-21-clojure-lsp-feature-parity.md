@@ -104,10 +104,10 @@ to promote it into a milestone.
 ### Open questions
 
 - **Whole-document formatting** (`documentFormattingProvider`,
-  `documentRangeFormattingProvider`). It is not paredit, but it is
-  undecided. A native cljfmt-compatible formatter sits under "Best effort" in
-  the ROADMAP, and Clojure Pulse formats client-side. Decide whether it is a
-  daily row or excluded with the structural editing.
+  `documentRangeFormattingProvider`). Decided 2026-10-27: a *daily* row,
+  status *gap* (not yet implemented in the server). A native
+  cljfmt-compatible formatter sits under "Best effort" in the ROADMAP, and
+  Clojure Pulse formats client-side for now.
 - **Where the matrix lives:** its own `docs/PARITY.md` (proposed), or a
   section of `docs/FEATURES.md`.
 
