@@ -436,15 +436,17 @@ state, so its result can be cached. This is the 2026-09-10 backlog item
 
 ### Task 11: Published tables (maintainer, on the Mac)
 
+> Done 2026-10-27 from the maintainer's Mac run: every definition and keystroke row at or below clojure-lsp's, ROADMAP item ticked. clj-pulse's metabase memory read erratically on the Mac (88–545 MiB); published with a footnote.
+
 Execution stops here. The published tables are the maintainer's Mac alone,
 and only the maintainer can run them.
 
-- [ ] **Step 1:** On the Mac, run `CLJ_PULSE_BENCH_RUNS=3 bb bench`.
-- [ ] **Step 2:** Update the README Performance table, both PERFORMANCE.md
+- [x] **Step 1:** On the Mac, run `CLJ_PULSE_BENCH_RUNS=3 bb bench`.
+- [x] **Step 2:** Update the README Performance table, both PERFORMANCE.md
   tables and the macOS section of MEMORY.md. Write keystroke cells as
   `N ms (D ms debounce)`. Drop README's "clojure-lsp answers a definition
   faster once settled" sentence if the new row no longer shows it.
-- [ ] **Step 3:** If every definition and keystroke row is at or below
+- [x] **Step 3:** If every definition and keystroke row is at or below
   clojure-lsp's, tick the ROADMAP item and set its status to `done`. Commit
   that together with the README change, as the working rules require.
   Otherwise, leave the item `in progress`, write the remaining gap into it,

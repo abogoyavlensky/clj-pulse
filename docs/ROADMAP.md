@@ -150,7 +150,7 @@ Small fixes that remove wrong answers. Each extractor change bumps
       (`:kondo {:live-max-kb 256}`) on the didChange pass only; one publish
       per pass stays.
   Plan: [2026-09-08-2239-tree-cache-and-kondo-threshold.md](plans/2026-09-08-2239-tree-cache-and-kondo-threshold.md) — done
-- [ ] **Match or beat clojure-lsp on every bench speed row.** Two rows still
+- [x] **Match or beat clojure-lsp on every bench speed row.** Two rows still
       lose ([PERFORMANCE.md](PERFORMANCE.md)): definition (11 ms against 6–8 ms
       on metabase) and keystroke → diagnostics (524–585 ms against 298–418 ms).
       The keystroke gap is debounce policy (our 300 ms against clojure-lsp's
@@ -160,9 +160,12 @@ Small fixes that remove wrong answers. Each extractor change bumps
       entry "Cache the extraction per document version". Measured on the
       Linux baseline box (2026-10-27): definition under 1 ms against
       clojure-lsp's 6–18 ms, keystroke → diagnostics 138 / 547 ms against
-      1 332 / 759 ms, RSS within noise; the Mac rows are the maintainer's to
-      record before this is ticked.
-  Plan: [2026-10-27-1800-match-clojure-lsp-speed.md](plans/2026-10-27-1800-match-clojure-lsp-speed.md) — in progress
+      1 332 / 759 ms, RSS within noise. On the maintainer's Mac (same day):
+      definition < 1 ms against 2 / 1 ms, keystroke 261 / 214 ms against
+      389 / 290 ms — every speed row at or below clojure-lsp's. Memory
+      on the Mac read erratically for clj-pulse (88–545 MiB); see
+      [MEMORY.md](MEMORY.md).
+  Plan: [2026-10-27-1800-match-clojure-lsp-speed.md](plans/2026-10-27-1800-match-clojure-lsp-speed.md) — done
 - [x] **`are` template arguments are locals.** `(are [x y] expr & values)`
       currently records `x` and `y` as vars of the current namespace, so
       definition, hover, completion, references, rename, documentHighlight and

@@ -61,26 +61,30 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 ## Performance
 
 What a user waits for after opening Metabase (1,400+ files), recorded on a
-MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-09-22: clj-pulse 0.5.4 and
+MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-10-27: clj-pulse 0.5.6 and
 clojure-lsp 2026.07.06-14.34.19, both at their defaults, with clj-kondo
 installed. Cold is the first open of a fresh checkout, one run; warm is the
 next open, using the caches the first one left, as the median of three runs.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 2.1 s | 1.4 s | 106 s | 28 s |
-| All dependencies navigable | 3.9 s | 1.6 s | 106 s | 28 s |
-| clj-kondo finished | 25 s | 16 s | 106 s | 28 s |
-| Memory once settled | 427 MiB | 412 MiB | 2,705 MiB | 2,151 MiB |
-| Definition (median of 20) | 11 ms | 11 ms | 6 ms | 8 ms |
+| First navigation | 2.4 s | 1.8 s | 118 s | 26 s |
+| All dependencies navigable | 3.9 s | 2.1 s | 118 s | 26 s |
+| clj-kondo finished | 25 s | 17 s | 118 s | 26 s |
+| Memory once settled | 88 MiB\* | 523 MiB\* | 2,647 MiB | 1,766 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 5 ms | 2 ms |
+| Keystroke to diagnostics, 251 KiB file | 260 ms | 261 ms | 349 ms | 389 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while
 clojure-lsp analyzes everything before it answers. In clj-pulse, clj-kondo is
 optional and only adds lint warnings; navigation, completion and the built-in
-lints never wait for it. clojure-lsp answers a definition faster once settled
-in these benchmarks. These results describe the
-recorded project and machine; they are not a guarantee for every workspace.
+lints never wait for it. Each server waits briefly after an edit before
+linting it (50 ms for clj-pulse, 75 ms for clojure-lsp); the keystroke row
+includes that wait. \* macOS reported clj-pulse's memory erratically on this
+run (88 to 545 MiB); see [Performance](docs/PERFORMANCE.md). These results
+describe the recorded project and machine; they are not a guarantee for every
+workspace.
 
 See [Performance](docs/PERFORMANCE.md) for the clj-kondo corpus,
 diagnostics latency, pinned project commits, and methodology. Reproduce
