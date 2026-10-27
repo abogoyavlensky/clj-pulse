@@ -2,7 +2,15 @@ use std::path::Path;
 
 use tower_lsp::lsp_types::*;
 
+use crate::index::extractor::Analysis;
 use crate::index::{extractor, DefKind, ExtractConfig};
+
+/// How long a change waits after the last edit before its lint pass runs.
+/// clojure-lsp debounces changes by 50 ms and diagnostics by another 25 ms;
+/// this is the same 50 ms, so a keystroke's squiggles take no longer to
+/// appear here than there. A burst inside the window — auto-pair, Enter plus
+/// indent, a multi-cursor edit, a held key — still collapses to one pass.
+pub const CHANGE_DEBOUNCE_MS: u64 = 50;
 
 /// Computes this file's native diagnostics. Pure and index-free — every answer
 /// comes from the file's own text, so a project without an indexed classpath
@@ -37,6 +45,26 @@ pub fn compute_tree(
     let Ok(analysis) = extractor::extract_analysis_tree(tree, source, path, cfg) else {
         return vec![];
     };
+    // Never stale, so never `None`.
+    compute_from(tree, source, path, &analysis, &|| false).unwrap_or_default()
+}
+
+/// [`compute_tree`] over an `analysis` of the same `tree` and `source`, which
+/// the caller took from the document store's cache. `stale` is asked between
+/// the stages that walk the whole tree; once it answers true the pass is
+/// abandoned and this returns `None`. Aborting a task cannot stop a blocking
+/// thread, so a superseded pass has to notice for itself, or each keystroke
+/// would leave one running to completion.
+pub fn compute_from(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    path: &Path,
+    analysis: &Analysis,
+    stale: &dyn Fn() -> bool,
+) -> Option<Vec<Diagnostic>> {
+    if !crate::config::is_clojure_source(path) {
+        return Some(vec![]);
+    }
     let ns_meta = &analysis.ns_meta;
 
     // A warning for each qualified usage (`prefix/name`) whose prefix isn't
@@ -57,6 +85,9 @@ pub fn compute_tree(
             ..Default::default()
         })
         .collect();
+    if stale() {
+        return None;
+    }
 
     // Required namespaces the file never uses — the squiggle counterpart to the
     // "Clean namespace" code action. Tagged UNNECESSARY so editors fade them
@@ -75,6 +106,9 @@ pub fn compute_tree(
                 ..Default::default()
             }),
     );
+    if stale() {
+        return None;
+    }
 
     // A namespace required more than once (even with a different `:as` alias).
     // Keyed on the namespace, so it catches duplicates the exact-text dedup in
@@ -93,6 +127,9 @@ pub fn compute_tree(
                 ..Default::default()
             }),
     );
+    if stale() {
+        return None;
+    }
 
     // Locals the file binds but never reads. Tagged UNNECESSARY so editors fade
     // them; a leading `_` is the opt-out, applied by the extractor.
@@ -131,7 +168,7 @@ pub fn compute_tree(
             }),
     );
 
-    diags
+    Some(diags)
 }
 
 /// The `def`-family kinds whose private members are worth reporting.
@@ -255,6 +292,49 @@ mod tests {
         assert!(
             compute_tree(&tree, edn, Path::new("deps.edn"), &ExtractConfig::default()).is_empty()
         );
+    }
+
+    #[test]
+    fn compute_from_stands_down_when_stale_and_otherwise_matches_compute_tree() {
+        let src = "(ns my.app\n  (:require [clojure.string :as str]\n            [clojure.set :as set]\n            [clojure.set :as cset]))\n(defn- unused-fn [] 1)\n(defn f [x]\n  (let [y 1]\n    (missing/call x)))\n";
+        let path = Path::new("test.clj");
+        let cfg = ExtractConfig::default();
+        let tree = extractor::parse_tree(src).unwrap();
+        let analysis = extractor::extract_analysis_tree(&tree, src, path, &cfg).unwrap();
+
+        assert_eq!(compute_from(&tree, src, path, &analysis, &|| true), None);
+        let fresh = compute_from(&tree, src, path, &analysis, &|| false).unwrap();
+        assert_eq!(fresh, compute_tree(&tree, src, path, &cfg));
+        let codes: std::collections::BTreeSet<_> = fresh
+            .iter()
+            .filter_map(|d| match &d.code {
+                Some(NumberOrString::String(c)) => Some(c.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            codes.len(),
+            5,
+            "the fixture exercises every native code: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn compute_from_checks_between_stages() {
+        // Stale from the second question on: the pass gets past the first
+        // stage and stops at the next check rather than running to the end.
+        let src = "(ns a (:require [clojure.string :as str]))\n";
+        let path = Path::new("test.clj");
+        let tree = extractor::parse_tree(src).unwrap();
+        let analysis =
+            extractor::extract_analysis_tree(&tree, src, path, &ExtractConfig::default()).unwrap();
+        let asked = std::cell::Cell::new(0);
+        let stale = || {
+            asked.set(asked.get() + 1);
+            asked.get() >= 2
+        };
+        assert_eq!(compute_from(&tree, src, path, &analysis, &stale), None);
+        assert_eq!(asked.get(), 2);
     }
 
     #[test]
