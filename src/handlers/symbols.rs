@@ -3,7 +3,7 @@ use tower_lsp::lsp_types::*;
 
 use super::matching::match_score;
 use crate::document::DocumentStore;
-use crate::index::{extractor, DefKind, Index, Symbol, SymbolSource};
+use crate::index::{DefKind, Index, Symbol, SymbolSource};
 
 /// Outline for a single file. Prefers the live (possibly unsaved) document
 /// over the index so the outline tracks edits; extraction over the cached
@@ -20,17 +20,13 @@ pub fn document_symbols(
 
     let symbols: Vec<Symbol> = match documents.snapshot(&uri) {
         Some(snapshot) => {
-            let extract_path = path
-                .clone()
+            // The path every other handler gives the cache for this URI.
+            let extract_path = crate::uri::to_index_path(&uri)
                 .unwrap_or_else(|| std::path::PathBuf::from(uri.path()));
-            extractor::extract_full_tree(
-                &snapshot.tree,
-                &snapshot.text,
-                &extract_path,
-                &index.extract_config(),
-            )
-            .map(|(_, syms, _)| syms)
-            .unwrap_or_default()
+            documents
+                .analysis(&uri, &snapshot, &extract_path, &index.extract_config())
+                .map(|analysis| analysis.symbols.clone())
+                .unwrap_or_default()
         }
         None => path
             .map(|path| {

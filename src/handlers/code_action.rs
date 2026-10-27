@@ -84,14 +84,10 @@ fn add_require_actions(
         return vec![];
     };
     // Resolve against the live buffer: its requires may differ from the index.
-    let Ok((ns_meta, _, _)) = extractor::extract_full_tree(
-        &snapshot.tree,
-        &snapshot.text,
-        path,
-        &index.extract_config(),
-    ) else {
+    let Ok(analysis) = documents.analysis(uri, snapshot, path, &index.extract_config()) else {
         return vec![];
     };
+    let ns_meta = &analysis.ns_meta;
 
     // The unresolved-namespace diagnostics at this position, so VS Code binds
     // the fix to the squiggle (and marks the diagnostic resolved on apply).
@@ -108,7 +104,7 @@ fn add_require_actions(
         return vec![];
     };
 
-    candidates(index, &ns_meta, &token)
+    candidates(index, ns_meta, &token)
         .into_iter()
         .map(|candidate| {
             let spec = candidate.spec();

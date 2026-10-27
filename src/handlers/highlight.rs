@@ -53,27 +53,25 @@ pub fn document_highlight(
                 highlights.push(highlight(occ.name_range, usage_kind));
             }
         }
-    } else if let Ok((meta, syms, occs)) =
-        extractor::extract_full_tree(&snapshot.tree, &snapshot.text, &path, &cfg)
-    {
+    } else if let Ok(analysis) = documents.analysis(&uri, &snapshot, &path, &cfg) {
         // Bare calls through `:refer :all` are sites of the var they reach,
         // as `references` reads them.
-        let occs = references::with_referred_fqns(
+        let rewritten = references::with_referred_fqns(
             index,
-            &meta.name,
-            &meta.refer_all,
-            &occs,
+            &analysis.ns_meta.name,
+            &analysis.ns_meta.refer_all,
+            &analysis.occurrences,
             &snapshot.text,
             Dialect::of_path(&path),
-            &syms,
-        )
-        .unwrap_or(occs);
+            &analysis.symbols,
+        );
+        let occs = rewritten.as_deref().unwrap_or(&analysis.occurrences);
         // A type's constructor calls count, narrowed to the type name.
         let forms = references::constructor_forms(index, &fqn);
-        for occ in references::matching_occurrences(&occs, &fqn, &forms, Some(&snapshot.text)) {
+        for occ in references::matching_occurrences(occs, &fqn, &forms, Some(&snapshot.text)) {
             highlights.push(highlight(occ.name_range, usage_kind));
         }
-        for sym in &syms {
+        for sym in &analysis.symbols {
             // A `defmethod` head names the multimethod it extends rather than
             // defining anything, exactly as `resolve_fqn_at` treats it.
             if sym.kind != DefKind::Defmethod && sym.fqn == fqn {
