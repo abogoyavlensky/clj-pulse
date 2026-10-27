@@ -1,6 +1,6 @@
 # clj-pulse
 
-A fast-starting, low-memory Clojure language server.
+A fast, low-memory Clojure language server.
 
 ## Highlights
 
@@ -13,12 +13,12 @@ A fast-starting, low-memory Clojure language server.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
   qualified keywords across indexed source and config files.
-- **let-go support.** Navigation, completion, references, and rename for
-  [let-go](https://github.com/nooga/let-go) `.lg` files, with dependencies
-  resolved from [lgx](https://github.com/abogoyavlensky/lgx) projects.
 - **Monorepo support.** Automatically discover projects using `deps.edn`,
   Leiningen, or lgx within one workspace. Navigate across their sources and
   cached dependencies, with [classpath settings per project](docs/SETTINGS.md#projects-and-classpaths).
+- **let-go support.** Navigation, completion, references, and rename for
+  [let-go](https://github.com/nooga/let-go) `.lg` files, with dependencies
+  resolved from [lgx](https://github.com/abogoyavlensky/lgx) projects.
 
 Everyday tools include: fuzzy completion with auto-require, hover and signature
 help, references, rename, keyword completion, symbol search, namespace
@@ -66,7 +66,7 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 ## Performance
 
 What a user waits for after opening Metabase (1,400+ files), recorded on a
-MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-10-27: clj-pulse 0.5.6 and
+MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-10-27: clj-pulse 0.5.7 and
 clojure-lsp 2026.07.06-14.34.19, both at their defaults, with clj-kondo
 installed. Cold is the first open of a fresh checkout, one run; warm is the
 next open, using the caches the first one left, as the median of three runs.
@@ -75,7 +75,7 @@ next open, using the caches the first one left, as the median of three runs.
 |---|---|---|---|---|
 | First navigation | 2.9 s | 1.8 s | 108 s | 24 s |
 | All dependencies navigable | 4.5 s | 1.9 s | 108 s | 24 s |
-| clj-kondo finished | 24 s | 16 s | 108 s | 24 s |
+| clj-kondo linting available | 24 s | 16 s | 108 s | 24 s |
 | Memory once settled | 555 MiB | 530 MiB | 2,747 MiB | 1,772 MiB |
 | Definition (median of 20) | < 1 ms | < 1 ms | 6 ms | 3 ms |
 | Keystroke to diagnostics, 251 KiB file | 259 ms | 257 ms | 346 ms | 388 ms |

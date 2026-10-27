@@ -25,7 +25,7 @@ Cold is the first open of a fresh checkout, with the server's caches cleared;
 warm is the next open, with what the first run left behind. Warm numbers are
 the median of three runs, cold is one run.
 `CLJ_PULSE_BENCH_RUNS=3 bb bench` on a 2021 MacBook Pro (Apple M1 Pro, 16 GB,
-macOS Tahoe 26.5.2), 2026-10-27: clj-pulse 0.5.6 at `8944e89`,
+macOS Tahoe 26.5.2), 2026-10-27: clj-pulse 0.5.7 at `8944e89`,
 clojure-lsp 2026.07.06-14.34.19, clj-kondo v2026.08.04, metabase at
 `42a8e9f7`, clj-kondo at `13a32d1c`. Keystroke cells give the wait each server
 puts before it lints a change: clj-pulse 50 ms, clojure-lsp 75 ms (50 ms for
