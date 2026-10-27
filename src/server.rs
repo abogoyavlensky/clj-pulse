@@ -2096,9 +2096,6 @@ impl Backend {
     }
 }
 
-/// Idle time after the last edit before re-linting a changed document.
-const DIAGNOSTIC_DEBOUNCE_MS: u64 = 300;
-
 /// The project root from an `initialize` request. Prefers the modern
 /// `workspaceFolders` over the deprecated `rootUri`: newer clients (Zed and
 /// others) send only `workspaceFolders`, and reading just `rootUri` left the
@@ -3006,7 +3003,7 @@ impl LanguageServer for Backend {
         self.spawn_lint(
             uri,
             pass,
-            std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS),
+            std::time::Duration::from_millis(crate::diagnostics::CHANGE_DEBOUNCE_MS),
         );
     }
 
