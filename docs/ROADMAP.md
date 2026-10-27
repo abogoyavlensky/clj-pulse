@@ -157,7 +157,11 @@ Small fixes that remove wrong answers. Each extractor change bumps
       50 + 25 ms), not clj-kondo; the definition gap is per-request
       re-extraction of the open buffer. Cache each open document's analysis per
       revision and debounce changes by 50 ms. Promotes the 2026-09-10 backlog
-      entry "Cache the extraction per document version".
+      entry "Cache the extraction per document version". Measured on the
+      Linux baseline box (2026-10-27): definition under 1 ms against
+      clojure-lsp's 6–18 ms, keystroke → diagnostics 138 / 547 ms against
+      1 332 / 759 ms, RSS within noise; the Mac rows are the maintainer's to
+      record before this is ticked.
   Plan: [2026-10-27-1800-match-clojure-lsp-speed.md](plans/2026-10-27-1800-match-clojure-lsp-speed.md) — in progress
 - [x] **`are` template arguments are locals.** `(are [x y] expr & values)`
       currently records `x` and `y` as vars of the current namespace, so

@@ -213,10 +213,15 @@ clj-kondo:
 | didChange → diagnostics, 233 KiB | 524 ms | 523 ms | 298 ms | 301 ms |
 
 Warm runs of clj-pulse: first navigation 209 / 212 / 214 ms, all
-dependencies 209 / 212 / 317 ms. The keystroke rows favour clojure-lsp on
-the Mac: its embedded clj-kondo answers in ~300 ms, and clj-pulse's
-per-keystroke clj-kondo process costs ~520 ms there — process start is the
-difference, since the 452 KiB row (built-in tier alone) is 360 ms.
+dependencies 209 / 212 / 317 ms. The keystroke rows favoured clojure-lsp on
+the Mac, and the gap was debounce policy, not clj-kondo (corrected
+2026-10-27; this paragraph used to blame per-keystroke process start).
+clj-pulse debounced a change by 300 ms and clojure-lsp by 75 ms (50 + 25,
+see [the 2026-10-27 section](#match-clojure-lsp-an-analysis-cache-and-a-50-ms-debounce-2026-10-27)),
+which leaves ~224 ms of work against clojure-lsp's ~223 ms. The 452 KiB row
+(built-in tier alone, 360 ms) is the same 300 ms plus ~60 ms. The debounce is
+50 ms since the change after 0.5.6; these Mac rows predate it and are re-recorded by the
+maintainer.
 
 ### What the numbers mean, and what they do not
 
@@ -229,8 +234,13 @@ difference, since the 452 KiB row (built-in tier alone) is 360 ms.
 - **clojure-lsp answers a definition faster once it is up** and it is
   answering from a fuller analysis. That row is the one to watch when the
   extractor changes.
-- **That gap is per-request re-analysis, and it scales with the open file.**
-  Every position request re-reads the buffer: `references::resolve_fqn_at`
+- **That gap was per-request re-analysis, and it scaled with the open file.
+  It is now cached (2026-10-27): the document store keeps each open
+  buffer's `Analysis` per revision, and what is left of a definition request
+  is a hash lookup plus three copies of the rope's text** (`symbol_position`,
+  `local_definition`, `resolve_fqn_at` each take a snapshot). The paragraph
+  below is the diagnosis that justified the cache, as measured before it.
+  Every position request re-read the buffer: `references::resolve_fqn_at`
   calls `extractor::extract_full_tree`, which rebuilds every symbol and
   occurrence and then scans them linearly for the cursor. The index lookup
   after it is a hash lookup. Measured on a warm metabase checkout (0.5.0,
@@ -244,13 +254,12 @@ difference, since the 452 KiB row (built-in tier alone) is 360 ms.
   On a small file the two are indistinguishable and the floor is the JSON-RPC
   round trip. The bench probes the largest `.clj` in each repo, so its
   definition row is our worst case and not clojure-lsp's, which reads a stored
-  analysis and barely moves. Caching the `Analysis` per (uri, version) would
-  close the gap, and the native lint pass on the same buffer would reuse it
-  (`unused_requires` is 28 ms of its 65 ms for the same reason). It is in the
-  [ROADMAP.md](ROADMAP.md) backlog and deliberately unscheduled: 27 ms is below
-  what a user perceives, and a cache serving a stale entry would navigate
-  confidently to the wrong place — masking the resolution bugs that list
-  already tracks rather than fixing them.
+  analysis and barely moves. Caching the `Analysis` per (uri, version) closed
+  the gap, and the native lint pass on the same buffer reuses it. It was
+  deliberately unscheduled for a while — 27 ms is below what a user perceives,
+  and a cache serving a stale entry would navigate confidently to the wrong
+  place — until `bb soak` and `bb compare` could defend it, and the bench rows
+  below made it the one place clojure-lsp still won.
 - **Cold and warm are per server.** Cold deletes `.clj-pulse/jar-cache` and
   `.clj-kondo/.cache` for clj-pulse, and `.lsp/.cache`, `.clj-kondo/.cache`
   *and* clojure-lsp's global
@@ -284,6 +293,78 @@ difference, since the 452 KiB row (built-in tier alone) is 360 ms.
   project file that defines the var, or an entry inside a dependency archive
   (`jar:` for clj-pulse, `zipfile:` for clojure-lsp). A null answer is a retry,
   never a fast sample.
+
+## Match clojure-lsp: an analysis cache and a 50 ms debounce (2026-10-27)
+
+Plan: [2026-10-27-1800-match-clojure-lsp-speed.md](plans/2026-10-27-1800-match-clojure-lsp-speed.md).
+Two changes aimed at the two `bb bench` rows clj-pulse still lost on the Mac
+(definition, keystroke → diagnostics):
+
+- **The keystroke gap was debounce policy.** clj-pulse waited 300 ms after the
+  last edit; clojure-lsp's pinned release (`cli/src/clojure_lsp/server.clj`)
+  waits `change-debounce-ms 50` plus `diagnostics-debounce-ms 25`. The work
+  after the wait is the same ~224 ms. The wait is now 50 ms
+  (`diagnostics::CHANGE_DEBOUNCE_MS`), and the bench prints each server's
+  debounce beside its keystroke rows.
+- **The definition gap was re-extraction.** Every position request walked the
+  whole open buffer. The document store now keeps each open document's
+  `Analysis` per revision (a global counter bumped by `open` and every
+  `apply_changes`, before the first mutation) and the `ExtractConfig` `Arc` it
+  was computed under; handlers and the lint pass read
+  `DocumentStore::analysis`. A superseded native lint pass also stops at its
+  next stage boundary instead of running to completion on a blocking thread.
+
+Linux x86-64 container, 5 cores (the regression baseline box), release build,
+clj-kondo v2026.08.04, metabase `42a8e9f7`, clj-kondo `13a32d1c`.
+Before: master at `babc206`, `CLJ_PULSE_BENCH_RUNS=1`. After: this change,
+`CLJ_PULSE_BENCH_RUNS=3` (warm columns are the median row). clojure-lsp is
+the unchanged baseline of each run; its numbers moved with the box's load
+(its warm first navigation read 65 s before and 59 s after).
+
+metabase:
+
+| Metric | clj-pulse before (warm) | clj-pulse after (warm) | clojure-lsp (warm, same run as after) |
+|---|---|---|---|
+| Time to first navigation | 4.9 s | 5.2 s | 58.8 s |
+| RSS settled | 462 MiB | 462 MiB | 1 863 MiB |
+| Definition (median of 20) | 31 ms | < 1 ms | 18 ms |
+| didChange → diagnostics, 452 KiB (+ debounce) | 388 ms (300) | 138 ms (50) | 1 332 ms (75) |
+| didChange → diagnostics, 251 KiB (+ debounce) | 895 ms (300) | 700 ms (50) | 995 ms (75) |
+
+clj-kondo:
+
+| Metric | clj-pulse before (warm) | clj-pulse after (warm) | clojure-lsp (warm, same run as after) |
+|---|---|---|---|
+| Time to first navigation | 645 ms | 629 ms | 2.9 s |
+| RSS settled | 96 MiB | 95 MiB | 277 MiB |
+| Definition (median of 20) | 31 ms | < 1 ms | 6 ms |
+| didChange → diagnostics, 233 KiB (+ debounce) | 818 ms (300) | 547 ms (50) | 759 ms (75) |
+
+Cold rows, single runs, for the record: definition 28 → 0 ms and 21 → 0 ms,
+452 KiB keystroke 390 → 136 ms, 251 KiB 913 → 741 ms, clj-kondo corpus
+808 → 617 ms; RSS 468 → 470 MiB and 122 → 136 MiB.
+
+Reading it:
+
+- **Definition is below the bench's 1 ms resolution** (`Duration::as_millis`),
+  hence "< 1 ms": a hit on the cached analysis is the cursor scan plus the
+  JSON-RPC round trip. Nothing was profiled, since nothing was left to chase on
+  this box.
+- **The keystroke rows fell by about the debounce's 250 ms** (388 → 138 ms), as
+  the arithmetic predicted; the 251 KiB row fell by less (895 → 700 ms)
+  because clj-kondo's process is on the path there. clojure-lsp's embedded
+  clj-kondo is slower than clj-pulse's process on this Linux box (1 332 ms for
+  the 452 KiB file, which clj-pulse lints natively); the Mac, where it is
+  faster, is the maintainer's to re-record.
+- **RSS is within noise of the baseline.** One cached `Analysis` per open
+  document; the bench opens two.
+- **The 452 KiB row's ratio is partly the threshold:** that file is above
+  `:kondo {:live-max-kb 256}`, so clj-pulse lints it natively while
+  clojure-lsp runs clj-kondo. The 251 KiB row is the like-for-like one.
+- The gates ran on this change: `bb check`, `bb e2e` (twice, for the debounce),
+  `bb soak` and `bb soak penpot`, `bb compare` (clj-kondo and penpot match the
+  tables above row for row: 4754 / 36 / 231 / 11 and 6409 / 198 / 380 / 366),
+  `bb e2e-pulse` and `bb e2e-calva`.
 
 ## Compare against clj-kondo analysis (2026-09-18)
 
