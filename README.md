@@ -68,12 +68,12 @@ next open, using the caches the first one left, as the median of three runs.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 2.4 s | 1.8 s | 118 s | 26 s |
-| All dependencies navigable | 3.9 s | 2.1 s | 118 s | 26 s |
-| clj-kondo finished | 25 s | 17 s | 118 s | 26 s |
-| Memory once settled | 88 MiB\* | 523 MiB\* | 2,647 MiB | 1,766 MiB |
-| Definition (median of 20) | < 1 ms | < 1 ms | 5 ms | 2 ms |
-| Keystroke to diagnostics, 251 KiB file | 260 ms | 261 ms | 349 ms | 389 ms |
+| First navigation | 2.9 s | 1.8 s | 108 s | 24 s |
+| All dependencies navigable | 4.5 s | 1.9 s | 108 s | 24 s |
+| clj-kondo finished | 24 s | 16 s | 108 s | 24 s |
+| Memory once settled | 555 MiB | 530 MiB | 2,747 MiB | 1,772 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 6 ms | 3 ms |
+| Keystroke to diagnostics, 251 KiB file | 259 ms | 257 ms | 346 ms | 388 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while
@@ -81,8 +81,7 @@ clojure-lsp analyzes everything before it answers. In clj-pulse, clj-kondo is
 optional and only adds lint warnings; navigation, completion and the built-in
 lints never wait for it. Each server waits briefly after an edit before
 linting it (50 ms for clj-pulse, 75 ms for clojure-lsp); the keystroke row
-includes that wait. \* macOS reported clj-pulse's memory erratically on this
-run (88 to 545 MiB); see [Performance](docs/PERFORMANCE.md). These results
+includes that wait. These results
 describe the recorded project and machine; they are not a guarantee for every
 workspace.
 

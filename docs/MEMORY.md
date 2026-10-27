@@ -228,50 +228,49 @@ below the table above re-records them.
 
 `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the same MacBook Pro, clj-pulse 0.5.6
 at `8944e89` (the analysis cache and the 50 ms change debounce, code as of
-`6f5e3e1`), same clojure-lsp, clj-kondo and corpus pins. These are the
-published tables (README, PERFORMANCE.md). Keystroke cells: wait included in
-parentheses.
+`6f5e3e1`), same clojure-lsp, clj-kondo and corpus pins, on a quiet machine.
+These are the published tables (README, PERFORMANCE.md). Keystroke cells:
+wait included in parentheses.
 
 metabase (51 082 symbols, 3 843 namespaces):
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| Time to first navigation | 2.4 s | 1.8 s | 118 s | 26 s |
-| All dependencies navigable | 3.9 s | 2.1 s | 118 s | 26 s |
-| clj-kondo finished | 25 s | 17 s | 118 s | 26 s |
-| Time to settled | 27 s | 19 s | 120 s | 28 s |
-| RSS settled | 88 MiB | 523 MiB | 2 647 MiB | 1 766 MiB |
-| Definition (median of 20) | < 1 ms | < 1 ms | 5 ms | 2 ms |
-| didChange → diagnostics, 452 KiB | 87 ms (50) | 87 ms (50) | 467 ms (75) | 501 ms (75) |
-| didChange → diagnostics, 251 KiB | 260 ms (50) | 261 ms (50) | 349 ms (75) | 389 ms (75) |
+| Time to first navigation | 2.9 s | 1.8 s | 108 s | 24 s |
+| All dependencies navigable | 4.5 s | 1.9 s | 108 s | 24 s |
+| clj-kondo finished | 24 s | 16 s | 108 s | 24 s |
+| Time to settled | 26 s | 18 s | 110 s | 26 s |
+| RSS settled | 555 MiB | 530 MiB | 2 747 MiB | 1 772 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 6 ms | 3 ms |
+| didChange → diagnostics, 452 KiB | 88 ms (50) | 89 ms (50) | 512 ms (75) | 538 ms (75) |
+| didChange → diagnostics, 251 KiB | 259 ms (50) | 257 ms (50) | 346 ms (75) | 388 ms (75) |
 
 clj-kondo (2 252 symbols, 225 namespaces):
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| Time to first navigation | 751 ms | 212 ms | 8.0 s | 1.2 s |
-| All dependencies navigable | 1.4 s | 212 ms | 8.0 s | 1.2 s |
-| clj-kondo finished | 5.0 s | 902 ms | 8.0 s | 1.2 s |
-| Time to settled | 7.0 s | 3.0 s | 10.1 s | 3.3 s |
-| RSS settled | 101 MiB | 95 MiB | 324 MiB | 272 MiB |
+| Time to first navigation | 688 ms | 213 ms | 7.8 s | 1.2 s |
+| All dependencies navigable | 900 ms | 213 ms | 7.8 s | 1.2 s |
+| clj-kondo finished | 4.6 s | 897 ms | 7.8 s | 1.2 s |
+| Time to settled | 6.6 s | 2.9 s | 9.9 s | 3.2 s |
+| RSS settled | 98 MiB | 93 MiB | 286 MiB | 270 MiB |
 | Definition (median of 20) | < 1 ms | < 1 ms | 1 ms | 1 ms |
-| didChange → diagnostics, 233 KiB | 217 ms (50) | 214 ms (50) | 290 ms (75) | 290 ms (75) |
+| didChange → diagnostics, 233 KiB | 206 ms (50) | 207 ms (50) | 290 ms (75) | 286 ms (75) |
 
 Against the 2026-09-22 rows above (0.5.4): definition 11 → < 1 ms and 7 →
-< 1 ms, keystroke 570 / 585 → 260 / 261 ms (251 KiB) and 524 / 523 → 217 /
-214 ms (233 KiB), 452 KiB 360 → 87 ms. Every definition and keystroke row is
-now at or below clojure-lsp's. The startup rows moved within the usual spread
-(clojure-lsp's cold metabase start read 118 s against 106 s).
+< 1 ms, keystroke 570 / 585 → 259 / 257 ms (251 KiB) and 524 / 523 → 206 /
+207 ms (233 KiB), 452 KiB 360 → 88 ms. Every definition and keystroke row is
+now at or below clojure-lsp's. The startup rows moved within the usual spread.
 
-- **clj-pulse's metabase memory is unreliable on this run.** The warm runs read
-  545 / 523 / 255 MiB and the cold run 88 MiB, against 427 / 412 MiB on
-  2026-09-22 and a flat 462 MiB before and after the change on the Linux
-  box. The 255 and 88 MiB figures are too small to be the process's real
-  footprint (51 082 symbols are indexed), and `ps` RSS on macOS excludes pages
-  the system has compressed, so memory pressure from clojure-lsp's 2 GB
-  neighbours is the likeliest cause. Not investigated; the published cells
-  carry a footnote. A re-run on a quiet machine would settle it. The clj-kondo
-  corpus rows were steady (94–99 MiB warm).
+- **A first Mac run the same day read clj-pulse's metabase memory
+  erratically** (warm 545 / 523 / 255 MiB, cold 88 MiB), probably macOS
+  compressing pages while the machine was busy. On this quiet re-run it is
+  steady: 555 cold and 538 / 524 / 530 MiB warm. Its other rows agreed with
+  the first run within noise, so these replace it.
+- **Metabase memory is ~120 MiB above the 2026-09-22 Mac row** (412 → 530 MiB).
+  That is not this change: the Linux box reads 462 MiB before and after it,
+  and the step from 363 to 454 MiB on Linux is recorded above as having come
+  in with earlier releases. The clj-kondo corpus is flat (89 → 93 MiB warm).
 - **The tier label cannot prove clj-kondo ran.** Every keystroke row, both
   servers, reads "native only", since the bench can only evidence kondo from a
   diagnostic it owns. The 251 KiB rows are the clj-kondo-in-the-loop ones by

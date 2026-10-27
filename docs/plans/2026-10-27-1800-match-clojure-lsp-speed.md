@@ -436,7 +436,7 @@ state, so its result can be cached. This is the 2026-09-10 backlog item
 
 ### Task 11: Published tables (maintainer, on the Mac)
 
-> Done 2026-10-27 from the maintainer's Mac run: every definition and keystroke row at or below clojure-lsp's, ROADMAP item ticked. clj-pulse's metabase memory read erratically on the Mac (88–545 MiB); published with a footnote.
+> Done 2026-10-27 from the maintainer's Mac run: every definition and keystroke row at or below clojure-lsp's, ROADMAP item ticked. A first Mac run read clj-pulse's metabase memory erratically (88–545 MiB); a second run on a quiet machine read 524–555 MiB, and the tables were re-recorded from it.
 
 Execution stops here. The published tables are the maintainer's Mac alone,
 and only the maintainer can run them.

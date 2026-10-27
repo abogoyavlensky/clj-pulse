@@ -35,29 +35,23 @@ the change plus 25 ms for diagnostics).
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 2.4 s | 1.8 s | 118 s | 26 s |
-| All dependencies navigable | 3.9 s | 2.1 s | 118 s | 26 s |
-| clj-kondo finished | 25 s | 17 s | 118 s | 26 s |
-| Memory once settled | 88 MiB\* | 523 MiB\* | 2 647 MiB | 1 766 MiB |
-| Definition (median of 20) | < 1 ms | < 1 ms | 5 ms | 2 ms |
-| Keystroke -> diagnostics, 251 KiB file | 260 ms (50 ms debounce) | 261 ms (50 ms debounce) | 349 ms (75 ms debounce) | 389 ms (75 ms debounce) |
+| First navigation | 2.9 s | 1.8 s | 108 s | 24 s |
+| All dependencies navigable | 4.5 s | 1.9 s | 108 s | 24 s |
+| clj-kondo finished | 24 s | 16 s | 108 s | 24 s |
+| Memory once settled | 555 MiB | 530 MiB | 2 747 MiB | 1 772 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 6 ms | 3 ms |
+| Keystroke -> diagnostics, 251 KiB file | 259 ms (50 ms debounce) | 257 ms (50 ms debounce) | 346 ms (75 ms debounce) | 388 ms (75 ms debounce) |
 
 **clj-kondo** (400 files, 2 252 symbols):
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 751 ms | 212 ms | 8.0 s | 1.2 s |
-| All dependencies navigable | 1.4 s | 212 ms | 8.0 s | 1.2 s |
-| clj-kondo finished | 5.0 s | 902 ms | 8.0 s | 1.2 s |
-| Memory once settled | 101 MiB | 95 MiB | 324 MiB | 272 MiB |
+| First navigation | 688 ms | 213 ms | 7.8 s | 1.2 s |
+| All dependencies navigable | 900 ms | 213 ms | 7.8 s | 1.2 s |
+| clj-kondo finished | 4.6 s | 897 ms | 7.8 s | 1.2 s |
+| Memory once settled | 98 MiB | 93 MiB | 286 MiB | 270 MiB |
 | Definition (median of 20) | < 1 ms | < 1 ms | 1 ms | 1 ms |
-| Keystroke -> diagnostics, 233 KiB file | 217 ms (50 ms debounce) | 214 ms (50 ms debounce) | 290 ms (75 ms debounce) | 290 ms (75 ms debounce) |
-
-\* macOS reported clj-pulse's metabase memory erratically on this run: the
-three warm runs read 545, 523 and 255 MiB and the cold run 88 MiB, against
-462 MiB before and after the change on the Linux baseline box (`/proc`, not
-`ps`). Treat the two clj-pulse cells as unreliable until a re-run settles
-them; the clj-kondo corpus rows were steady.
+| Keystroke -> diagnostics, 233 KiB file | 206 ms (50 ms debounce) | 207 ms (50 ms debounce) | 290 ms (75 ms debounce) | 286 ms (75 ms debounce) |
 
 What the tables do not say:
 
@@ -86,8 +80,8 @@ What the tables do not say:
   was most of what separated the two. The bench cannot confirm from a
   publication alone that clj-kondo ran, so the tier it reports for these
   rows reads "native only" for both servers. Above the threshold clj-pulse
-  lints a keystroke with its built-in tier alone: 87 ms on the 452 KiB
-  file, against 501 ms for clojure-lsp, which lints it with clj-kondo.
+  lints a keystroke with its built-in tier alone: 89 ms on the 452 KiB
+  file, against 538 ms for clojure-lsp, which lints it with clj-kondo.
 - The same run on a 5-core Linux container keeps the ratios, with every
   number slower; it is the regression baseline and lives in the records.
 
