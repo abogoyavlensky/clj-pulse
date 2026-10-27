@@ -5688,8 +5688,8 @@ fn test_e2e_kondo_threshold_save_right_after_change_keeps_kondo_findings() {
         "the save's full pass publishes first"
     );
 
-    // Outlast the debounce, then make sure nothing native-only followed.
-    std::thread::sleep(Duration::from_millis(3 * 300));
+    // Wait well past the debounce, then make sure nothing native-only followed.
+    std::thread::sleep(Duration::from_millis(900));
     while let Ok(msg) = client.incoming.try_recv() {
         if msg["method"] == "textDocument/publishDiagnostics"
             && msg["params"]["uri"]

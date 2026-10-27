@@ -4,7 +4,12 @@ A fast-starting, low-memory Clojure language server.
 
 ## Highlights
 
-- **Fast startup.** Navigate your project right away. On Metabase on an M1 Pro, every dependency is navigable after 4 seconds cold and 1.6 warm. See [Performance](#performance) for details.
+- **Fast.** The project index is built in under a second for a typical
+  project and within a few seconds for a very large one, so you navigate right
+  away. Dependencies become navigable moments later, and warm restarts are
+  faster still. Definition answers in
+  under a millisecond, and diagnostics follow an edit within a fraction of a
+  second. See [Performance](#performance) for details.
 - **Integrant navigation.** Jump from a component key in `config.edn` or an
   `#ig/ref` to its `ig/init-key` implementation. Find references and rename
   qualified keywords across indexed source and config files.
@@ -61,26 +66,29 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 ## Performance
 
 What a user waits for after opening Metabase (1,400+ files), recorded on a
-MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-09-22: clj-pulse 0.5.4 and
+MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-10-27: clj-pulse 0.5.6 and
 clojure-lsp 2026.07.06-14.34.19, both at their defaults, with clj-kondo
 installed. Cold is the first open of a fresh checkout, one run; warm is the
 next open, using the caches the first one left, as the median of three runs.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 2.1 s | 1.4 s | 106 s | 28 s |
-| All dependencies navigable | 3.9 s | 1.6 s | 106 s | 28 s |
-| clj-kondo finished | 25 s | 16 s | 106 s | 28 s |
-| Memory once settled | 427 MiB | 412 MiB | 2,705 MiB | 2,151 MiB |
-| Definition (median of 20) | 11 ms | 11 ms | 6 ms | 8 ms |
+| First navigation | 2.9 s | 1.8 s | 108 s | 24 s |
+| All dependencies navigable | 4.5 s | 1.9 s | 108 s | 24 s |
+| clj-kondo finished | 24 s | 16 s | 108 s | 24 s |
+| Memory once settled | 555 MiB | 530 MiB | 2,747 MiB | 1,772 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 6 ms | 3 ms |
+| Keystroke to diagnostics, 251 KiB file | 259 ms | 257 ms | 346 ms | 388 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while
 clojure-lsp analyzes everything before it answers. In clj-pulse, clj-kondo is
 optional and only adds lint warnings; navigation, completion and the built-in
-lints never wait for it. clojure-lsp answers a definition faster once settled
-in these benchmarks. These results describe the
-recorded project and machine; they are not a guarantee for every workspace.
+lints never wait for it. Each server waits briefly after an edit before
+linting it (50 ms for clj-pulse, 75 ms for clojure-lsp); the keystroke row
+includes that wait. These results
+describe the recorded project and machine; they are not a guarantee for every
+workspace.
 
 See [Performance](docs/PERFORMANCE.md) for the clj-kondo corpus,
 diagnostics latency, pinned project commits, and methodology. Reproduce
@@ -88,23 +96,32 @@ with `bb bench`.
 
 ## Support and status
 
-clj-pulse is under active development; [bug reports](https://github.com/abogoyavlensky/clj-pulse/issues)
-and real-world feedback are welcome.
+[Bug reports](https://github.com/abogoyavlensky/clj-pulse/issues) and
+real-world feedback are welcome.
 
 - Clojure Pulse, Calva, and Neovim are the primary editor targets. Zed is
   best effort and does not yet support library JAR navigation.
+- Compared with clojure-lsp (the [feature matrix](docs/PARITY.md) has the
+  full list), the everyday navigation and editing features are covered
+  (definition, references, rename, hover, completion, symbols, diagnostics,
+  namespace quickfixes), and clj-pulse matches or beats it on every
+  benchmarked speed row. Not available yet: refactoring commands
+  (extract function, inline symbol, introduce let, and the like), go to
+  implementation, code lens, and updating references when a file is renamed.
+  Paredit-style structural editing is left to the editor.
 - Vars defined in files a namespace `(load …)`s and `(in-ns '…)`s are
   navigable, including `clojure.pprint` and `clojure.core`'s split files. The
   loading namespace's aliases are not known inside a loaded file.
 - Java support covers JDK classes, static members, and constructors.
   Instance methods, library classes, and decompilation are not supported yet.
-- Whole-document formatting is provided by the editor. Clojure Pulse uses
-  cljfmt compiled from ClojureScript to JavaScript, bundled as a library.
-  The server provides indent-on-Enter.
+- Whole-document formatting is provided by the editor, not yet by the server.
+  Clojure Pulse uses cljfmt compiled from ClojureScript to JavaScript, bundled
+  as a library. The server provides indent-on-Enter.
 
 ## Documentation
 
 - [Feature reference](docs/FEATURES.md)
+- [Feature parity with clojure-lsp](docs/PARITY.md)
 - [Installation and editor setup](docs/EDITORS.md)
 - [Settings and monorepo configuration](docs/SETTINGS.md)
 - [Linting](docs/LINTING.md)

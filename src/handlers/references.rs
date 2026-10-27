@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::document::{DocumentStore, Snapshot};
+use crate::index::extractor::Analysis;
 use crate::index::{
     extractor, DefKind, Dialect, ExtractConfig, Index, Occurrence, Symbol, SymbolSource,
 };
@@ -309,17 +311,18 @@ fn alias_target(
     let path = crate::uri::to_index_path(uri)?;
     let snapshot = documents.snapshot(uri)?;
     let alias = extractor::alias_at_tree(&snapshot.tree, &snapshot.text, pos)?;
-    let (ns_meta, _, occs) = extractor::extract_full_tree(
-        &snapshot.tree,
-        &snapshot.text,
-        &path,
-        &index.extract_config(),
-    )
-    .ok()?;
-    if !ns_meta.aliases.contains_key(&alias) {
+    let analysis = documents
+        .analysis(uri, &snapshot, &path, &index.extract_config())
+        .ok()?;
+    if !analysis.ns_meta.aliases.contains_key(&alias) {
         return None;
     }
-    let sites = extractor::alias_sites_tree(&snapshot.tree, &snapshot.text, &alias, &occs);
+    let sites = extractor::alias_sites_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        &alias,
+        &analysis.occurrences,
+    );
     let on_site = !sites.declarations.is_empty()
         && sites
             .declarations
@@ -345,20 +348,21 @@ fn alias_capture(
 ) -> Option<String> {
     let path = crate::uri::to_index_path(uri)?;
     let snapshot = documents.snapshot(uri)?;
-    let (ns_meta, _, occs) = extractor::extract_full_tree(
-        &snapshot.tree,
-        &snapshot.text,
-        &path,
-        &index.extract_config(),
-    )
-    .ok()?;
-    if ns_meta.aliases.contains_key(new_name) {
+    let analysis = documents
+        .analysis(uri, &snapshot, &path, &index.extract_config())
+        .ok()?;
+    if analysis.ns_meta.aliases.contains_key(new_name) {
         return Some(format!(
             "cannot rename alias '{}' to '{}': '{}' is already an alias in this file",
             alias, new_name, new_name
         ));
     }
-    let taken = extractor::alias_sites_tree(&snapshot.tree, &snapshot.text, new_name, &occs);
+    let taken = extractor::alias_sites_tree(
+        &snapshot.tree,
+        &snapshot.text,
+        new_name,
+        &analysis.occurrences,
+    );
     (!taken.usages.is_empty()).then(|| {
         format!(
             "cannot rename alias '{}' to '{}': '{}' already qualifies names in this file, \
@@ -405,16 +409,14 @@ fn keyword_target(index: &Index, documents: &DocumentStore, fqn: String) -> Resu
         let Some(snapshot) = documents.snapshot(&uri) else {
             continue;
         };
-        let Ok((_, syms, _)) = extractor::extract_full_tree(
-            &snapshot.tree,
-            &snapshot.text,
-            &path,
-            &index.extract_config(),
-        ) else {
+        let Ok(analysis) = documents.analysis(&uri, &snapshot, &path, &index.extract_config())
+        else {
             continue;
         };
         candidates.extend(
-            syms.into_iter()
+            analysis
+                .symbols
+                .iter()
                 .filter(|sym| sym.fqn == fqn)
                 .map(|sym| (path.clone(), sym.name_range)),
         );
@@ -527,19 +529,23 @@ fn live_definition_range(
     let Ok(uri) = Url::from_file_path(&sym.file) else {
         return sym.name_range;
     };
+    let Some(path) = crate::uri::to_index_path(&uri) else {
+        return sym.name_range;
+    };
     documents
         .snapshot(&uri)
         .and_then(|snapshot| {
-            extractor::extract_full_tree(
-                &snapshot.tree,
-                &snapshot.text,
-                &sym.file,
-                &index.extract_config(),
-            )
-            .ok()
+            documents
+                .analysis(&uri, &snapshot, &path, &index.extract_config())
+                .ok()
         })
-        .and_then(|(_, syms, _)| syms.into_iter().find(|s| s.fqn == fqn))
-        .map(|s| s.name_range)
+        .and_then(|analysis| {
+            analysis
+                .symbols
+                .iter()
+                .find(|s| s.fqn == fqn)
+                .map(|s| s.name_range)
+        })
         .unwrap_or(sym.name_range)
 }
 
@@ -635,24 +641,21 @@ fn occurrence_range_at(
 ) -> Option<Range> {
     let path = crate::uri::to_index_path(uri)?;
     let snapshot = documents.snapshot(uri)?;
-    let (meta, syms, occs) = extractor::extract_full_tree(
-        &snapshot.tree,
-        &snapshot.text,
-        &path,
-        &index.extract_config(),
-    )
-    .ok()?;
+    let analysis = documents
+        .analysis(uri, &snapshot, &path, &index.extract_config())
+        .ok()?;
+    let (meta, syms) = (&analysis.ns_meta, &analysis.symbols);
     // A bare call through `:refer :all` is a site of the var it reaches.
-    let occs = with_referred_fqns(
+    let rewritten = with_referred_fqns(
         index,
         &meta.name,
         &meta.refer_all,
-        &occs,
+        &analysis.occurrences,
         &snapshot.text,
         Dialect::of_path(&path),
-        &syms,
-    )
-    .unwrap_or(occs);
+        syms,
+    );
+    let occs: &[Occurrence] = rewritten.as_deref().unwrap_or(&analysis.occurrences);
     let line = snapshot
         .text
         .lines()
@@ -665,7 +668,7 @@ fn occurrence_range_at(
         .filter(|s| s.fqn == fqn)
         .map(|s| (s.name_range, s.name_range))
         .chain(
-            matching_sites(&occs, fqn, &forms, Some(&snapshot.text))
+            matching_sites(occs, fqn, &forms, Some(&snapshot.text))
                 .into_iter()
                 .map(|(occ, token)| (occ.name_range, token)),
         )
@@ -899,10 +902,9 @@ pub fn resolve_fqn_at(
             .map(|occ| occ.fqn);
     }
 
-    if let Ok((meta, syms, occs)) =
-        extractor::extract_full_tree(&snapshot.tree, &snapshot.text, &path, &cfg)
-    {
-        for sym in &syms {
+    if let Ok(analysis) = documents.analysis(uri, &snapshot, &path, &cfg) {
+        let (meta, syms, occs) = (&analysis.ns_meta, &analysis.symbols, &analysis.occurrences);
+        for sym in syms {
             // A `defmethod` head names the multimethod it extends, not a new
             // definition — its symbol points at itself. Skip it so the
             // multimethod occurrence below (resolved to the `defmulti`) wins,
@@ -914,7 +916,7 @@ pub fn resolve_fqn_at(
                 return Some(sym.fqn.clone());
             }
         }
-        for occ in &occs {
+        for occ in occs {
             if range_contains(&occ.name_range, pos) {
                 // A bare call through `:refer :all` / `(:use …)` is filed
                 // under this namespace; ask about the var it reaches.
@@ -925,7 +927,7 @@ pub fn resolve_fqn_at(
                     std::slice::from_ref(occ),
                     &snapshot.text,
                     Dialect::of_path(&path),
-                    &syms,
+                    syms,
                 )
                 .map_or_else(|| occ.fqn.clone(), |mut occs| occs.remove(0).fqn);
                 return Some(canonical_type_fqn(index, fqn));
@@ -1197,6 +1199,22 @@ pub(crate) fn matching_occurrences(
         .collect()
 }
 
+/// One open buffer's occurrences: the cached analysis' own, or a copy whose
+/// bare `:refer :all` calls were rewritten (or an EDN config's keywords).
+enum LiveOccs {
+    Cached(Arc<Analysis>),
+    Rewritten(Vec<Occurrence>),
+}
+
+impl LiveOccs {
+    fn as_slice(&self) -> &[Occurrence] {
+        match self {
+            LiveOccs::Cached(analysis) => &analysis.occurrences,
+            LiveOccs::Rewritten(occs) => occs,
+        }
+    }
+}
+
 /// All occurrences of `fqn`, per file. Files currently open in the editor
 /// are re-extracted from their cached tree so unsaved edits produce correct
 /// ranges; everything else comes from the index. A type's constructor calls
@@ -1237,7 +1255,7 @@ pub fn occurrences_for(
         })
     };
 
-    let mut live: HashMap<PathBuf, (Vec<Occurrence>, String)> = HashMap::new();
+    let mut live: HashMap<PathBuf, (LiveOccs, String)> = HashMap::new();
     for uri in documents.open_uris() {
         // Open JAR docs (`jar:` URIs) convert to their virtual index path, so a
         // library file the user is viewing contributes its live occurrences.
@@ -1247,34 +1265,39 @@ pub fn occurrences_for(
         let Some(snapshot) = documents.snapshot(&uri) else {
             continue;
         };
-        let occs = extractor::file_occurrences_tree(
-            &snapshot.tree,
-            &snapshot.text,
-            &path,
-            &index.extract_config(),
-        );
-        let meta = extractor::ns_meta_of_tree(&snapshot.tree, &snapshot.text);
-        let occs = if may_refer(&meta.name, &meta.refer_all, &occs) {
-            // The buffer's own definitions shadow a referred name before
-            // the index sees them.
-            let defined = extractor::extract_full_tree(
+        // EDN configs hold keyword occurrences alone; a Clojure buffer is
+        // read from its cached analysis.
+        let (occs, defined) = if crate::config::is_edn(&path) {
+            let occs = extractor::file_occurrences_tree(
                 &snapshot.tree,
                 &snapshot.text,
                 &path,
                 &index.extract_config(),
-            )
-            .map(|(_, syms, _)| syms)
-            .unwrap_or_default();
-            with_referred_fqns(
+            );
+            (LiveOccs::Rewritten(occs), None)
+        } else {
+            match documents.analysis(&uri, &snapshot, &path, &index.extract_config()) {
+                Ok(analysis) => (LiveOccs::Cached(analysis.clone()), Some(analysis)),
+                Err(_) => (LiveOccs::Rewritten(Vec::new()), None),
+            }
+        };
+        let meta = extractor::ns_meta_of_tree(&snapshot.tree, &snapshot.text);
+        let occs = if may_refer(&meta.name, &meta.refer_all, occs.as_slice()) {
+            // The buffer's own definitions shadow a referred name before
+            // the index sees them.
+            let defined = defined.as_ref().map_or(&[][..], |a| a.symbols.as_slice());
+            match with_referred_fqns(
                 index,
                 &meta.name,
                 &meta.refer_all,
-                &occs,
+                occs.as_slice(),
                 &snapshot.text,
                 Dialect::of_path(&path),
-                &defined,
-            )
-            .unwrap_or(occs)
+                defined,
+            ) {
+                Some(rewritten) => LiveOccs::Rewritten(rewritten),
+                None => occs,
+            }
         } else {
             occs
         };
@@ -1315,7 +1338,7 @@ pub fn occurrences_for(
         }
     }
     for (path, (occs, text)) in live {
-        let matching = matching_occurrences(&occs, fqn, &forms, Some(&text));
+        let matching = matching_occurrences(occs.as_slice(), fqn, &forms, Some(&text));
         if !matching.is_empty() {
             result.push((path, matching));
         }

@@ -3,7 +3,10 @@
 - **Found:** 2026-10-21, in a discussion of how to measure parity with
   clojure-lsp.
 - **Status:** open.
-
+- **Partly done, 2026-10-27:** the matrix exists as `docs/PARITY.md`, written
+  by hand with the formatting decision below (daily, gap). What remains is the
+  `bb parity` drift check. A probe the same day found that a realistic client
+  payload returns the same 24 capabilities and 62 commands as an empty one.
 ## Problem
 
 Three gates compare clj-pulse with something else, and none of them compares
@@ -104,10 +107,10 @@ to promote it into a milestone.
 ### Open questions
 
 - **Whole-document formatting** (`documentFormattingProvider`,
-  `documentRangeFormattingProvider`). It is not paredit, but it is
-  undecided. A native cljfmt-compatible formatter sits under "Best effort" in
-  the ROADMAP, and Clojure Pulse formats client-side. Decide whether it is a
-  daily row or excluded with the structural editing.
+  `documentRangeFormattingProvider`). Decided 2026-10-27: a *daily* row,
+  status *gap* (not yet implemented in the server). A native
+  cljfmt-compatible formatter sits under "Best effort" in the ROADMAP, and
+  Clojure Pulse formats client-side for now.
 - **Where the matrix lives:** its own `docs/PARITY.md` (proposed), or a
   section of `docs/FEATURES.md`.
 

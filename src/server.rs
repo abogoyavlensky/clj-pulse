@@ -1337,7 +1337,7 @@ static KONDO_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4
 /// on every keystroke.
 async fn lint_and_publish_doc(
     client: &Client,
-    documents: &DocumentStore,
+    documents: &Arc<DocumentStore>,
     index: &Index,
     warmer: &KondoWarmer,
     uri: Url,
@@ -1362,19 +1362,45 @@ async fn lint_and_publish_doc(
         version,
         snapshot.text.len()
     );
-    let text = Arc::new(snapshot.text);
+    let snapshot = Arc::new(snapshot);
     // The two tiers are independent, so they run at the same time rather than
     // one after the other — on a large buffer each costs hundreds of
     // milliseconds, and this is the path every keystroke takes. The native pass
     // is CPU-bound, so it goes to a blocking thread instead of holding a tokio
     // worker for the whole walk.
+    //
+    // The analysis comes from the store's per-revision cache, so a save right
+    // after the edits that nobody asked a question about walks the buffer once,
+    // and a position request in between reads what this pass computed. A pass
+    // that has been superseded by the time a stage finishes stops there: its
+    // result would be discarded after the join, and aborting the task cannot
+    // stop a blocking thread.
     let native_pass = {
-        let text = text.clone();
-        let tree = snapshot.tree;
+        let documents = documents.clone();
+        let uri = uri.clone();
+        let snapshot = snapshot.clone();
         let path = path.clone();
         let cfg = index.extract_config();
         tokio::task::spawn_blocking(move || {
-            crate::diagnostics::compute_tree(&tree, &text, &path, &cfg)
+            if !crate::config::is_clojure_source(&path) {
+                return Some(Vec::new());
+            }
+            let stale = || {
+                documents.current_version(&uri) != Some(version)
+                    || documents.lint_epoch(&uri) != epoch
+            };
+            // A pass whose extraction fails keeps the old behavior: no native
+            // findings, kondo's alone.
+            let Ok(analysis) = documents.analysis(&uri, &snapshot, &path, &cfg) else {
+                return Some(Vec::new());
+            };
+            crate::diagnostics::compute_from(
+                &snapshot.tree,
+                &snapshot.text,
+                &path,
+                &analysis,
+                &stale,
+            )
         })
     };
 
@@ -1387,7 +1413,7 @@ async fn lint_and_publish_doc(
     // this pass" outcome as a missing binary, so one publish still goes out,
     // carrying the native set — never a native publish and then a kondo one.
     let over_live_max =
-        trigger == LintTrigger::Change && engine.config.exceeds_live_max(text.len());
+        trigger == LintTrigger::Change && engine.config.exceeds_live_max(snapshot.text.len());
     // `None` is "clj-kondo has no say in this pass" — not in use, or sitting
     // out a keystroke — which `merge` reads as "keep the native set" and
     // which is not a failure. `Some(Err)` is a run that was meant to happen
@@ -1398,7 +1424,7 @@ async fn lint_and_publish_doc(
             tracing::debug!(
                 "clj-kondo skipped on change: {} is {} bytes, over live-max-kb {}",
                 path.display(),
-                text.len(),
+                snapshot.text.len(),
                 engine.config.live_max_kb
             );
             return None;
@@ -1406,7 +1432,7 @@ async fn lint_and_publish_doc(
         let _permit = KONDO_LIMIT.acquire().await;
         let result = kondo::lint(
             &bin,
-            &text,
+            &snapshot.text,
             &path,
             engine.root.as_deref(),
             kondo::LINT_TIMEOUT,
@@ -1454,7 +1480,10 @@ async fn lint_and_publish_doc(
     let kondo = kondo.unwrap_or_else(|| Err("clj-kondo not in use".to_string()));
 
     let native = match native {
-        Ok(native) => native,
+        Ok(Some(native)) => native,
+        // The pass noticed it was superseded and stopped early; whatever
+        // replaced it publishes. The check above would have discarded it too.
+        Ok(None) => return,
         // The blocking task panicked; the guard in `panic_guard` never sees it,
         // so log it and publish what clj-kondo found rather than nothing.
         Err(e) => {
@@ -2066,9 +2095,6 @@ impl Backend {
         );
     }
 }
-
-/// Idle time after the last edit before re-linting a changed document.
-const DIAGNOSTIC_DEBOUNCE_MS: u64 = 300;
 
 /// The project root from an `initialize` request. Prefers the modern
 /// `workspaceFolders` over the deprecated `rootUri`: newer clients (Zed and
@@ -2977,7 +3003,7 @@ impl LanguageServer for Backend {
         self.spawn_lint(
             uri,
             pass,
-            std::time::Duration::from_millis(DIAGNOSTIC_DEBOUNCE_MS),
+            std::time::Duration::from_millis(crate::diagnostics::CHANGE_DEBOUNCE_MS),
         );
     }
 

@@ -1,4 +1,6 @@
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
@@ -6,7 +8,8 @@ use ropey::Rope;
 use tower_lsp::lsp_types::{Position, TextDocumentContentChangeEvent, Url};
 use tree_sitter::{InputEdit, Parser, Point, Tree};
 
-use crate::index::extractor;
+use crate::index::extractor::{self, Analysis};
+use crate::index::ExtractConfig;
 
 /// The keyword token under the cursor, as completion needs it.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +36,29 @@ pub struct Snapshot {
     /// The rope materialized once.
     pub text: String,
     pub tree: Tree,
+    /// The document revision this text and tree are. [`Snapshot::parse`]
+    /// leaves it 0, which the store never issues, so such a snapshot never
+    /// matches a cached analysis.
+    pub rev: u64,
+}
+
+/// Revisions are drawn from one counter for every document, so a document
+/// closed and reopened can never repeat a revision a slow request still holds.
+/// 0 is left for [`Snapshot::parse`].
+static NEXT_REV: AtomicU64 = AtomicU64::new(1);
+
+fn next_rev() -> u64 {
+    NEXT_REV.fetch_add(1, Ordering::Relaxed)
+}
+
+/// An analysis together with everything it was computed from that is not the
+/// document's own `rev`: the config, by pointer, since a reload installs a
+/// fresh `Arc` (see `Index::set_extract_config`). Holding the `Arc` keeps its
+/// address from being reused while the entry lives.
+struct CachedAnalysis {
+    rev: u64,
+    cfg: Arc<ExtractConfig>,
+    analysis: Arc<Analysis>,
 }
 
 impl Snapshot {
@@ -43,6 +69,7 @@ impl Snapshot {
         Some(Self {
             text: text.to_string(),
             tree,
+            rev: 0,
         })
     }
 }
@@ -55,6 +82,10 @@ struct Doc {
     /// `None` only if tree-sitter refused to parse (it never does once the
     /// language is set); `snapshot` repairs that lazily.
     tree: Option<Tree>,
+    /// Taken from [`NEXT_REV`] on open and on every `apply_changes`.
+    rev: u64,
+    /// The analysis of revision `rev`, once something asked for it.
+    analysis: Option<CachedAnalysis>,
 }
 
 pub struct DocumentStore {
@@ -96,7 +127,15 @@ impl DocumentStore {
     pub fn open(&self, uri: Url, text: String) {
         let rope = Rope::from_str(&text);
         let tree = self.parse(&rope, None);
-        self.docs.insert(uri, Doc { rope, tree });
+        self.docs.insert(
+            uri,
+            Doc {
+                rope,
+                tree,
+                rev: next_rev(),
+                analysis: None,
+            },
+        );
     }
 
     pub fn close(&self, uri: &Url) {
@@ -143,7 +182,12 @@ impl DocumentStore {
             .docs
             .get_mut(uri)
             .ok_or_else(|| anyhow!("document not found: {}", uri))?;
-        let Doc { rope, tree } = &mut *doc;
+        // A batch can fail part-way, leaving the changes before the bad one
+        // applied; retire the revision and its analysis before the first
+        // mutation so that text can never answer to the old one.
+        doc.rev = next_rev();
+        doc.analysis = None;
+        let Doc { rope, tree, .. } = &mut *doc;
         let mut old_tree = tree.take();
 
         for change in changes {
@@ -182,7 +226,50 @@ impl DocumentStore {
         Some(Snapshot {
             text: doc.rope.to_string(),
             tree: doc.tree.clone()?,
+            rev: doc.rev,
         })
+    }
+
+    /// The analysis of exactly `snapshot`, from the cache when this document's
+    /// slot holds `snapshot.rev` under `cfg`, computed otherwise. A computed
+    /// analysis is stored only if the document has not moved on since the
+    /// snapshot, so the slot never holds anything but its own revision.
+    ///
+    /// The walk (about 20 ms on a 452 KiB file) runs with no map lock held.
+    /// Two concurrent misses may both compute; the results are equal, so the
+    /// later store is harmless.
+    pub fn analysis(
+        &self,
+        uri: &Url,
+        snapshot: &Snapshot,
+        path: &Path,
+        cfg: &Arc<ExtractConfig>,
+    ) -> Result<Arc<Analysis>> {
+        if let Some(doc) = self.docs.get(uri) {
+            if let Some(cached) = &doc.analysis {
+                if cached.rev == snapshot.rev && Arc::ptr_eq(&cached.cfg, cfg) {
+                    return Ok(cached.analysis.clone());
+                }
+            }
+        }
+        let analysis = Arc::new(extractor::extract_analysis_tree(
+            &snapshot.tree,
+            &snapshot.text,
+            path,
+            cfg,
+        )?);
+        if snapshot.rev != 0 {
+            if let Some(mut doc) = self.docs.get_mut(uri) {
+                if doc.rev == snapshot.rev {
+                    doc.analysis = Some(CachedAnalysis {
+                        rev: snapshot.rev,
+                        cfg: cfg.clone(),
+                        analysis: analysis.clone(),
+                    });
+                }
+            }
+        }
+        Ok(analysis)
     }
 
     /// Parses the rope, incrementally against `old` when given, reading chunks
@@ -742,6 +829,162 @@ mod tests {
             .replacen("\n\n(defn greet", "\n(defn greet", 1)
             .replacen("my.app", "renamed.app", 1);
         assert_snapshot_matches_fresh_parse(&store, &uri, &expected);
+    }
+
+    fn full_sync(text: &str) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
+    fn cfg() -> Arc<ExtractConfig> {
+        Arc::new(ExtractConfig::default())
+    }
+
+    fn path() -> std::path::PathBuf {
+        std::path::PathBuf::from("/test.clj")
+    }
+
+    /// What a fresh extraction of `snap` says, for comparing a cached answer to.
+    fn fresh(snap: &Snapshot, cfg: &ExtractConfig) -> Analysis {
+        extractor::extract_analysis_tree(&snap.tree, &snap.text, &path(), cfg).unwrap()
+    }
+
+    #[test]
+    fn analysis_hits_for_the_same_revision_and_config() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let cfg = cfg();
+        let snap = store.snapshot(&uri).unwrap();
+        let a = store.analysis(&uri, &snap, &path(), &cfg).unwrap();
+        let b = store
+            .analysis(&uri, &store.snapshot(&uri).unwrap(), &path(), &cfg)
+            .unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(*a, fresh(&snap, &cfg));
+    }
+
+    #[test]
+    fn analysis_misses_after_an_incremental_edit() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let cfg = cfg();
+        let a = store
+            .analysis(&uri, &store.snapshot(&uri).unwrap(), &path(), &cfg)
+            .unwrap();
+        store
+            .apply_changes(&uri, vec![change((3, 17), (3, 17), " greeting")])
+            .unwrap();
+        let snap = store.snapshot(&uri).unwrap();
+        let b = store.analysis(&uri, &snap, &path(), &cfg).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(*b, fresh(&snap, &cfg));
+        assert_ne!(*a, *b);
+    }
+
+    #[test]
+    fn analysis_misses_after_a_full_sync_edit() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let cfg = cfg();
+        let a = store
+            .analysis(&uri, &store.snapshot(&uri).unwrap(), &path(), &cfg)
+            .unwrap();
+        store
+            .apply_changes(&uri, vec![full_sync("(ns other)\n(def x 1)\n")])
+            .unwrap();
+        let snap = store.snapshot(&uri).unwrap();
+        let b = store.analysis(&uri, &snap, &path(), &cfg).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(*b, fresh(&snap, &cfg));
+    }
+
+    #[test]
+    fn analysis_misses_after_a_config_swap() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let first = cfg();
+        let a = store
+            .analysis(&uri, &store.snapshot(&uri).unwrap(), &path(), &first)
+            .unwrap();
+        let second = cfg();
+        let snap = store.snapshot(&uri).unwrap();
+        let b = store.analysis(&uri, &snap, &path(), &second).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(*b, fresh(&snap, &second));
+        // The slot now answers for the new config.
+        let c = store.analysis(&uri, &snap, &path(), &second).unwrap();
+        assert!(Arc::ptr_eq(&b, &c));
+    }
+
+    #[test]
+    fn analysis_of_a_stale_snapshot_is_computed_and_not_stored() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let cfg = cfg();
+        let old = store.snapshot(&uri).unwrap();
+        store
+            .apply_changes(&uri, vec![change((3, 17), (3, 17), " greeting")])
+            .unwrap();
+        let stale = store.analysis(&uri, &old, &path(), &cfg).unwrap();
+        assert_eq!(*stale, fresh(&old, &cfg), "answers for its own text");
+        let current = store.snapshot(&uri).unwrap();
+        let a = store.analysis(&uri, &current, &path(), &cfg).unwrap();
+        assert!(!Arc::ptr_eq(&stale, &a));
+        assert_eq!(*a, fresh(&current, &cfg));
+    }
+
+    #[test]
+    fn analysis_after_a_batch_that_fails_part_way_is_not_a_hit() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let cfg = cfg();
+        let before = store.snapshot(&uri).unwrap();
+        let a = store.analysis(&uri, &before, &path(), &cfg).unwrap();
+        // The first change lands; the second names a line that does not exist.
+        let result = store.apply_changes(
+            &uri,
+            vec![
+                change((3, 17), (3, 17), " greeting"),
+                change((99, 0), (99, 0), "x"),
+            ],
+        );
+        assert!(result.is_err());
+        let after = store.snapshot(&uri).unwrap();
+        assert_ne!(after.rev, before.rev);
+        assert!(after.text.contains("[name greeting]"));
+        let b = store.analysis(&uri, &after, &path(), &cfg).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(*b, fresh(&after, &cfg));
+    }
+
+    #[test]
+    fn analysis_does_not_cross_a_close_and_reopen() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let cfg = cfg();
+        let old = store.snapshot(&uri).unwrap();
+        store.close(&uri);
+        store.open(uri.clone(), SNAPSHOT_SRC.to_string());
+        let current = store.snapshot(&uri).unwrap();
+        assert_ne!(old.rev, current.rev);
+        let from_old = store.analysis(&uri, &old, &path(), &cfg).unwrap();
+        let a = store.analysis(&uri, &current, &path(), &cfg).unwrap();
+        assert!(
+            !Arc::ptr_eq(&from_old, &a),
+            "the old snapshot stored nothing"
+        );
+        let b = store.analysis(&uri, &current, &path(), &cfg).unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn analysis_of_a_parsed_snapshot_is_never_stored() {
+        let (store, uri) = store_with(SNAPSHOT_SRC);
+        let cfg = cfg();
+        let parsed = Snapshot::parse(SNAPSHOT_SRC).unwrap();
+        assert_eq!(parsed.rev, 0);
+        let a = store.analysis(&uri, &parsed, &path(), &cfg).unwrap();
+        let b = store.analysis(&uri, &parsed, &path(), &cfg).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        let current = store.snapshot(&uri).unwrap();
+        let c = store.analysis(&uri, &current, &path(), &cfg).unwrap();
+        assert!(!Arc::ptr_eq(&a, &c));
     }
 
     #[test]

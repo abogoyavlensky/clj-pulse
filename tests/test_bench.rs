@@ -187,11 +187,27 @@ enum Server {
     ClojureLsp,
 }
 
+/// What clojure-lsp waits after a change before it publishes: upstream
+/// `cli/src/clojure_lsp/server.clj` sets `change-debounce-ms 50` and
+/// `diagnostics-debounce-ms 25`, at the tag in `bb.edn`'s `clojure-lsp-version`.
+/// Re-check both when that pin moves.
+const CLOJURE_LSP_DEBOUNCE_MS: u64 = 75;
+
 impl Server {
     fn label(self) -> &'static str {
         match self {
             Server::CljPulse => "clj-pulse",
             Server::ClojureLsp => "clojure-lsp",
+        }
+    }
+
+    /// The idle time the server waits before it lints a change, which every
+    /// keystroke row includes. clj-pulse's is read from the library, so it
+    /// cannot drift from the binary under test.
+    fn debounce_ms(self) -> u64 {
+        match self {
+            Server::CljPulse => clj_pulse::diagnostics::CHANGE_DEBOUNCE_MS,
+            Server::ClojureLsp => CLOJURE_LSP_DEBOUNCE_MS,
         }
     }
 
@@ -1325,6 +1341,10 @@ impl Row {
             );
             row("  tier", self.tier_label(self.small_edit_kondo));
         }
+        row(
+            "  debounce (in the rows above)",
+            &format!("{} ms", self.server.debounce_ms()),
+        );
         if !self.edit_versioned {
             row(
                 "  note",
@@ -1403,6 +1423,7 @@ impl Row {
                 "first_diagnostics_ms": ms(self.first_diagnostics),
                 "edit_ms": ms(self.edit),
                 "edit_samples": self.edit_samples,
+                "debounce_ms": self.server.debounce_ms(),
                 "edit_kondo": self.edit_kondo,
                 "edit_versioned": self.edit_versioned,
                 "edit_file": self.edit_file.as_ref().map(|p| p.display().to_string()),

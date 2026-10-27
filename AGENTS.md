@@ -59,7 +59,10 @@ there.
   went quiet for clojure-lsp — then
   RSS once the server is settled (no traffic for 2 s and no child process
   still working), and medians of 20 definitions and 20 keystrokes to
-  `publishDiagnostics`. Message times are receipt times: `LspClient.received`
+  `publishDiagnostics`, with each server's change debounce printed beside the
+  keystroke rows (`debounce_ms` in `BENCH_JSON`; clj-pulse's is read from
+  `diagnostics::CHANGE_DEBOUNCE_MS`, clojure-lsp's is the pinned
+  `CLOJURE_LSP_DEBOUNCE_MS`). Message times are receipt times: `LspClient.received`
   stamps each stashed message, and the poll waits through `quiet_for` so the
   channel is drained while nothing is asked. Each row also prints as one
   `BENCH_JSON` line (`run` is the repeat index or `"median"`), so a later run
@@ -241,12 +244,28 @@ there.
   the store always matches the rope (eager, never lazy). Handlers and the lint
   pass read `DocumentStore::snapshot` (text and tree from one lock) and call
   the extractor's `_tree` variants; never `text()` plus a fresh parse. `text()`
-  is for text-only work such as `word_at` and indent-on-Enter.
+  is for text-only work such as `word_at` and indent-on-Enter. Each open
+  document also caches its `Analysis` for one revision: `rev` comes from a
+  global counter bumped by `open` and by every `apply_changes` *before* its
+  first mutation (a batch can fail part-way), the cache holds the
+  `Arc<ExtractConfig>` it was computed under and hits only on `ptr_eq`, and a
+  miss computes outside the map lock and stores only if the document is still
+  at the snapshot's `rev` (`Snapshot::parse` is rev 0, never stored).
+  Handlers and the lint pass read `DocumentStore::analysis` for a snapshot,
+  never `extract_full_tree` on one; the two `server.rs` paths that *index* an
+  open buffer (`did_open`, the config-change re-index) are the exception, since
+  they need owned values. `Index::extract_config()` returns an `Arc`, and every
+  `set_extract_config` installs a fresh one, which is what invalidates the
+  caches.
 - `:kondo {:live-max-kb}` applies to `LintTrigger::Change` alone: a keystroke
   on a larger buffer publishes the native set, while open, save, and an engine
-  change always run clj-kondo. A save bumps the document's lint epoch so a
-  change pass still waiting out its debounce stands down; the version alone
-  cannot tell a save from the edit just before it.
+  change always run clj-kondo. A change pass waits `CHANGE_DEBOUNCE_MS`
+  (50 ms, clojure-lsp's own; `diagnostics.rs`, read by the bench), and a save
+  bumps the document's lint epoch so a change pass still waiting out its
+  debounce stands down; the version alone cannot tell a save from the edit just
+  before it. A superseded native pass stops at its next staleness check
+  (`diagnostics::compute_from`'s `stale`, between stages) and publishes
+  nothing: aborting the task cannot stop a blocking thread.
 - Rename resolves locals structurally (`extractor::local_references_at`)
   *before* the fqn path, so a param shadowing a global only ever edits itself;
   a `:keys`/`:strs`/`:syms`-destructured binding (`!` forms included) is
