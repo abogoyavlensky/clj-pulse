@@ -128,7 +128,7 @@
                     (println "WARNING: could not warm clj-kondo's cache:" (ex-message e)))))))
 
           ;; --- the server we compare against ---------------------------------
-          (def clojure-lsp-version "2026.07.06-14.34.19")
+          (def clojure-lsp-version "2026.10.15-11.42.38")
 
           (defn clojure-lsp-asset
             "The native release archive for this platform, or nil when there is
