@@ -583,15 +583,44 @@ fn settle_clj_pulse(
         }
     }
 
-    quiesce(
+    let mut settle = quiesce(
         client,
         pid,
         t0,
         deadline,
         watch,
         &["window/logMessage"],
-        note,
-    )
+        note.clone(),
+    );
+    // A cache warm logs nothing while its clj-kondo runs, so the quiet window
+    // is long met by the time the child exits, and the child check alone can
+    // end the settle in the moment between that exit and the
+    // `warming: false` the server sends right after it. That run would
+    // report `kondo_finished` as n/a and settle 2 s early (seen on macOS in
+    // two of three warm metabase runs). A started warm is startup work: wait
+    // for its end, which also brings the "warm complete" log line that
+    // restarts the quiet window. The deadline still bounds a warm that never
+    // reports.
+    let mut waited = false;
+    while settle.at.is_some() && watch.warming_started.is_some() && watch.warming_finished.is_none()
+    {
+        waited = true;
+        settle = quiesce(
+            client,
+            pid,
+            t0,
+            deadline,
+            watch,
+            &["window/logMessage"],
+            note.clone(),
+        );
+    }
+    if waited {
+        settle
+            .note
+            .push_str("; waited for the clj-kondo warm to report its end");
+    }
+    settle
 }
 
 /// clojure-lsp is settled when its analysis progress has ended (when it

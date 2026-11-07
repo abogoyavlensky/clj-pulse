@@ -57,7 +57,11 @@ before a release and after index or extractor changes.
   would carry the 2 s quiet window). `n/a` when no warm ever started.
 - **Time to settled** — nothing logged (clj-pulse) or no
   `publishDiagnostics`/`$/progress` (clojure-lsp) for 2 s, *and* no child
-  process still running. Not a published row any more: for clj-pulse it is
+  process still running; for clj-pulse, a clj-kondo warm that has reported
+  `warming: true` must also have reported `warming: false` (before
+  2026-11-07 the child check alone could end the settle between the
+  clj-kondo exit and that status, leaving a warm row's clj-kondo finished at
+  `n/a` and its settle time 2 s early). Not a published row any more: for clj-pulse it is
   the clj-kondo warm plus the quiet window, and reads as a wait it is not.
   RSS and every median below are sampled after it.
 - **Definition (median of 20)** — on the largest `.clj` in the repo, into the
