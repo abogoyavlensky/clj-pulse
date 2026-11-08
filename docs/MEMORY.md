@@ -233,8 +233,9 @@ below the table above re-records them.
 `CLJ_PULSE_BENCH_RUNS=3 bb bench` on the same MacBook Pro, clj-pulse 0.5.6
 at `8944e89` (the analysis cache and the 50 ms change debounce, code as of
 `6f5e3e1`), same clojure-lsp, clj-kondo and corpus pins, on a quiet machine.
-These are the published tables (README, PERFORMANCE.md). Keystroke cells:
-wait included in parentheses.
+These were the published tables (README, PERFORMANCE.md) until the
+2026-11-07 run against the new clojure-lsp below. Keystroke cells: wait
+included in parentheses.
 
 metabase (51 082 symbols, 3 843 namespaces):
 
@@ -282,6 +283,78 @@ now at or below clojure-lsp's. The startup rows moved within the usual spread.
   construction.
 - **The 452 KiB row** is clj-pulse's native tier against clojure-lsp's
   clj-kondo, so it is not like-for-like; the 251 KiB row is.
+
+### macOS against clojure-lsp 2026.10.15-11.42.38 (2026-11-07)
+
+`CLJ_PULSE_BENCH_RUNS=3 bb bench metabase` and `… bb bench clj-kondo` on the
+same MacBook Pro, quiet machine. clj-pulse 0.5.7: server code as released
+(`d7d5a94`, identical to `8944e89` above), bench harness at `0524757` (the
+settle fix below). clojure-lsp moved to **2026.10.15-11.42.38** (bundles
+clj-kondo `2026.08.05-20261014.211514-15`); clj-kondo v2026.08.04 on PATH for
+clj-pulse, corpus pins unchanged. These replace the 2026-10-27 tables as the
+published ones (README, PERFORMANCE.md). Keystroke cells: wait included in
+parentheses. Upstream's debounce is still `change-debounce-ms 50` +
+`diagnostics-debounce-ms 25` at the new tag, so `CLOJURE_LSP_DEBOUNCE_MS`
+stays 75.
+
+metabase (51 082 symbols, 3 843 namespaces, 491 classpath entries):
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| Time to first navigation | 2.4 s | 1.9 s | 91 s | 26 s |
+| All dependencies navigable | 4.1 s | 2.1 s | 91 s | 26 s |
+| clj-kondo finished | 24 s | 16 s | 91 s | 26 s |
+| Time to settled | 26 s | 19 s | 93 s | 28 s |
+| RSS settled | 528 MiB | 524 MiB | 2 461 MiB | 1 733 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 5 ms | 3 ms |
+| didChange → diagnostics, 452 KiB | 91 ms (50) | 89 ms (50) | 445 ms (75) | 516 ms (75) |
+| didChange → diagnostics, 251 KiB | 259 ms (50) | 258 ms (50) | 323 ms (75) | 350 ms (75) |
+
+Warm per run — clj-pulse: first navigation 2024 / 1897 / 1904 ms, clj-kondo
+finished 16.6 / 16.5 / 16.3 s, RSS 524 / 528 / 513 MiB. clojure-lsp: 26.1 /
+27.0 / 24.5 s, RSS 1 733 / 1 706 / 1 780 MiB. Library probes landed on
+`sql/format` (clj-pulse) and `p/import-vars` (clojure-lsp), as before.
+
+clj-kondo (2 252 symbols, 225 namespaces, 102 classpath entries):
+
+| Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
+|---|---|---|---|---|
+| Time to first navigation | 757 ms | 215 ms | 8.1 s | 1.2 s |
+| All dependencies navigable | 963 ms | 318 ms | 8.1 s | 1.2 s |
+| clj-kondo finished | 5.1 s | 913 ms | 8.1 s | 1.2 s |
+| Time to settled | 7.1 s | 3.0 s | 10.1 s | 3.3 s |
+| RSS settled | 91 MiB | 91 MiB | 300 MiB | 271 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 1 ms | 1 ms |
+| didChange → diagnostics, 233 KiB | 211 ms (50) | 209 ms (50) | 285 ms (75) | 282 ms (75) |
+
+- **What the new clojure-lsp changed, read across three metabase sessions on
+  the new pin** (the two below plus this one): the cold start is faster (100 /
+  92 / 91 s against 108 s), the warm start slightly slower (25.8–26.9 s
+  medians against 24 s), and the 452 KiB keystroke 5–10% faster (warm 483 /
+  479 / 516 ms against 538). The 251 KiB warm row read 333 / 372 / 350 ms
+  across the sessions, inside its own noise; clj-pulse leads it in every one.
+  Its cold memory is loose (2 274 / 2 388 / 2 461 MiB), the warm steady. The
+  clj-kondo corpus is flat for clojure-lsp (7.8 → 8.1 s cold, 1.2 s warm).
+- **clj-pulse is a control here**: its server code did not change, and its
+  rows agree with 2026-10-27 within noise — so the machine compares. The one
+  move is the clj-kondo corpus's warm "all dependencies" (213 → 318 ms, first
+  navigation unchanged at 215 ms), which no code explains and is within the
+  startup probe's poll cadence.
+- **Two earlier sessions on the new pin were set aside.** The first read
+  clj-pulse's metabase RSS as 11 / 11 / 521 / 288 MiB — macOS compressing an
+  idle server's pages under memory pressure, which `ps` RSS does not count,
+  the same pattern as the 2026-10-27 first run. The second had clean memory
+  but left clj-kondo finished at `n/a` in two of three warm runs, with those
+  runs settled at the instant clj-kondo exited (16.5 s against 18.5 s for the
+  third): the settle check required quiet and no child, and a warm logs
+  nothing while it runs, so the check could pass between the child's exit
+  and the `warming: false` sent right after it. `settle_clj_pulse` now also
+  waits for a started warm to report its end (`0524757`). The race did not
+  recur in this session, so no row carries the "waited for the clj-kondo
+  warm" note.
+- **The Linux tables above are still on 2026.07.06-14.34.19.** They remain
+  the regression baseline for clj-pulse; a Linux comparison against the new
+  clojure-lsp needs its own run.
 
 ### What the numbers mean, and what they do not
 

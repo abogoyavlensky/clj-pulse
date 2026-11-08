@@ -66,19 +66,19 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 ## Performance
 
 What a user waits for after opening Metabase (1,400+ files), recorded on a
-MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-10-27: clj-pulse 0.5.7 and
-clojure-lsp 2026.07.06-14.34.19, both at their defaults, with clj-kondo
+MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-11-07: clj-pulse 0.5.7 and
+clojure-lsp 2026.10.15-11.42.38, both at their defaults, with clj-kondo
 installed. Cold is the first open of a fresh checkout, one run; warm is the
 next open, using the caches the first one left, as the median of three runs.
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 2.9 s | 1.8 s | 108 s | 24 s |
-| All dependencies navigable | 4.5 s | 1.9 s | 108 s | 24 s |
-| clj-kondo linting available | 24 s | 16 s | 108 s | 24 s |
-| Memory once settled | 555 MiB | 530 MiB | 2,747 MiB | 1,772 MiB |
-| Definition (median of 20) | < 1 ms | < 1 ms | 6 ms | 3 ms |
-| Keystroke to diagnostics, 251 KiB file | 259 ms | 257 ms | 346 ms | 388 ms |
+| First navigation | 2.4 s | 1.9 s | 91 s | 26 s |
+| All dependencies navigable | 4.1 s | 2.1 s | 91 s | 26 s |
+| clj-kondo linting available | 24 s | 16 s | 91 s | 26 s |
+| Memory once settled | 528 MiB | 524 MiB | 2,461 MiB | 1,733 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 5 ms | 3 ms |
+| Keystroke to diagnostics, 251 KiB file | 259 ms | 258 ms | 323 ms | 350 ms |
 
 The servers do different work at startup: clj-pulse makes project navigation
 available first, then dependency navigation, and warms clj-kondo last, while
