@@ -287,7 +287,8 @@ now at or below clojure-lsp's. The startup rows moved within the usual spread.
 ### macOS against clojure-lsp 2026.10.15-11.42.38 (2026-11-07)
 
 `CLJ_PULSE_BENCH_RUNS=3 bb bench metabase` and `… bb bench clj-kondo` on the
-same MacBook Pro, quiet machine. clj-pulse 0.5.7: server code as released
+same MacBook Pro, now on macOS Tahoe 26.7.1 (25G241), quiet machine.
+clj-pulse 0.5.7: server code as released
 (`d7d5a94`, identical to `8944e89` above), bench harness at `0524757` (the
 settle fix below). clojure-lsp moved to **2026.10.15-11.42.38** (bundles
 clj-kondo `2026.08.05-20261014.211514-15`); clj-kondo v2026.08.04 on PATH for

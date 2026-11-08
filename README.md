@@ -66,7 +66,7 @@ See [Linting](docs/LINTING.md) for configuration and troubleshooting.
 ## Performance
 
 What a user waits for after opening Metabase (1,400+ files), recorded on a
-MacBook Pro (M1 Pro, 16 GB, macOS 26.5), 2026-11-07: clj-pulse 0.5.7 and
+MacBook Pro (M1 Pro, 16 GB, macOS 26.7), 2026-11-07: clj-pulse 0.5.7 and
 clojure-lsp 2026.10.15-11.42.38, both at their defaults, with clj-kondo
 installed. Cold is the first open of a fresh checkout, one run; warm is the
 next open, using the caches the first one left, as the median of three runs.
