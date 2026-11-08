@@ -25,8 +25,8 @@ Cold is the first open of a fresh checkout, with the server's caches cleared;
 warm is the next open, with what the first run left behind. Warm numbers are
 the median of three runs, cold is one run.
 `CLJ_PULSE_BENCH_RUNS=3 bb bench` on a 2021 MacBook Pro (Apple M1 Pro, 16 GB,
-macOS Tahoe 26.5.2), 2026-10-27: clj-pulse 0.5.7 at `8944e89`,
-clojure-lsp 2026.07.06-14.34.19, clj-kondo v2026.08.04, metabase at
+macOS Tahoe 26.7.1), 2026-11-07: clj-pulse 0.5.7 at `0524757`,
+clojure-lsp 2026.10.15-11.42.38, clj-kondo v2026.08.04, metabase at
 `42a8e9f7`, clj-kondo at `13a32d1c`. Keystroke cells give the wait each server
 puts before it lints a change: clj-pulse 50 ms, clojure-lsp 75 ms (50 ms for
 the change plus 25 ms for diagnostics).
@@ -35,23 +35,23 @@ the change plus 25 ms for diagnostics).
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 2.9 s | 1.8 s | 108 s | 24 s |
-| All dependencies navigable | 4.5 s | 1.9 s | 108 s | 24 s |
-| clj-kondo finished | 24 s | 16 s | 108 s | 24 s |
-| Memory once settled | 555 MiB | 530 MiB | 2 747 MiB | 1 772 MiB |
-| Definition (median of 20) | < 1 ms | < 1 ms | 6 ms | 3 ms |
-| Keystroke -> diagnostics, 251 KiB file | 259 ms (50 ms debounce) | 257 ms (50 ms debounce) | 346 ms (75 ms debounce) | 388 ms (75 ms debounce) |
+| First navigation | 2.4 s | 1.9 s | 91 s | 26 s |
+| All dependencies navigable | 4.1 s | 2.1 s | 91 s | 26 s |
+| clj-kondo finished | 24 s | 16 s | 91 s | 26 s |
+| Memory once settled | 528 MiB | 524 MiB | 2 461 MiB | 1 733 MiB |
+| Definition (median of 20) | < 1 ms | < 1 ms | 5 ms | 3 ms |
+| Keystroke -> diagnostics, 251 KiB file | 259 ms (50 ms debounce) | 258 ms (50 ms debounce) | 323 ms (75 ms debounce) | 350 ms (75 ms debounce) |
 
 **clj-kondo** (400 files, 2 252 symbols):
 
 | Metric | clj-pulse cold | clj-pulse warm | clojure-lsp cold | clojure-lsp warm |
 |---|---|---|---|---|
-| First navigation | 688 ms | 213 ms | 7.8 s | 1.2 s |
-| All dependencies navigable | 900 ms | 213 ms | 7.8 s | 1.2 s |
-| clj-kondo finished | 4.6 s | 897 ms | 7.8 s | 1.2 s |
-| Memory once settled | 98 MiB | 93 MiB | 286 MiB | 270 MiB |
+| First navigation | 757 ms | 215 ms | 8.1 s | 1.2 s |
+| All dependencies navigable | 963 ms | 318 ms | 8.1 s | 1.2 s |
+| clj-kondo finished | 5.1 s | 913 ms | 8.1 s | 1.2 s |
+| Memory once settled | 91 MiB | 91 MiB | 300 MiB | 271 MiB |
 | Definition (median of 20) | < 1 ms | < 1 ms | 1 ms | 1 ms |
-| Keystroke -> diagnostics, 233 KiB file | 206 ms (50 ms debounce) | 207 ms (50 ms debounce) | 290 ms (75 ms debounce) | 286 ms (75 ms debounce) |
+| Keystroke -> diagnostics, 233 KiB file | 211 ms (50 ms debounce) | 209 ms (50 ms debounce) | 285 ms (75 ms debounce) | 282 ms (75 ms debounce) |
 
 What the tables do not say:
 
@@ -81,9 +81,12 @@ What the tables do not say:
   publication alone that clj-kondo ran, so the tier it reports for these
   rows reads "native only" for both servers. Above the threshold clj-pulse
   lints a keystroke with its built-in tier alone: 89 ms on the 452 KiB
-  file, against 538 ms for clojure-lsp, which lints it with clj-kondo.
-- The same run on a 5-core Linux container keeps the ratios, with every
-  number slower; it is the regression baseline and lives in the records.
+  file, against 516 ms for clojure-lsp, which lints it with clj-kondo.
+- clojure-lsp's cold memory varies from session to session (2 274 to 2 461
+  MiB on metabase across three on this pin); its warm memory is steady.
+- A run on a 5-core Linux container, against the previous clojure-lsp
+  (2026.07.06-14.34.19), keeps the ratios, with every number slower; it is
+  the regression baseline and lives in the records.
 
 The full method, the per-run rows, the Linux run, and the caveats in detail
 are in [benchmark records](MEMORY.md#benchmark-against-clojure-lsp). To
